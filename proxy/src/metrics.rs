@@ -4,10 +4,12 @@ use crate::{config::MetricCollectionConfig, http};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use tracing::{error, info, instrument, trace, warn};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
+
+const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
 ///
 /// Key that uniquely identifies the object, this metric describes.
@@ -30,7 +32,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client();
+    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
     let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
@@ -182,35 +184,35 @@ async fn collect_metrics_iteration(
             }
         };
 
-        if res.status().is_success() {
-            // update cached metrics after they were sent successfully
-            for send_metric in chunk {
-                let stop_time = match send_metric.kind {
-                    EventType::Incremental { stop_time, .. } => stop_time,
-                    _ => unreachable!(),
-                };
-
-                cached_metrics
-                    .entry(Ids {
-                        endpoint_id: send_metric.extra.endpoint_id.clone(),
-                        branch_id: send_metric.extra.branch_id.clone(),
-                    })
-                    // update cached value (add delta) and time
-                    .and_modify(|e| {
-                        e.0 = e.0.saturating_add(send_metric.value);
-                        e.1 = stop_time
-                    })
-                    // cache new metric
-                    .or_insert((send_metric.value, stop_time));
-            }
-        } else {
+        if !res.status().is_success() {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.iter() {
+            for metric in chunk.iter().filter(|metric| metric.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
-                if metric.value > (1u64 << 40) {
-                    error!("potentially abnormal metric value: {:?}", metric);
-                }
+                error!("potentially abnormal metric value: {:?}", metric);
             }
+        }
+        // update cached metrics after they were sent
+        // (to avoid sending the same metrics twice)
+        // see the relevant discussion on why to do so even if the status is not success:
+        // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
+        for send_metric in chunk {
+            let stop_time = match send_metric.kind {
+                EventType::Incremental { stop_time, .. } => stop_time,
+                _ => unreachable!(),
+            };
+
+            cached_metrics
+                .entry(Ids {
+                    endpoint_id: send_metric.extra.endpoint_id.clone(),
+                    branch_id: send_metric.extra.branch_id.clone(),
+                })
+                // update cached value (add delta) and time
+                .and_modify(|e| {
+                    e.0 = e.0.saturating_add(send_metric.value);
+                    e.1 = stop_time
+                })
+                // cache new metric
+                .or_insert((send_metric.value, stop_time));
         }
     }
     Ok(())
