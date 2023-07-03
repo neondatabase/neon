@@ -132,7 +132,7 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > cargo neon init
-Starting pageserver node 1 at '127.0.0.1:64000' in '.neon'.
+Initializing pageserver node 1 at '127.0.0.1:64000' in ".neon"
 
 # start pageserver, safekeeper, and broker for their intercommunication
 > cargo neon start
