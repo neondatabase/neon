@@ -132,13 +132,13 @@ Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (r
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
 > cargo neon init
-Starting pageserver at '127.0.0.1:64000' in '.neon'.
+Starting pageserver node 1 at '127.0.0.1:64000' in '.neon'.
 
 # start pageserver, safekeeper, and broker for their intercommunication
 > cargo neon start
-Starting neon broker at 127.0.0.1:50051
+Starting neon broker at 127.0.0.1:50051.
 storage_broker started, pid: 2918372
-Starting pageserver at '127.0.0.1:64000' in '.neon'.
+Starting pageserver node 1 at '127.0.0.1:64000' in ".neon".
 pageserver started, pid: 2918386
 Starting safekeeper at '127.0.0.1:5454' in '.neon/safekeepers/sk1'.
 safekeeper 1 started, pid: 2918437
@@ -152,8 +152,7 @@ Setting tenant 9ef87a5bf0d92544f6fafeeb3239695c as a default one
 # start postgres compute node
 > cargo neon endpoint start main
 Starting new endpoint main (PostgreSQL v14) on timeline de200bd42b49cc1814412c7e592dd6e9 ...
-Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
-Starting postgres at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
+Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55432/postgres'
 
 # check list of running postgres instances
 > cargo neon endpoint list
@@ -189,8 +188,7 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 # start postgres on that branch
 > cargo neon endpoint start migration_check --branch-name migration_check
 Starting new endpoint migration_check (PostgreSQL v14) on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
-Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
-Starting postgres at 'host=127.0.0.1 port=55434 user=cloud_admin dbname=postgres'
+Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55434/postgres'
 
 # check the new list of running postgres instances
 > cargo neon endpoint list
