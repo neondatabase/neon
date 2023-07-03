@@ -127,7 +127,7 @@ tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.18.0"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter"] }
 url = "2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
 walkdir = "2.3.2"
