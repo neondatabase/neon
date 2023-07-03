@@ -88,33 +88,31 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
         pgb: &mut PostgresBackendTCP,
         query: &str,
     ) -> Result<(), QueryError> {
-        try_process_query(pgb, query).await.map_err(|e| {
+        try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
             e
         })
     }
 }
 
-async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
+fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
-    async move {
-        info!("got response: {:?}", resp.result);
+    let _enter = span.enter();
+    info!("got response: {:?}", resp.result);
 
-        match notify(resp.session_id, Ok(resp.result)) {
-            Ok(()) => {
-                pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                    .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
-                    .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-            }
-            Err(e) => {
-                error!("failed to deliver response to per-client task");
-                pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string(), None))?;
-            }
+    match notify(resp.session_id, Ok(resp.result)) {
+        Ok(()) => {
+            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
-        Ok(())
+        Err(e) => {
+            error!("failed to deliver response to per-client task");
+            pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string(), None))?;
+        }
     }
-    .instrument(span)
-    .await
+
+    Ok(())
 }
