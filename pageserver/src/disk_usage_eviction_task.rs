@@ -314,7 +314,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             partition,
             candidate.layer.get_tenant_id(),
             candidate.layer.get_timeline_id(),
-            candidate.layer.filename().file_name(),
+            candidate.layer.filename(),
         );
     }
 

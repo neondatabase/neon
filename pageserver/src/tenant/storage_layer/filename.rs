@@ -210,9 +210,15 @@ pub enum LayerFileName {
 
 impl LayerFileName {
     pub fn file_name(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for LayerFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Image(fname) => fname.to_string(),
-            Self::Delta(fname) => fname.to_string(),
+            Self::Image(fname) => write!(f, "{fname}"),
+            Self::Delta(fname) => write!(f, "{fname}"),
         }
     }
 }
