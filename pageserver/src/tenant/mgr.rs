@@ -26,6 +26,8 @@ use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
+use super::delete::DeleteTimelineFlow;
+
 /// The tenants known to the pageserver.
 /// The enum variants are used to distinguish the different states that the pageserver can be in.
 enum TenantsMap {
@@ -393,12 +395,10 @@ pub enum DeleteTimelineError {
 pub async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    ctx: &RequestContext,
+    _ctx: &RequestContext,
 ) -> Result<(), DeleteTimelineError> {
     let tenant = get_tenant(tenant_id, true).await?;
-    tenant
-        .prepare_and_schedule_delete_timeline(timeline_id, ctx)
-        .await?;
+    DeleteTimelineFlow::run(&tenant, timeline_id).await?;
     Ok(())
 }
 
