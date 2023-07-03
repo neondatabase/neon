@@ -3984,13 +3984,8 @@ impl Timeline {
 
         // Trigger 3: reduce number of sorted runs, pick up to max_merge_width files to compact.
         let mut compact_tiers: Vec<usize> = Vec::new();
-        let last_tier = tier_sizes.last().unwrap().0;
         for (tier_id, size) in tier_sizes {
             if skip_tiers.contains(&tier_id) {
-                break;
-            }
-            if tier_id == last_tier {
-                // exclude bottom-most level
                 break;
             }
             total_size_up_to_lvl += size;
