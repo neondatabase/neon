@@ -198,10 +198,10 @@ impl Timeline {
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
             let guard = self.layers.read().await;
-            let (layers, mapping) = &*guard;
+            let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
-                let hist_layer = mapping.get_from_desc(&hist_layer);
+                let hist_layer = guard.get_from_desc(&hist_layer);
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
