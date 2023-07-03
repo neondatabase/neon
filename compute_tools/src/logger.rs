@@ -18,6 +18,7 @@ pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
         .with_target(false)
         .with_writer(std::io::stderr);
 
