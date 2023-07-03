@@ -48,14 +48,23 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
 
         tokio::task::spawn(
             async move {
-                info!("started a new console management API task");
-                scopeguard::defer! {
-                    info!("console management API task is about to finish");
-                }
+                info!("serving a new console management API connection");
+
+                // these might be long running connections, have a separate logging for cancelling
+                // on shutdown and other ways of stopping.
+                let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
+                    let _e = span.entered();
+                    info!("console management API task cancelled");
+                });
 
                 if let Err(e) = handle_connection(socket).await {
-                    error!("task failed with an error: {e}");
+                    error!("serving failed with an error: {e}");
+                } else {
+                    info!("serving completed");
                 }
+
+                // we can no longer get dropped
+                scopeguard::ScopeGuard::into_inner(cancelled);
             }
             .instrument(span),
         );
