@@ -161,6 +161,8 @@ impl BranchCheckStats {
     }
 }
 
+const KNOWN_VERSIONS: &[usize] = &[1, 2];
+
 async fn branch_cleanup_and_check_errors(
     id: TenantTimelineId,
     s3_root: &RootTarget,
@@ -196,7 +198,7 @@ async fn branch_cleanup_and_check_errors(
                     mut index_part,
                     mut s3_layers,
                 } => {
-                    if index_part.version != 1 {
+                    if !KNOWN_VERSIONS.contains(&index_part.version) {
                         branch_check_errors
                             .push(format!("index_part.json version: {}", index_part.version))
                     }

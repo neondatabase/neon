@@ -283,6 +283,12 @@ where
     Ok(total_entries)
 }
 
+enum FetchResult<A> {
+    Found(A),
+    Deleted,
+    Absent,
+}
+
 async fn split_to_active_and_deleted_entries<I, A, F, Fut>(
     new_entry_ids: Vec<I>,
     find_active_entry: F,
@@ -291,7 +297,7 @@ where
     I: std::fmt::Display + Send + Sync + 'static + Copy,
     A: Send + 'static,
     F: FnOnce(I) -> Fut + Send + Sync + 'static + Clone,
-    Fut: Future<Output = anyhow::Result<Option<A>>> + Send,
+    Fut: Future<Output = anyhow::Result<FetchResult<A>>> + Send,
 {
     let entries_total = new_entry_ids.len();
     let mut check_tasks = JoinSet::new();
@@ -328,12 +334,16 @@ where
     while let Some(task_result) = check_tasks.join_next().await {
         let (entry_id, entry_data_fetch_result) = task_result.context("task join")?;
         match entry_data_fetch_result.context("entry data fetch")? {
-            Some(active_entry) => {
+            FetchResult::Found(active_entry) => {
                 info!("Entry {entry_id} is alive, cannot delete");
                 active_entries.push(active_entry);
             }
-            None => {
-                info!("Entry {entry_id} is either deleted or absent in the admin data, can safely delete");
+            FetchResult::Deleted => {
+                info!("Entry {entry_id} deleted in the admin data, can safely delete");
+                entries_to_delete.push(entry_id);
+            }
+            FetchResult::Absent => {
+                info!("Entry {entry_id} absent in the admin data, can safely delete");
                 entries_to_delete.push(entry_id);
             }
         }

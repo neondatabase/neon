@@ -8,7 +8,7 @@ use tracing::{info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
 use crate::copied_definitions::id::TenantTimelineId;
-use crate::delete_batch_producer::ProcessedS3List;
+use crate::delete_batch_producer::{FetchResult, ProcessedS3List};
 use crate::{RootTarget, TenantId};
 
 pub async fn schedule_cleanup_deleted_timelines(
@@ -32,9 +32,13 @@ pub async fn schedule_cleanup_deleted_timelines(
     let mut timeline_stats = ProcessedS3List::default();
     while let Some(project_to_check) = projects_to_check_receiver.recv().await {
         let check_client = Arc::clone(admin_client);
+
         let check_s3_client = Arc::clone(s3_client);
+
         let check_delete_sender = Arc::clone(&delete_elements_sender);
+
         let check_root = s3_root_target.clone();
+
         let new_stats = async move {
             let tenant_id_to_check = project_to_check.tenant;
             let check_target = check_root.timelines_root(tenant_id_to_check);
@@ -60,14 +64,14 @@ pub async fn schedule_cleanup_deleted_timelines(
                                 Some(console_branch) => {
                                     if console_branch.deleted {
                                         check_delete_sender.send(Either::Right(id)).ok();
-                                        None
+                                        FetchResult::Deleted
                                     } else {
-                                        Some(console_branch)
+                                        FetchResult::Found(console_branch)
                                     }
                                 }
                                 None => {
                                     check_delete_sender.send(Either::Right(id)).ok();
-                                    None
+                                    FetchResult::Absent
                                 }
                             })
                         },

@@ -25,14 +25,17 @@ async fn main() -> anyhow::Result<()> {
     let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
     node_kind.make_ascii_lowercase();
 
-    let _guard = init_logging(&binary_name, dry_run, &node_kind);
+    let skip_validation = env::var("SKIP_VALIDATION").is_ok();
 
+    let _guard = init_logging(&binary_name, dry_run, &node_kind);
     let _main_span = info_span!("main", binary = %binary_name, %dry_run).entered();
     if dry_run {
         info!("Dry run, not removing items for real");
     } else {
         warn!("Dry run disabled, removing bucket items for real");
     }
+
+    info!("skip_validation={skip_validation}");
 
     let sso_account_id_param =
         env::var("SSO_ACCOUNT_ID").context("'SSO_ACCOUNT_ID' param retrieval")?;
@@ -131,33 +134,41 @@ async fn main() -> anyhow::Result<()> {
         batch_producer_stats.timelines_checked()
     );
 
-    if "pageserver" == node_kind.trim() {
-        info!("validating active tenants and timelines for pageserver S3 data");
-
-        // TODO kb real stats for validation + better stats for every place: add and print `min`, `max`, `mean` values at least
-        let validation_stats = checks::validate_pageserver_active_tenant_and_timelines(
-            s3_client,
-            s3_root,
-            cloud_admin_api_client,
-            batch_producer_stats,
-        )
-        .await
-        .context("active tenant and timeline validation")?;
-        info!("Finished active tenant and timeline validation, correct timelines: {}, timeline validation errors: {}",
-            validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors.len());
-        if !validation_stats.timelines_with_errors.is_empty() {
-            warn!(
-                "Validation errors: {:#?}",
-                validation_stats
-                    .timelines_with_errors
-                    .into_iter()
-                    .map(|(id, errors)| (id.to_string(), format!("{errors:?}")))
-                    .collect::<HashMap<_, _>>()
-            );
-        }
+    if node_kind.trim() != "pageserver" {
+        info!("node_kind != pageserver, finish without performing validation step");
+        return Ok(());
     }
 
-    info!("Finished S3 removal");
+    if skip_validation {
+        info!("SKIP_VALIDATION env var is set, exiting");
+        return Ok(());
+    }
+
+    info!("validating active tenants and timelines for pageserver S3 data");
+
+    // TODO kb real stats for validation + better stats for every place: add and print `min`, `max`, `mean` values at least
+    let validation_stats = checks::validate_pageserver_active_tenant_and_timelines(
+        s3_client,
+        s3_root,
+        cloud_admin_api_client,
+        batch_producer_stats,
+    )
+    .await
+    .context("active tenant and timeline validation")?;
+    info!("Finished active tenant and timeline validation, correct timelines: {}, timeline validation errors: {}",
+        validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors.len());
+    if !validation_stats.timelines_with_errors.is_empty() {
+        warn!(
+            "Validation errors: {:#?}",
+            validation_stats
+                .timelines_with_errors
+                .into_iter()
+                .map(|(id, errors)| (id.to_string(), format!("{errors:?}")))
+                .collect::<HashMap<_, _>>()
+        );
+    }
+
+    info!("Done");
 
     Ok(())
 }

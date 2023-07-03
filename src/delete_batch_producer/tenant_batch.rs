@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::cloud_admin_api::{CloudAdminApiClient, ProjectData};
 use crate::copied_definitions::id::TenantTimelineId;
+use crate::delete_batch_producer::FetchResult;
 use crate::{RootTarget, TenantId, TraversingDepth};
 
 use super::ProcessedS3List;
@@ -46,16 +47,16 @@ pub async fn schedule_cleanup_deleted_tenants(
                 Ok(if let Some(console_project) = project_data {
                     if console_project.deleted {
                         delete_sender.send(Either::Left(tenant_id)).ok();
-                        None
+                        FetchResult::Deleted
                     } else {
                         if traversing_depth == TraversingDepth::Timeline {
                             projects_to_check_sender.send(console_project.clone()).ok();
                         }
-                        Some(console_project)
+                        FetchResult::Found(console_project)
                     }
                 } else {
                     delete_sender.send(Either::Left(tenant_id)).ok();
-                    None
+                    FetchResult::Absent
                 })
             })
             .await
