@@ -14,6 +14,7 @@ use crate::{
     },
 };
 
+/// Provides semantic APIs to manipulate the layer map.
 pub struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager,
@@ -47,6 +48,7 @@ impl LayerManager {
         &self.layer_map
     }
 
+    /// Replace layers in the layer file manager, used in evictions and layer downloads.
     pub fn replace_and_verify(
         &mut self,
         expected: Arc<dyn PersistentLayer>,
@@ -130,12 +132,14 @@ impl LayerManager {
         updates.flush();
     }
 
+    /// Insert into the layer map when a new delta layer is created, called from `create_delta_layer`.
     pub fn flush_l0_delta_layer(&mut self, delta_layer: Arc<DeltaLayer>) {
         let mut updates = self.layer_map.batch_update();
         Self::insert_historic_layer(delta_layer, &mut updates, &mut self.layer_fmgr);
         updates.flush();
     }
 
+    /// Called when compaction is completed.
     pub fn compact_l0(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
@@ -163,6 +167,7 @@ impl LayerManager {
         Ok(())
     }
 
+    /// Called when garbage collect the timeline.
     pub fn gc_timeline(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
