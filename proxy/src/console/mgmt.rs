@@ -48,13 +48,13 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
 
         tokio::task::spawn(
             async move {
-                info!("started a new console management API thread");
+                info!("started a new console management API task");
                 scopeguard::defer! {
-                    info!("console management API thread is about to finish");
+                    info!("console management API task is about to finish");
                 }
 
                 if let Err(e) = handle_connection(socket).await {
-                    error!("thread failed with an error: {e}");
+                    error!("task failed with an error: {e}");
                 }
             }
             .instrument(span),
