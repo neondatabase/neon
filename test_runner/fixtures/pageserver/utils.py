@@ -194,10 +194,14 @@ def wait_for_upload_queue_empty(
 
 
 def wait_timeline_detail_404(
-    pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    wait_longer: bool = False,
 ):
     last_exc = None
-    for _ in range(2):
+    iterations = 10 if wait_longer else 2
+    for _ in range(iterations):
         time.sleep(0.250)
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
@@ -216,7 +220,8 @@ def timeline_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
+    wait_longer: bool = False,  # Use when running with RemoteStorageKind.REAL_S3
     **delete_args,
 ):
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
-    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, wait_longer)

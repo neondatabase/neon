@@ -250,6 +250,7 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
 
         timeline_info["state"]["Broken"]["reason"] == failpoint
 
+    wait_longer = remote_storage_kind is RemoteStorageKind.REAL_S3
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
@@ -262,12 +263,17 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
             timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
         else:
             # Pageserver should've resumed deletion after restart.
-            wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
+            wait_timeline_detail_404(
+                ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+            )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state
         ps_http.configure_failpoints((failpoint, "off"))
-        timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
+
+        timeline_delete_wait_completed(
+            ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+        )
 
     # Check remote is impty
     if remote_storage_kind is RemoteStorageKind.MOCK_S3:
