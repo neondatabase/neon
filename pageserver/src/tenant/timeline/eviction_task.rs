@@ -88,7 +88,6 @@ impl Timeline {
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
-                info!("shutting down");
                 return;
             }
         }
@@ -103,7 +102,6 @@ impl Timeline {
                 ControlFlow::Continue(sleep_until) => {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            info!("shutting down");
                             break;
                         }
                         _ = tokio::time::sleep_until(sleep_until) => { }

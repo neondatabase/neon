@@ -135,7 +135,6 @@ async fn disk_usage_eviction_task(
             .await
             .is_err()
         {
-            info!("shutting down");
             return;
         }
     }
@@ -170,7 +169,6 @@ async fn disk_usage_eviction_task(
         tokio::select! {
             _ = tokio::time::sleep_until(sleep_until) => {},
             _ = cancel.cancelled() => {
-                info!("shutting down");
                 break
             }
         }
