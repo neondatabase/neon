@@ -413,14 +413,17 @@ pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
             ))
         } else {
             crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_STARTED_COUNT.inc();
-            tokio::task::spawn_blocking(move || {
+            crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_ACTIVE_GAUGE.inc();
+            let res = tokio::task::spawn_blocking(move || {
                 crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY
                     .observe(start.elapsed().as_secs_f64());
                 let _enter = span.enter();
                 self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
             })
             .await
-            .context("spawn_blocking")
+            .context("spawn_blocking");
+            crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_ACTIVE_GAUGE.dec();
+            res
         };
         let histo = match &res {
             Ok(Ok(_)) => &crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_OK,

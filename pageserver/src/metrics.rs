@@ -683,6 +683,15 @@ pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_STARTED_COUNT: Lazy<I
         .expect("failed to define a metric")
     });
 
+pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_ACTIVE_GAUGE: Lazy<IntGauge> =
+    Lazy::new(|| {
+        register_int_gauge!(
+            "pageserver_layer_get_value_reconstruct_data_spawn_blocking_active_gauge",
+            "Number of spawn_blocking calls active in Layer::get_value_reconstruct_data"
+        )
+        .expect("failed to define a metric")
+    });
+
 pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY: Lazy<Histogram> = Lazy::new(
     || {
         register_histogram!(
