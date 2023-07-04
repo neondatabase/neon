@@ -313,7 +313,9 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
-        crate::metrics::PAGE_CACHE.read_accesses_materialized_page.inc();
+        crate::metrics::PAGE_CACHE
+            .read_accesses_materialized_page
+            .inc();
 
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
@@ -331,9 +333,13 @@ impl PageCache {
             } = cache_key
             {
                 if available_lsn == lsn {
-                    crate::metrics::PAGE_CACHE.read_hits_materialized_page_exact.inc();
+                    crate::metrics::PAGE_CACHE
+                        .read_hits_materialized_page_exact
+                        .inc();
                 } else {
-                    crate::metrics::PAGE_CACHE.read_hits_materialized_page_older_lsn.inc();
+                    crate::metrics::PAGE_CACHE
+                        .read_hits_materialized_page_older_lsn
+                        .inc();
                 }
                 Some((available_lsn, guard))
             } else {
