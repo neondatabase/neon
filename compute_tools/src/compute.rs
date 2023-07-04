@@ -532,10 +532,25 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
-        // TODO FIXME: this should not be blocking here
-        // Maybe we can run it as a child process?
-        // Also, worth measuring how long this step is taking
-        self.prepare_external_extensions(&compute_state)?;
+        // This part is sync, because we need to download
+        // remote shared_preload_libraries before postgres start (if any)
+        let library_load_start_time = Utc::now();
+        {
+            self.prepare_extenal_libraries(&compute_state)?;
+
+            let library_load_time = Utc::now()
+                .signed_duration_since(library_load_start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+
+            let mut state = self.state.lock().unwrap();
+            state.metrics.load_libraries_ms = library_load_time;
+            info!(
+                "Loading shared_preload_libraries took {:?}ms",
+                library_load_time
+            );
+        }
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
@@ -675,10 +690,9 @@ LIMIT 100",
     }
 
     // If remote extension storage is configured,
-    // download extension control files
-    // and shared preload libraries.
+    // download shared preload libraries.
     #[tokio::main]
-    pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+    pub async fn prepare_extenal_libraries(&self, compute_state: &ComputeState) -> Result<()> {
         if let Some(ref ext_remote_storage) = self.ext_remote_storage {
             let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             // download preload shared libraries before postgres start (if any)
@@ -692,7 +706,7 @@ LIMIT 100",
 
             info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
 
-            // 2. parse shared_preload_libraries from spec
+            // parse shared_preload_libraries from spec
             let mut libs_vec = Vec::new();
 
             if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
@@ -738,29 +752,51 @@ LIMIT 100",
             }
 
             info!("Libraries to download: {:?}", &libs_vec);
-            // download extension control files & shared_preload_libraries
-            let get_extensions_task = extension_server::get_available_extensions(
-                ext_remote_storage,
-                &self.pgbin,
-                &self.pgversion,
-                &custom_ext_prefixes,
-            );
-            let get_libraries_task = extension_server::get_available_libraries(
+            // download shared_preload_libraries
+            let available_libraries = extension_server::get_available_libraries(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
                 &custom_ext_prefixes,
                 &libs_vec,
-            );
+            )
+            .await?;
 
-            let (available_extensions, available_libraries) =
-                tokio::join!(get_extensions_task, get_libraries_task);
-            self.available_extensions
-                .set(available_extensions?)
-                .expect("available_extensions.set error");
             self.available_libraries
-                .set(available_libraries?)
+                .set(available_libraries)
                 .expect("available_libraries.set error");
+        }
+        Ok(())
+    }
+
+    // If remote extension storage is configured,
+    // download extension control files
+    #[tokio::main]
+    pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+        if let Some(ref ext_remote_storage) = self.ext_remote_storage {
+            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+            let spec = &pspec.spec;
+
+            // 1. parse custom extension paths from spec
+            let custom_ext_prefixes = match &spec.custom_extensions {
+                Some(custom_extensions) => custom_extensions.clone(),
+                None => Vec::new(),
+            };
+
+            info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
+
+            // download extension control files
+            let available_extensions = extension_server::get_available_extensions(
+                ext_remote_storage,
+                &self.pgbin,
+                &self.pgversion,
+                &custom_ext_prefixes,
+            )
+            .await?;
+
+            self.available_extensions
+                .set(available_extensions)
+                .expect("available_extensions.set error");
         }
         Ok(())
     }

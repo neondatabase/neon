@@ -73,6 +73,7 @@ pub struct ComputeMetrics {
     pub basebackup_ms: u64,
     pub config_ms: u64,
     pub total_startup_ms: u64,
+    pub load_libraries_ms: u64,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.

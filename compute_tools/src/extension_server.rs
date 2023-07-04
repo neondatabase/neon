@@ -13,6 +13,11 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
+use crate::compute::ComputeNode;
+use std::sync::Arc;
+use std::thread;
+use tracing::instrument;
+
 // remote!
 const SHARE_EXT_PATH: &str = "share/extension";
 
@@ -425,4 +430,26 @@ async fn organized_extension_files(
         }
     }
     Ok((grouped_dependencies, control_files))
+}
+
+#[instrument(skip_all)]
+fn prepare_external_extensions(compute: &Arc<ComputeNode>) -> Result<()> {
+    info!("start download_extension_files");
+    let compute_state = compute.state.lock().unwrap();
+    compute.prepare_external_extensions(&compute_state)?;
+
+    info!("download_extension_files done");
+    Ok(())
+}
+
+pub fn launch_download_extensions(compute: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+    let compute = Arc::clone(compute);
+
+    Ok(thread::Builder::new()
+        .name("download-extensions".into())
+        .spawn(move || {
+            // FIX unwrap
+            prepare_external_extensions(&compute).unwrap();
+            info!("download_extensions_thread is exited");
+        })?)
 }

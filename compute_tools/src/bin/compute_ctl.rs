@@ -51,6 +51,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
+use compute_tools::extension_server::launch_download_extensions;
 use compute_tools::extension_server::{get_pg_version, init_remote_storage};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
@@ -242,6 +243,8 @@ fn main() -> Result<()> {
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
     let _configurator_handle =
         launch_configurator(&compute).expect("cannot launch configurator thread");
+
+    let _download_extensions_handle = launch_download_extensions(&compute);
 
     // Start Postgres
     let mut delay_exit = false;
