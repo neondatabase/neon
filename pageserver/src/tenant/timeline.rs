@@ -2072,7 +2072,10 @@ impl Timeline {
 
     fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
         let state = self.current_state();
-        if !matches!(state, TimelineState::Active) {
+        if matches!(
+            state,
+            TimelineState::Broken { .. } | TimelineState::Stopping
+        ) {
             // Can happen when timeline detail endpoint is used when deletion is ongoing.
             warn!("Logical size calculation was attempted to be spawned for inactive timeline");
             return;

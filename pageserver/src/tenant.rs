@@ -18,7 +18,6 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
-use tokio::sync::OwnedMutexGuard;
 use tokio::task::JoinSet;
 use tracing::*;
 use utils::completion;
@@ -34,8 +33,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::ops::Bound::Included;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -517,22 +514,6 @@ impl std::fmt::Display for WaitToBecomeActiveError {
 
 pub(crate) enum ShutdownError {
     AlreadyStopping,
-}
-
-pub struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
-
-impl Deref for DeletionGuard {
-    type Target = DeleteTimelineFlow;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DeletionGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
 }
 
 #[derive(thiserror::Error, Debug)]

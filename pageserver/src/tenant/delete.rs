@@ -1,7 +1,11 @@
-use std::sync::Arc;
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use pageserver_api::models::TimelineState;
+use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, error, info, instrument, warn, Instrument, Span};
 use utils::{
     crashsafe, fs_ext,
@@ -18,7 +22,7 @@ use crate::{
 use super::{
     metadata::TimelineMetadata,
     remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-    DeletionGuard, Tenant, Timeline,
+    Tenant, Timeline,
 };
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
@@ -479,14 +483,6 @@ impl DeleteTimelineFlow {
                 .map_err(|_| DeleteTimelineError::AlreadyInProgress)?,
         );
 
-        // FIXME is it really possible given that we remove timeline under mutex when we complete the deletion and
-        // then drop the guard?
-        // If another task finished the deletion just before we acquired the lock,
-        // return success.
-        // if delete_lock_guard.is_deleted() {
-        //     return Ok(());
-        // }
-
         timeline.set_state(TimelineState::Stopping);
 
         Ok((Arc::clone(timeline), delete_lock_guard))
@@ -565,5 +561,21 @@ impl DeleteTimelineFlow {
         *guard.0 = Self::Finished;
 
         Ok(())
+    }
+}
+
+struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
+
+impl Deref for DeletionGuard {
+    type Target = DeleteTimelineFlow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DeletionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
