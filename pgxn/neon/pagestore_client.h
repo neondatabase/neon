@@ -157,6 +157,7 @@ extern page_server_api * page_server;
 extern char *page_server_connstring;
 extern int flush_every_n_requests;
 extern int readahead_buffer_size;
+extern int readahead_distance;
 extern bool seqscan_prefetch_enabled;
 extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
@@ -210,5 +211,8 @@ extern bool lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumbe
 extern void lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
+/* Access statistic */
+extern void access_stat_init(void);
+extern bool is_sequential_access(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
 
 #endif
