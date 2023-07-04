@@ -34,3 +34,41 @@ impl From<[u8; SALTED_PASSWORD_LEN]> for SaltedPassword {
         Self { bytes }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SaltedPassword;
+
+    fn legacy_pbkdf2_impl(password: &[u8], salt: &[u8], iterations: u32) -> SaltedPassword {
+        let one = 1_u32.to_be_bytes(); // magic
+
+        let mut current = super::super::hmac_sha256(password, [salt, &one]);
+        let mut result = current;
+        for _ in 1..iterations {
+            current = super::super::hmac_sha256(password, [current.as_ref()]);
+            // TODO: result = current.zip(result).map(|(x, y)| x ^ y), issue #80094
+            for (i, x) in current.iter().enumerate() {
+                result[i] ^= x;
+            }
+        }
+
+        result.into()
+    }
+
+    #[test]
+    fn pbkdf2() {
+        let password = "a-very-secure-password";
+        let salt = "such-a-random-salt";
+        let iterations = 4096;
+        let output = [
+            203, 18, 206, 81, 4, 154, 193, 100, 147, 41, 211, 217, 177, 203, 69, 210, 194, 211,
+            101, 1, 248, 156, 96, 0, 8, 223, 30, 87, 158, 41, 20, 42,
+        ];
+
+        let actual = SaltedPassword::new(password.as_bytes(), salt.as_bytes(), iterations);
+        let expected = legacy_pbkdf2_impl(password.as_bytes(), salt.as_bytes(), iterations);
+
+        assert_eq!(actual.bytes, output);
+        assert_eq!(actual.bytes, expected.bytes);
+    }
+}

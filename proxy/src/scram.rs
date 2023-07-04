@@ -54,3 +54,65 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
     hasher.finalize().into()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::sasl::{Mechanism, Step};
+
+    use super::{password::SaltedPassword, Exchange, ServerSecret};
+
+    #[test]
+    fn happy_path() {
+        let iterations = 4096;
+        let salt_base64 = "QSXCR+Q6sek8bf92";
+        let pw = SaltedPassword::new(
+            b"pencil",
+            base64::decode(salt_base64).unwrap().as_slice(),
+            iterations,
+        );
+
+        let secret = ServerSecret {
+            iterations,
+            salt_base64: salt_base64.to_owned(),
+            stored_key: pw.client_key().sha256(),
+            server_key: pw.server_key(),
+            doomed: false,
+        };
+        const NONCE: [u8; 18] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+        ];
+        let mut exchange = Exchange::new(&secret, || NONCE, None);
+
+        let client_first = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
+        let client_final = "c=biws,r=rOprNGfwEbeRWgbNEkqOAQIDBAUGBwgJCgsMDQ4PEBES,p=rw1r5Kph5ThxmaUBC2GAQ6MfXbPnNkFiTIvdb/Rear0=";
+        let server_first =
+            "r=rOprNGfwEbeRWgbNEkqOAQIDBAUGBwgJCgsMDQ4PEBES,s=QSXCR+Q6sek8bf92,i=4096";
+        let server_final = "v=qtUDIofVnIhM7tKn93EQUUt5vgMOldcDVu1HC+OH0o0=";
+
+        exchange = match exchange.exchange(client_first).unwrap() {
+            Step::Continue(exchange, message) => {
+                assert_eq!(message, server_first);
+                exchange
+            }
+            Step::Success(_, _) => panic!("expected continue, got success"),
+            Step::Failure(f) => panic!("{f}"),
+        };
+
+        let key = match exchange.exchange(client_final).unwrap() {
+            Step::Success(key, message) => {
+                assert_eq!(message, server_final);
+                key
+            }
+            Step::Continue(_, _) => panic!("expected success, got continue"),
+            Step::Failure(f) => panic!("{f}"),
+        };
+
+        assert_eq!(
+            key.as_bytes(),
+            [
+                74, 103, 1, 132, 12, 31, 200, 48, 28, 54, 82, 232, 207, 12, 138, 189, 40, 32, 134,
+                27, 125, 170, 232, 35, 171, 167, 166, 41, 70, 228, 182, 112,
+            ]
+        );
+    }
+}
