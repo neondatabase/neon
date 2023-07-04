@@ -253,6 +253,10 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
         env.pageserver.start()
         if failpoint == "timeline-delete-before-index-deleted-at":
             # We crashed before persisting this to remote storage, need to retry delete request
+
+            # Wait till tenant is loaded. Shouldnt take longer than 2 seconds (we shouldnt block tenant loading)
+            wait_until_tenant_active(ps_http, env.initial_tenant, iterations=2)
+
             timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
         else:
             # Pageserver should've resumed deletion after restart.
