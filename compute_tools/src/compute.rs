@@ -685,12 +685,10 @@ LIMIT 100",
             let spec = &pspec.spec;
 
             // 1. parse custom extension paths from spec
-            let mut custom_ext_prefixes = match &spec.custom_extensions {
+            let custom_ext_prefixes = match &spec.custom_extensions {
                 Some(custom_extensions) => custom_extensions.clone(),
                 None => Vec::new(),
             };
-            // TODO actually add this to spec
-            custom_ext_prefixes.push("anon".to_string());
 
             info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
 
