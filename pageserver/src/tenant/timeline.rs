@@ -1381,9 +1381,9 @@ impl Timeline {
                         .read()
                         .unwrap()
                         .observe(delta);
-                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
-                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
+                    info!(layer=%local_layer, "evicted layer after unknown residence period");
                 }
 
                 true
@@ -2474,11 +2474,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!(
-            "timeline {} in-memory {}",
-            self.get_timeline_id(),
-            self.short_id()
-        )
+        format!("timeline {} in-memory {self}", self.get_timeline_id())
     }
 }
 
@@ -2998,7 +2994,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -4551,7 +4547,7 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
@@ -4589,7 +4585,7 @@ impl Timeline {
             TaskKind::RemoteDownloadTask,
             Some(self.tenant_id),
             Some(self.timeline_id),
-            &format!("download layer {}", remote_layer.short_id()),
+            &format!("download layer {}", remote_layer),
             false,
             async move {
                 let remote_client = self_clone.remote_client.as_ref().unwrap();
