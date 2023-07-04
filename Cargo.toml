@@ -86,6 +86,7 @@ opentelemetry = "0.18.0"
 opentelemetry-otlp = { version = "0.11.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.10.0"
 parking_lot = "0.12"
+pbkdf2 = "0.12.1"
 pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
