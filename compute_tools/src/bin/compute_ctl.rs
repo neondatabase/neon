@@ -54,11 +54,20 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
+const BUILD_TAG_DEFAULT: &str = "local";
+
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
+    let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
+
+    info!("build_tag: {build_tag}");
+
     let matches = cli().get_matches();
 
+    let http_port = *matches
+        .get_one::<u16>("http-port")
+        .expect("http-port is required");
     let pgdata = matches
         .get_one::<String>("pgdata")
         .expect("PGDATA path is required");
@@ -178,7 +187,8 @@ fn main() -> Result<()> {
 
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
-    let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
+    let _http_handle =
+        launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -246,6 +256,16 @@ fn main() -> Result<()> {
         exit_code = ecode.code()
     }
 
+    // Maybe sync safekeepers again, to speed up next startup
+    let compute_state = compute.state.lock().unwrap().clone();
+    let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+    if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        info!("syncing safekeepers on shutdown");
+        let storage_auth_token = pspec.storage_auth_token.clone();
+        let lsn = compute.sync_safekeepers(storage_auth_token)?;
+        info!("synced safekeepers at lsn {lsn}");
+    }
+
     if let Err(err) = compute.check_for_core_dumps() {
         error!("error while checking for core dumps: {err:?}");
     }
@@ -286,6 +306,14 @@ fn cli() -> clap::Command {
     let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
     clap::Command::new("compute_ctl")
         .version(version)
+        .arg(
+            Arg::new("http-port")
+                .long("http-port")
+                .value_name("HTTP_PORT")
+                .default_value("3080")
+                .value_parser(clap::value_parser!(u16))
+                .required(false),
+        )
         .arg(
             Arg::new("connstr")
                 .short('C')

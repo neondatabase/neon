@@ -2,6 +2,7 @@ import copy
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,7 +16,11 @@ from fixtures.neon_fixtures import (
     PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn
 from pytest import FixtureRequest
@@ -383,6 +388,9 @@ def check_neon_works(
     cli_target = NeonCli(config_target)
 
     # And the current binaries to launch computes
+    snapshot_config["neon_distrib_dir"] = str(neon_current_binpath)
+    with (snapshot_config_toml).open("w") as f:
+        toml.dump(snapshot_config, f)
     config_current = copy.copy(config)
     config_current.neon_binpath = neon_current_binpath
     cli_current = NeonCli(config_current)
@@ -391,7 +399,8 @@ def check_neon_works(
     request.addfinalizer(lambda: cli_target.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli_current.endpoint_start("main", port=pg_port)
+    http_port = port_distributor.get_port()
+    cli_current.endpoint_start("main", pg_port=pg_port, http_port=http_port)
     request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
@@ -413,7 +422,7 @@ def check_neon_works(
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
-    pageserver_http.timeline_delete(tenant_id, timeline_id)
+    timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
     pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
     pg_bin.run(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -440,7 +449,7 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
     """
 
     with output.open("w") as stdout:
-        rv = subprocess.run(
+        res = subprocess.run(
             [
                 "diff",
                 "--unified",  # Make diff output more readable
@@ -452,4 +461,53 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
             stdout=stdout,
         )
 
-    return rv.returncode != 0
+    differs = res.returncode != 0
+
+    # TODO: Remove after https://github.com/neondatabase/neon/pull/4425 is merged, and a couple of releases are made
+    if differs:
+        with tempfile.NamedTemporaryFile(mode="w") as tmp:
+            tmp.write(PR4425_ALLOWED_DIFF)
+            tmp.flush()
+
+            allowed = subprocess.run(
+                [
+                    "diff",
+                    "--unified",  # Make diff output more readable
+                    r"--ignore-matching-lines=^---",  # Ignore diff headers
+                    r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
+                    "--ignore-matching-lines=^@@",  # Ignore diff blocks location
+                    "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
+                    "--ignore-matching-lines=^ --.*",  # Ignore the " --" lines for compatibility with PG14
+                    "--ignore-blank-lines",
+                    str(output),
+                    str(tmp.name),
+                ],
+            )
+
+            differs = allowed.returncode != 0
+
+    return differs
+
+
+PR4425_ALLOWED_DIFF = """
+--- /tmp/test_output/test_backward_compatibility[release-pg15]/compatibility_snapshot/dump.sql 2023-06-08 18:12:45.000000000 +0000
++++ /tmp/test_output/test_backward_compatibility[release-pg15]/dump.sql        2023-06-13 07:25:35.211733653 +0000
+@@ -13,12 +13,20 @@
+
+ CREATE ROLE cloud_admin;
+ ALTER ROLE cloud_admin WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
++CREATE ROLE neon_superuser;
++ALTER ROLE neon_superuser WITH NOSUPERUSER INHERIT CREATEROLE CREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;
+
+ --
+ -- User Configurations
+ --
+
+
++--
++-- Role memberships
++--
++
++GRANT pg_read_all_data TO neon_superuser GRANTED BY cloud_admin;
++GRANT pg_write_all_data TO neon_superuser GRANTED BY cloud_admin;
+"""

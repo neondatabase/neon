@@ -14,7 +14,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
@@ -79,6 +83,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
+
     client = env.pageserver.http_client()
     client.tenant_create(tenant)
 
@@ -145,7 +150,12 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     )
 
     # NOTE: delete can easily come before upload operations are completed
-    client.timeline_delete(tenant, timeline)
+    # https://github.com/neondatabase/neon/issues/4326
+    env.pageserver.allowed_errors.append(
+        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    )
+
+    timeline_delete_wait_completed(client, tenant, timeline)
 
     # Importing correct backup works
     import_tar(base_tar, wal_tar)

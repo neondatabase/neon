@@ -24,6 +24,8 @@ const RESIDENT_SIZE: &str = "resident_size";
 const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
 const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
 
+const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[serde_as]
 #[derive(Serialize, Debug)]
 struct Ids {
@@ -73,7 +75,10 @@ pub async fn collect_metrics(
     );
 
     // define client here to reuse it for all requests
-    let client = reqwest::Client::new();
+    let client = reqwest::ClientBuilder::new()
+        .timeout(DEFAULT_HTTP_REPORTING_TIMEOUT)
+        .build()
+        .expect("Failed to create http client with timeout");
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
     let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
 
@@ -83,7 +88,7 @@ pub async fn collect_metrics(
                 info!("collect_metrics received cancellation request");
                 return Ok(());
             },
-            _ = ticker.tick() => {
+            tick_at = ticker.tick() => {
 
                 // send cached metrics every cached_metric_collection_interval
                 let send_cached = prev_iteration_time.elapsed() >= cached_metric_collection_interval;
@@ -93,6 +98,12 @@ pub async fn collect_metrics(
                 }
 
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
+
+                crate::tenant::tasks::warn_when_period_overrun(
+                    tick_at.elapsed(),
+                    metric_collection_interval,
+                    "consumption_metrics_collect_metrics",
+                );
             }
         }
     }
@@ -273,31 +284,42 @@ pub async fn collect_metrics_iteration(
         })
         .expect("PageserverConsumptionMetric should not fail serialization");
 
-        let res = client
-            .post(metric_collection_endpoint.clone())
-            .json(&chunk_json)
-            .send()
-            .await;
+        const MAX_RETRIES: u32 = 3;
 
-        match res {
-            Ok(res) => {
-                if res.status().is_success() {
-                    // update cached metrics after they were sent successfully
-                    for (curr_key, curr_val) in chunk.iter() {
-                        cached_metrics.insert(curr_key.clone(), *curr_val);
-                    }
-                } else {
-                    error!("metrics endpoint refused the sent metrics: {:?}", res);
-                    for metric in chunk_to_send.iter() {
-                        // Report if the metric value is suspiciously large
-                        if metric.value > (1u64 << 40) {
+        for attempt in 0..MAX_RETRIES {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .json(&chunk_json)
+                .send()
+                .await;
+
+            match res {
+                Ok(res) => {
+                    if res.status().is_success() {
+                        // update cached metrics after they were sent successfully
+                        for (curr_key, curr_val) in chunk.iter() {
+                            cached_metrics.insert(curr_key.clone(), *curr_val);
+                        }
+                    } else {
+                        error!("metrics endpoint refused the sent metrics: {:?}", res);
+                        for metric in chunk_to_send
+                            .iter()
+                            .filter(|metric| metric.value > (1u64 << 40))
+                        {
+                            // Report if the metric value is suspiciously large
                             error!("potentially abnormal metric value: {:?}", metric);
                         }
                     }
+                    break;
                 }
-            }
-            Err(err) => {
-                error!("failed to send metrics: {:?}", err);
+                Err(err) if err.is_timeout() => {
+                    error!(attempt, "timeout sending metrics, retrying immediately");
+                    continue;
+                }
+                Err(err) => {
+                    error!(attempt, ?err, "failed to send metrics");
+                    break;
+                }
             }
         }
     }
@@ -317,7 +339,7 @@ pub async fn calculate_synthetic_size_worker(
             _ = task_mgr::shutdown_watcher() => {
                 return Ok(());
             },
-        _ = ticker.tick() => {
+        tick_at = ticker.tick() => {
 
                 let tenants = match mgr::list_tenants().await {
                     Ok(tenants) => tenants,
@@ -343,6 +365,12 @@ pub async fn calculate_synthetic_size_worker(
                     }
 
                 }
+
+                crate::tenant::tasks::warn_when_period_overrun(
+                    tick_at.elapsed(),
+                    synthetic_size_calculation_interval,
+                    "consumption_metrics_synthetic_size_worker",
+                );
             }
         }
     }

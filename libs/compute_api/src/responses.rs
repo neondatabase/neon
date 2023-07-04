@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::spec::ComputeSpec;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
 }
 
 /// Response of the /status API
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
     pub start_time: DateTime<Utc>,
@@ -23,7 +23,7 @@ pub struct ComputeStatusResponse {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeState {
     pub status: ComputeStatus,
@@ -33,7 +33,7 @@ pub struct ComputeState {
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
     // Spec wasn't provided at start, waiting for it to be

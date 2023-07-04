@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
+use utils::completion;
 use utils::serde_percent::Percent;
 
 use crate::{
@@ -82,6 +83,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    background_jobs_barrier: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -98,14 +100,16 @@ pub fn launch_disk_usage_global_eviction_task(
         "disk usage based eviction",
         false,
         async move {
-            disk_usage_eviction_task(
-                &state,
-                task_config,
-                storage,
-                &conf.tenants_path(),
-                task_mgr::shutdown_token(),
-            )
-            .await;
+            let cancel = task_mgr::shutdown_token();
+
+            // wait until initial load is complete, because we cannot evict from loading tenants.
+            tokio::select! {
+                _ = cancel.cancelled() => { return Ok(()); },
+                _ = background_jobs_barrier.wait() => { }
+            };
+
+            disk_usage_eviction_task(&state, task_config, storage, &conf.tenants_path(), cancel)
+                .await;
             Ok(())
         },
     );
@@ -515,7 +519,7 @@ async fn collect_eviction_candidates(
             if !tl.is_active() {
                 continue;
             }
-            let info = tl.get_local_layers_for_disk_usage_eviction();
+            let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_id, timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
             tenant_candidates.extend(
                 info.resident_layers

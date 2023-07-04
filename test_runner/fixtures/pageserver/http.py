@@ -21,6 +21,18 @@ class PageserverApiException(Exception):
         self.status_code = status_code
 
 
+class TimelineCreate406(PageserverApiException):
+    def __init__(self, res: requests.Response):
+        assert res.status_code == 406
+        super().__init__(res.json()["msg"], res.status_code)
+
+
+class TimelineCreate409(PageserverApiException):
+    def __init__(self, res: requests.Response):
+        assert res.status_code == 409
+        super().__init__("", res.status_code)
+
+
 @dataclass
 class InMemoryLayerInfo:
     kind: str
@@ -155,14 +167,14 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def tenant_create(
-        self, new_tenant_id: Optional[TenantId] = None, conf: Optional[Dict[str, Any]] = None
+        self, new_tenant_id: TenantId, conf: Optional[Dict[str, Any]] = None
     ) -> TenantId:
         if conf is not None:
             assert "new_tenant_id" not in conf.keys()
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
+                "new_tenant_id": str(new_tenant_id),
                 **(conf or {}),
             },
         )
@@ -293,13 +305,13 @@ class PageserverHttpClient(requests.Session):
         self,
         pg_version: PgVersion,
         tenant_id: TenantId,
-        new_timeline_id: Optional[TimelineId] = None,
+        new_timeline_id: TimelineId,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
         **kwargs,
     ) -> Dict[Any, Any]:
         body: Dict[str, Any] = {
-            "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
+            "new_timeline_id": str(new_timeline_id),
             "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
             "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
         }
@@ -309,9 +321,12 @@ class PageserverHttpClient(requests.Session):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs
         )
-        self.verbose_error(res)
         if res.status_code == 409:
-            raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
+            raise TimelineCreate409(res)
+        if res.status_code == 406:
+            raise TimelineCreate406(res)
+
+        self.verbose_error(res)
 
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -342,6 +357,11 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
+        """
+        Note that deletion is not instant, it is scheduled and performed mostly in the background.
+        So if you need to wait for it to complete use `timeline_delete_wait_completed`.
+        For longer description consult with pageserver openapi spec.
+        """
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}", **kwargs
         )

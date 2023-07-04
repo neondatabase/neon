@@ -58,11 +58,8 @@ def test_ondemand_download_large_rel(
     )
 
     ##### First start, insert secret data and upload it to the remote storage
-    env = neon_env_builder.init_start()
-
-    # Override defaults, to create more layers
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # disable background GC
             "gc_period": "0s",
             "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
@@ -75,7 +72,6 @@ def test_ondemand_download_large_rel(
             "compaction_period": "0s",
         }
     )
-    env.initial_tenant = tenant
 
     endpoint = env.endpoints.create_start("main")
 
@@ -717,9 +713,7 @@ def test_ondemand_download_failure_to_replace(
         # error message is not useful
         pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=2)
 
-    actual_message = (
-        ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"
-    )
+    actual_message = ".* ERROR .*layermap-replace-notfound"
     assert env.pageserver.log_contains(actual_message) is not None
     env.pageserver.allowed_errors.append(actual_message)
 

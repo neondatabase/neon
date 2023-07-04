@@ -23,6 +23,7 @@ use prometheus::{Registry, Result};
 pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
+pub mod metric_vec_duration;
 
 pub type UIntGauge = GenericGauge<AtomicU64>;
 pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;

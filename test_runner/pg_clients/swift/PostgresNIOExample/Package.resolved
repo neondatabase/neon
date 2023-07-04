@@ -5,8 +5,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vapor/postgres-nio.git",
       "state" : {
-        "revision" : "dbf9c2eb596df39cba8ff3f74d74b2e6a31bd937",
-        "version" : "1.14.1"
+        "revision" : "061a0836d7c1887e04a975d1d2eaa2ef5fd7dfab",
+        "version" : "1.16.0"
       }
     },
     {
@@ -59,8 +59,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
       "state" : {
-        "revision" : "d1690f85419fdac8d54e350fb6d2ab9fd95afd75",
-        "version" : "2.51.1"
+        "revision" : "6213ba7a06febe8fef60563a4a7d26a4085783cf",
+        "version" : "2.54.0"
       }
     },
     {

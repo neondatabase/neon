@@ -31,7 +31,11 @@ from fixtures.neon_fixtures import (
     SafekeeperPort,
     available_remote_storages,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
@@ -548,15 +552,15 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
                     f"sk_id={sk.id} to flush {last_lsn}",
                 )
 
-    ps_cli = env.pageserver.http_client()
-    pageserver_lsn = Lsn(ps_cli.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
+    ps_http = env.pageserver.http_client()
+    pageserver_lsn = Lsn(ps_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
     lag = last_lsn - pageserver_lsn
     log.info(
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
     )
 
     endpoint.stop_and_destroy()
-    ps_cli.timeline_delete(tenant_id, timeline_id)
+    timeline_delete_wait_completed(ps_http, tenant_id, timeline_id)
 
     # Also delete and manually create timeline on safekeepers -- this tests
     # scenario of manual recovery on different set of safekeepers.
@@ -571,11 +575,21 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     pg_version = sk.http_client().timeline_status(tenant_id, timeline_id).pg_version
 
+    # Terminate first all safekeepers to prevent communication unexpectantly
+    # advancing peer_horizon_lsn.
     for sk in env.safekeepers:
         cli = sk.http_client()
         cli.timeline_delete_force(tenant_id, timeline_id)
         # restart safekeeper to clear its in-memory state
-        sk.stop().start()
+        sk.stop()
+    # wait all potenital in flight pushes to broker arrive before starting
+    # safekeepers (even without sleep, it is very unlikely they are not
+    # delivered yet).
+    time.sleep(1)
+
+    for sk in env.safekeepers:
+        sk.start()
+        cli = sk.http_client()
         cli.timeline_create(tenant_id, timeline_id, pg_version, last_lsn)
         f_partial_path = (
             Path(sk.data_dir()) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
@@ -583,7 +597,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         shutil.copy(f_partial_saved, f_partial_path)
 
     # recreate timeline on pageserver from scratch
-    ps_cli.timeline_create(
+    ps_http.timeline_create(
         pg_version=PgVersion(pg_version),
         tenant_id=tenant_id,
         new_timeline_id=timeline_id,
@@ -598,7 +612,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         if elapsed > wait_lsn_timeout:
             raise RuntimeError("Timed out waiting for WAL redo")
 
-        tenant_status = ps_cli.tenant_status(tenant_id)
+        tenant_status = ps_http.tenant_status(tenant_id)
         if tenant_status["state"]["slug"] == "Loading":
             log.debug(f"Tenant {tenant_id} is still loading, retrying")
         else:
@@ -1001,9 +1015,6 @@ def test_safekeeper_without_pageserver(
 
 
 def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
-    def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
-        return ",".join([f"localhost:{sk.port.pg}" for sk in env.safekeepers if sk.id in sk_names])
-
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1032,9 +1043,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
-    active_safekeepers = [1, 2, 3]
     endpoint = env.endpoints.create("test_replace_safekeeper")
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
 
     # learn neon timeline from compute
@@ -1072,9 +1082,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
     endpoint.stop_and_destroy().create("test_replace_safekeeper")
-    active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [2, 3, 4]
     endpoint.start()
 
     execute_payload(endpoint)
@@ -1201,6 +1210,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO t (key) VALUES (1)")
 
+    # Stop all computes gracefully before safekeepers stop responding to them
+    endpoint_1.stop_and_destroy()
+    endpoint_3.stop_and_destroy()
+
     # Remove initial tenant's br1 (active)
     assert sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
@@ -1293,9 +1306,8 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
-    active_safekeepers = [1, 2, 3]
     endpoint = env.endpoints.create("test_pull_timeline")
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
 
     # learn neon timeline from compute
@@ -1332,10 +1344,8 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Restarting compute with new config to verify that it works")
-    active_safekeepers = [1, 3, 4]
-
     endpoint.stop_and_destroy().create("test_pull_timeline")
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [1, 3, 4]
     endpoint.start()
 
     execute_payload(endpoint)

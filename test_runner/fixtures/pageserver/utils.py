@@ -1,8 +1,8 @@
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fixtures.log_helper import log
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -72,7 +72,7 @@ def wait_until_tenant_state(
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> bool:
+) -> Dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -81,7 +81,7 @@ def wait_until_tenant_state(
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
             log.debug(f"Tenant {tenant_id} data: {tenant}")
             if tenant["state"]["slug"] == expected_state:
-                return True
+                return tenant
         except Exception as e:
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
 
@@ -89,6 +89,41 @@ def wait_until_tenant_state(
 
     raise Exception(
         f"Tenant {tenant_id} did not become {expected_state} within {iterations * period} seconds"
+    )
+
+
+def wait_until_timeline_state(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    expected_state: str,
+    iterations: int,
+    period: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Does not use `wait_until` for debugging purposes
+    """
+    for i in range(iterations):
+        try:
+            timeline = pageserver_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+            log.debug(f"Timeline {tenant_id}/{timeline_id} data: {timeline}")
+            if isinstance(timeline["state"], str):
+                if timeline["state"] == expected_state:
+                    return timeline
+            elif isinstance(timeline, Dict):
+                if timeline["state"].get(expected_state):
+                    return timeline
+
+        except Exception as e:
+            log.debug(f"Timeline {tenant_id}/{timeline_id} state retrieval failure: {e}")
+
+        if i == iterations - 1:
+            # do not sleep last time, we already know that we failed
+            break
+        time.sleep(period)
+
+    raise Exception(
+        f"Timeline {tenant_id}/{timeline_id} did not become {expected_state} within {iterations * period} seconds"
     )
 
 
@@ -156,3 +191,32 @@ def wait_for_upload_queue_empty(
         if all(m.value == 0 for m in tl):
             return
         time.sleep(0.2)
+
+
+def wait_timeline_detail_404(
+    pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+):
+    last_exc = None
+    for _ in range(2):
+        time.sleep(0.250)
+        try:
+            data = pageserver_http.timeline_detail(tenant_id, timeline_id)
+            log.error(f"detail {data}")
+        except PageserverApiException as e:
+            log.debug(e)
+            if e.status_code == 404:
+                return
+
+            last_exc = e
+
+    raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")
+
+
+def timeline_delete_wait_completed(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    **delete_args,
+):
+    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)

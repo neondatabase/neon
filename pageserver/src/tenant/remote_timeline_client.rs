@@ -210,13 +210,15 @@ use chrono::{NaiveDateTime, Utc};
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
 
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -225,7 +227,9 @@ use crate::metrics::{
     RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::upload_queue::Delete;
 use crate::{
     config::PageServerConf,
     task_mgr,
@@ -259,7 +263,7 @@ const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
-    Deleted,
+    Deleted(IndexPart),
 }
 
 /// Errors that can arise when calling [`RemoteTimelineClient::stop`].
@@ -361,11 +365,42 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Initialize the queue in stopped state. Used in startup path
+    /// to continue deletion operation interrupted by pageserver crash or restart.
+    pub fn init_upload_queue_stopped_to_continue_deletion(
+        &self,
+        index_part: &IndexPart,
+    ) -> anyhow::Result<()> {
+        // FIXME: consider newtype for DeletedIndexPart.
+        let deleted_at = index_part.deleted_at.ok_or(anyhow::anyhow!(
+            "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
+        ))?;
+
+        {
+            let mut upload_queue = self.upload_queue.lock().unwrap();
+            upload_queue.initialize_with_current_remote_index_part(index_part)?;
+            self.update_remote_physical_size_gauge(Some(index_part));
+        }
+        // also locks upload queue, without dropping the guard above it will be a deadlock
+        self.stop().expect("initialized line above");
+
+        let mut upload_queue = self.upload_queue.lock().unwrap();
+
+        upload_queue
+            .stopped_mut()
+            .expect("stopped above")
+            .deleted_at = SetDeletedFlagProgress::Successful(deleted_at);
+
+        Ok(())
+    }
+
     pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
         match &*self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
             UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
-            UploadQueue::Stopped(q) => Some(q.last_uploaded_consistent_lsn),
+            UploadQueue::Stopped(q) => {
+                Some(q.upload_queue_for_deletion.last_uploaded_consistent_lsn)
+            }
         }
     }
 
@@ -420,7 +455,7 @@ impl RemoteTimelineClient {
         .await?;
 
         if index_part.deleted_at.is_some() {
-            Ok(MaybeDeletedIndexPart::Deleted)
+            Ok(MaybeDeletedIndexPart::Deleted(index_part))
         } else {
             Ok(MaybeDeletedIndexPart::IndexPart(index_part))
         }
@@ -622,7 +657,11 @@ impl RemoteTimelineClient {
 
             // schedule the actual deletions
             for name in names {
-                let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
+                let op = UploadOp::Delete(Delete {
+                    file_kind: RemoteOpFileKind::Layer,
+                    layer_file_name: name.clone(),
+                    scheduled_from_timeline_delete: false,
+                });
                 self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
                 info!("scheduled layer file deletion {}", name.file_name());
@@ -639,23 +678,32 @@ impl RemoteTimelineClient {
     /// Wait for all previously scheduled uploads/deletions to complete
     ///
     pub async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
-        let (sender, mut receiver) = tokio::sync::watch::channel(());
-        let barrier_op = UploadOp::Barrier(sender);
-
-        {
+        let mut receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            upload_queue.queued_operations.push_back(barrier_op);
-            // Don't count this kind of operation!
-
-            // Launch the task immediately, if possible
-            self.launch_queued_tasks(upload_queue);
-        }
+            self.schedule_barrier(upload_queue)
+        };
 
         if receiver.changed().await.is_err() {
             anyhow::bail!("wait_completion aborted because upload queue was stopped");
         }
         Ok(())
+    }
+
+    fn schedule_barrier(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+    ) -> tokio::sync::watch::Receiver<()> {
+        let (sender, receiver) = tokio::sync::watch::channel(());
+        let barrier_op = UploadOp::Barrier(sender);
+
+        upload_queue.queued_operations.push_back(barrier_op);
+        // Don't count this kind of operation!
+
+        // Launch the task immediately, if possible
+        self.launch_queued_tasks(upload_queue);
+
+        receiver
     }
 
     /// Set the deleted_at field in the remote index file.
@@ -665,6 +713,7 @@ impl RemoteTimelineClient {
     /// The caller is responsible for calling `stop()` AND for waiting
     /// for any ongoing upload tasks to finish after `stop()` has succeeded.
     /// Check method [`RemoteTimelineClient::stop`] for details.
+    #[instrument(skip_all)]
     pub(crate) async fn persist_index_part_with_deleted_flag(
         self: &Arc<Self>,
     ) -> Result<(), PersistIndexPartWithDeletedFlagError> {
@@ -674,15 +723,7 @@ impl RemoteTimelineClient {
             // We must be in stopped state because otherwise
             // we can have inprogress index part upload that can overwrite the file
             // with missing is_deleted flag that we going to set below
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized => {
-                    return Err(anyhow::anyhow!("is not Stopped but Uninitialized").into())
-                }
-                UploadQueue::Initialized(_) => {
-                    return Err(anyhow::anyhow!("is not Stopped but Initialized").into())
-                }
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+            let stopped = locked.stopped_mut()?;
 
             match stopped.deleted_at {
                 SetDeletedFlagProgress::NotRunning => (), // proceed
@@ -696,48 +737,34 @@ impl RemoteTimelineClient {
             let deleted_at = Utc::now().naive_utc();
             stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
 
-            let mut index_part = IndexPart::new(
-                stopped.latest_files.clone(),
-                stopped.last_uploaded_consistent_lsn,
-                stopped
-                    .latest_metadata
-                    .to_bytes()
-                    .context("serialize metadata")?,
-            );
+            let mut index_part = IndexPart::try_from(&stopped.upload_queue_for_deletion)
+                .context("IndexPart serialize")?;
             index_part.deleted_at = Some(deleted_at);
             index_part
         };
 
         let undo_deleted_at = scopeguard::guard(Arc::clone(self), |self_clone| {
             let mut locked = self_clone.upload_queue.lock().unwrap();
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
-                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
-                    locked.as_str(),
-                ),
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+            let stopped = locked
+                .stopped_mut()
+                .expect("there's no way out of Stopping, and we checked it's Stopping above");
             stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
         // Have a failpoint that can use the `pause` failpoint action.
         // We don't want to block the executor thread, hence, spawn_blocking + await.
-        #[cfg(feature = "testing")]
-        tokio::task::spawn_blocking({
-            let current = tracing::Span::current();
-            move || {
-                let _entered = current.entered();
-                tracing::info!(
-                    "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-                fail::fail_point!(
-                    "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-            }
-        })
-        .await
-        .expect("spawn_blocking");
-
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint persist_deleted_index_part");
+                    fail::fail_point!("persist_deleted_index_part");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
         upload::upload_index_part(
             self.conf,
             &self.storage_impl,
@@ -751,19 +778,100 @@ impl RemoteTimelineClient {
         ScopeGuard::into_inner(undo_deleted_at);
         {
             let mut locked = self.upload_queue.lock().unwrap();
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
-                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
-                    locked.as_str(),
-                ),
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+
+            let stopped = locked
+                .stopped_mut()
+                .expect("there's no way out of Stopping, and we checked it's Stopping above");
             stopped.deleted_at = SetDeletedFlagProgress::Successful(
                 index_part_with_deleted_at
                     .deleted_at
                     .expect("we set it above"),
             );
         }
+
+        Ok(())
+    }
+
+    /// Prerequisites: UploadQueue should be in stopped state and deleted_at should be successfuly set.
+    /// The function deletes layer files one by one, then lists the prefix to see if we leaked something
+    /// deletes leaked files if any and proceeds with deletion of index file at the end.
+    pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        let (mut receiver, deletions_queued) = {
+            let mut deletions_queued = 0;
+
+            let mut locked = self.upload_queue.lock().unwrap();
+            let stopped = locked.stopped_mut()?;
+
+            if !matches!(stopped.deleted_at, SetDeletedFlagProgress::Successful(_)) {
+                anyhow::bail!("deleted_at is not set")
+            }
+
+            debug_assert!(stopped.upload_queue_for_deletion.no_pending_work());
+
+            stopped
+                .upload_queue_for_deletion
+                .queued_operations
+                .reserve(stopped.upload_queue_for_deletion.latest_files.len());
+
+            // schedule the actual deletions
+            for name in stopped.upload_queue_for_deletion.latest_files.keys() {
+                let op = UploadOp::Delete(Delete {
+                    file_kind: RemoteOpFileKind::Layer,
+                    layer_file_name: name.clone(),
+                    scheduled_from_timeline_delete: true,
+                });
+                self.calls_unfinished_metric_begin(&op);
+                stopped
+                    .upload_queue_for_deletion
+                    .queued_operations
+                    .push_back(op);
+
+                info!("scheduled layer file deletion {}", name.file_name());
+                deletions_queued += 1;
+            }
+
+            self.launch_queued_tasks(&mut stopped.upload_queue_for_deletion);
+
+            (
+                self.schedule_barrier(&mut stopped.upload_queue_for_deletion),
+                deletions_queued,
+            )
+        };
+
+        receiver.changed().await?;
+
+        // Do not delete index part yet, it is needed for possible retry. If we remove it first
+        // and retry will arrive to different pageserver there wont be any traces of it on remote storage
+        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        let timeline_storage_path = self.conf.remote_path(&timeline_path)?;
+
+        let remaining = self
+            .storage_impl
+            .list_prefixes(Some(&timeline_storage_path))
+            .await?;
+
+        let remaining: Vec<RemotePath> = remaining
+            .into_iter()
+            .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
+            .collect();
+
+        if !remaining.is_empty() {
+            warn!(
+                "Found {} files not bound to index_file.json, proceeding with their deletion",
+                remaining.len()
+            );
+            warn!("About to remove {} files", remaining.len());
+            self.storage_impl.delete_objects(&remaining).await?;
+        }
+
+        let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
+
+        debug!("deleting index part");
+        self.storage_impl.delete(&index_file_path).await?;
+
+        info!(deletions_queued, "done deleting, including index_part.json");
 
         Ok(())
     }
@@ -786,7 +894,7 @@ impl RemoteTimelineClient {
                     // have finished.
                     upload_queue.inprogress_tasks.is_empty()
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
                     upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
@@ -817,7 +925,7 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions += 1;
                 }
                 UploadOp::Barrier(sender) => {
@@ -891,7 +999,6 @@ impl RemoteTimelineClient {
                         unreachable!("we never launch an upload task if the queue is uninitialized, and once it is initialized, we never go back")
                     }
                 }
-                self.calls_unfinished_metric_end(&task.op);
                 return;
             }
 
@@ -937,16 +1044,16 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
+                UploadOp::Delete(delete) => {
                     let path = &self
                         .conf
                         .timeline_path(&self.timeline_id, &self.tenant_id)
-                        .join(layer_file_name.file_name());
+                        .join(delete.layer_file_name.file_name());
                     delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
-                            *metric_file_kind,
+                            delete.file_kind,
                             RemoteOpKind::Delete,
                             Arc::clone(&self.metrics),
                         )
@@ -1012,11 +1119,24 @@ impl RemoteTimelineClient {
             let mut upload_queue_guard = self.upload_queue.lock().unwrap();
             let upload_queue = match upload_queue_guard.deref_mut() {
                 UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
-                UploadQueue::Stopped(_) => {
+                UploadQueue::Stopped(stopped) => {
+                    // Special care is needed for deletions, if it was an earlier deletion (not scheduled from deletion)
+                    // then stop() took care of it so we just return.
+                    // For deletions that come from delete_all we still want to maintain metrics, launch following tasks, etc.
+                    match &task.op {
+                        UploadOp::Delete(delete) if delete.scheduled_from_timeline_delete => Some(&mut stopped.upload_queue_for_deletion),
+                        _ => None
+                    }
+                },
+                UploadQueue::Initialized(qi) => { Some(qi) }
+            };
+
+            let upload_queue = match upload_queue {
+                Some(upload_queue) => upload_queue,
+                None => {
                     info!("another concurrent task already stopped the queue");
                     return;
-                }, // nothing to do
-                UploadQueue::Initialized(qi) => { qi }
+                }
             };
 
             upload_queue.inprogress_tasks.remove(&task.task_id);
@@ -1029,7 +1149,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions -= 1;
                 }
                 UploadOp::Barrier(_) => unreachable!(),
@@ -1063,8 +1183,8 @@ impl RemoteTimelineClient {
                     reason: "metadata uploads are tiny",
                 },
             ),
-            UploadOp::Delete(file_kind, _) => (
-                *file_kind,
+            UploadOp::Delete(delete) => (
+                delete.file_kind,
                 RemoteOpKind::Delete,
                 DontTrackSize {
                     reason: "should we track deletes? positive or negative sign?",
@@ -1111,40 +1231,42 @@ impl RemoteTimelineClient {
                 info!("another concurrent task already shut down the queue");
                 Ok(())
             }
-            UploadQueue::Initialized(UploadQueueInitialized {
-                latest_files,
-                latest_metadata,
-                last_uploaded_consistent_lsn,
-                ..
-            }) => {
+            UploadQueue::Initialized(initialized) => {
                 info!("shutting down upload queue");
 
                 // Replace the queue with the Stopped state, taking ownership of the old
                 // Initialized queue. We will do some checks on it, and then drop it.
                 let qi = {
-                    // take or clone what we need
-                    let latest_files = std::mem::take(latest_files);
-                    let last_uploaded_consistent_lsn = *last_uploaded_consistent_lsn;
-                    // this could be Copy
-                    let latest_metadata = latest_metadata.clone();
-
-                    let stopped = UploadQueueStopped {
-                        latest_files,
-                        last_uploaded_consistent_lsn,
-                        latest_metadata,
-                        deleted_at: SetDeletedFlagProgress::NotRunning,
+                    // Here we preserve working version of the upload queue for possible use during deletions.
+                    // In-place replace of Initialized to Stopped can be done with the help of https://github.com/Sgeo/take_mut
+                    // but for this use case it doesnt really makes sense to bring unsafe code only for this usage point.
+                    // Deletion is not really perf sensitive so there shouldnt be any problems with cloning a fraction of it.
+                    let upload_queue_for_deletion = UploadQueueInitialized {
+                        task_counter: 0,
+                        latest_files: initialized.latest_files.clone(),
+                        latest_files_changes_since_metadata_upload_scheduled: 0,
+                        latest_metadata: initialized.latest_metadata.clone(),
+                        last_uploaded_consistent_lsn: initialized.last_uploaded_consistent_lsn,
+                        num_inprogress_layer_uploads: 0,
+                        num_inprogress_metadata_uploads: 0,
+                        num_inprogress_deletions: 0,
+                        inprogress_tasks: HashMap::default(),
+                        queued_operations: VecDeque::default(),
                     };
 
-                    let upload_queue =
-                        std::mem::replace(&mut *guard, UploadQueue::Stopped(stopped));
+                    let upload_queue = std::mem::replace(
+                        &mut *guard,
+                        UploadQueue::Stopped(UploadQueueStopped {
+                            upload_queue_for_deletion,
+                            deleted_at: SetDeletedFlagProgress::NotRunning,
+                        }),
+                    );
                     if let UploadQueue::Initialized(qi) = upload_queue {
                         qi
                     } else {
                         unreachable!("we checked in the match above that it is Initialized");
                     }
                 };
-
-                assert!(qi.latest_files.is_empty(), "do not use this anymore");
 
                 // consistency check
                 assert_eq!(
@@ -1243,7 +1365,7 @@ mod tests {
     struct TestSetup {
         runtime: &'static tokio::runtime::Runtime,
         entered_runtime: EnterGuard<'static>,
-        harness: TenantHarness<'static>,
+        harness: TenantHarness,
         tenant: Arc<Tenant>,
         tenant_ctx: RequestContext,
         remote_fs_dir: PathBuf,
@@ -1264,7 +1386,12 @@ mod tests {
             let harness = TenantHarness::create(test_name)?;
             let (tenant, ctx) = runtime.block_on(harness.load());
             // create an empty timeline directory
-            let _ = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let _ = runtime.block_on(tenant.create_test_timeline(
+                TIMELINE_ID,
+                Lsn(8),
+                DEFAULT_PG_VERSION,
+                &ctx,
+            ))?;
 
             let remote_fs_dir = harness.conf.workdir.join("remote_fs");
             std::fs::create_dir_all(remote_fs_dir)?;
@@ -1408,7 +1535,7 @@ mod tests {
         // Download back the index.json, and check that the list of files is correct
         let index_part = match runtime.block_on(client.download_index_file())? {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-            MaybeDeletedIndexPart::Deleted => panic!("unexpectedly got deleted index part"),
+            MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
 
         assert_file_list(

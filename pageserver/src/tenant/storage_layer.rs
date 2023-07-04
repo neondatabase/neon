@@ -4,6 +4,7 @@ pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod layer_desc;
 mod remote_layer;
 
 use crate::config::PageServerConf;
@@ -37,6 +38,7 @@ pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
+pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use remote_layer::RemoteLayer;
 
 use super::layer_map::BatchedUpdates;
@@ -174,13 +176,10 @@ impl LayerAccessStats {
     /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    pub(crate) fn for_loading_layer<L>(
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+    pub(crate) fn for_loading_layer(
+        layer_map_lock_held_witness: &BatchedUpdates<'_>,
         status: LayerResidenceStatus,
-    ) -> Self
-    where
-        L: ?Sized + Layer,
-    {
+    ) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(
             layer_map_lock_held_witness,
@@ -195,14 +194,11 @@ impl LayerAccessStats {
     /// The `new_status` is not recorded in `self`.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    pub(crate) fn clone_for_residence_change<L>(
+    pub(crate) fn clone_for_residence_change(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        layer_map_lock_held_witness: &BatchedUpdates<'_>,
         new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats
-    where
-        L: ?Sized + Layer,
-    {
+    ) -> LayerAccessStats {
         let clone = {
             let inner = self.0.lock().unwrap();
             inner.clone()
@@ -230,14 +226,12 @@ impl LayerAccessStats {
     /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
     /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
     ///
-    pub(crate) fn record_residence_event<L>(
+    pub(crate) fn record_residence_event(
         &self,
-        _layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        _layer_map_lock_held_witness: &BatchedUpdates<'_>,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
-    ) where
-        L: ?Sized + Layer,
-    {
+    ) {
         let mut locked = self.0.lock().unwrap();
         locked.iter_mut().for_each(|inner| {
             inner
@@ -387,10 +381,10 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
 }
 
 /// Returned by [`Layer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i>;
+pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
 
 /// Returned by [`Layer::key_iter`]
-pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
+pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -406,14 +400,23 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 pub trait PersistentLayer: Layer {
-    fn get_tenant_id(&self) -> TenantId;
+    /// Get the layer descriptor.
+    fn layer_desc(&self) -> &PersistentLayerDesc;
+
+    fn get_tenant_id(&self) -> TenantId {
+        self.layer_desc().tenant_id
+    }
 
     /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
+    fn get_timeline_id(&self) -> TimelineId {
+        self.layer_desc().timeline_id
+    }
 
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName;
+    fn filename(&self) -> LayerFileName {
+        self.layer_desc().filename()
+    }
 
     // Path to the layer file in the local filesystem.
     // `None` for `RemoteLayer`.
@@ -443,7 +446,9 @@ pub trait PersistentLayer: Layer {
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64;
+    fn file_size(&self) -> u64 {
+        self.layer_desc().file_size
+    }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
@@ -460,80 +465,125 @@ pub fn downcast_remote_layer(
     }
 }
 
-/// Holds metadata about a layer without any content. Used mostly for testing.
-///
-/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
-/// LayerDescriptor.
-#[derive(Clone, Debug)]
-pub struct LayerDescriptor {
-    pub key: Range<Key>,
-    pub lsn: Range<Lsn>,
-    pub is_incremental: bool,
-    pub short_id: String,
-}
+pub mod tests {
+    use super::*;
 
-impl Layer for LayerDescriptor {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key.clone()
+    /// Holds metadata about a layer without any content. Used mostly for testing.
+    ///
+    /// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
+    /// LayerDescriptor.
+    #[derive(Clone, Debug)]
+    pub struct LayerDescriptor {
+        base: PersistentLayerDesc,
     }
 
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn.clone()
-    }
-
-    fn is_incremental(&self) -> bool {
-        self.is_incremental
-    }
-
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        todo!("This method shouldn't be part of the Layer trait")
-    }
-
-    fn short_id(&self) -> String {
-        self.short_id.clone()
-    }
-
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        todo!()
-    }
-}
-
-impl From<DeltaFileName> for LayerDescriptor {
-    fn from(value: DeltaFileName) -> Self {
-        let short_id = value.to_string();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn: value.lsn_range,
-            is_incremental: true,
-            short_id,
+    impl From<PersistentLayerDesc> for LayerDescriptor {
+        fn from(base: PersistentLayerDesc) -> Self {
+            Self { base }
         }
     }
-}
 
-impl From<ImageFileName> for LayerDescriptor {
-    fn from(value: ImageFileName) -> Self {
-        let short_id = value.to_string();
-        let lsn = value.lsn_as_range();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn,
-            is_incremental: false,
-            short_id,
+    impl Layer for LayerDescriptor {
+        fn get_value_reconstruct_data(
+            &self,
+            _key: Key,
+            _lsn_range: Range<Lsn>,
+            _reconstruct_data: &mut ValueReconstructState,
+            _ctx: &RequestContext,
+        ) -> Result<ValueReconstructResult> {
+            todo!("This method shouldn't be part of the Layer trait")
+        }
+
+        fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
+            todo!()
+        }
+
+        /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+        fn get_key_range(&self) -> Range<Key> {
+            self.layer_desc().key_range.clone()
+        }
+
+        /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+        fn get_lsn_range(&self) -> Range<Lsn> {
+            self.layer_desc().lsn_range.clone()
+        }
+
+        /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+        fn is_incremental(&self) -> bool {
+            self.layer_desc().is_incremental
+        }
+
+        /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+        fn short_id(&self) -> String {
+            self.layer_desc().short_id()
         }
     }
-}
 
-impl From<LayerFileName> for LayerDescriptor {
-    fn from(value: LayerFileName) -> Self {
-        match value {
-            LayerFileName::Delta(d) => Self::from(d),
-            LayerFileName::Image(i) => Self::from(i),
+    impl PersistentLayer for LayerDescriptor {
+        fn layer_desc(&self) -> &PersistentLayerDesc {
+            &self.base
+        }
+
+        fn local_path(&self) -> Option<PathBuf> {
+            unimplemented!()
+        }
+
+        fn iter(&self, _: &RequestContext) -> Result<LayerIter<'_>> {
+            unimplemented!()
+        }
+
+        fn key_iter(&self, _: &RequestContext) -> Result<LayerKeyIter<'_>> {
+            unimplemented!()
+        }
+
+        fn delete_resident_layer_file(&self) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn info(&self, _: LayerAccessStatsReset) -> HistoricLayerInfo {
+            unimplemented!()
+        }
+
+        fn access_stats(&self) -> &LayerAccessStats {
+            unimplemented!()
+        }
+    }
+
+    impl From<DeltaFileName> for LayerDescriptor {
+        fn from(value: DeltaFileName) -> Self {
+            LayerDescriptor {
+                base: PersistentLayerDesc::new_delta(
+                    TenantId::from_array([0; 16]),
+                    TimelineId::from_array([0; 16]),
+                    value.key_range,
+                    value.lsn_range,
+                    233,
+                ),
+            }
+        }
+    }
+
+    impl From<ImageFileName> for LayerDescriptor {
+        fn from(value: ImageFileName) -> Self {
+            LayerDescriptor {
+                base: PersistentLayerDesc::new_img(
+                    TenantId::from_array([0; 16]),
+                    TimelineId::from_array([0; 16]),
+                    value.key_range,
+                    value.lsn,
+                    false,
+                    233,
+                ),
+            }
+        }
+    }
+
+    impl From<LayerFileName> for LayerDescriptor {
+        fn from(value: LayerFileName) -> Self {
+            match value {
+                LayerFileName::Delta(d) => Self::from(d),
+                LayerFileName::Image(i) => Self::from(i),
+            }
         }
     }
 }
@@ -542,7 +592,7 @@ impl From<LayerFileName> for LayerDescriptor {
 ///
 /// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
 /// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'pageserver_binutils' binary, we need to construct a Layer
+/// path from the config. But in the 'pagectl' binary, we need to construct a Layer
 /// struct for a file on disk, without having a page server running, so that we have no
 /// config. In that case, we use the Path variant to hold the full path to the file on
 /// disk.

@@ -113,9 +113,17 @@ impl GlobalTimelines {
         Ok(())
     }
 
-    /// Loads all timelines for the given tenant to memory. Returns fs::read_dir errors if any.
+    /// Loads all timelines for the given tenant to memory. Returns fs::read_dir
+    /// errors if any.
+    ///
+    /// Note: This function (and all reading/loading below) is sync because
+    /// timelines are loaded while holding GlobalTimelinesState lock. Which is
+    /// fine as this is called only from single threaded main runtime on boot,
+    /// but clippy complains anyway, and suppressing that isn't trivial as async
+    /// is the keyword, ha. That only other user is pull_timeline.rs for which
+    /// being blocked is not that bad, and we can do spawn_blocking.
     fn load_tenant_timelines(
-        state: &mut MutexGuard<GlobalTimelinesState>,
+        state: &mut MutexGuard<'_, GlobalTimelinesState>,
         tenant_id: TenantId,
     ) -> Result<()> {
         let timelines_dir = state.get_conf().tenant_dir(&tenant_id);
@@ -220,7 +228,7 @@ impl GlobalTimelines {
         // Take a lock and finish the initialization holding this mutex. No other threads
         // can interfere with creation after we will insert timeline into the map.
         {
-            let mut shared_state = timeline.write_shared_state();
+            let mut shared_state = timeline.write_shared_state().await;
 
             // We can get a race condition here in case of concurrent create calls, but only
             // in theory. create() will return valid timeline on the next try.
@@ -232,7 +240,7 @@ impl GlobalTimelines {
             // Write the new timeline to the disk and start background workers.
             // Bootstrap is transactional, so if it fails, the timeline will be deleted,
             // and the state on disk should remain unchanged.
-            if let Err(e) = timeline.bootstrap(&mut shared_state) {
+            if let Err(e) = timeline.bootstrap(&mut shared_state).await {
                 // Note: the most likely reason for bootstrap failure is that the timeline
                 // directory already exists on disk. This happens when timeline is corrupted
                 // and wasn't loaded from disk on startup because of that. We want to preserve
@@ -294,15 +302,16 @@ impl GlobalTimelines {
     }
 
     /// Cancels timeline, then deletes the corresponding data directory.
-    pub fn delete_force(ttid: &TenantTimelineId) -> Result<TimelineDeleteForceResult> {
+    pub async fn delete_force(ttid: &TenantTimelineId) -> Result<TimelineDeleteForceResult> {
         let tli_res = TIMELINES_STATE.lock().unwrap().get(ttid);
         match tli_res {
             Ok(timeline) => {
                 // Take a lock and finish the deletion holding this mutex.
-                let mut shared_state = timeline.write_shared_state();
+                let mut shared_state = timeline.write_shared_state().await;
 
                 info!("deleting timeline {}", ttid);
-                let (dir_existed, was_active) = timeline.delete_from_disk(&mut shared_state)?;
+                let (dir_existed, was_active) =
+                    timeline.delete_from_disk(&mut shared_state).await?;
 
                 // Remove timeline from the map.
                 // FIXME: re-enable it once we fix the issue with recreation of deleted timelines
@@ -335,7 +344,7 @@ impl GlobalTimelines {
     /// the tenant had, `true` if a timeline was active. There may be a race if new timelines are
     /// created simultaneously. In that case the function will return error and the caller should
     /// retry tenant deletion again later.
-    pub fn delete_force_all_for_tenant(
+    pub async fn delete_force_all_for_tenant(
         tenant_id: &TenantId,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
@@ -345,7 +354,7 @@ impl GlobalTimelines {
 
         let mut deleted = HashMap::new();
         for tli in &to_delete {
-            match Self::delete_force(&tli.ttid) {
+            match Self::delete_force(&tli.ttid).await {
                 Ok(result) => {
                     deleted.insert(tli.ttid, result);
                 }

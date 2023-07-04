@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
-use std::{env, fs, path::Path, path::PathBuf, str, str::FromStr};
+use std::{fs, path::Path, str};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
@@ -18,12 +18,14 @@ use pageserver::virtual_file::VirtualFile;
 
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
+use crate::AnalyzeLayerMapCmd;
+
 const MIN_HOLE_LENGTH: i128 = (128 * 1024 * 1024 / PAGE_SZ) as i128;
 const DEFAULT_MAX_HOLES: usize = 10;
 
 /// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
 #[derive(PartialEq, Eq)]
-struct Hole(Range<Key>);
+pub struct Hole(Range<Key>);
 
 impl Ord for Hole {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -39,11 +41,11 @@ impl PartialOrd for Hole {
     }
 }
 
-struct LayerFile {
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
-    is_delta: bool,
-    holes: Vec<Hole>,
+pub(crate) struct LayerFile {
+    pub key_range: Range<Key>,
+    pub lsn_range: Range<Lsn>,
+    pub is_delta: bool,
+    pub holes: Vec<Hole>,
 }
 
 impl LayerFile {
@@ -67,7 +69,7 @@ impl LayerFile {
     }
 }
 
-fn parse_filename(name: &str) -> Option<LayerFile> {
+pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
     let split: Vec<&str> = name.split("__").collect();
     if split.len() != 2 {
         return None;
@@ -127,18 +129,9 @@ fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     Ok(holes)
 }
 
-fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        println!("Usage: layer_map_analyzer PAGESERVER_DATA_DIR [MAX_HOLES]");
-        return Ok(());
-    }
-    let storage_path = PathBuf::from_str(&args[1])?;
-    let max_holes = if args.len() > 2 {
-        args[2].parse::<usize>().unwrap()
-    } else {
-        DEFAULT_MAX_HOLES
-    };
+pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
+    let storage_path = &cmd.path;
+    let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(10);

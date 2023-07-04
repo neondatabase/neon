@@ -24,7 +24,7 @@ use utils::{
 
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 14;
+pub const DEFAULT_PG_VERSION: u32 = 15;
 
 //
 // This data structures represents neon_local CLI config
@@ -37,7 +37,7 @@ pub const DEFAULT_PG_VERSION: u32 = 14;
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
-    // compute nodes).
+    // compute endpoints).
     //
     // This is not stored in the config file. Rather, this is the path where the
     // config file itself is. It is read from the NEON_REPO_DIR env variable or
@@ -364,7 +364,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self, pg_version: u32) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32, force: bool) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -372,11 +372,29 @@ impl LocalEnv {
             "repository base path is missing"
         );
 
-        ensure!(
-            !base_path.exists(),
-            "directory '{}' already exists. Perhaps already initialized?",
-            base_path.display()
-        );
+        if base_path.exists() {
+            if force {
+                println!("removing all contents of '{}'", base_path.display());
+                // instead of directly calling `remove_dir_all`, we keep the original dir but removing
+                // all contents inside. This helps if the developer symbol links another directory (i.e.,
+                // S3 local SSD) to the `.neon` base directory.
+                for entry in std::fs::read_dir(base_path)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        fs::remove_dir_all(&path)?;
+                    } else {
+                        fs::remove_file(&path)?;
+                    }
+                }
+            } else {
+                bail!(
+                    "directory '{}' already exists. Perhaps already initialized? (Hint: use --force to remove all contents)",
+                    base_path.display()
+                );
+            }
+        }
+
         if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
@@ -392,7 +410,9 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir(base_path)?;
+        if !base_path.exists() {
+            fs::create_dir(base_path)?;
+        }
 
         // Generate keypair for JWT.
         //
