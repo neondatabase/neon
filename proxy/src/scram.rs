@@ -45,17 +45,12 @@ fn hmac_sha256<'a>(key: &[u8], parts: impl IntoIterator<Item = &'a [u8]>) -> [u8
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("bad key size");
     parts.into_iter().for_each(|s| mac.update(s));
 
-    // TODO: maybe newer `hmac` et al already migrated to regular arrays?
-    let mut result = [0u8; 32];
-    result.copy_from_slice(mac.finalize().into_bytes().as_slice());
-    result
+    mac.finalize().into_bytes().into()
 }
 
 fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
     let mut hasher = Sha256::new();
     parts.into_iter().for_each(|s| hasher.update(s));
 
-    let mut result = [0u8; 32];
-    result.copy_from_slice(hasher.finalize().as_slice());
-    result
+    hasher.finalize().into()
 }

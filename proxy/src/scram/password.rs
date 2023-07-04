@@ -14,19 +14,7 @@ impl SaltedPassword {
     /// See `scram-common.c : scram_SaltedPassword` for details.
     /// Further reading: <https://datatracker.ietf.org/doc/html/rfc2898> (see `PBKDF2`).
     pub fn new(password: &[u8], salt: &[u8], iterations: u32) -> SaltedPassword {
-        let one = 1_u32.to_be_bytes(); // magic
-
-        let mut current = super::hmac_sha256(password, [salt, &one]);
-        let mut result = current;
-        for _ in 1..iterations {
-            current = super::hmac_sha256(password, [current.as_ref()]);
-            // TODO: result = current.zip(result).map(|(x, y)| x ^ y), issue #80094
-            for (i, x) in current.iter().enumerate() {
-                result[i] ^= x;
-            }
-        }
-
-        result.into()
+        pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, salt, iterations).into()
     }
 
     /// Derive `ClientKey` from a salted hashed password.
