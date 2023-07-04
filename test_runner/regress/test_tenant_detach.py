@@ -632,14 +632,14 @@ def test_ignored_tenant_download_missing_layers(
 
     # ignore the tenant and remove its layers
     pageserver_http.tenant_ignore(tenant_id)
-    tenant_timeline_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
     layers_removed = False
-    for dir_entry in tenant_timeline_dir.iterdir():
+    for dir_entry in timeline_dir.iterdir():
         if dir_entry.name.startswith("00000"):
             # Looks like a layer file. Remove it
             dir_entry.unlink()
             layers_removed = True
-    assert layers_removed, f"Found no layers for tenant {tenant_timeline_dir}"
+    assert layers_removed, f"Found no layers for tenant {timeline_dir}"
 
     # now, load it from the local files and expect it to work due to remote storage restoration
     pageserver_http.tenant_load(tenant_id=tenant_id)
@@ -688,14 +688,14 @@ def test_ignored_tenant_stays_broken_without_metadata(
 
     # ignore the tenant and remove its metadata
     pageserver_http.tenant_ignore(tenant_id)
-    tenant_timeline_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
     metadata_removed = False
-    for dir_entry in tenant_timeline_dir.iterdir():
+    for dir_entry in timeline_dir.iterdir():
         if dir_entry.name == "metadata":
             # Looks like a layer file. Remove it
             dir_entry.unlink()
             metadata_removed = True
-    assert metadata_removed, f"Failed to find metadata file in {tenant_timeline_dir}"
+    assert metadata_removed, f"Failed to find metadata file in {timeline_dir}"
 
     env.pageserver.allowed_errors.append(
         f".*{tenant_id}.*: load failed.*: failed to load metadata.*"

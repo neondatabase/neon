@@ -214,9 +214,7 @@ def switch_pg_to_new_pageserver(
 
     endpoint.start()
 
-    timeline_to_detach_local_path = (
-        env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    timeline_to_detach_local_path = env.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
         "metadata" in files_before_detach
@@ -419,8 +417,6 @@ def test_tenant_relocation(
             new_pageserver_http.tenant_attach(tenant_id)
 
             # wait for tenant to finish attaching
-            tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"]["slug"] in ["Attaching", "Active"]
             wait_until(
                 number_of_iterations=10,
                 interval=1,

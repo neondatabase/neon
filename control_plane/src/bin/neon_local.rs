@@ -308,7 +308,8 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
     let mut env =
         LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
-    env.init(pg_version)
+    let force = init_match.get_flag("force");
+    env.init(pg_version, force)
         .context("Failed to initialize neon repository")?;
 
     // Initialize pageserver, create initial tenant and timeline.
@@ -1013,6 +1014,13 @@ fn cli() -> Command {
         .help("If set, the node will be a hot replica on the specified timeline")
         .required(false);
 
+    let force_arg = Arg::new("force")
+        .value_parser(value_parser!(bool))
+        .long("force")
+        .action(ArgAction::SetTrue)
+        .help("Force initialization even if the repository is not empty")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1028,6 +1036,7 @@ fn cli() -> Command {
                         .value_name("config"),
                 )
                 .arg(pg_version_arg.clone())
+                .arg(force_arg)
         )
         .subcommand(
             Command::new("timeline")

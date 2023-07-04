@@ -571,10 +571,10 @@ def test_concurrent_timeline_delete_stuck_on(
 
         # make the second call and assert behavior
         log.info("second call start")
-        error_msg_re = "timeline deletion is already in progress"
+        error_msg_re = "Timeline deletion is already in progress"
         with pytest.raises(PageserverApiException, match=error_msg_re) as second_call_err:
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
-        assert second_call_err.value.status_code == 500
+        assert second_call_err.value.status_code == 409
         env.pageserver.allowed_errors.append(f".*{child_timeline_id}.*{error_msg_re}.*")
         # the second call will try to transition the timeline into Stopping state as well
         env.pageserver.allowed_errors.append(
@@ -626,9 +626,9 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
         ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
 
     env.pageserver.allowed_errors.append(
-        f".*{child_timeline_id}.*timeline deletion is already in progress.*"
+        f".*{child_timeline_id}.*Timeline deletion is already in progress.*"
     )
-    with pytest.raises(PageserverApiException, match="timeline deletion is already in progress"):
+    with pytest.raises(PageserverApiException, match="Timeline deletion is already in progress"):
         ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
 
     # make sure the timeout was due to the failpoint

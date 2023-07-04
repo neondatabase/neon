@@ -84,7 +84,7 @@ pub fn init(
     let r = r.with({
         let log_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
-            .with_ansi(atty::is(atty::Stream::Stdout))
+            .with_ansi(false)
             .with_writer(std::io::stdout);
         let log_layer = match log_format {
             LogFormat::Json => log_layer.json().boxed(),

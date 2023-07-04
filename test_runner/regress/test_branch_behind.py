@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pageserver.http import TimelineCreate406
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
@@ -17,7 +18,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(".*invalid start lsn .* for ancestor timeline.*")
 
     # Branch at the point where only 100 rows were inserted
-    env.neon_cli.create_branch("test_branch_behind")
+    branch_behind_timeline_id = env.neon_cli.create_branch("test_branch_behind")
     endpoint_main = env.endpoints.create_start("test_branch_behind")
     log.info("postgres is running on 'test_branch_behind' branch")
 
@@ -89,6 +90,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     assert query_scalar(main_cur, "SELECT count(*) FROM foo") == 400100
 
     # Check bad lsn's for branching
+    pageserver_http = env.pageserver.http_client()
 
     # branch at segment boundary
     env.neon_cli.create_branch(
@@ -97,26 +99,51 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start("test_branch_segment_boundary")
     assert endpoint.safe_psql("SELECT 1")[0][0] == 1
 
-    # branch at pre-initdb lsn
+    # branch at pre-initdb lsn (from main branch)
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
+    # retry the same with the HTTP API, so that we can inspect the status code
+    with pytest.raises(TimelineCreate406):
+        new_timeline_id = TimelineId.generate()
+        log.info(f"Expecting failure for branch pre-initdb LSN, new_timeline_id={new_timeline_id}")
+        pageserver_http.timeline_create(
+            env.pg_version, env.initial_tenant, new_timeline_id, env.initial_timeline, Lsn("0/42")
+        )
 
     # branch at pre-ancestor lsn
     with pytest.raises(Exception, match="less than timeline ancestor lsn"):
         env.neon_cli.create_branch(
             "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn=Lsn("0/42")
         )
+    # retry the same with the HTTP API, so that we can inspect the status code
+    with pytest.raises(TimelineCreate406):
+        new_timeline_id = TimelineId.generate()
+        log.info(
+            f"Expecting failure for branch pre-ancestor LSN, new_timeline_id={new_timeline_id}"
+        )
+        pageserver_http.timeline_create(
+            env.pg_version,
+            env.initial_tenant,
+            new_timeline_id,
+            branch_behind_timeline_id,
+            Lsn("0/42"),
+        )
 
     # check that we cannot create branch based on garbage collected data
-    with env.pageserver.http_client() as pageserver_http:
-        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
-        gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
-        print_gc_result(gc_result)
-
+    pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
+    gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+    print_gc_result(gc_result)
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
         env.neon_cli.create_branch(
             "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn
+        )
+    # retry the same with the HTTP API, so that we can inspect the status code
+    with pytest.raises(TimelineCreate406):
+        new_timeline_id = TimelineId.generate()
+        log.info(f"Expecting failure for branch behind gc'd LSN, new_timeline_id={new_timeline_id}")
+        pageserver_http.timeline_create(
+            env.pg_version, env.initial_tenant, new_timeline_id, branch_behind_timeline_id, gced_lsn
         )
 
     # check that after gc everything is still there
