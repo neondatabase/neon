@@ -54,7 +54,7 @@ def prepare_mock_ext_storage(
 
     PUB_EXT_ROOT = f"v{pg_version}/share/extension"
     PRIVATE_EXT_ROOT = f"v{pg_version}/{custom_prefix}/share/extension"
-    LOCAL_EXT_ROOT = f"pg_install/{pg_version}/share/postgresql/extension"
+    LOCAL_EXT_ROOT = f"pg_install/v{pg_version}/share/postgresql/extension"
 
     PUB_LIB_ROOT = f"v{pg_version}/lib"
     PRIVATE_LIB_ROOT = f"v{pg_version}/{custom_prefix}/lib"
