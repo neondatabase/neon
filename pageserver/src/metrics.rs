@@ -130,34 +130,18 @@ pub static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_page_cache_read_accesses_total",
-        "Number of read accesses to the page cache",
-        &["key_kind"]
-    )
-    .expect("failed to define a metric")
-});
+pub struct PageCacheMetrics {
+    pub read_accesses_materialized_page: IntCounter,
+    pub read_accesses_ephemeral: IntCounter,
+    pub read_accesses_immutable: IntCounter,
 
-pub static PAGE_CACHE_READ_ACCESSES_MATERIALIZED_PAGE: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_ACCESSES
-        .get_metric_with_label_values(&["materialized_page"])
-        .unwrap()
-});
+    pub read_hits_ephemeral: IntCounter,
+    pub read_hits_immutable: IntCounter,
+    pub read_hits_materialized_page_exact: IntCounter,
+    pub read_hits_materialized_page_older_lsn: IntCounter,
+}
 
-pub static PAGE_CACHE_READ_ACCESSES_EPHEMERAL: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_ACCESSES
-        .get_metric_with_label_values(&["ephemeral"])
-        .unwrap()
-});
-
-pub static PAGE_CACHE_READ_ACCESSES_IMMUTABLE: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_ACCESSES
-        .get_metric_with_label_values(&["immutable"])
-        .unwrap()
-});
-
-pub static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
+static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
         "Number of read accesses to the page cache that hit",
@@ -166,28 +150,57 @@ pub static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static PAGE_CACHE_READ_HITS_EPHEMERAL: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_HITS
-        .get_metric_with_label_values(&["ephemeral", "-"])
-        .unwrap()
+static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_accesses_total",
+        "Number of read accesses to the page cache",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
 });
 
-pub static PAGE_CACHE_READ_HITS_IMMUTABLE: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_HITS
-        .get_metric_with_label_values(&["immutable", "-"])
-        .unwrap()
-});
+pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
+    read_accesses_materialized_page: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["materialized_page"])
+            .unwrap()
+    },
 
-pub static PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_EXACT: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_HITS
-        .get_metric_with_label_values(&["materialized_page", "exact"])
-        .unwrap()
-});
+    read_accesses_ephemeral: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["ephemeral"])
+            .unwrap()
+    },
 
-pub static PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_OLDER_LSN: Lazy<IntCounter> = Lazy::new(|| {
-    PAGE_CACHE_READ_HITS
-        .get_metric_with_label_values(&["materialized_page", "older_lsn"])
-        .unwrap()
+    read_accesses_immutable: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["immutable"])
+            .unwrap()
+    },
+
+    read_hits_ephemeral: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["ephemeral", "-"])
+            .unwrap()
+    },
+
+    read_hits_immutable: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["immutable", "-"])
+            .unwrap()
+    },
+
+    read_hits_materialized_page_exact: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["materialized_page", "exact"])
+            .unwrap()
+    },
+
+    read_hits_materialized_page_older_lsn: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["materialized_page", "older_lsn"])
+            .unwrap()
+    },
 });
 
 static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {

@@ -313,7 +313,7 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
-        crate::metrics::PAGE_CACHE_READ_ACCESSES_MATERIALIZED_PAGE.inc();
+        crate::metrics::PAGE_CACHE.read_accesses_materialized_page.inc();
 
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
@@ -331,9 +331,9 @@ impl PageCache {
             } = cache_key
             {
                 if available_lsn == lsn {
-                    crate::metrics::PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_EXACT.inc();
+                    crate::metrics::PAGE_CACHE.read_hits_materialized_page_exact.inc();
                 } else {
-                    crate::metrics::PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_OLDER_LSN.inc();
+                    crate::metrics::PAGE_CACHE.read_hits_materialized_page_older_lsn.inc();
                 }
                 Some((available_lsn, guard))
             } else {
@@ -515,12 +515,12 @@ impl PageCache {
                 unreachable!("Materialized pages use lookup_materialized_page")
             }
             CacheKey::EphemeralPage { .. } => (
-                &crate::metrics::PAGE_CACHE_READ_ACCESSES_EPHEMERAL,
-                &crate::metrics::PAGE_CACHE_READ_HITS_EPHEMERAL,
+                &crate::metrics::PAGE_CACHE.read_accesses_ephemeral,
+                &crate::metrics::PAGE_CACHE.read_hits_ephemeral,
             ),
             CacheKey::ImmutableFilePage { .. } => (
-                &crate::metrics::PAGE_CACHE_READ_ACCESSES_IMMUTABLE,
-                &crate::metrics::PAGE_CACHE_READ_HITS_IMMUTABLE,
+                &crate::metrics::PAGE_CACHE.read_accesses_immutable,
+                &crate::metrics::PAGE_CACHE.read_hits_immutable,
             ),
         };
         read_access.inc();
