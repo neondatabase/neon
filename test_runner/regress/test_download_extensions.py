@@ -1,3 +1,4 @@
+import json
 import os
 from contextlib import closing
 from io import BytesIO
@@ -248,3 +249,75 @@ def test_remote_extensions(
                 log.info(f"Deleted {file}")
             except FileNotFoundError:
                 log.info(f"{file} does not exist, so cannot be deleted")
+
+
+"""
+This tests against the actual infra for real S3
+Note in particular that we don't need to set up a bucket (real or mock)
+because we are testing the files already uploaded as part of CI/CD
+"""
+
+
+def test_remote_extensions_in_bucket(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.REAL_S3,
+        test_name="test_remote_extensions_in_bucket",
+        enable_remote_extensions=False,  # we don't enable remote extensions here; instead we use the real bucket
+    )
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+    tenant_id, _ = env.neon_cli.create_tenant()
+    env.neon_cli.create_timeline("test_remote_extensions_in_bucket", tenant_id=tenant_id)
+
+    # Start a compute node and check that it can download the extensions
+    # and use them to CREATE EXTENSION and LOAD 'library.so'
+    remote_ext_config = {
+        "bucket": "neon-dev-extensions-us-east-2",
+        "region": "us-east-2",
+        "endpoint": None,
+        "prefix": "5412197734",  # build tag
+    }
+    endpoint = env.endpoints.create_start(
+        "test_remote_extensions_in_bucket",
+        tenant_id=tenant_id,
+        remote_ext_config=json.dumps(remote_ext_config),
+        config_lines=["shared_preload_libraries='anon, neon'"],
+    )
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            # test create extension
+            cur.execute("CREATE EXTENSION pg_surgery")
+            cur.execute("create extension hnsw")
+            cur.execute("SELECT extname FROM pg_extension")
+            all_extensions = [x[0] for x in cur.fetchall()]
+            assert "pg_surgery" in all_extensions
+            assert "hnsw" in all_extensions
+
+            # test load library
+            cur.execute("LOAD 'hnsw'")
+
+            # test load library with .so.3.14 extension.
+            # Note: it should download the appropriate files, but error for the
+            # specified reason
+            try:
+                cur.execute("LOAD 'libpgtypes'")
+            except Exception as err:
+                correct_err_type = (
+                    "Extension libraries are required to use the PG_MODULE_MAGIC macro." in str(err)
+                )
+                assert correct_err_type
+                log.info(err)
+
+            # test load extension with dependencies in a subdirectory
+            try:
+                cur.execute("CREATE EXTENSION anon")
+            except Exception as e:
+                # Check that this errors, but for the right reason
+                # (that it is missing dependencies, not that files failed to download)
+                log.info(e)
+                assert 'required extension "pgcrypto" is not installed' in str(e)
+
+            # test load exension with dependencies not in a subdirectory
+            cur.execute("CREATE EXTENSION fuzzystrmatch")
+
+    log.info("Please MANUALLY cleanup any downloaded  files")
