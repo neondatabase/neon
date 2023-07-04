@@ -141,7 +141,12 @@ DELETE_FAILPOINTS = [
 
 def combinations():
     result = []
-    for remote_storage_kind in [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]:
+
+    remotes = [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]
+    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
+        remotes.append(RemoteStorageKind.REAL_S3)
+
+    for remote_storage_kind in remotes:
         for delete_failpoint in DELETE_FAILPOINTS:
             if remote_storage_kind == RemoteStorageKind.NOOP and delete_failpoint in (
                 "timeline-delete-before-index-delete",
