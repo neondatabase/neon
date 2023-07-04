@@ -53,14 +53,14 @@ neon_download_extension_file_http(const char *filename, bool is_library)
     }
 
     compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s%s",
-                      extension_server_port, filename, is_library?"?is_library=true":"");
+                               extension_server_port, filename, is_library ? "?is_library=true" : "");
 
     elog(LOG, "Sending request to compute_ctl: %s", compute_ctl_url);
 
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
     curl_easy_setopt(curl, CURLOPT_URL, compute_ctl_url);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L /* seconds */);
-
+    // NOTE: 15L may be insufficient time for large extensions like postgis
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L /* seconds */);
 
     if (curl)
     {

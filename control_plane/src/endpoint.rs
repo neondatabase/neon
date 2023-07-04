@@ -491,7 +491,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            // This is a hack to test custom extensions locally.
+            // TODO FIXME: This is a hack to test custom extensions locally.
             // In test_download_extensions, we assume that the custom extension
             // prefix is the tenant ID. So we set it here.
             //

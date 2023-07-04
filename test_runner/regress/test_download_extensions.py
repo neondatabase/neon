@@ -22,7 +22,7 @@ comment = 'This is a mock extension'
 default_version = '1.0'
 module_pathname = '$libdir/test_ext{i}'
 relocatable = true"""
-    return output
+    return BytesIO(bytes(output, "utf-8"))
 
 
 def sql_file_content():
@@ -33,7 +33,11 @@ def sql_file_content():
     IMMUTABLE
     RETURNS NULL ON NULL INPUT;
         """
-    return output
+    return BytesIO(bytes(output, "utf-8"))
+
+
+def fake_library_content():
+    return BytesIO(bytes("\n111\n", "utf-8"))
 
 
 # Prepare some mock extension files and upload them to the bucket
@@ -47,9 +51,10 @@ def prepare_mock_ext_storage(
 ):
     bucket_prefix = ext_remote_storage.prefix_in_bucket
     custom_prefix = str(tenant_id)
-    PUB_EXT_ROOT = f"v{pg_version}/share/postgresql/extension"
-    PRIVATE_EXT_ROOT = f"v{pg_version}/{custom_prefix}/share/postgresql/extension"
-    LOCAL_EXT_ROOT = f"pg_install/{PUB_EXT_ROOT}"
+
+    PUB_EXT_ROOT = f"v{pg_version}/share/extension"
+    PRIVATE_EXT_ROOT = f"v{pg_version}/{custom_prefix}/share/extension"
+    LOCAL_EXT_ROOT = f"pg_install/{pg_version}/share/postgresql/extension"
 
     PUB_LIB_ROOT = f"v{pg_version}/lib"
     PRIVATE_LIB_ROOT = f"v{pg_version}/{custom_prefix}/lib"
@@ -70,56 +75,53 @@ def prepare_mock_ext_storage(
 
     # Upload several test_ext{i}.control files to the bucket
     for i in range(NUM_EXT):
-        public_ext = BytesIO(bytes(control_file_content("public", i), "utf-8"))
         public_remote_name = f"{bucket_prefix}/{PUB_EXT_ROOT}/test_ext{i}.control"
-        public_local_name = f"{LOCAL_EXT_ROOT}/test_ext{i}.control"
-        custom_ext = BytesIO(bytes(control_file_content(str(tenant_id), i), "utf-8"))
         custom_remote_name = f"{bucket_prefix}/{PRIVATE_EXT_ROOT}/custom_ext{i}.control"
-        custom_local_name = f"{LOCAL_EXT_ROOT}/custom_ext{i}.control"
-        cleanup_files += [public_local_name, custom_local_name]
+        cleanup_files += [
+            f"{LOCAL_EXT_ROOT}/test_ext{i}.control",
+            f"{LOCAL_EXT_ROOT}/custom_ext{i}.control",
+        ]
 
+        log.info(f"Uploading control file to {public_remote_name}")
         remote_storage_client.upload_fileobj(
-            public_ext, ext_remote_storage.bucket_name, public_remote_name
+            control_file_content("public", i), ext_remote_storage.bucket_name, public_remote_name
         )
+        log.info(f"Uploading control file to {custom_remote_name}")
         remote_storage_client.upload_fileobj(
-            custom_ext, ext_remote_storage.bucket_name, custom_remote_name
+            control_file_content(str(tenant_id), i),
+            ext_remote_storage.bucket_name,
+            custom_remote_name,
         )
 
     # Upload SQL file for the extension we're going to create
     sql_filename = "test_ext0--1.0.sql"
     test_sql_public_remote_path = f"{bucket_prefix}/{PUB_EXT_ROOT}/{sql_filename}"
-    test_sql_local_path = f"{LOCAL_EXT_ROOT}/{sql_filename}"
-    test_ext_sql_file = BytesIO(bytes(sql_file_content(), "utf-8"))
     remote_storage_client.upload_fileobj(
-        test_ext_sql_file,
+        sql_file_content(),
         ext_remote_storage.bucket_name,
         test_sql_public_remote_path,
     )
-    cleanup_files += [test_sql_local_path]
+    cleanup_files += [f"{LOCAL_EXT_ROOT}/{sql_filename}"]
 
     # upload some fake library files
     for i in range(2):
-        public_library = BytesIO(bytes("\n111\n", "utf-8"))
         public_remote_name = f"{bucket_prefix}/{PUB_LIB_ROOT}/test_lib{i}.so"
-        public_local_name = f"{LOCAL_LIB_ROOT}/test_lib{i}.so"
-        custom_library = BytesIO(bytes("\n111\n", "utf-8"))
         custom_remote_name = f"{bucket_prefix}/{PRIVATE_LIB_ROOT}/custom_lib{i}.so"
-        custom_local_name = f"{LOCAL_LIB_ROOT}/custom_lib{i}.so"
 
-        log.info(f"uploading library to {public_remote_name}")
-        log.info(f"uploading library to {custom_remote_name}")
-
+        log.info(f"uploading fake library to {public_remote_name}")
         remote_storage_client.upload_fileobj(
-            public_library,
+            fake_library_content(),
             ext_remote_storage.bucket_name,
             public_remote_name,
         )
+
+        log.info(f"uploading fake library to {custom_remote_name}")
         remote_storage_client.upload_fileobj(
-            custom_library,
+            fake_library_content(),
             ext_remote_storage.bucket_name,
             custom_remote_name,
         )
-        cleanup_files += [public_local_name, custom_local_name]
+        cleanup_files += [f"{LOCAL_LIB_ROOT}/test_lib{i}.so", f"{LOCAL_LIB_ROOT}/custom_lib{i}.so"]
 
     return cleanup_files
 
@@ -136,7 +138,8 @@ def prepare_mock_ext_storage(
 #   export AWS_SECURITY_TOKEN='test'
 #   export AWS_SESSION_TOKEN='test'
 #   export AWS_DEFAULT_REGION='us-east-1'
-#
+
+
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_extensions(
     neon_env_builder: NeonEnvBuilder,

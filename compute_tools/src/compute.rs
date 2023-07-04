@@ -20,6 +20,7 @@ use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use remote_storage::{GenericRemoteStorage, RemotePath};
 
+use crate::extension_server::PathAndFlag;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::{config, extension_server};
@@ -53,8 +54,8 @@ pub struct ComputeNode {
     ///  the S3 bucket that we search for extensions in
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     // cached lists of available extensions and libraries
-    pub available_libraries: OnceLock<HashMap<String, RemotePath>>,
-    pub available_extensions: OnceLock<HashMap<String, Vec<RemotePath>>>,
+    pub available_libraries: OnceLock<HashMap<String, Vec<RemotePath>>>,
+    pub available_extensions: OnceLock<HashMap<String, Vec<PathAndFlag>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -531,6 +532,9 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
+        // TODO FIXME: this should not be blocking here
+        // Maybe we can run it as a child process?
+        // Also, worth measuring how long this step is taking
         self.prepare_external_extensions(&compute_state)?;
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
@@ -734,33 +738,30 @@ LIMIT 100",
             }
 
             info!("Libraries to download: {:?}", &libs_vec);
-
             // download extension control files & shared_preload_libraries
-
-            let available_extensions = extension_server::get_available_extensions(
+            let get_extensions_task = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
                 &custom_ext_prefixes,
-            )
-            .await?;
-            self.available_extensions
-                .set(available_extensions)
-                .expect("available_extensions.set error");
-
-            let available_libraries = extension_server::get_available_libraries(
+            );
+            let get_libraries_task = extension_server::get_available_libraries(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
                 &custom_ext_prefixes,
                 &libs_vec,
-            )
-            .await?;
+            );
+
+            let (available_extensions, available_libraries) =
+                tokio::join!(get_extensions_task, get_libraries_task);
+            self.available_extensions
+                .set(available_extensions?)
+                .expect("available_extensions.set error");
             self.available_libraries
-                .set(available_libraries)
+                .set(available_libraries?)
                 .expect("available_libraries.set error");
         }
-
         Ok(())
     }
 
