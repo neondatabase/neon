@@ -72,18 +72,10 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    let ext_remote_storage = match remote_ext_config {
-        Some(x) => match init_remote_storage(x, build_tag) {
-            Ok(y) => Some(y),
-            Err(e) => {
-                panic!(
-                    "cannot initialize remote extension storage from config {}: {}",
-                    x, e
-                );
-            }
-        },
-        None => None,
-    };
+    let ext_remote_storage = remote_ext_config.map(|x| {
+        init_remote_storage(x, build_tag)
+            .expect("cannot initialize remote extension storage from config")
+    });
 
     let http_port = *matches
         .get_one::<u16>("http-port")
