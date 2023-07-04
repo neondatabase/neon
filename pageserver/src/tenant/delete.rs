@@ -476,11 +476,7 @@ impl DeleteTimelineFlow {
         let delete_lock_guard = DeletionGuard(
             Arc::clone(&timeline.delete_progress)
                 .try_lock_owned()
-                .map_err(|_| {
-                    DeleteTimelineError::Other(anyhow::anyhow!(
-                        "timeline deletion is already in progress"
-                    ))
-                })?,
+                .map_err(|_| DeleteTimelineError::AlreadyInProgress)?,
         );
 
         // FIXME is it really possible given that we remove timeline under mutex when we complete the deletion and
