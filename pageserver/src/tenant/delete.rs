@@ -504,7 +504,6 @@ impl DeleteTimelineFlow {
     ) {
         let tenant_id = timeline.tenant_id;
         let timeline_id = timeline.timeline_id;
-        // let timeline = Arc::clone(timeline);
 
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
