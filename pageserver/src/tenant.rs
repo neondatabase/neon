@@ -965,7 +965,7 @@ impl Tenant {
                         });
                     }
                 }
-                Ok(())
+               Ok(())
             }
             .instrument({
                 let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
