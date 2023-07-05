@@ -214,32 +214,35 @@ get_result(PGconn *conn, const char *query)
 create or replace function copydata() returns setof record as $$ \
 declare \
     relsize integer; \
+    total_relsize integer; \
 	content bytea; \
 	r record; \
 	fork text; \
 	relname text; \
 	pagesize integer; \
 begin \
-	pagesize = (SELECT current_setting('block_size')); \
+	pagesize = current_setting('block_size'); \
 	for r in select oid,reltoastrelid from pg_class where relnamespace not in (select oid from pg_namespace where nspname in ('pg_catalog','pg_toast','information_schema')) \
 	loop \
 		relname = r.oid::regclass::text; \
+        total_relsize = 0; \
 	    foreach fork in array array['main','vm','fsm'] \
 		loop \
-		    relsize = (select pg_relation_size(r.oid, fork)); \
-	        for p in 1..relsize/pagesize \
+		    relsize = pg_relation_size(r.oid, fork)/pagesize; \
+			total_relsize = total_relsize + relsize; \
+	        for p in 1..relsize \
 		    loop \
 			    content = get_raw_page(relname, fork, p-1); \
 				return next row(relname,fork,p-1,content); \
 			end loop; \
 		end loop; \
-        if r.reltoastrelid <> 0 then \
+        if total_relsize <> 0 and r.reltoastrelid <> 0 then \
             foreach relname in array array ['pg_toast.pg_toast_'||r.oid, 'pg_toast.pg_toast_'||r.oid||'_index'] \
 			loop \
 		    	foreach fork in array array['main','vm','fsm'] \
 				loop \
-			    	relsize = (select pg_relation_size(relname, fork)); \
-	        		for p in 1..relsize/pagesize \
+			    	relsize = pg_relation_size(relname, fork)/pagesize; \
+	        		for p in 1..relsize \
 		    		loop \
 			    		content = get_raw_page(relname, fork, p-1); \
 						return next row(relname,fork,p-1,content); \
@@ -270,6 +273,8 @@ copy_from(PG_FUNCTION_ARGS)
 	char blkno_buf[4];
 	int n_tuples;
 	Buffer buf;
+	char* toast_rel_name;
+	Oid relid = InvalidOid;
 
 	/* Connect to the source database */
 	conn = PQconnectdb(conninfo);
@@ -308,10 +313,20 @@ copy_from(PG_FUNCTION_ARGS)
 			{
 				if (forknum == MAIN_FORKNUM)
 				{
+					char* dst_rel_name = strncmp(relname, "pg_toast.", 9) == 0
+						/* Construct correct TOAST table name */
+						? psprintf("pg_toast.pg_toast_%u%s",
+								   relid,
+								   strcmp(relname + strlen(relname) - 5, "index") == 0 ? "_index" : "")
+						: (char*)relname;
 					if (rel)
 						relation_close(rel, AccessExclusiveLock);
-					relrv = makeRangeVarFromNameList(textToQualifiedNameList(cstring_to_text(relname)));
+					relrv = makeRangeVarFromNameList(textToQualifiedNameList(cstring_to_text(dst_rel_name)));
 					rel = relation_openrv(relrv, AccessExclusiveLock);
+					if (dst_rel_name != relname)
+						pfree(dst_rel_name);
+					else
+						relid = RelationGetRelid(rel);
 				}
 				rel_size = RelationGetNumberOfBlocksInFork(rel, forknum);
 			}
