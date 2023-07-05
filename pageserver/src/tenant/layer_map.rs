@@ -132,7 +132,9 @@ impl SortedRuns {
     }
 
     /// Remove layers and the corresponding sorted runs.
-    pub fn insert_run_at(&mut self, idx: usize, layers: Vec<Arc<PersistentLayerDesc>>) {}
+    pub fn insert_run_at(&mut self, idx: usize, layers: Vec<Arc<PersistentLayerDesc>>) {
+        unimplemented!()
+    }
 
     pub fn num_of_tiers(&self) -> usize {
         self.runs.len()
@@ -740,11 +742,6 @@ impl LayerMap {
 
         println!("l0_deltas:");
         for layer in &self.l0_delta_layers {
-            layer.dump(verbose, ctx)?;
-        }
-
-        println!("historic_layers:");
-        for layer in self.iter_historic_layers() {
             layer.dump(verbose, ctx)?;
         }
 
