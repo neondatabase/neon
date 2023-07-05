@@ -4049,12 +4049,24 @@ impl Timeline {
             let mut layers_in_tier = vec![];
             for (tier_id, layers) in layers.sorted_runs.runs.iter() {
                 if tier_to_compact.contains(tier_id) {
-                    layers_in_tier.push(layers.iter().cloned().collect_vec());
+                    let layers = layers.iter().cloned().collect_vec();
+                    let image_layers = layers
+                        .iter()
+                        .filter(|x| !x.is_delta())
+                        .cloned()
+                        .collect_vec();
+                    let delta_layers = layers
+                        .iter()
+                        .filter(|x| x.is_delta())
+                        .cloned()
+                        .collect_vec();
+                    layers_in_tier.push((image_layers, delta_layers));
                 }
             }
 
             let mut layers_range = vec![];
-            for layers in &layers_in_tier {
+            // compute layer ranges (only including delta)
+            for (_, layers) in &layers_in_tier {
                 let key_range_start = layers
                     .iter()
                     .map(|l| l.get_key_range().start)
@@ -4064,9 +4076,10 @@ impl Timeline {
                 layers_range.push(key_range_start..key_range_end);
             }
 
+            // compute deltas that can be trivially moved
             let mut deltas_to_compact_layers = vec![];
             let mut trivial_move_layers = vec![];
-            for (idx, layers) in layers_in_tier.into_iter().enumerate() {
+            for (idx, (image_layers, delta_layers)) in layers_in_tier.into_iter().enumerate() {
                 let range_to_check = {
                     let start = layers_range
                         .iter()
@@ -4087,29 +4100,45 @@ impl Timeline {
                 fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
                     !(a.end <= b.start || b.end <= a.start)
                 }
-                let first_overlap = layers
+                /// a contains b
+                /// ---- a -----
+                ///   -- b --
+                fn contains<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                    b.start >= a.start && b.end <= a.end
+                }
+                let first_overlap = delta_layers
                     .iter()
                     .enumerate()
                     .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
                     .map(|(i, _)| i);
-                let last_overlap = layers
+                let last_overlap = delta_layers
                     .iter()
                     .enumerate()
                     .rev()
                     .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
                     .map(|(i, _)| i);
                 if let (Some(first_overlap), Some(last_overlap)) = (first_overlap, last_overlap) {
-                    for (i, layer) in layers.into_iter().enumerate() {
+                    for (i, layer) in delta_layers.into_iter().enumerate() {
                         if i < first_overlap || i > last_overlap {
                             trivial_move_layers.push(layer);
                         } else {
                             deltas_to_compact_layers.push(layer);
                         }
                     }
+                    for layer in image_layers.into_iter() {
+                        if contains(&range_to_check, &layer.get_key_range()) {
+                            // if image layer is within compaction range, remove it
+                            deltas_to_compact_layers.push(layer);
+                        } else {
+                            // otherwise, trivially move
+                            trivial_move_layers.push(layer);
+                        }
+                    }
                 } else {
                     assert!(first_overlap.is_none());
                     assert!(last_overlap.is_none());
-                    trivial_move_layers.extend(layers);
+                    trivial_move_layers.extend(image_layers);
+                    trivial_move_layers.extend(delta_layers);
                 }
             }
 
@@ -4134,9 +4163,14 @@ impl Timeline {
             };
 
             info!(
-                "Starting tier compaction in LSN range {}-{} for tiers {:?}",
-                lsn_range.start, lsn_range.end, tier_to_compact
+                "Starting tier compaction in LSN range {}-{} for tiers {:?}, trivial move layers: {:?}",
+                lsn_range.start, lsn_range.end, tier_to_compact, trivial_move_layers
             );
+
+            let trivial_move_layers = trivial_move_layers
+                .iter()
+                .map(|x| self.lcache.get_from_desc(x))
+                .collect_vec();
 
             (
                 deltas_to_compact_layers,
@@ -4145,6 +4179,15 @@ impl Timeline {
                 trivial_move_layers,
             )
         };
+
+        if deltas_to_compact_layers.is_empty() {
+            return Ok(Some(CompactTieredPhase1Result {
+                new_layers: vec![],
+                new_tier_at: *tier_to_compact.last().unwrap(),
+                removed_tiers: tier_to_compact,
+                trivial_move_layers,
+            }));
+        }
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
@@ -4191,6 +4234,7 @@ impl Timeline {
 
         let mut new_layers: Vec<Arc<dyn PersistentLayer>> = Vec::new();
         let mut prev_key: Option<Key> = None;
+        let mut prev_image_key: Option<Key> = None;
         let mut writer: Option<DeltaLayerWriter> = None;
         let mut image_writer: Option<ImageLayerWriter> = None;
         let mut key_values_total_size = 0u64;
@@ -4241,12 +4285,7 @@ impl Timeline {
                     let image_writer_mut = image_writer.as_mut().unwrap();
                     image_writer_mut.put_image(key, &img)?;
                     construct_image_for_key = true;
-
-                    let written_size: u64 = image_writer_mut.size();
-                    if written_size + key_values_total_size > target_file_size {
-                        new_layers.push(Arc::new(image_writer.take().unwrap().finish(key.next())?));
-                        image_writer = None;
-                    }
+                    prev_image_key = Some(key);
                 }
             }
 
@@ -4289,6 +4328,7 @@ impl Timeline {
                     dup_start_lsn = dup_end_lsn;
                     dup_end_lsn = lsn_range.end;
                 }
+
                 if writer.is_some() {
                     let written_size = writer.as_mut().unwrap().size();
                     // check if key cause layer overflow or contains hole...
@@ -4300,9 +4340,26 @@ impl Timeline {
                         new_layers.push(Arc::new(
                             writer.take().unwrap().finish(prev_key.unwrap().next())?,
                         ));
-                        writer = None;
+
+                        // only write image layer when we end a delta layer
+                        if image_writer.is_some() {
+                            let image_writer_mut = image_writer.as_mut().unwrap();
+                            let written_size: u64 = image_writer_mut.size();
+                            if written_size + key_values_total_size > target_file_size / 2 {
+                                new_layers.push(Arc::new(
+                                    image_writer
+                                        .take()
+                                        .unwrap()
+                                        .finish(prev_image_key.unwrap().next())?,
+                                ));
+                                image_writer = None; // this is redundant
+                            }
+                        }
+
+                        writer = None; // this is redundant
                     }
                 }
+
                 // Remember size of key value because at next iteration we will access next item
                 key_values_total_size = next_key_size;
             }
@@ -4360,7 +4417,7 @@ impl Timeline {
             new_layers,
             new_tier_at: *tier_to_compact.last().unwrap(),
             removed_tiers: tier_to_compact,
-            trivial_move_layers: vec![],
+            trivial_move_layers,
         }))
     }
 
