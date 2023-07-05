@@ -1,6 +1,7 @@
 //!
 
 mod eviction_task;
+pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
