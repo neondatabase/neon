@@ -438,25 +438,9 @@ pub enum GetTimelineError {
 #[derive(Debug, thiserror::Error)]
 pub enum LoadLocalTimelineError {
     #[error("FailedToLoad")]
-    FailedToLoad {
-        #[source]
-        source: anyhow::Error,
-    },
+    Load(#[source] anyhow::Error),
     #[error("FailedToResumeDeletion")]
-    FailedToResumeDeletion {
-        #[source]
-        source: anyhow::Error,
-    },
-}
-
-impl LoadLocalTimelineError {
-    fn load(e: anyhow::Error) -> Self {
-        Self::FailedToLoad { source: e }
-    }
-
-    fn resume_delete(e: anyhow::Error) -> Self {
-        Self::FailedToResumeDeletion { source: e }
-    }
+    ResumeDeletion(#[source] anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1192,11 +1176,11 @@ impl Tenant {
                 .await
             {
                 match e {
-                    LoadLocalTimelineError::FailedToLoad { source } => {
+                    LoadLocalTimelineError::Load(source) => {
                         return Err(anyhow::anyhow!(source)
                             .context("Failed to load local timeline: {timeline_id}"))
                     }
-                    LoadLocalTimelineError::FailedToResumeDeletion { source } => {
+                    LoadLocalTimelineError::ResumeDeletion(source) => {
                         // Make sure resumed deletion wont fail loading for entire tenant.
                         error!("Failed to resume timeline deletion: {source:#}")
                     }
@@ -1211,13 +1195,13 @@ impl Tenant {
                 .await
             {
                 match e {
-                    LoadLocalTimelineError::FailedToLoad { source } => {
+                    LoadLocalTimelineError::Load(source) => {
                         // We tried to load deleted timeline, this is a bug.
                         return Err(anyhow::anyhow!(source).context(
                             "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
                         ));
                     }
-                    LoadLocalTimelineError::FailedToResumeDeletion { source } => {
+                    LoadLocalTimelineError::ResumeDeletion(source) => {
                         // Make sure resumed deletion wont fail loading for entire tenant.
                         error!("Failed to resume timeline deletion: {source:#}")
                     }
@@ -1275,7 +1259,7 @@ impl Tenant {
                                 // Can happen because we create delete mark after we set deleted_at in the index part.
                                 self.create_timeline_delete_mark(timeline_id)
                                     .context("create delete mark")
-                                    .map_err(LoadLocalTimelineError::resume_delete)?;
+                                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
                             };
                             remote_client
                                 .init_upload_queue_stopped_to_continue_deletion(&index_part)
@@ -1290,7 +1274,7 @@ impl Tenant {
                                     )
                                     .context("resume deletion")
                                 })
-                                .map_err(LoadLocalTimelineError::resume_delete)?;
+                                .map_err(LoadLocalTimelineError::ResumeDeletion)?;
 
                             return Ok(());
                         }
@@ -1299,7 +1283,7 @@ impl Tenant {
                     let remote_metadata = index_part
                         .parse_metadata()
                         .context("parse_metadata")
-                        .map_err(LoadLocalTimelineError::load)?;
+                        .map_err(LoadLocalTimelineError::Load)?;
                     (
                         Some(RemoteStartupData {
                             index_part,
@@ -1317,17 +1301,13 @@ impl Tenant {
                         return DeleteTimelineFlow::cleanup_remaining_fs_traces_after_timeline_deletion(self, timeline_id)
                             .await
                             .context("cleanup_remaining_fs_traces_after_timeline_deletion")
-                            .map_err(LoadLocalTimelineError::resume_delete);
+                            .map_err(LoadLocalTimelineError::ResumeDeletion);
                     }
 
                     // We're loading fresh timeline that didnt yet make it into remote.
                     (None, Some(remote_client))
                 }
-                Err(e) => {
-                    return Err(LoadLocalTimelineError::FailedToLoad {
-                        source: anyhow::anyhow!(e),
-                    })
-                }
+                Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
             },
             None => {
                 // No remote client
@@ -1342,7 +1322,7 @@ impl Tenant {
                         init_order,
                     )
                     .context("resume deletion")
-                    .map_err(LoadLocalTimelineError::resume_delete)?;
+                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
                     return Ok(());
                 }
 
@@ -1353,7 +1333,7 @@ impl Tenant {
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
             let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
                 .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))
-                .map_err(LoadLocalTimelineError::load)?;
+                .map_err(LoadLocalTimelineError::Load)?;
             Some(ancestor_timeline)
         } else {
             None
@@ -1370,7 +1350,7 @@ impl Tenant {
             ctx,
         )
         .await
-        .map_err(LoadLocalTimelineError::load)
+        .map_err(LoadLocalTimelineError::Load)
     }
 
     pub fn tenant_id(&self) -> TenantId {
