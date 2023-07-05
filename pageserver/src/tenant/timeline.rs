@@ -128,7 +128,7 @@ impl LayerFileManager {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename().file_name()))
+            .with_context(|| format!("get layer from desc: {}", desc.filename()))
             .expect("not found")
             .clone()
     }
@@ -1381,9 +1381,9 @@ impl Timeline {
                         .read()
                         .unwrap()
                         .observe(delta);
-                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
-                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
+                    info!(layer=%local_layer, "evicted layer after unknown residence period");
                 }
 
                 true
@@ -2462,11 +2462,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 format!("{}", local_path.display())
             }
             None => {
-                format!(
-                    "remote {}/{}",
-                    self.get_timeline_id(),
-                    self.filename().file_name()
-                )
+                format!("remote {}/{self}", self.get_timeline_id())
             }
         }
     }
@@ -2474,11 +2470,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!(
-            "timeline {} in-memory {}",
-            self.get_timeline_id(),
-            self.short_id()
-        )
+        format!("timeline {} in-memory {self}", self.get_timeline_id())
     }
 }
 
@@ -2998,7 +2990,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -3677,7 +3669,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .inspect(|l| info!("compact requires download of {l}"))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3701,7 +3693,7 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            info!("compact includes {l}");
         }
 
         // We don't need the original list of layers anymore. Drop it so that
@@ -4316,8 +4308,8 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().file_name(),
-                    horizon_cutoff
+                    l.filename(),
+                    horizon_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
@@ -4327,8 +4319,8 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().file_name(),
-                    pitr_cutoff
+                    l.filename(),
+                    pitr_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
@@ -4346,7 +4338,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().file_name(),
+                        l.filename(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -4377,10 +4369,7 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
             {
-                debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().file_name()
-                );
+                debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
                 // collecting the layers.
                 // It is not so obvious whether we need to propagate information only about
@@ -4397,7 +4386,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().file_name(),
+                l.filename(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -4551,7 +4540,7 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
@@ -4589,7 +4578,7 @@ impl Timeline {
             TaskKind::RemoteDownloadTask,
             Some(self.tenant_id),
             Some(self.timeline_id),
-            &format!("download layer {}", remote_layer.short_id()),
+            &format!("download layer {}", remote_layer),
             false,
             async move {
                 let remote_client = self_clone.remote_client.as_ref().unwrap();
@@ -4865,15 +4854,12 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = l
-                .access_stats()
-                .latest_activity()
-                .unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
+                // We only use this fallback if there's an implementation error.
+                // `latest_activity` already does rate-limited warn!() log.
+                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
+                SystemTime::now()
+            });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,

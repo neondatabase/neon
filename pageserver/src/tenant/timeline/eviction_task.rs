@@ -209,7 +209,7 @@ impl Timeline {
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
                     // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%hist_layer.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    debug!(layer=%hist_layer, "last_activity returns None, using SystemTime::now");
                     SystemTime::now()
                 });
 
