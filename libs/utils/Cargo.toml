@@ -40,6 +40,8 @@ pq_proto.workspace = true
 metrics.workspace = true
 workspace_hack.workspace = true
 
+const_format.workspace = true
+
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true

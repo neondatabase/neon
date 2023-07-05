@@ -4817,6 +4817,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "const_format",
  "criterion",
  "futures",
  "heapless",
