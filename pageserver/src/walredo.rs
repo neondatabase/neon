@@ -1056,11 +1056,16 @@ impl Drop for NoLeakChild {
             Some(child) => child,
             None => return,
         };
+        let tenant_id = self.tenant_id;
         // Offload the kill+wait of the child process into the background.
         // If someone stops the runtime, we'll leak the child process.
         // We can ignore that case because we only stop the runtime on pageserver exit.
         BACKGROUND_RUNTIME.spawn(async move {
             tokio::task::spawn_blocking(move || {
+                // Intentionally don't inherit the tracing context from whoever is dropping us.
+                // This thread here is going to outlive of our dropper.
+                let span = tracing::info_span!("NoLeakChild::drop", %tenant_id);
+                let _entered = span.enter();
                 Self::kill_and_wait_impl(child);
             })
             .await
