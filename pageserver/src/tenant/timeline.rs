@@ -2462,7 +2462,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 format!("{}", local_path.display())
             }
             None => {
-                format!("remote {}/{}", self.get_timeline_id(), self.filename())
+                format!("remote {}/{self}", self.get_timeline_id())
             }
         }
     }
@@ -3669,7 +3669,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename()))
+            .inspect(|l| info!("compact requires download of {l}"))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3693,7 +3693,7 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename());
+            info!("compact includes {l}");
         }
 
         // We don't need the original list of layers anymore. Drop it so that
@@ -4309,7 +4309,7 @@ impl Timeline {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
                     l.filename(),
-                    horizon_cutoff
+                    horizon_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
@@ -4320,7 +4320,7 @@ impl Timeline {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
                     l.filename(),
-                    pitr_cutoff
+                    pitr_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
@@ -4857,7 +4857,7 @@ impl Timeline {
             let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
                 // We only use this fallback if there's an implementation error.
                 // `latest_activity` already does rate-limited warn!() log.
-                debug!(layer=%l.filename(), "last_activity returns None, using SystemTime::now");
+                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
                 SystemTime::now()
             });
 
