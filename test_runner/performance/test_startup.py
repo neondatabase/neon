@@ -54,6 +54,7 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
             "basebackup_ms": f"{i}_basebackup",
             "config_ms": f"{i}_config",
             "total_startup_ms": f"{i}_total_startup",
+            "load_libraries_ms": f"{i}_load_libraries_ms",
         }
         for key, name in durations.items():
             value = metrics[key]
