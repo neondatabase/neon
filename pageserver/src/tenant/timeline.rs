@@ -3914,7 +3914,7 @@ impl Timeline {
         let size_ratio = 1.25;
         let space_amplification_ratio = 1.5;
         let max_merge_width = 10;
-        let min_merge_width = 3;
+        let min_merge_width = 2;
 
         // Trigger 1: by space amplification, do full compaction
         let total_tier_size = tier_sizes.iter().map(|(_, size)| *size).sum::<u64>();
@@ -4019,7 +4019,7 @@ impl Timeline {
             let (layers, _) = &*guard;
 
             // Precondition: only compact if enough layers have accumulated.
-            let threshold = 8;
+            let threshold = 3;
             assert!(threshold >= 2);
 
             if layers.sorted_runs.num_of_tiers() < threshold {
@@ -4106,39 +4106,23 @@ impl Timeline {
                 fn contains<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
                     b.start >= a.start && b.end <= a.end
                 }
-                let first_overlap = delta_layers
-                    .iter()
-                    .enumerate()
-                    .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
-                    .map(|(i, _)| i);
-                let last_overlap = delta_layers
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
-                    .map(|(i, _)| i);
-                if let (Some(first_overlap), Some(last_overlap)) = (first_overlap, last_overlap) {
-                    for (i, layer) in delta_layers.into_iter().enumerate() {
-                        if i < first_overlap || i > last_overlap {
-                            trivial_move_layers.push(layer);
-                        } else {
-                            deltas_to_compact_layers.push(layer);
-                        }
+                for layer in delta_layers.into_iter() {
+                    if overlaps_with(&range_to_check, &layer.get_key_range()) {
+                        // compact if overlaps
+                        deltas_to_compact_layers.push(layer);
+                    } else {
+                        // if delta layer does not overlap, trivial move
+                        trivial_move_layers.push(layer);
                     }
-                    for layer in image_layers.into_iter() {
-                        if contains(&range_to_check, &layer.get_key_range()) {
-                            // if image layer is within compaction range, remove it
-                            deltas_to_compact_layers.push(layer);
-                        } else {
-                            // otherwise, trivially move
-                            trivial_move_layers.push(layer);
-                        }
+                }
+                for layer in image_layers.into_iter() {
+                    if contains(&range_to_check, &layer.get_key_range()) {
+                        // if image layer is within compaction range, remove it
+                        deltas_to_compact_layers.push(layer);
+                    } else {
+                        // otherwise, trivially move
+                        trivial_move_layers.push(layer);
                     }
-                } else {
-                    assert!(first_overlap.is_none());
-                    assert!(last_overlap.is_none());
-                    trivial_move_layers.extend(image_layers);
-                    trivial_move_layers.extend(delta_layers);
                 }
             }
 
@@ -4163,8 +4147,8 @@ impl Timeline {
             };
 
             info!(
-                "Starting tier compaction in LSN range {}-{} for tiers {:?}, trivial move layers: {:?}",
-                lsn_range.start, lsn_range.end, tier_to_compact, trivial_move_layers
+                "Starting tier compaction in LSN range {}-{} for tiers {:?}, trivial move layers: {}",
+                lsn_range.start, lsn_range.end, tier_to_compact, trivial_move_layers.len()
             );
 
             let trivial_move_layers = trivial_move_layers
