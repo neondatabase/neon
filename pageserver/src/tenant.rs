@@ -1321,7 +1321,6 @@ impl Tenant {
                     }
 
                     // We're loading fresh timeline that didnt yet make it into remote.
-                    // FIXME: now we block on uploading index during both branch creation and initial creation, is is considered normal?
                     (None, Some(remote_client))
                 }
                 Err(e) => {

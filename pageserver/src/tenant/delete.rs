@@ -424,7 +424,6 @@ impl DeleteTimelineFlow {
         timeline.set_state(TimelineState::Stopping);
         // We meed to do this because when console retries delete request we shouldnt answer with 404
         // because 404 means successful deletion.
-        // FIXME consider TimelineState::Deleting.
         {
             let mut locked = tenant.timelines.lock().unwrap();
             locked.insert(timeline_id, Arc::clone(&timeline));
