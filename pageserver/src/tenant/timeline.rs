@@ -4019,7 +4019,7 @@ impl Timeline {
             let (layers, _) = &*guard;
 
             // Precondition: only compact if enough layers have accumulated.
-            let threshold = 3;
+            let threshold = 8;
             assert!(threshold >= 2);
 
             if layers.sorted_runs.num_of_tiers() < threshold {
