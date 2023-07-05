@@ -128,7 +128,7 @@ impl LayerFileManager {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename().file_name()))
+            .with_context(|| format!("get layer from desc: {}", desc.filename()))
             .expect("not found")
             .clone()
     }
@@ -2462,11 +2462,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 format!("{}", local_path.display())
             }
             None => {
-                format!(
-                    "remote {}/{}",
-                    self.get_timeline_id(),
-                    self.filename().file_name()
-                )
+                format!("remote {}/{}", self.get_timeline_id(), self.filename())
             }
         }
     }
@@ -3673,7 +3669,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .inspect(|l| info!("compact requires download of {}", l.filename()))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3697,7 +3693,7 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            info!("compact includes {}", l.filename());
         }
 
         // We don't need the original list of layers anymore. Drop it so that
@@ -4312,7 +4308,7 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().file_name(),
+                    l.filename(),
                     horizon_cutoff
                 );
                 result.layers_needed_by_cutoff += 1;
@@ -4323,7 +4319,7 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().file_name(),
+                    l.filename(),
                     pitr_cutoff
                 );
                 result.layers_needed_by_pitr += 1;
@@ -4342,7 +4338,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().file_name(),
+                        l.filename(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -4373,10 +4369,7 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
             {
-                debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().file_name()
-                );
+                debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
                 // collecting the layers.
                 // It is not so obvious whether we need to propagate information only about
@@ -4393,7 +4386,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().file_name(),
+                l.filename(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -4861,15 +4854,12 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = l
-                .access_stats()
-                .latest_activity()
-                .unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
+                // We only use this fallback if there's an implementation error.
+                // `latest_activity` already does rate-limited warn!() log.
+                debug!(layer=%l.filename(), "last_activity returns None, using SystemTime::now");
+                SystemTime::now()
+            });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,
