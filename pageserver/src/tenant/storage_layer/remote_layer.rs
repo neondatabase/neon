@@ -216,6 +216,17 @@ impl RemoteLayer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(desc: PersistentLayerDesc) -> RemoteLayer {
+        RemoteLayer {
+            layer_metadata: LayerFileMetadata::new(desc.file_size),
+            desc,
+            ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+        }
+    }
+
     /// Create a Layer struct representing this layer, after it has been downloaded.
     pub fn create_downloaded_layer(
         &self,
