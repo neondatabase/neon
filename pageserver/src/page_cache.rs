@@ -934,7 +934,7 @@ trait PageSzBytesMetric {
 
 #[inline(always)]
 fn count_times_page_sz(count: usize) -> u64 {
-    TryInto::<u64>::try_into(count).unwrap() * TryInto::<u64>::try_into(PAGE_SZ).unwrap()
+    u64::try_from(count).unwrap() * u64::try_from(PAGE_SZ).unwrap()
 }
 
 impl PageSzBytesMetric for metrics::UIntGauge {
