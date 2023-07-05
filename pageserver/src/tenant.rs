@@ -437,12 +437,12 @@ pub enum GetTimelineError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadLocalTimelineError {
-    #[error("FailedToLoad: {source}")]
+    #[error("FailedToLoad")]
     FailedToLoad {
         #[source]
         source: anyhow::Error,
     },
-    #[error("FailedToResumeDeletion: {source}")]
+    #[error("FailedToResumeDeletion")]
     FailedToResumeDeletion {
         #[source]
         source: anyhow::Error,
@@ -2170,6 +2170,10 @@ impl Tenant {
     /// The returned Timeline is in Loading state. The caller is responsible for
     /// initializing any on-disk state, and for inserting the Timeline to the 'timelines'
     /// map.
+    ///
+    /// `validate_ancestor == false` is used when a timeline is created for deletion
+    /// and we might not have the ancestor present anymore which is fine for to be
+    /// deleted timelines.
     fn create_timeline_struct(
         &self,
         new_timeline_id: TimelineId,
@@ -2182,9 +2186,9 @@ impl Tenant {
         if validate_ancestor {
             if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
                 anyhow::ensure!(
-                    ancestor.is_some(),
+                    new_metadata.ancestor_timeline() == ancestor.as_ref().map(|t| t.timeline_id),
                     "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
-                )
+                );
             }
         }
 
