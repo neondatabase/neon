@@ -685,7 +685,7 @@ impl PostgresRedoManager {
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
             .close_fds()
-            .spawn_no_leak_child()
+            .spawn_no_leak_child(self.tenant_id)
             .map_err(|e| {
                 Error::new(
                     e.kind(),
@@ -989,6 +989,7 @@ impl PostgresRedoManager {
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
 struct NoLeakChild {
+    tenant_id: TenantId,
     child: Option<Child>,
 }
 
@@ -1007,9 +1008,12 @@ impl DerefMut for NoLeakChild {
 }
 
 impl NoLeakChild {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
+    fn spawn(tenant_id: TenantId, command: &mut Command) -> io::Result<Self> {
         let child = command.spawn()?;
-        Ok(NoLeakChild { child: Some(child) })
+        Ok(NoLeakChild {
+            tenant_id,
+            child: Some(child),
+        })
     }
 
     fn kill_and_wait(mut self) {
@@ -1074,12 +1078,12 @@ impl Drop for NoLeakChild {
 }
 
 trait NoLeakChildCommandExt {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild>;
 }
 
 impl NoLeakChildCommandExt for Command {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
-        NoLeakChild::spawn(self)
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild> {
+        NoLeakChild::spawn(tenant_id, self)
     }
 }
 
