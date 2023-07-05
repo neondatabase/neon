@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
+use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
@@ -262,7 +263,7 @@ async fn page_service_conn_main(
         .context("could not set TCP_NODELAY")?;
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
-    tracing::Span::current().record("peer_addr", &peer_addr.to_string());
+    tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
     // - long enough for most valid compute connections
@@ -895,8 +896,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -918,8 +919,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -968,8 +969,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
             let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
@@ -1003,8 +1004,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
@@ -1061,8 +1062,8 @@ where
                 .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1109,8 +1110,8 @@ where
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id.to_string())
-                .record("timeline_id", &timeline_id.to_string());
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1143,7 +1144,7 @@ where
             let tenant_id = TenantId::from_str(params[0])
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
 
-            tracing::Span::current().record("tenant_id", &tenant_id.to_string());
+            tracing::Span::current().record("tenant_id", field::display(tenant_id));
 
             self.check_permission(Some(tenant_id))?;
 
