@@ -263,6 +263,7 @@ copy_from(PG_FUNCTION_ARGS)
 	char const* declare_cursor = "declare copy_data_cursor no scroll cursor for select * from copydata() as raw_page(relid text, fork text, blkno integer, content bytea)";
 	char* fetch_cursor = psprintf("fetch forward %d copy_data_cursor", COPY_FETCH_COUNT);
 	char const* close_cursor = "close copy_data_cursor";
+	char const* vacuum_freeze = "vacuum freeze";
 	char   *content;
 	char const* relname;
 	BlockNumber blkno;
@@ -292,6 +293,12 @@ copy_from(PG_FUNCTION_ARGS)
 	res = PQexec(conn, CREATE_COPYDATA_FUNC);
 	if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK)
 		report_error(ERROR, res, conn, true, CREATE_COPYDATA_FUNC);
+	PQclear(res);
+
+	/* Freeze all tables to prevent problems with XID mapping */
+	res = PQexec(conn, vacuum_freeze);
+	if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK)
+		report_error(ERROR, res, conn, true, vacuum_freeze);
 	PQclear(res);
 
 	/* Start transaction to use cursor */
