@@ -746,7 +746,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(lsn=%lsn, prev_lsn=%prev_lsn, full_backup=%full_backup))]
+    #[instrument(skip_all, fields(lsn=?lsn, prev_lsn=?prev_lsn, full_backup=%full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -895,8 +895,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
 
@@ -918,8 +918,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
 
@@ -968,8 +968,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
             let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
@@ -1003,8 +1003,8 @@ where
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
@@ -1061,8 +1061,8 @@ where
                 .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1109,8 +1109,8 @@ where
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
             tracing::Span::current()
-                .record("tenant_id", &tenant_id)
-                .record("timeline_id", &timeline_id);
+                .record("tenant_id", &tenant_id.to_string())
+                .record("timeline_id", &timeline_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1143,7 +1143,7 @@ where
             let tenant_id = TenantId::from_str(params[0])
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
 
-            tracing::Span::current().record("tenant_id", &tenant_id);
+            tracing::Span::current().record("tenant_id", &tenant_id.to_string());
 
             self.check_permission(Some(tenant_id))?;
 
