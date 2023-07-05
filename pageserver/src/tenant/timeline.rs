@@ -4465,9 +4465,18 @@ impl Timeline {
             }
         }
 
+        let new_layers_key = new_layers
+            .iter()
+            .map(|x| x.layer_desc().key())
+            .collect::<HashSet<_>>();
+
         for layer in layers_to_delete {
-            layer_names_to_delete.push(layer.filename());
-            self.delete_historic_layer_new(layer_removal_cs.clone(), layer, &mut updates)?;
+            if !new_layers_key.contains(&layer.key()) {
+                layer_names_to_delete.push(layer.filename());
+                self.delete_historic_layer_new(layer_removal_cs.clone(), layer, &mut updates)?;
+            } else {
+                updates.remove_historic_new((*layer).clone());
+            }
         }
 
         let new_tier_at_index = new_tier_at_index.unwrap();
