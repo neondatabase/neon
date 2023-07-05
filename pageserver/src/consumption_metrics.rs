@@ -234,14 +234,18 @@ pub async fn collect_metrics_iteration(
         // Note that this metric is calculated in a separate bgworker
         // Here we only use cached value, which may lag behind the real latest one
         let tenant_synthetic_size = tenant.get_cached_synthetic_size();
-        current_metrics.push((
-            PageserverConsumptionMetricsKey {
-                tenant_id,
-                timeline_id: None,
-                metric: SYNTHETIC_STORAGE_SIZE,
-            },
-            tenant_synthetic_size,
-        ));
+
+        if tenant_synthetic_size != 0 {
+            // only send non-zeroes because otherwise these show up as errors in logs
+            current_metrics.push((
+                PageserverConsumptionMetricsKey {
+                    tenant_id,
+                    timeline_id: None,
+                    metric: SYNTHETIC_STORAGE_SIZE,
+                },
+                tenant_synthetic_size,
+            ));
+        }
     }
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
