@@ -130,6 +130,79 @@ pub static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub struct PageCacheMetrics {
+    pub read_accesses_materialized_page: IntCounter,
+    pub read_accesses_ephemeral: IntCounter,
+    pub read_accesses_immutable: IntCounter,
+
+    pub read_hits_ephemeral: IntCounter,
+    pub read_hits_immutable: IntCounter,
+    pub read_hits_materialized_page_exact: IntCounter,
+    pub read_hits_materialized_page_older_lsn: IntCounter,
+}
+
+static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_hits_total",
+        "Number of read accesses to the page cache that hit",
+        &["key_kind", "hit_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_accesses_total",
+        "Number of read accesses to the page cache",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
+    read_accesses_materialized_page: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["materialized_page"])
+            .unwrap()
+    },
+
+    read_accesses_ephemeral: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["ephemeral"])
+            .unwrap()
+    },
+
+    read_accesses_immutable: {
+        PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["immutable"])
+            .unwrap()
+    },
+
+    read_hits_ephemeral: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["ephemeral", "-"])
+            .unwrap()
+    },
+
+    read_hits_immutable: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["immutable", "-"])
+            .unwrap()
+    },
+
+    read_hits_materialized_page_exact: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["materialized_page", "exact"])
+            .unwrap()
+    },
+
+    read_hits_materialized_page_older_lsn: {
+        PAGE_CACHE_READ_HITS
+            .get_metric_with_label_values(&["materialized_page", "older_lsn"])
+            .unwrap()
+    },
+});
+
 static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
@@ -204,11 +277,11 @@ pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 pub static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_tenant_synthetic_size",
-        "Synthetic size of each tenant",
+        "pageserver_tenant_synthetic_cached_size_bytes",
+        "Synthetic size of each tenant in bytes",
         &["tenant_id"]
     )
-    .expect("Failed to register pageserver_tenant_synthetic_size metric")
+    .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
@@ -968,7 +1041,6 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.remote_operation_time.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str(), status);
         let metric = guard.entry(key).or_insert_with(move || {
@@ -990,7 +1062,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntGauge {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.calls_unfinished_gauge.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1011,7 +1082,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> Histogram {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.calls_started_hist.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1032,7 +1102,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntCounter {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.bytes_started_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1053,7 +1122,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntCounter {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.bytes_finished_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {

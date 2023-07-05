@@ -904,7 +904,7 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() == 3 {
+            let lsn = if params.len() >= 3 {
                 Some(
                     Lsn::from_str(params[2])
                         .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,

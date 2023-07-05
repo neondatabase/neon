@@ -59,6 +59,8 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "libmetrics_tracing_event_count_total",
     "pageserver_materialized_cache_hits_total",
     "pageserver_materialized_cache_hits_direct_total",
+    "pageserver_page_cache_read_hits_total",
+    "pageserver_page_cache_read_accesses_total",
     "pageserver_getpage_reconstruct_seconds_bucket",
     "pageserver_getpage_reconstruct_seconds_count",
     "pageserver_getpage_reconstruct_seconds_sum",

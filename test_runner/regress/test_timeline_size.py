@@ -416,6 +416,7 @@ def test_timeline_physical_size_post_compaction(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
 
     # shutdown safekeepers to prevent new data from coming in
+    endpoint.stop()  # We can't gracefully stop after safekeepers die
     for sk in env.safekeepers:
         sk.stop()
 

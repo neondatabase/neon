@@ -21,6 +21,18 @@ class PageserverApiException(Exception):
         self.status_code = status_code
 
 
+class TimelineCreate406(PageserverApiException):
+    def __init__(self, res: requests.Response):
+        assert res.status_code == 406
+        super().__init__(res.json()["msg"], res.status_code)
+
+
+class TimelineCreate409(PageserverApiException):
+    def __init__(self, res: requests.Response):
+        assert res.status_code == 409
+        super().__init__("", res.status_code)
+
+
 @dataclass
 class InMemoryLayerInfo:
     kind: str
@@ -309,9 +321,12 @@ class PageserverHttpClient(requests.Session):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs
         )
-        self.verbose_error(res)
         if res.status_code == 409:
-            raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
+            raise TimelineCreate409(res)
+        if res.status_code == 406:
+            raise TimelineCreate406(res)
+
+        self.verbose_error(res)
 
         res_json = res.json()
         assert isinstance(res_json, dict)

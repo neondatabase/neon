@@ -2,12 +2,16 @@
 //! Other modules should use stuff from this module instead of
 //! directly relying on deps like `reqwest` (think loose coupling).
 
+pub mod conn_pool;
 pub mod server;
 pub mod sql_over_http;
 pub mod websocket;
 
+use std::time::Duration;
+
 pub use reqwest::{Request, Response, StatusCode};
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
+pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 
 use crate::url::ApiUrl;
 use reqwest_middleware::RequestBuilder;
@@ -18,6 +22,24 @@ use reqwest_middleware::RequestBuilder;
 pub fn new_client() -> ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
         .with(reqwest_tracing::TracingMiddleware::default())
+        .build()
+}
+
+pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+    let timeout_client = reqwest::ClientBuilder::new()
+        .timeout(default_timout)
+        .build()
+        .expect("Failed to create http client with timeout");
+
+    let retry_policy =
+        ExponentialBackoff::builder().build_with_total_retry_duration(default_timout);
+
+    reqwest_middleware::ClientBuilder::new(timeout_client)
+        .with(reqwest_tracing::TracingMiddleware::default())
+        // As per docs, "This middleware always errors when given requests with streaming bodies".
+        // That's all right because we only use this client to send `serde_json::RawValue`, which
+        // is not a stream.
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
         .build()
 }
 

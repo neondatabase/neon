@@ -173,10 +173,15 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     let path2 = RemotePath::new(&PathBuf::from(format!("{}/path2", ctx.base_prefix,)))
         .with_context(|| "RemotePath conversion")?;
 
+    let path3 = RemotePath::new(&PathBuf::from(format!("{}/path3", ctx.base_prefix,)))
+        .with_context(|| "RemotePath conversion")?;
+
     let data1 = "remote blob data1".as_bytes();
     let data1_len = data1.len();
     let data2 = "remote blob data2".as_bytes();
     let data2_len = data2.len();
+    let data3 = "remote blob data3".as_bytes();
+    let data3_len = data3.len();
     ctx.client
         .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
         .await?;
@@ -185,7 +190,17 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
         .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
         .await?;
 
+    ctx.client
+        .upload(std::io::Cursor::new(data3), data3_len, &path3, None)
+        .await?;
+
     ctx.client.delete_objects(&[path1, path2]).await?;
+
+    let prefixes = ctx.client.list_prefixes(None).await?;
+
+    assert_eq!(prefixes.len(), 1);
+
+    ctx.client.delete_objects(&[path3]).await?;
 
     Ok(())
 }

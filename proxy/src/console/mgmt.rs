@@ -8,7 +8,7 @@ use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, Quer
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, info_span};
+use tracing::{error, info, info_span, Instrument};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
@@ -44,19 +44,30 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
             .set_nodelay(true)
             .context("failed to set client socket option")?;
 
-        tokio::task::spawn(async move {
-            let span = info_span!("mgmt", peer = %peer_addr);
-            let _enter = span.enter();
+        let span = info_span!("mgmt", peer = %peer_addr);
 
-            info!("started a new console management API thread");
-            scopeguard::defer! {
-                info!("console management API thread is about to finish");
-            }
+        tokio::task::spawn(
+            async move {
+                info!("serving a new console management API connection");
 
-            if let Err(e) = handle_connection(socket).await {
-                error!("thread failed with an error: {e}");
+                // these might be long running connections, have a separate logging for cancelling
+                // on shutdown and other ways of stopping.
+                let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
+                    let _e = span.entered();
+                    info!("console management API task cancelled");
+                });
+
+                if let Err(e) = handle_connection(socket).await {
+                    error!("serving failed with an error: {e}");
+                } else {
+                    info!("serving completed");
+                }
+
+                // we can no longer get dropped
+                scopeguard::ScopeGuard::into_inner(cancelled);
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
@@ -77,14 +88,14 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
         pgb: &mut PostgresBackendTCP,
         query: &str,
     ) -> Result<(), QueryError> {
-        try_process_query(pgb, query).await.map_err(|e| {
+        try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
             e
         })
     }
 }
 
-async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
+fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);

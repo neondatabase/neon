@@ -33,6 +33,7 @@ def handle_role(dbs, roles, operation):
                     dbs[db] = operation["name"]
         if "password" in operation:
             roles[operation["name"]] = operation["password"]
+            assert "encrypted_password" in operation
     elif operation["op"] == "del":
         if "old_name" in operation:
             roles.pop(operation["old_name"])
