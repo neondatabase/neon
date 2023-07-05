@@ -70,7 +70,6 @@ impl Timeline {
                 };
 
                 self_clone.eviction_task(cancel).await;
-                info!("eviction task finishing");
                 Ok(())
             },
         );
@@ -78,6 +77,9 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+        scopeguard::defer! {
+            info!("eviction task finishing");
+        }
         use crate::tenant::tasks::random_init_delay;
         {
             let policy = self.get_eviction_policy();
@@ -86,7 +88,6 @@ impl Timeline {
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
-                info!("shutting down");
                 return;
             }
         }
@@ -101,7 +102,6 @@ impl Timeline {
                 ControlFlow::Continue(sleep_until) => {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            info!("shutting down");
                             break;
                         }
                         _ = tokio::time::sleep_until(sleep_until) => { }
