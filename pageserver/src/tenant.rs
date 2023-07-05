@@ -2184,12 +2184,11 @@ impl Tenant {
         validate_ancestor: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         if validate_ancestor {
-            if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
-                anyhow::ensure!(
-                    new_metadata.ancestor_timeline() == ancestor.as_ref().map(|t| t.timeline_id),
-                    "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
-                );
-            }
+            let ancestor_id = new_metadata.ancestor_timeline();
+            anyhow::ensure!(
+                ancestor_id == ancestor.as_ref().map(|t| t.timeline_id),
+                "Timeline's {new_timeline_id} ancestor {ancestor_id:?} was not found"
+            );
         }
 
         let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
