@@ -42,13 +42,15 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     }
 }
 
-pub fn launch_configurator(compute: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_configurator(
+    compute: &Arc<ComputeNode>,
+) -> Result<thread::JoinHandle<()>, std::io::Error> {
     let compute = Arc::clone(compute);
 
-    Ok(thread::Builder::new()
+    thread::Builder::new()
         .name("compute-configurator".into())
         .spawn(move || {
             configurator_main_loop(&compute);
             info!("configurator thread is exited");
-        })?)
+        })
 }

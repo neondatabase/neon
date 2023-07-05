@@ -244,7 +244,8 @@ fn main() -> Result<()> {
     let _configurator_handle =
         launch_configurator(&compute).expect("cannot launch configurator thread");
 
-    let _download_extensions_handle = launch_download_extensions(&compute);
+    let _download_extensions_handle =
+        launch_download_extensions(&compute).expect("cannot launch download extensions thread");
 
     // Start Postgres
     let mut delay_exit = false;

@@ -1,5 +1,6 @@
 // Download extension files from the extension store
 // and put them in the right place in the postgres directory
+use crate::compute::ComputeNode;
 use anyhow::{self, bail, Context, Result};
 use futures::future::join_all;
 use remote_storage::*;
@@ -10,13 +11,10 @@ use std::io::{BufWriter, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str;
-use tokio::io::AsyncReadExt;
-use tracing::info;
-
-use crate::compute::ComputeNode;
 use std::sync::Arc;
 use std::thread;
-use tracing::instrument;
+use tokio::io::AsyncReadExt;
+use tracing::info;
 
 // remote!
 const SHARE_EXT_PATH: &str = "share/extension";
@@ -432,24 +430,18 @@ async fn organized_extension_files(
     Ok((grouped_dependencies, control_files))
 }
 
-#[instrument(skip_all)]
-fn prepare_external_extensions(compute: &Arc<ComputeNode>) -> Result<()> {
-    info!("start download_extension_files");
-    let compute_state = compute.state.lock().unwrap();
-    compute.prepare_external_extensions(&compute_state)?;
-
-    info!("download_extension_files done");
-    Ok(())
-}
-
-pub fn launch_download_extensions(compute: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_download_extensions(
+    compute: &Arc<ComputeNode>,
+) -> Result<thread::JoinHandle<()>, std::io::Error> {
     let compute = Arc::clone(compute);
-
-    Ok(thread::Builder::new()
+    thread::Builder::new()
         .name("download-extensions".into())
         .spawn(move || {
-            // FIX unwrap
-            prepare_external_extensions(&compute).unwrap();
-            info!("download_extensions_thread is exited");
-        })?)
+            info!("start download_extension_files");
+            let compute_state = compute.state.lock().expect("error unlocking compute.state");
+            compute
+                .prepare_external_extensions(&compute_state)
+                .expect("error preparing extensions");
+            info!("download_extension_files done, exiting thread");
+        })
 }
