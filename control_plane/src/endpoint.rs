@@ -405,6 +405,16 @@ impl Endpoint {
                 String::from_utf8_lossy(&pg_ctl.stderr),
             );
         }
+
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        // TODO use background_process::stop_process instead
+        let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
+        let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        crate::background_process::wait_until_stopped("compute_ctl", pid)?;
+
         Ok(())
     }
 
@@ -507,7 +517,13 @@ impl Endpoint {
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
-        let _child = cmd.spawn()?;
+        let child = cmd.spawn()?;
+
+        // Write down the pid so we can wait for it when we want to stop
+        // TODO use background_process::start_process instead
+        let pid = child.id();
+        let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
+        std::fs::write(pidfile_path, pid.to_string())?;
 
         // Wait for it to start
         let mut attempt = 0;

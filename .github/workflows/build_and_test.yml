@@ -767,7 +767,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.11.0
+      VM_BUILDER_VERSION: v0.11.1
 
     steps:
       - name: Checkout
@@ -966,6 +966,10 @@ jobs:
           # Delete Neon extensitons (they always present on compute-node image)
           rm -rf ./extensions-to-upload/share/extension/neon*
           rm -rf ./extensions-to-upload/lib/neon*
+
+          # Delete leftovers from the extension build step
+          rm -rf ./extensions-to-upload/lib/pgxs
+          rm -rf ./extensions-to-upload/lib/pkgconfig
 
           docker cp ${{ steps.create-container.outputs.EID }}:/extensions ./custom-extensions
           for EXT_NAME in $(ls ./custom-extensions); do

@@ -16,7 +16,10 @@ use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCou
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    time,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
@@ -305,12 +308,13 @@ pub fn invalidate_cache(node_info: &console::CachedNodeInfo) {
 #[tracing::instrument(name = "connect_once", skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
+    timeout: time::Duration,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
     let allow_self_signed_compute = node_info.allow_self_signed_compute;
 
     node_info
         .config
-        .connect(allow_self_signed_compute)
+        .connect(allow_self_signed_compute, timeout)
         .inspect_err(|_: &compute::ConnectionError| invalidate_cache(node_info))
         .await
 }
@@ -328,7 +332,27 @@ async fn connect_to_compute(
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
         node_info.config.set_startup_params(params);
-        match connect_to_compute_once(node_info).await {
+
+        // Set a shorter timeout for the initial connection attempt.
+        //
+        // In case we try to connect to an outdated address that is no longer valid, the
+        // default behavior of Kubernetes is to drop the packets, causing us to wait for
+        // the entire timeout period. We want to fail fast in such cases.
+        //
+        // A specific case to consider is when we have cached compute node information
+        // with a 4-minute TTL (Time To Live), but the user has executed a `/suspend` API
+        // call, resulting in the nonexistence of the compute node.
+        //
+        // We only use caching in case of scram proxy backed by the console, so reduce
+        // the timeout only in that case.
+        let is_scram_proxy = matches!(creds, auth::BackendType::Console(_, _));
+        let timeout = if is_scram_proxy && num_retries == NUM_RETRIES_WAKE_COMPUTE {
+            time::Duration::from_secs(2)
+        } else {
+            time::Duration::from_secs(10)
+        };
+
+        match connect_to_compute_once(node_info, timeout).await {
             Err(e) if num_retries > 0 => {
                 info!("compute node's state has changed; requesting a wake-up");
                 match creds.wake_compute(extra).map_err(io_error).await? {

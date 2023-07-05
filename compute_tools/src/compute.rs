@@ -278,7 +278,7 @@ impl ComputeNode {
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
     #[instrument(skip_all)]
-    fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+    pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
@@ -516,9 +516,9 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
-
         let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
 
+        let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
             self.apply_config(&compute_state)?;
         }
@@ -526,8 +526,13 @@ impl ComputeNode {
         let startup_end_time = Utc::now();
         {
             let mut state = self.state.lock().unwrap();
-            state.metrics.config_ms = startup_end_time
+            state.metrics.start_postgres_ms = config_time
                 .signed_duration_since(start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.config_ms = startup_end_time
+                .signed_duration_since(config_time)
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;

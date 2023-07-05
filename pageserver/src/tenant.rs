@@ -506,6 +506,8 @@ pub enum CreateTimelineError {
     #[error("a timeline with the given ID already exists")]
     AlreadyExists,
     #[error(transparent)]
+    AncestorLsn(anyhow::Error),
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
@@ -1432,7 +1434,7 @@ impl Tenant {
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
-                        return Err(CreateTimelineError::Other(anyhow::anyhow!(
+                        return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
                             "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
                             lsn,
                             ancestor_timeline_id,
@@ -2715,7 +2717,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let tl = self
             .branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
             .await?;
@@ -2732,7 +2734,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
             .await
     }
@@ -2743,7 +2745,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
         // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
@@ -2783,16 +2785,17 @@ impl Tenant {
             .context(format!(
                 "invalid branch start lsn: less than latest GC cutoff {}",
                 *latest_gc_cutoff_lsn,
-            ))?;
+            ))
+            .map_err(CreateTimelineError::AncestorLsn)?;
 
         // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
             if start_lsn < cutoff {
-                bail!(format!(
+                return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
                     "invalid branch start lsn: less than planned GC cutoff {cutoff}"
-                ));
+                )));
             }
         }
 
@@ -3825,6 +3828,9 @@ mod tests {
         {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
+                let CreateTimelineError::AncestorLsn(err) = err else {
+                    panic!("wrong error type")
+                };
                 assert!(err.to_string().contains("invalid branch start lsn"));
                 assert!(err
                     .source()
@@ -3854,6 +3860,9 @@ mod tests {
         {
             Ok(_) => panic!("branching should have failed"),
             Err(err) => {
+                let CreateTimelineError::AncestorLsn(err) = err else {
+                    panic!("wrong error type");
+                };
                 assert!(&err.to_string().contains("invalid branch start lsn"));
                 assert!(&err
                     .source()

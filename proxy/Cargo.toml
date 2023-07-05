@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-atty.workspace = true
 base64.workspace = true
 bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
@@ -30,6 +29,7 @@ metrics.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
+pbkdf2.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true
@@ -38,6 +38,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 reqwest-middleware.workspace = true
+reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 routerify.workspace = true
 rustls-pemfile.workspace = true

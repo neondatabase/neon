@@ -1210,6 +1210,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO t (key) VALUES (1)")
 
+    # Stop all computes gracefully before safekeepers stop responding to them
+    endpoint_1.stop_and_destroy()
+    endpoint_3.stop_and_destroy()
+
     # Remove initial tenant's br1 (active)
     assert sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()

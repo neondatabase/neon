@@ -320,11 +320,11 @@ pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 pub static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_tenant_synthetic_size",
-        "Synthetic size of each tenant",
+        "pageserver_tenant_synthetic_cached_size_bytes",
+        "Synthetic size of each tenant in bytes",
         &["tenant_id"]
     )
-    .expect("Failed to register pageserver_tenant_synthetic_size metric")
+    .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
@@ -1084,7 +1084,6 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.remote_operation_time.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str(), status);
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1106,7 +1105,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntGauge {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.calls_unfinished_gauge.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1127,7 +1125,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> Histogram {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.calls_started_hist.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1148,7 +1145,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntCounter {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.bytes_started_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
@@ -1169,7 +1165,6 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> IntCounter {
-        // XXX would be nice to have an upgradable RwLock
         let mut guard = self.bytes_finished_counter.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
