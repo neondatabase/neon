@@ -1,9 +1,9 @@
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
-    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    UIntGauge, UIntGaugeVec,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge,
+    register_uint_gauge_vec, Counter, CounterVec, Histogram, HistogramVec, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
@@ -199,6 +199,49 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     read_hits_materialized_page_older_lsn: {
         PAGE_CACHE_READ_HITS
             .get_metric_with_label_values(&["materialized_page", "older_lsn"])
+            .unwrap()
+    },
+});
+
+pub struct PageCacheSizeMetrics {
+    pub max_bytes: UIntGauge,
+
+    pub current_bytes_ephemeral: UIntGauge,
+    pub current_bytes_immutable: UIntGauge,
+    pub current_bytes_materialized_page: UIntGauge,
+}
+
+static PAGE_CACHE_SIZE_CURRENT_BYTES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_page_cache_size_current_bytes",
+        "Current size of the page cache in bytes, by key kind",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheSizeMetrics {
+    max_bytes: {
+        register_uint_gauge!(
+            "pageserver_page_cache_size_max_bytes",
+            "Maximum size of the page cache in bytes"
+        )
+        .expect("failed to define a metric")
+    },
+
+    current_bytes_ephemeral: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["ephemeral"])
+            .unwrap()
+    },
+    current_bytes_immutable: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["immutable"])
+            .unwrap()
+    },
+    current_bytes_materialized_page: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["materialized_page"])
             .unwrap()
     },
 });
