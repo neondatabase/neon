@@ -90,6 +90,7 @@ pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
 pub mod manifest;
+mod span;
 
 pub mod metadata;
 mod par_fsync;
@@ -105,7 +106,7 @@ mod timeline;
 
 pub mod size;
 
-pub(crate) use timeline::debug_assert_current_span_has_tenant_and_timeline_id;
+pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub use timeline::{
     LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
 };
@@ -504,7 +505,7 @@ impl Tenant {
     /// No background tasks are started as part of this routine.
     ///
     async fn attach(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
         if !tokio::fs::try_exists(&marker_file)
@@ -642,7 +643,7 @@ impl Tenant {
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
@@ -721,7 +722,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
             Ok(conf) => conf,
@@ -907,7 +908,7 @@ impl Tenant {
         init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
 
@@ -953,7 +954,7 @@ impl Tenant {
         init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
@@ -1544,7 +1545,7 @@ impl Tenant {
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
-        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
@@ -1708,7 +1709,7 @@ impl Tenant {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
 
         let mut activating = false;
         self.state.send_modify(|current_state| {
@@ -1779,7 +1780,7 @@ impl Tenant {
     ///
     /// This will attempt to shutdown even if tenant is broken.
     pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
-        debug_assert_current_span_has_tenant_id();
+        span::debug_assert_current_span_has_tenant_id();
         // Set tenant (and its timlines) to Stoppping state.
         //
         // Since we can only transition into Stopping state after activation is complete,
@@ -4378,30 +4379,5 @@ mod tests {
             .exists());
 
         Ok(())
-    }
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_id() {}
-
-#[cfg(debug_assertions)]
-pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
-    utils::tracing_span_assert::MultiNameExtractor<2>,
-> = once_cell::sync::Lazy::new(|| {
-    utils::tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
-});
-
-#[cfg(debug_assertions)]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_id() {
-    use utils::tracing_span_assert;
-
-    match tracing_span_assert::check_fields_present([&*TENANT_ID_EXTRACTOR]) {
-        Ok(()) => (),
-        Err(missing) => panic!(
-            "missing extractors: {:?}",
-            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
-        ),
     }
 }

@@ -1,6 +1,7 @@
 //!
 
 mod eviction_task;
+pub mod span;
 pub mod uninit;
 mod walreceiver;
 
@@ -2240,7 +2241,7 @@ impl Timeline {
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
@@ -4546,7 +4547,7 @@ impl Timeline {
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -4978,33 +4979,6 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
-
-#[cfg(debug_assertions)]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
-    use utils::tracing_span_assert;
-
-    pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
-        tracing_span_assert::MultiNameExtractor<2>,
-    > = once_cell::sync::Lazy::new(|| {
-        tracing_span_assert::MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"])
-    });
-
-    match tracing_span_assert::check_fields_present([
-        &*super::TENANT_ID_EXTRACTOR,
-        &*TIMELINE_ID_EXTRACTOR,
-    ]) {
-        Ok(()) => (),
-        Err(missing) => panic!(
-            "missing extractors: {:?}",
-            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
-        ),
-    }
 }
 
 /// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
