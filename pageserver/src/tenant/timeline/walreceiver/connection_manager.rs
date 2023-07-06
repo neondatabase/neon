@@ -266,7 +266,7 @@ pub struct ConnectionManagerStatus {
 impl ConnectionManagerStatus {
     /// Generates a string, describing current connection status in a form, suitable for logging.
     pub fn to_human_readable_string(&self) -> String {
-        let mut resulting_string = "WalReceiver status".to_string();
+        let mut resulting_string = String::new();
         match &self.existing_connection {
             Some(connection) => {
                 if connection.has_processed_wal {
