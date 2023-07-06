@@ -364,7 +364,7 @@ impl LayerMap {
     }
 
     pub fn is_l0(layer: &PersistentLayerDesc) -> bool {
-        &layer.get_key_range() == &(Key::MIN..Key::MAX)
+        layer.get_key_range() == (Key::MIN..Key::MAX)
     }
 
     /// This function determines which layers are counted in `count_deltas`:
