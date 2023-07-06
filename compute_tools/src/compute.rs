@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -253,22 +254,28 @@ impl ComputeNode {
         }
 
         let mut client = config.connect(NoTls)?;
-        let (gzip, basebackup_cmd) = match lsn {
+        let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
-            Lsn(0) => (
-                false,
-                format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
-            ),
-            _ => (
-                true,
-                format!(
-                    "basebackup {} {} {} --gzip",
-                    spec.tenant_id, spec.timeline_id, lsn
-                ),
+            Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
+            _ => format!(
+                "basebackup {} {} {} --gzip",
+                spec.tenant_id, spec.timeline_id, lsn
             ),
         };
+
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
         let mut measured_reader = MeasuredReader::new(copyreader);
+
+        // Check the magic number to see if it's a gzip or not. Even though
+        // we might explicitly ask for gzip, an old pageserver with no implementation
+        // of gzip compression might send us uncompressed data. After some time
+        // passes we can assume all pageservers know how to compress and we can
+        // delete this check.
+        let mut bufreader = std::io::BufReader::new(&mut measured_reader);
+        let gzip = {
+            let peek = bufreader.fill_buf().unwrap();
+            peek[0] == 0x1f && peek[1] == 0x8b
+        };
 
         // Read the archive directly from the `CopyOutReader`
         //
@@ -276,11 +283,11 @@ impl ComputeNode {
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
         if gzip {
-            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut measured_reader));
+            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
             ar.set_ignore_zeros(true);
             ar.unpack(&self.pgdata)?;
         } else {
-            let mut ar = tar::Archive::new(&mut measured_reader);
+            let mut ar = tar::Archive::new(&mut bufreader);
             ar.set_ignore_zeros(true);
             ar.unpack(&self.pgdata)?;
         };

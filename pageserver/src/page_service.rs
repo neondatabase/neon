@@ -791,7 +791,15 @@ impl PageServerHandler {
         } else {
             let mut writer = pgb.copyout_writer();
             if gzip {
-                let mut encoder = GzipEncoder::new(writer);
+                let mut encoder = GzipEncoder::with_quality(
+                    writer,
+                    // NOTE using fast compression because it's on the critical path
+                    //      for compute startup. For an empty database, we get
+                    //      <100KB with this method. The Level::Best compression method
+                    //      gives us <20KB, but maybe we should add basebackup caching
+                    //      on compute shutdown first.
+                    async_compression::Level::Fastest,
+                );
                 basebackup::send_basebackup_tarball(
                     &mut encoder,
                     &timeline,
