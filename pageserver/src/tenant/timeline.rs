@@ -86,7 +86,8 @@ use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
-    DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc, PersistentLayerKey,
+    AsLayerDesc, DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc,
+    PersistentLayerKey,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -120,10 +121,10 @@ impl PartialOrd for Hole {
     }
 }
 
-pub struct LayerFileManager(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
+pub struct LayerFileManager<T: AsLayerDesc + ?Sized>(HashMap<PersistentLayerKey, Arc<T>>);
 
-impl LayerFileManager {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
@@ -133,7 +134,7 @@ impl LayerFileManager {
             .clone()
     }
 
-    pub(crate) fn insert(&mut self, layer: Arc<dyn PersistentLayer>) {
+    pub(crate) fn insert(&mut self, layer: Arc<T>) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
@@ -144,7 +145,7 @@ impl LayerFileManager {
         Self(HashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: Arc<dyn PersistentLayer>) {
+    pub(crate) fn remove(&mut self, layer: Arc<T>) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
@@ -154,11 +155,7 @@ impl LayerFileManager {
         }
     }
 
-    pub(crate) fn replace_and_verify(
-        &mut self,
-        expected: Arc<dyn PersistentLayer>,
-        new: Arc<dyn PersistentLayer>,
-    ) -> Result<()> {
+    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
         let key = expected.layer_desc().key();
         let other = new.layer_desc().key();
 
@@ -206,6 +203,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
 
+type TimelineLayerFileManager = LayerFileManager<dyn PersistentLayer>;
+
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
@@ -234,7 +233,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
+    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, TimelineLayerFileManager)>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1303,7 +1302,7 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         batch_updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &mut TimelineLayerFileManager,
     ) -> anyhow::Result<bool> {
         if local_layer.is_remote_layer() {
             // TODO(issue #3851): consider returning an err here instead of false,
@@ -2397,7 +2396,7 @@ impl Timeline {
         &self,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &mut TimelineLayerFileManager,
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
@@ -2409,7 +2408,7 @@ impl Timeline {
         &self,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &mut TimelineLayerFileManager,
     ) {
         updates.remove_historic(layer.layer_desc().clone());
         mapping.remove(layer);
@@ -2423,7 +2422,7 @@ impl Timeline {
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<PersistentLayerDesc>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &mut TimelineLayerFileManager,
     ) -> anyhow::Result<()> {
         let layer = mapping.get_from_desc(&layer);
         if !layer.is_remote_layer() {
@@ -3609,7 +3608,7 @@ impl Timeline {
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
+        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, TimelineLayerFileManager)>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,

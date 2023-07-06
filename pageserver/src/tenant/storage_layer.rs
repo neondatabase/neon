@@ -383,6 +383,18 @@ pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i
 /// Returned by [`Layer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
 
+/// Get a layer descriptor from a layer.
+pub trait AsLayerDesc {
+    /// Get the layer descriptor.
+    fn layer_desc(&self) -> &PersistentLayerDesc;
+}
+
+impl<T: AsLayerDesc + ?Sized> AsLayerDesc for Arc<T> {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        (**self).layer_desc()
+    }
+}
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -396,10 +408,8 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send
 /// A delta layer contains all modifications within a range of LSNs and keys.
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
-pub trait PersistentLayer: Layer {
-    /// Get the layer descriptor.
-    fn layer_desc(&self) -> &PersistentLayerDesc;
-
+pub trait PersistentLayer: Layer + AsLayerDesc {
+    /// Identify the tenant this layer belongs to
     fn get_tenant_id(&self) -> TenantId {
         self.layer_desc().tenant_id
     }
