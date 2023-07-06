@@ -175,7 +175,7 @@ impl WalRedoManager for PostgresRedoManager {
         let mut img = base_img.map(|p| p.1);
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
-        for (i, record) in records[1..].iter().enumerate() {
+        for (i, record) in records.iter().enumerate().skip(1) {
             let rec_neon = can_apply_in_neon(&record.1);
 
             if rec_neon != batch_neon {
