@@ -253,22 +253,37 @@ impl ComputeNode {
         }
 
         let mut client = config.connect(NoTls)?;
-        let basebackup_cmd = match lsn {
-            Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id), // First start of the compute
-            _ => format!("basebackup {} {} {}", spec.tenant_id, spec.timeline_id, lsn),
+        let (gzip, basebackup_cmd) = match lsn {
+            // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
+            Lsn(0) => (
+                false,
+                format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
+            ),
+            _ => (
+                true,
+                format!(
+                    "basebackup {} {} {} --gzip",
+                    spec.tenant_id, spec.timeline_id, lsn
+                ),
+            ),
         };
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
         let mut measured_reader = MeasuredReader::new(copyreader);
-        let mut decoder = flate2::read::GzDecoder::new(&mut measured_reader);
 
         // Read the archive directly from the `CopyOutReader`
         //
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
-        let mut ar = tar::Archive::new(&mut decoder);
-        ar.set_ignore_zeros(true);
-        ar.unpack(&self.pgdata)?;
+        if gzip {
+            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut measured_reader));
+            ar.set_ignore_zeros(true);
+            ar.unpack(&self.pgdata)?;
+        } else {
+            let mut ar = tar::Archive::new(&mut measured_reader);
+            ar.set_ignore_zeros(true);
+            ar.unpack(&self.pgdata)?;
+        };
 
         // Report metrics
         self.state.lock().unwrap().metrics.basebackup_bytes =

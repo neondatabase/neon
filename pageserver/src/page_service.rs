@@ -749,6 +749,7 @@ impl PageServerHandler {
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
+        gzip: bool,
         ctx: RequestContext,
     ) -> anyhow::Result<()>
     where
@@ -788,19 +789,32 @@ impl PageServerHandler {
             )
             .await?;
         } else {
-            let writer = pgb.copyout_writer();
-            let mut encoder = GzipEncoder::new(writer);
-            basebackup::send_basebackup_tarball(
-                &mut encoder,
-                &timeline,
-                lsn,
-                prev_lsn,
-                full_backup,
-                &ctx,
-            )
-            .await?;
-            // shutdown the encoder to ensure the gzip footer is written
-            encoder.shutdown().await?;
+            if gzip {
+                let writer = pgb.copyout_writer();
+                let mut encoder = GzipEncoder::new(writer);
+                basebackup::send_basebackup_tarball(
+                    &mut encoder,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+                // shutdown the encoder to ensure the gzip footer is written
+                encoder.shutdown().await?;
+            } else {
+                let mut writer = pgb.copyout_writer();
+                basebackup::send_basebackup_tarball(
+                    &mut writer,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+            }
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
@@ -930,6 +944,19 @@ where
                 None
             };
 
+            let gzip = if params.len() >= 4 {
+                if params[3] == "--gzip" {
+                    true
+                } else {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "Parameter in position 3 unknown {}",
+                        params[3],
+                    )));
+                }
+            } else {
+                false
+            };
+
             metrics::metric_vec_duration::observe_async_block_duration_by_result(
                 &*crate::metrics::BASEBACKUP_QUERY_TIME,
                 async move {
@@ -940,6 +967,7 @@ where
                         lsn,
                         None,
                         false,
+                        gzip,
                         ctx,
                     )
                     .await?;
@@ -1017,8 +1045,17 @@ where
             self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
-                .await?;
+            self.handle_basebackup_request(
+                pgb,
+                tenant_id,
+                timeline_id,
+                lsn,
+                prev_lsn,
+                true,
+                false,
+                ctx,
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
