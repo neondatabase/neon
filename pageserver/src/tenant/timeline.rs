@@ -2808,14 +2808,10 @@ impl Timeline {
                     layers.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
-                if let Some(layer_to_flush) = layer_to_flush {
-                    if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
-                        error!("could not flush frozen layer: {err:?}");
-                        break Err(err);
-                    }
-                    continue;
-                } else {
-                    break Ok(());
+                let Some(layer_to_flush) = layer_to_flush else { break Ok(()) };
+                if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
+                    error!("could not flush frozen layer: {err:?}");
+                    break Err(err);
                 }
             };
             // Notify any listeners that we're done
