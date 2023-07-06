@@ -782,6 +782,13 @@ jobs:
           curl -fL ec2-18-217-40-54.us-east-2.compute.amazonaws.com:8000/vm-builder -o vm-builder
           chmod +x vm-builder
 
+      # We need to provide vm-informant/vm-monitor images for vm-builder since it was not
+      # compiled through the release pipeline
+      - name: Pull informant and monitor image image
+        run: |
+          docker pull fprasx/vm-informant:monitor-testing
+          docker pull fprasx/vm-monitor:monitor-testing
+
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
@@ -792,9 +799,8 @@ jobs:
         run: |
           ./vm-builder \
             -enable-file-cache \
-            # We need to provide a vm-informant image for vm-builder since it was not
-            # compiled through the release pipeline
-            -informant=fprasx/vm-informant:monitor-testing \
+            -informant="fprasx/vm-informant:monitor-testing" \
+            -monitor="fprasx/vm-monitor:monitor-testing" \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
