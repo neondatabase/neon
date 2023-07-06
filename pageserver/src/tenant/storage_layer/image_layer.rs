@@ -153,12 +153,14 @@ impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} ----",
+            "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
-            self.lsn
+            self.lsn,
+            self.desc.is_incremental,
+            self.desc.file_size
         );
 
         if !verbose {
