@@ -3015,7 +3015,7 @@ def check_restored_datadir_content(
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
             -c 'basebackup {endpoint.tenant_id} {timeline}'  \
-         | tar -xz -C {restored_dir_path}
+         | tar -x -C {restored_dir_path}
     """
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
