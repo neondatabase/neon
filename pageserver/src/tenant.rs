@@ -515,6 +515,11 @@ struct TenantDirectoryScan {
     timelines_to_resume_deletion: Vec<(TimelineId, TimelineMetadata)>,
 }
 
+enum CreateTimelineCause {
+    Load,
+    Delete,
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -553,7 +558,7 @@ impl Tenant {
             ancestor.clone(),
             remote_client,
             init_order,
-            true,
+            CreateTimelineCause::Load,
         )?;
         let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1059,6 +1064,8 @@ impl Tenant {
                 // Missing metadata means that timeline directory should be empty at this point.
                 // Remove delete mark afterwards.
                 // Note that failure during the process wont prevent tenant from successfully loading.
+                // TODO: this is very much similar to DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces
+                // but here we're inside spawn_blocking.
                 if let Err(e) = fs_ext::ignore_absent_files(|| {
                     fs::remove_dir(self.conf.timeline_path(&timeline_id, &self.tenant_id))
                 })
@@ -1255,26 +1262,21 @@ impl Tenant {
                             // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
                             info!("is_deleted is set on remote, resuming removal of timeline data originally done by timeline deletion handler");
 
-                            if !found_delete_mark {
-                                // Can happen because we create delete mark after we set deleted_at in the index part.
-                                self.create_timeline_delete_mark(timeline_id)
-                                    .context("create delete mark")
-                                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-                            };
                             remote_client
                                 .init_upload_queue_stopped_to_continue_deletion(&index_part)
                                 .context("init queue stopped")
-                                .and_then(|_| {
-                                    DeleteTimelineFlow::resume_deletion(
-                                        Arc::clone(self),
-                                        timeline_id,
-                                        &local_metadata,
-                                        Some(remote_client),
-                                        init_order,
-                                    )
-                                    .context("resume deletion")
-                                })
                                 .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+
+                            DeleteTimelineFlow::resume_deletion(
+                                Arc::clone(self),
+                                timeline_id,
+                                &local_metadata,
+                                Some(remote_client),
+                                init_order,
+                            )
+                            .await
+                            .context("resume deletion")
+                            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
 
                             return Ok(());
                         }
@@ -1298,10 +1300,13 @@ impl Tenant {
                     if found_delete_mark {
                         // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
                         // Cleanup:
-                        return DeleteTimelineFlow::cleanup_remaining_fs_traces_after_timeline_deletion(self, timeline_id)
-                            .await
-                            .context("cleanup_remaining_fs_traces_after_timeline_deletion")
-                            .map_err(LoadLocalTimelineError::ResumeDeletion);
+                        return DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(
+                            self,
+                            timeline_id,
+                        )
+                        .await
+                        .context("cleanup_remaining_timeline_fs_traces")
+                        .map_err(LoadLocalTimelineError::ResumeDeletion);
                     }
 
                     // We're loading fresh timeline that didnt yet make it into remote.
@@ -1321,6 +1326,7 @@ impl Tenant {
                         None,
                         init_order,
                     )
+                    .await
                     .context("resume deletion")
                     .map_err(LoadLocalTimelineError::ResumeDeletion)?;
                     return Ok(());
@@ -2161,9 +2167,9 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
         init_order: Option<&InitializationOrder>,
-        validate_ancestor: bool,
+        cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
-        if validate_ancestor {
+        if matches!(cause, CreateTimelineCause::Load) {
             let ancestor_id = new_metadata.ancestor_timeline();
             anyhow::ensure!(
                 ancestor_id == ancestor.as_ref().map(|t| t.timeline_id),
@@ -2835,7 +2841,7 @@ impl Tenant {
                 ancestor,
                 remote_client,
                 None,
-                true,
+                CreateTimelineCause::Load,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -2919,21 +2925,6 @@ impl Tenant {
         let uninit_mark = TimelineUninitMark::new(uninit_mark_path, timeline_path);
 
         Ok(uninit_mark)
-    }
-
-    fn create_timeline_delete_mark(&self, timeline_id: TimelineId) -> anyhow::Result<()> {
-        let marker_path = self
-            .conf
-            .timeline_delete_mark_file_path(self.tenant_id, timeline_id);
-
-        // Note: we're ok to replace existing file.
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&marker_path)
-            .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
-
-        crashsafe::fsync_file_and_parent(&marker_path).context("sync_mark")
     }
 
     /// Gathers inputs from all of the timelines to produce a sizing model input.

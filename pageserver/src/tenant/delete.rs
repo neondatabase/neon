@@ -22,7 +22,7 @@ use crate::{
 use super::{
     metadata::TimelineMetadata,
     remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-    Tenant, Timeline,
+    CreateTimelineCause, Tenant, Timeline,
 };
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
@@ -264,7 +264,7 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
 // Note: io::ErrorKind::NotFound are ignored for metadata and timeline dir.
 // delete mark should be present because it is the last step during deletion.
 // (nothing can fail after its deletion)
-async fn cleanup_remaining_fs_traces_after_timeline_deletion(
+async fn cleanup_remaining_timeline_fs_traces(
     conf: &PageServerConf,
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -337,7 +337,7 @@ async fn remove_timeline_from_tenant(
 /// 1. [`DeleteTimelineFlow::run`] this is the main one called by a management api handler.
 /// 2. [`DeleteTimelineFlow::resume_deletion`] is called during restarts when local metadata is still present
 /// and we possibly neeed to continue deletion of remote files.
-/// 3. [`DeleteTimelineFlow::cleanup_remaining_fs_traces_after_timeline_deletion`] is used when we deleted remote
+/// 3. [`DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`] is used when we deleted remote
 /// index but still have local metadata, timeline directory and delete mark.
 /// Note the only other place that messes around timeline delete mark is the logic that scans directory with timelines during tenant load.
 #[derive(Default)]
@@ -393,7 +393,7 @@ impl DeleteTimelineFlow {
     }
 
     /// Shortcut to create Timeline in stopping state and spawn deletion task.
-    pub fn resume_deletion(
+    pub async fn resume_deletion(
         tenant: Arc<Tenant>,
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
@@ -409,7 +409,7 @@ impl DeleteTimelineFlow {
                 init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
-                false,
+                CreateTimelineCause::Delete,
             )
             .context("create_timeline_struct")?;
 
@@ -431,21 +431,19 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
+        // Note that delete mark can be missing because we create delete mark after we set deleted_at in the index part.
+        create_delete_mark(tenant.conf, tenant.tenant_id, timeline_id).await?;
+
         Self::schedule_background(guard, tenant.conf, tenant, timeline);
 
         Ok(())
     }
 
-    pub async fn cleanup_remaining_fs_traces_after_timeline_deletion(
+    pub async fn cleanup_remaining_timeline_fs_traces(
         tenant: &Tenant,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        cleanup_remaining_fs_traces_after_timeline_deletion(
-            tenant.conf,
-            tenant.tenant_id,
-            timeline_id,
-        )
-        .await
+        cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await
     }
 
     fn prepare(
@@ -485,10 +483,6 @@ impl DeleteTimelineFlow {
         timeline.set_state(TimelineState::Stopping);
 
         Ok((Arc::clone(timeline), delete_lock_guard))
-    }
-
-    pub fn is_deleted(&self) -> bool {
-        matches!(self, Self::Finished)
     }
 
     fn schedule_background(
@@ -548,12 +542,7 @@ impl DeleteTimelineFlow {
             .expect("spawn_blocking");
         }
 
-        cleanup_remaining_fs_traces_after_timeline_deletion(
-            conf,
-            tenant.tenant_id,
-            timeline.timeline_id,
-        )
-        .await?;
+        cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_id, timeline.timeline_id).await?;
 
         remove_timeline_from_tenant(tenant, timeline.timeline_id).await?;
 

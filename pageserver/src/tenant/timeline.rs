@@ -2076,8 +2076,7 @@ impl Timeline {
             state,
             TimelineState::Broken { .. } | TimelineState::Stopping
         ) {
-            // Can happen when timeline detail endpoint is used when deletion is ongoing.
-            warn!("Logical size calculation was attempted to be spawned for inactive timeline");
+            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
             return;
         }
 
