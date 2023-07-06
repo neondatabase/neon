@@ -789,8 +789,8 @@ impl PageServerHandler {
             )
             .await?;
         } else {
+            let mut writer = pgb.copyout_writer();
             if gzip {
-                let writer = pgb.copyout_writer();
                 let mut encoder = GzipEncoder::new(writer);
                 basebackup::send_basebackup_tarball(
                     &mut encoder,
@@ -804,7 +804,6 @@ impl PageServerHandler {
                 // shutdown the encoder to ensure the gzip footer is written
                 encoder.shutdown().await?;
             } else {
-                let mut writer = pgb.copyout_writer();
                 basebackup::send_basebackup_tarball(
                     &mut writer,
                     &timeline,
