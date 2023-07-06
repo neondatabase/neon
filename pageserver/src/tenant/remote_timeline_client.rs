@@ -608,10 +608,7 @@ impl RemoteTimelineClient {
         self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
 
-        info!(
-            "scheduled layer file upload {}",
-            layer_file_name.file_name()
-        );
+        info!("scheduled layer file upload {layer_file_name}");
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -664,7 +661,7 @@ impl RemoteTimelineClient {
                 });
                 self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
-                info!("scheduled layer file deletion {}", name.file_name());
+                info!("scheduled layer file deletion {name}");
             }
 
             // Launch the tasks immediately, if possible
@@ -828,7 +825,7 @@ impl RemoteTimelineClient {
                     .queued_operations
                     .push_back(op);
 
-                info!("scheduled layer file deletion {}", name.file_name());
+                info!("scheduled layer file deletion {name}");
                 deletions_queued += 1;
             }
 
@@ -862,10 +859,8 @@ impl RemoteTimelineClient {
                 "Found {} files not bound to index_file.json, proceeding with their deletion",
                 remaining.len()
             );
-            for file in remaining {
-                warn!("Removing {}", file.object_name().unwrap_or_default());
-                self.storage_impl.delete(&file).await?;
-            }
+            warn!("About to remove {} files", remaining.len());
+            self.storage_impl.delete_objects(&remaining).await?;
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));

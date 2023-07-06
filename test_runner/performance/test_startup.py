@@ -71,6 +71,7 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
             "wait_for_spec_ms": f"{i}_wait_for_spec",
             "sync_safekeepers_ms": f"{i}_sync_safekeepers",
             "basebackup_ms": f"{i}_basebackup",
+            "start_postgres_ms": f"{i}_start_postgres",
             "config_ms": f"{i}_config",
             "total_startup_ms": f"{i}_total_startup",
         }

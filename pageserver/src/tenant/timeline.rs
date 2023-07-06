@@ -3,7 +3,7 @@
 mod eviction_task;
 mod walreceiver;
 
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use fail::fail_point;
 use futures::StreamExt;
@@ -85,7 +85,9 @@ use super::config::TenantConf;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
+use super::storage_layer::{
+    DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc, PersistentLayerKey,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -118,6 +120,92 @@ impl PartialOrd for Hole {
     }
 }
 
+pub struct LayerFileManager(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
+
+impl LayerFileManager {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+        // The assumption for the `expect()` is that all code maintains the following invariant:
+        // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
+        self.0
+            .get(&desc.key())
+            .with_context(|| format!("get layer from desc: {}", desc.filename()))
+            .expect("not found")
+            .clone()
+    }
+
+    pub(crate) fn insert(&mut self, layer: Arc<dyn PersistentLayer>) {
+        let present = self.0.insert(layer.layer_desc().key(), layer.clone());
+        if present.is_some() && cfg!(debug_assertions) {
+            panic!("overwriting a layer: {:?}", layer.layer_desc())
+        }
+    }
+
+    pub(crate) fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub(crate) fn remove(&mut self, layer: Arc<dyn PersistentLayer>) {
+        let present = self.0.remove(&layer.layer_desc().key());
+        if present.is_none() && cfg!(debug_assertions) {
+            panic!(
+                "removing layer that is not present in layer mapping: {:?}",
+                layer.layer_desc()
+            )
+        }
+    }
+
+    pub(crate) fn replace_and_verify(
+        &mut self,
+        expected: Arc<dyn PersistentLayer>,
+        new: Arc<dyn PersistentLayer>,
+    ) -> Result<()> {
+        let key = expected.layer_desc().key();
+        let other = new.layer_desc().key();
+
+        let expected_l0 = LayerMap::is_l0(expected.layer_desc());
+        let new_l0 = LayerMap::is_l0(new.layer_desc());
+
+        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
+            "layermap-replace-notfound"
+        ));
+
+        anyhow::ensure!(
+            key == other,
+            "expected and new layer have different keys: {key:?} != {other:?}"
+        );
+
+        anyhow::ensure!(
+            expected_l0 == new_l0,
+            "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
+        );
+
+        if let Some(layer) = self.0.get_mut(&expected.layer_desc().key()) {
+            anyhow::ensure!(
+                compare_arced_layers(&expected, layer),
+                "another layer was found instead of expected, expected={expected:?}, new={new:?}",
+                expected = Arc::as_ptr(&expected),
+                new = Arc::as_ptr(layer),
+            );
+            *layer = new;
+            Ok(())
+        } else {
+            anyhow::bail!("layer was not found");
+        }
+    }
+}
+
+/// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
+/// Can be removed after all refactors are done.
+fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
+    drop(rlock)
+}
+
+/// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
+/// Can be removed after all refactors are done.
+fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+    drop(rlock)
+}
+
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
@@ -129,7 +217,24 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>,
+    /// The tuple has two elements.
+    /// 1. `LayerFileManager` keeps track of the various physical representations of the layer files (inmem, local, remote).
+    /// 2. `LayerMap`, the acceleration data structure for `get_reconstruct_data`.
+    ///
+    /// `LayerMap` maps out the `(PAGE,LSN) / (KEY,LSN)` space, which is composed of `(KeyRange, LsnRange)` rectangles.
+    /// We describe these rectangles through the `PersistentLayerDesc` struct.
+    ///
+    /// When we want to reconstruct a page, we first find the `PersistentLayerDesc`'s that we need for page reconstruction,
+    /// using `LayerMap`. Then, we use `LayerFileManager` to get the `PersistentLayer`'s that correspond to the
+    /// `PersistentLayerDesc`'s.
+    ///
+    /// Hence, it's important to keep things coherent. The `LayerFileManager` must always have an entry for all
+    /// `PersistentLayerDesc`'s in the `LayerMap`. If it doesn't, `LayerFileManager::get_from_desc` will panic at
+    /// runtime, e.g., during page reconstruction.
+    ///
+    /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
+    /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
+    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -599,7 +704,8 @@ impl Timeline {
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
     pub async fn layer_size_sum(&self) -> u64 {
-        let layer_map = self.layers.read().await;
+        let guard = self.layers.read().await;
+        let (layer_map, _) = &*guard;
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
             size += l.file_size();
@@ -909,7 +1015,8 @@ impl Timeline {
     pub async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let open_layer_size = {
-            let layers = self.layers.read().await;
+            let guard = self.layers.read().await;
+            let (layers, _) = &*guard;
             let Some(open_layer) = layers.open_layer.as_ref() else {
                 return Ok(());
             };
@@ -1040,7 +1147,8 @@ impl Timeline {
     }
 
     pub async fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
-        let layer_map = self.layers.read().await;
+        let guard = self.layers.read().await;
+        let (layer_map, mapping) = &*guard;
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
             in_memory_layers.push(open_layer.info());
@@ -1051,6 +1159,7 @@ impl Timeline {
 
         let mut historic_layers = Vec::new();
         for historic_layer in layer_map.iter_historic_layers() {
+            let historic_layer = mapping.get_from_desc(&historic_layer);
             historic_layers.push(historic_layer.info(reset));
         }
 
@@ -1160,7 +1269,8 @@ impl Timeline {
         }
 
         // start the batch update
-        let mut layer_map = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layer_map, mapping) = &mut *guard;
         let mut batch_updates = layer_map.batch_update();
 
         let mut results = Vec::with_capacity(layers_to_evict.len());
@@ -1169,14 +1279,19 @@ impl Timeline {
             let res = if cancel.is_cancelled() {
                 None
             } else {
-                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut batch_updates))
+                Some(self.evict_layer_batch_impl(
+                    &layer_removal_guard,
+                    l,
+                    &mut batch_updates,
+                    mapping,
+                ))
             };
             results.push(res);
         }
 
         // commit the updates & release locks
         batch_updates.flush();
-        drop(layer_map);
+        drop_wlock(guard);
         drop(layer_removal_guard);
 
         assert_eq!(results.len(), layers_to_evict.len());
@@ -1187,10 +1302,9 @@ impl Timeline {
         &self,
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
-        batch_updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+        batch_updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<bool> {
-        use super::layer_map::Replacement;
-
         if local_layer.is_remote_layer() {
             // TODO(issue #3851): consider returning an err here instead of false,
             // which is the same out the match later
@@ -1238,13 +1352,10 @@ impl Timeline {
             ),
         });
 
-        let replaced = match batch_updates.replace_historic(
-            local_layer.layer_desc().clone(),
-            local_layer,
-            new_remote_layer.layer_desc().clone(),
-            new_remote_layer,
-        )? {
-            Replacement::Replaced { .. } => {
+        assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
+
+        let succeed = match mapping.replace_and_verify(local_layer.clone(), new_remote_layer) {
+            Ok(()) => {
                 if let Err(e) = local_layer.delete_resident_layer_file() {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
@@ -1270,33 +1381,29 @@ impl Timeline {
                         .read()
                         .unwrap()
                         .observe(delta);
-                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
-                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
+                    info!(layer=%local_layer, "evicted layer after unknown residence period");
                 }
 
                 true
             }
-            Replacement::NotFound => {
-                debug!(evicted=?local_layer, "layer was no longer in layer map");
-                false
-            }
-            Replacement::RemovalBuffered => {
-                unreachable!("not doing anything else in this batch")
-            }
-            Replacement::Unexpected(other) => {
-                error!(
-                    local_layer.ptr=?Arc::as_ptr(local_layer),
-                    other.ptr=?Arc::as_ptr(&other),
-                    ?other,
-                    "failed to replace");
+            Err(err) => {
+                if cfg!(debug_assertions) {
+                    panic!("failed to replace: {err}, evicted: {local_layer:?}");
+                } else {
+                    error!(evicted=?local_layer, "failed to replace: {err}");
+                }
                 false
             }
         };
 
-        Ok(replaced)
+        Ok(succeed)
     }
 }
+
+/// Number of times we will compute partition within a checkpoint distance.
+const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
@@ -1418,7 +1525,10 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: tokio::sync::RwLock::new(LayerMap::default()),
+                layers: Arc::new(tokio::sync::RwLock::new((
+                    LayerMap::default(),
+                    LayerFileManager::new(),
+                ))),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -1492,7 +1602,8 @@ impl Timeline {
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
             };
-            result.repartition_threshold = result.get_checkpoint_distance() / 10;
+            result.repartition_threshold =
+                result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
             result
                 .metrics
                 .last_record_gauge
@@ -1602,14 +1713,15 @@ impl Timeline {
         let mut layers = self.layers.try_write().expect(
             "in the context where we call this function, no other task has access to the object",
         );
-        layers.next_open_layer_at = Some(Lsn(start_lsn.0));
+        layers.0.next_open_layer_at = Some(Lsn(start_lsn.0));
     }
 
     ///
     /// Scan the timeline directory to populate the layer map.
     ///
     pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, mapping) = &mut *guard;
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
 
@@ -1652,7 +1764,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(layer.layer_desc().clone(), Arc::new(layer));
+                self.insert_historic_layer(Arc::new(layer), &mut updates, mapping);
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1684,7 +1796,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(layer.layer_desc().clone(), Arc::new(layer));
+                self.insert_historic_layer(Arc::new(layer), &mut updates, mapping);
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1738,7 +1850,8 @@ impl Timeline {
 
         // We're holding a layer map lock for a while but this
         // method is only called during init so it's fine.
-        let mut layer_map = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layer_map, mapping) = &mut *guard;
         let mut updates = layer_map.batch_update();
         for remote_layer_name in &index_part.timeline_layers {
             let local_layer = local_only_layers.remove(remote_layer_name);
@@ -1783,7 +1896,7 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
-                        updates.remove_historic(local_layer.layer_desc().clone(), local_layer);
+                        self.remove_historic_layer(local_layer, &mut updates, mapping);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1822,7 +1935,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    updates.insert_historic(remote_layer.layer_desc().clone(), remote_layer);
+                    self.insert_historic_layer(remote_layer, &mut updates, mapping);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1849,7 +1962,7 @@ impl Timeline {
                         ),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    updates.insert_historic(remote_layer.layer_desc().clone(), remote_layer);
+                    self.insert_historic_layer(remote_layer, &mut updates, mapping);
                 }
             }
         }
@@ -1888,13 +2001,14 @@ impl Timeline {
 
         let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
 
-        let local_layers = self
-            .layers
-            .read()
-            .await
-            .iter_historic_layers()
-            .map(|l| (l.filename(), l))
-            .collect::<HashMap<_, _>>();
+        let local_layers = {
+            let guard = self.layers.read().await;
+            let (layers, mapping) = &*guard;
+            layers
+                .iter_historic_layers()
+                .map(|l| (l.filename(), mapping.get_from_desc(&l)))
+                .collect::<HashMap<_, _>>()
+        };
 
         // If no writes happen, new branches do not have any layers, only the metadata file.
         let has_local_layers = !local_layers.is_empty();
@@ -2265,14 +2379,40 @@ impl Timeline {
     }
 
     async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
-        for historic_layer in self.layers.read().await.iter_historic_layers() {
+        let guard = self.layers.read().await;
+        let (layers, mapping) = &*guard;
+        for historic_layer in layers.iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
             if layer_file_name == historic_layer_name {
-                return Some(historic_layer);
+                return Some(mapping.get_from_desc(&historic_layer));
             }
         }
 
         None
+    }
+
+    /// Helper function to insert a layer from both layer map and layer file manager. Will be removed in the future
+    /// after we introduce `LayerMapManager`.
+    fn insert_historic_layer(
+        &self,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
+    ) {
+        updates.insert_historic(layer.layer_desc().clone());
+        mapping.insert(layer);
+    }
+
+    /// Helper function to remove a layer from both layer map and layer file manager. Will be removed in the future
+    /// after we introduce `LayerMapManager`.
+    fn remove_historic_layer(
+        &self,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
+    ) {
+        updates.remove_historic(layer.layer_desc().clone());
+        mapping.remove(layer);
     }
 
     /// Removes the layer from local FS (if present) and from memory.
@@ -2281,9 +2421,11 @@ impl Timeline {
         &self,
         // we cannot remove layers otherwise, since gc and compaction will race
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layer: Arc<dyn PersistentLayer>,
-        updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+        layer: Arc<PersistentLayerDesc>,
+        updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
+        let layer = mapping.get_from_desc(&layer);
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
             let layer_file_size = layer.file_size();
@@ -2297,7 +2439,8 @@ impl Timeline {
         //      won't be needed for page reconstruction for this timeline,
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
-        updates.remove_historic(layer.layer_desc().clone(), layer);
+        updates.remove_historic(layer.layer_desc().clone());
+        mapping.remove(layer);
 
         Ok(())
     }
@@ -2319,11 +2462,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 format!("{}", local_path.display())
             }
             None => {
-                format!(
-                    "remote {}/{}",
-                    self.get_timeline_id(),
-                    self.filename().file_name()
-                )
+                format!("remote {}/{self}", self.get_timeline_id())
             }
         }
     }
@@ -2331,11 +2470,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!(
-            "timeline {} in-memory {}",
-            self.get_timeline_id(),
-            self.short_id()
-        )
+        format!("timeline {} in-memory {self}", self.get_timeline_id())
     }
 }
 
@@ -2482,7 +2617,8 @@ impl Timeline {
             #[allow(clippy::never_loop)] // see comment at bottom of this loop
             'layer_map_search: loop {
                 let remote_layer = {
-                    let layers = timeline.layers.read().await;
+                    let guard = timeline.layers.read().await;
+                    let (layers, mapping) = &*guard;
 
                     // Check the open and frozen in-memory layers first, in order from newest
                     // to oldest.
@@ -2544,6 +2680,7 @@ impl Timeline {
                     }
 
                     if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                        let layer = mapping.get_from_desc(&layer);
                         // If it's a remote layer, download it and retry.
                         if let Some(remote_layer) =
                             super::storage_layer::downcast_remote_layer(&layer)
@@ -2665,7 +2802,8 @@ impl Timeline {
     /// Get a handle to the latest layer for appending.
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, _) = &mut *guard;
 
         ensure!(lsn.is_aligned());
 
@@ -2742,7 +2880,8 @@ impl Timeline {
         } else {
             Some(self.write_lock.lock().await)
         };
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, _) = &mut *guard;
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
@@ -2756,7 +2895,7 @@ impl Timeline {
             layers.next_open_layer_at = Some(end_lsn);
             self.last_freeze_at.store(end_lsn);
         }
-        drop(layers);
+        drop_wlock(guard);
     }
 
     /// Layer flusher task's main loop.
@@ -2780,7 +2919,8 @@ impl Timeline {
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 let layer_to_flush = {
-                    let layers = self.layers.read().await;
+                    let guard = self.layers.read().await;
+                    let (layers, _) = &*guard;
                     layers.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
@@ -2850,7 +2990,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -2903,15 +3043,17 @@ impl Timeline {
         fail_point!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
-        // in-memory layer from the map now.
+        // in-memory layer from the map now. We do not modify `LayerFileManager` because
+        // it only contains persistent layers. The flushed layer is stored in
+        // the mapping in `create_delta_layer`.
         {
             let mut layers = self.layers.write().await;
-            let l = layers.frozen_layers.pop_front();
+            let l = layers.0.frozen_layers.pop_front();
 
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(LayerMap::compare_arced_layers(&l.unwrap(), &frozen_layer));
+            assert!(compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
         }
@@ -3044,14 +3186,15 @@ impl Timeline {
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, mapping) = &mut *guard;
         let mut batch_updates = layers.batch_update();
         l.access_stats().record_residence_event(
             &batch_updates,
             LayerResidenceStatus::Resident,
             LayerResidenceEventReason::LayerCreate,
         );
-        batch_updates.insert_historic(l.layer_desc().clone(), l);
+        self.insert_historic_layer(l, &mut batch_updates, mapping);
         batch_updates.flush();
 
         // update metrics
@@ -3100,7 +3243,8 @@ impl Timeline {
     ) -> anyhow::Result<bool> {
         let threshold = self.get_image_creation_threshold();
 
-        let layers = self.layers.read().await;
+        let guard = self.layers.read().await;
+        let (layers, _) = &*guard;
 
         let mut max_deltas = 0;
         {
@@ -3278,7 +3422,8 @@ impl Timeline {
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, mapping) = &mut *guard;
         let mut updates = layers.batch_update();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
 
@@ -3300,10 +3445,10 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(l.layer_desc().clone(), l);
+            self.insert_historic_layer(l, &mut updates, mapping);
         }
         updates.flush();
-        drop(layers);
+        drop_wlock(guard);
         timer.stop_and_record();
 
         Ok(layer_paths_to_upload)
@@ -3313,7 +3458,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
+    deltas_to_compact: Vec<Arc<PersistentLayerDesc>>,
 }
 
 /// Top-level failure to compact.
@@ -3370,14 +3515,14 @@ struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
     tenant_id: Option<TenantId>,
     timeline_id: Option<TimelineId>,
-    first_read_lock_acquisition_micros: DurationRecorder,
-    get_level0_deltas_plus_drop_lock_micros: DurationRecorder,
-    level0_deltas_count: Option<usize>,
-    time_spent_between_locks: DurationRecorder,
-    second_read_lock_acquisition_micros: DurationRecorder,
-    second_read_lock_held_micros: DurationRecorder,
-    sort_holes_micros: DurationRecorder,
+    read_lock_acquisition_micros: DurationRecorder,
+    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
+    read_lock_held_prerequisites_micros: DurationRecorder,
+    read_lock_held_compute_holes_micros: DurationRecorder,
+    read_lock_drop_micros: DurationRecorder,
+    prepare_iterators_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
+    level0_deltas_count: Option<usize>,
     new_deltas_count: Option<usize>,
     new_deltas_size: Option<u64>,
 }
@@ -3390,14 +3535,14 @@ struct CompactLevel0Phase1Stats {
     tenant_id: TenantId,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
-    first_read_lock_acquisition_micros: RecordedDuration,
-    get_level0_deltas_plus_drop_lock_micros: RecordedDuration,
-    level0_deltas_count: usize,
-    time_spent_between_locks: RecordedDuration,
-    second_read_lock_acquisition_micros: RecordedDuration,
-    second_read_lock_held_micros: RecordedDuration,
-    sort_holes_micros: RecordedDuration,
+    read_lock_acquisition_micros: RecordedDuration,
+    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
+    read_lock_held_prerequisites_micros: RecordedDuration,
+    read_lock_held_compute_holes_micros: RecordedDuration,
+    read_lock_drop_micros: RecordedDuration,
+    prepare_iterators_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
+    level0_deltas_count: usize,
     new_deltas_count: usize,
     new_deltas_size: u64,
 }
@@ -3406,54 +3551,51 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
     type Error = anyhow::Error;
 
     fn try_from(value: CompactLevel0Phase1StatsBuilder) -> Result<Self, Self::Error> {
-        let CompactLevel0Phase1StatsBuilder {
-            version,
-            tenant_id,
-            timeline_id,
-            first_read_lock_acquisition_micros,
-            get_level0_deltas_plus_drop_lock_micros,
-            level0_deltas_count,
-            time_spent_between_locks,
-            second_read_lock_acquisition_micros,
-            second_read_lock_held_micros,
-            sort_holes_micros,
-            write_layer_files_micros,
-            new_deltas_count,
-            new_deltas_size,
-        } = value;
-        Ok(CompactLevel0Phase1Stats {
-            version: version.ok_or_else(|| anyhow::anyhow!("version not set"))?,
-            tenant_id: tenant_id.ok_or_else(|| anyhow::anyhow!("tenant_id not set"))?,
-            timeline_id: timeline_id.ok_or_else(|| anyhow::anyhow!("timeline_id not set"))?,
-            first_read_lock_acquisition_micros: first_read_lock_acquisition_micros
+        Ok(Self {
+            version: value.version.ok_or_else(|| anyhow!("version not set"))?,
+            tenant_id: value
+                .tenant_id
+                .ok_or_else(|| anyhow!("tenant_id not set"))?,
+            timeline_id: value
+                .timeline_id
+                .ok_or_else(|| anyhow!("timeline_id not set"))?,
+            read_lock_acquisition_micros: value
+                .read_lock_acquisition_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("first_read_lock_acquisition_micros not set"))?,
-            get_level0_deltas_plus_drop_lock_micros: get_level0_deltas_plus_drop_lock_micros
+                .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
+            read_lock_held_spawn_blocking_startup_micros: value
+                .read_lock_held_spawn_blocking_startup_micros
                 .into_recorded()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("get_level0_deltas_plus_drop_lock_micros not set")
-                })?,
-            level0_deltas_count: level0_deltas_count
-                .ok_or_else(|| anyhow::anyhow!("level0_deltas_count not set"))?,
-            time_spent_between_locks: time_spent_between_locks
+                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
+            read_lock_held_prerequisites_micros: value
+                .read_lock_held_prerequisites_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("time_spent_between_locks not set"))?,
-            second_read_lock_acquisition_micros: second_read_lock_acquisition_micros
+                .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
+            read_lock_held_compute_holes_micros: value
+                .read_lock_held_compute_holes_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("second_read_lock_acquisition_micros not set"))?,
-            second_read_lock_held_micros: second_read_lock_held_micros
+                .ok_or_else(|| anyhow!("read_lock_held_compute_holes_micros not set"))?,
+            read_lock_drop_micros: value
+                .read_lock_drop_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("second_read_lock_held_micros not set"))?,
-            sort_holes_micros: sort_holes_micros
+                .ok_or_else(|| anyhow!("read_lock_drop_micros not set"))?,
+            prepare_iterators_micros: value
+                .prepare_iterators_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("sort_holes_micros not set"))?,
-            write_layer_files_micros: write_layer_files_micros
+                .ok_or_else(|| anyhow!("prepare_iterators_micros not set"))?,
+            write_layer_files_micros: value
+                .write_layer_files_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("write_layer_files_micros not set"))?,
-            new_deltas_count: new_deltas_count
-                .ok_or_else(|| anyhow::anyhow!("new_deltas_count not set"))?,
-            new_deltas_size: new_deltas_size
-                .ok_or_else(|| anyhow::anyhow!("new_deltas_size not set"))?,
+                .ok_or_else(|| anyhow!("write_layer_files_micros not set"))?,
+            level0_deltas_count: value
+                .level0_deltas_count
+                .ok_or_else(|| anyhow!("level0_deltas_count not set"))?,
+            new_deltas_count: value
+                .new_deltas_count
+                .ok_or_else(|| anyhow!("new_deltas_count not set"))?,
+            new_deltas_size: value
+                .new_deltas_size
+                .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
     }
 }
@@ -3464,30 +3606,23 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
-    async fn compact_level0_phase1(
-        &self,
+    fn compact_level0_phase1(
+        self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
+        mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        let mut stats = CompactLevel0Phase1StatsBuilder {
-            version: Some(1),
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
-            ..Default::default()
-        };
-
-        let begin = tokio::time::Instant::now();
-        let layers = self.layers.read().await;
-        let now = tokio::time::Instant::now();
-        stats.first_read_lock_acquisition_micros =
-            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-        let mut level0_deltas = layers.get_level0_deltas()?;
-        drop(layers);
+        stats.read_lock_held_spawn_blocking_startup_micros =
+            stats.read_lock_acquisition_micros.till_now(); // set by caller
+        let (layers, mapping) = &*guard;
+        let level0_deltas = layers.get_level0_deltas()?;
+        let mut level0_deltas = level0_deltas
+            .into_iter()
+            .map(|x| mapping.get_from_desc(&x))
+            .collect_vec();
         stats.level0_deltas_count = Some(level0_deltas.len());
-        stats.get_level0_deltas_plus_drop_lock_micros =
-            stats.first_read_lock_acquisition_micros.till_now();
-
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
@@ -3534,7 +3669,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .inspect(|l| info!("compact requires download of {l}"))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3558,12 +3693,59 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            info!("compact includes {l}");
         }
 
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
+
+        stats.read_lock_held_prerequisites_micros = stats
+            .read_lock_held_spawn_blocking_startup_micros
+            .till_now();
+
+        // Determine N largest holes where N is number of compacted layers.
+        let max_holes = deltas_to_compact.len();
+        let last_record_lsn = self.get_last_record_lsn();
+        let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
+        let min_hole_coverage_size = 3; // TODO: something more flexible?
+
+        // min-heap (reserve space for one more element added before eviction)
+        let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
+        let mut prev: Option<Key> = None;
+        for (next_key, _next_lsn, _size) in itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
+        )? {
+            if let Some(prev_key) = prev {
+                // just first fast filter
+                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
+                    let key_range = prev_key..next_key;
+                    // Measuring hole by just subtraction of i128 representation of key range boundaries
+                    // has not so much sense, because largest holes will corresponds field1/field2 changes.
+                    // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
+                    // That is why it is better to measure size of hole as number of covering image layers.
+                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
+                    if coverage_size >= min_hole_coverage_size {
+                        heap.push(Hole {
+                            key_range,
+                            coverage_size,
+                        });
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
+                        }
+                    }
+                }
+            }
+            prev = Some(next_key.next());
+        }
+        stats.read_lock_held_compute_holes_micros =
+            stats.read_lock_held_prerequisites_micros.till_now();
+        drop_rlock(guard);
+        stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
+        let mut holes = heap.into_vec();
+        holes.sort_unstable_by_key(|hole| hole.key_range.start);
+        let mut next_hole = 0; // index of next hole in holes vector
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
@@ -3604,50 +3786,7 @@ impl Timeline {
             },
         )?;
 
-        // Determine N largest holes where N is number of compacted layers.
-        let max_holes = deltas_to_compact.len();
-        let last_record_lsn = self.get_last_record_lsn();
-        stats.time_spent_between_locks = stats.get_level0_deltas_plus_drop_lock_micros.till_now();
-        let layers = self.layers.read().await; // Is'n it better to hold original layers lock till here?
-        stats.second_read_lock_acquisition_micros = stats.time_spent_between_locks.till_now();
-        let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
-        let min_hole_coverage_size = 3; // TODO: something more flexible?
-
-        // min-heap (reserve space for one more element added before eviction)
-        let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
-        let mut prev: Option<Key> = None;
-        for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
-        )? {
-            if let Some(prev_key) = prev {
-                // just first fast filter
-                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
-                    let key_range = prev_key..next_key;
-                    // Measuring hole by just subtraction of i128 representation of key range boundaries
-                    // has not so much sense, because largest holes will corresponds field1/field2 changes.
-                    // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
-                    // That is why it is better to measure size of hole as number of covering image layers.
-                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
-                    if coverage_size >= min_hole_coverage_size {
-                        heap.push(Hole {
-                            key_range,
-                            coverage_size,
-                        });
-                        if heap.len() > max_holes {
-                            heap.pop(); // remove smallest hole
-                        }
-                    }
-                }
-            }
-            prev = Some(next_key.next());
-        }
-        drop(layers);
-        stats.second_read_lock_held_micros = stats.second_read_lock_acquisition_micros.till_now();
-        let mut holes = heap.into_vec();
-        holes.sort_unstable_by_key(|hole| hole.key_range.start);
-        let mut next_hole = 0; // index of next hole in holes vector
-        stats.sort_holes_micros = stats.second_read_lock_held_micros.till_now();
+        stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -3807,7 +3946,7 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
-        stats.write_layer_files_micros = stats.sort_holes_micros.till_now();
+        stats.write_layer_files_micros = stats.prepare_iterators_micros.till_now();
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
 
@@ -3829,7 +3968,10 @@ impl Timeline {
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
-            deltas_to_compact,
+            deltas_to_compact: deltas_to_compact
+                .into_iter()
+                .map(|x| Arc::new(x.layer_desc().clone()))
+                .collect(),
         })
     }
 
@@ -3846,9 +3988,36 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self
-            .compact_level0_phase1(layer_removal_cs.clone(), target_file_size, ctx)
-            .await?;
+        } = {
+            let phase1_span = info_span!("compact_level0_phase1");
+            let myself = Arc::clone(self);
+            let ctx = ctx.attached_child(); // technically, the spawn_blocking can outlive this future
+            let mut stats = CompactLevel0Phase1StatsBuilder {
+                version: Some(2),
+                tenant_id: Some(self.tenant_id),
+                timeline_id: Some(self.timeline_id),
+                ..Default::default()
+            };
+
+            let begin = tokio::time::Instant::now();
+            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
+            let now = tokio::time::Instant::now();
+            stats.read_lock_acquisition_micros =
+                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+            let layer_removal_cs = layer_removal_cs.clone();
+            tokio::task::spawn_blocking(move || {
+                let _entered = phase1_span.enter();
+                myself.compact_level0_phase1(
+                    layer_removal_cs,
+                    phase1_layers_locked,
+                    stats,
+                    target_file_size,
+                    &ctx,
+                )
+            })
+            .await
+            .context("spawn_blocking")??
+        };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
@@ -3866,7 +4035,8 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, mapping) = &mut *guard;
         let mut updates = layers.batch_update();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
@@ -3898,7 +4068,7 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(x.layer_desc().clone(), x);
+            self.insert_historic_layer(x, &mut updates, mapping);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -3906,10 +4076,13 @@ impl Timeline {
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             layer_names_to_delete.push(l.filename());
-            self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates)?;
+            // NB: the layer file identified by descriptor `l` is guaranteed to be present
+            // in the LayerFileManager because we kept holding `layer_removal_cs` the entire
+            // time, even though we dropped `Timeline::layers` inbetween.
+            self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates, mapping)?;
         }
         updates.flush();
-        drop(layers);
+        drop_wlock(guard);
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
@@ -4126,7 +4299,8 @@ impl Timeline {
         // 4. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
-        let mut layers = self.layers.write().await;
+        let mut guard = self.layers.write().await;
+        let (layers, mapping) = &mut *guard;
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
 
@@ -4134,8 +4308,8 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().file_name(),
-                    horizon_cutoff
+                    l.filename(),
+                    horizon_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
@@ -4145,8 +4319,8 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().file_name(),
-                    pitr_cutoff
+                    l.filename(),
+                    pitr_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
@@ -4164,7 +4338,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().file_name(),
+                        l.filename(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -4195,17 +4369,14 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
             {
-                debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().file_name()
-                );
+                debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
                 // collecting the layers.
                 // It is not so obvious whether we need to propagate information only about
                 // delta layers. Image layers can form "stairs" preventing old image from been deleted.
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
-                if self.get_gc_feedback() && l.is_incremental() && !LayerMap::is_l0(&*l) {
+                if self.get_gc_feedback() && l.is_incremental() && !LayerMap::is_l0(&l) {
                     wanted_image_layers.add_range(l.get_key_range());
                 }
                 result.layers_not_updated += 1;
@@ -4215,7 +4386,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().file_name(),
+                l.filename(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -4242,6 +4413,7 @@ impl Timeline {
                         layer_removal_cs.clone(),
                         doomed_layer,
                         &mut updates,
+                        mapping,
                     )?; // FIXME: schedule succeeded deletions before returning?
                     result.layers_removed += 1;
                 }
@@ -4368,7 +4540,7 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
@@ -4406,7 +4578,7 @@ impl Timeline {
             TaskKind::RemoteDownloadTask,
             Some(self.tenant_id),
             Some(self.timeline_id),
-            &format!("download layer {}", remote_layer.short_id()),
+            &format!("download layer {}", remote_layer),
             false,
             async move {
                 let remote_client = self_clone.remote_client.as_ref().unwrap();
@@ -4426,42 +4598,15 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let mut layers = self_clone.layers.write().await;
-                    let mut updates = layers.batch_update();
-                    let new_layer = remote_layer.create_downloaded_layer(&updates, self_clone.conf, *size);
+                    let mut guard = self_clone.layers.write().await;
+                    let (layers, mapping) = &mut *guard;
+                    let updates = layers.batch_update();
+                    let new_layer =
+                        remote_layer.create_downloaded_layer(&updates, self_clone.conf, *size);
                     {
-                        use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        let failure = match updates.replace_historic(l.layer_desc().clone(), &l, new_layer.layer_desc().clone(), new_layer) {
-                            Ok(Replacement::Replaced { .. }) => false,
-                            Ok(Replacement::NotFound) => {
-                                // TODO: the downloaded file should probably be removed, otherwise
-                                // it will be added to the layermap on next load? we should
-                                // probably restart any get_reconstruct_data search as well.
-                                //
-                                // See: https://github.com/neondatabase/neon/issues/3533
-                                error!("replacing downloaded layer into layermap failed because layer was not found");
-                                true
-                            }
-                            Ok(Replacement::RemovalBuffered) => {
-                                unreachable!("current implementation does not remove anything")
-                            }
-                            Ok(Replacement::Unexpected(other)) => {
-                                // if the other layer would have the same pointer value as
-                                // expected, it means they differ only on vtables.
-                                //
-                                // otherwise there's no known reason for this to happen as
-                                // compacted layers should have different covering rectangle
-                                // leading to produce Replacement::NotFound.
-
-                                error!(
-                                    expected.ptr = ?Arc::as_ptr(&l),
-                                    other.ptr = ?Arc::as_ptr(&other),
-                                    ?other,
-                                    "replacing downloaded layer into layermap failed because another layer was found instead of expected"
-                                );
-                                true
-                            }
+                        let failure = match mapping.replace_and_verify(l, new_layer) {
+                            Ok(()) => false,
                             Err(e) => {
                                 // this is a precondition failure, the layer filename derived
                                 // attributes didn't match up, which doesn't seem likely.
@@ -4489,7 +4634,7 @@ impl Timeline {
                         }
                     }
                     updates.flush();
-                    drop(layers);
+                    drop_wlock(guard);
 
                     info!("on-demand download successful");
 
@@ -4500,7 +4645,10 @@ impl Timeline {
                     remote_layer.ongoing_download.close();
                 } else {
                     // Keep semaphore open. We'll drop the permit at the end of the function.
-                    error!("layer file download failed: {:?}", result.as_ref().unwrap_err());
+                    error!(
+                        "layer file download failed: {:?}",
+                        result.as_ref().unwrap_err()
+                    );
                 }
 
                 // Don't treat it as an error if the task that triggered the download
@@ -4514,7 +4662,8 @@ impl Timeline {
                 drop(permit);
 
                 Ok(())
-            }.in_current_span(),
+            }
+            .in_current_span(),
         );
 
         receiver.await.context("download task cancelled")?
@@ -4584,9 +4733,11 @@ impl Timeline {
     ) {
         let mut downloads = Vec::new();
         {
-            let layers = self.layers.read().await;
+            let guard = self.layers.read().await;
+            let (layers, mapping) = &*guard;
             layers
                 .iter_historic_layers()
+                .map(|l| mapping.get_from_desc(&l))
                 .filter_map(|l| l.downcast_remote_layer())
                 .map(|l| self.download_remote_layer(l))
                 .for_each(|dl| downloads.push(dl))
@@ -4687,7 +4838,8 @@ impl LocalLayerInfoForDiskUsageEviction {
 
 impl Timeline {
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
-        let layers = self.layers.read().await;
+        let guard = self.layers.read().await;
+        let (layers, mapping) = &*guard;
 
         let mut max_layer_size: Option<u64> = None;
         let mut resident_layers = Vec::new();
@@ -4696,19 +4848,18 @@ impl Timeline {
             let file_size = l.file_size();
             max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
+            let l = mapping.get_from_desc(&l);
+
             if l.is_remote_layer() {
                 continue;
             }
 
-            let last_activity_ts = l
-                .access_stats()
-                .latest_activity()
-                .unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
+                // We only use this fallback if there's an implementation error.
+                // `latest_activity` already does rate-limited warn!() log.
+                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
+                SystemTime::now()
+            });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,
@@ -4853,4 +5004,32 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
             missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
         ),
     }
+}
+
+/// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+///
+/// Returns `true` if the two `Arc` point to the same layer, false otherwise.
+///
+/// If comparing persistent layers, ALWAYS compare the layer descriptor key.
+#[inline(always)]
+pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
+    // "dyn Trait" objects are "fat pointers" in that they have two components:
+    // - pointer to the object
+    // - pointer to the vtable
+    //
+    // rust does not provide a guarantee that these vtables are unique, but however
+    // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+    // pointer and the vtable need to be equal.
+    //
+    // See: https://github.com/rust-lang/rust/issues/103763
+    //
+    // A future version of rust will most likely use this form below, where we cast each
+    // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
+    // not affect the comparison.
+    //
+    // See: https://github.com/rust-lang/rust/pull/106450
+    let left = Arc::as_ptr(left) as *const ();
+    let right = Arc::as_ptr(right) as *const ();
+
+    left == right
 }

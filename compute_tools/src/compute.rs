@@ -134,6 +134,84 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
     }
 }
 
+/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
+/// that we give to customers
+fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+    let roles = spec
+        .cluster
+        .roles
+        .iter()
+        .map(|r| format!("'{}'", escape_literal(&r.name)))
+        .collect::<Vec<_>>();
+
+    let dbs = spec
+        .cluster
+        .databases
+        .iter()
+        .map(|db| format!("'{}'", escape_literal(&db.name)))
+        .collect::<Vec<_>>();
+
+    let roles_decl = if roles.is_empty() {
+        String::from("roles text[] := NULL;")
+    } else {
+        format!(
+            r#"
+               roles text[] := ARRAY(SELECT rolname
+                                     FROM pg_catalog.pg_roles
+                                     WHERE rolname IN ({}));"#,
+            roles.join(", ")
+        )
+    };
+
+    let database_decl = if dbs.is_empty() {
+        String::from("dbs text[] := NULL;")
+    } else {
+        format!(
+            r#"
+               dbs text[] := ARRAY(SELECT datname
+                                   FROM pg_catalog.pg_database
+                                   WHERE datname IN ({}));"#,
+            dbs.join(", ")
+        )
+    };
+
+    // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
+    // (see https://www.postgresql.org/docs/current/ddl-priv.html)
+    let query = format!(
+        r#"
+            DO $$
+                DECLARE
+                    r text;
+                    {}
+                    {}
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
+                    THEN
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
+                        IF array_length(roles, 1) IS NOT NULL THEN
+                            EXECUTE format('GRANT neon_superuser TO %s',
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
+                            FOREACH r IN ARRAY roles LOOP
+                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', quote_ident(r));
+                            END LOOP;
+                        END IF;
+                        IF array_length(dbs, 1) IS NOT NULL THEN
+                            EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %s TO neon_superuser',
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(dbs) as x), ', '));
+                        END IF;
+                    END IF;
+                END
+            $$;"#,
+        roles_decl, database_decl,
+    );
+    info!("Neon superuser created:\n{}", &query);
+    client
+        .simple_query(&query)
+        .map_err(|e| anyhow::anyhow!(e).context(query))?;
+    Ok(())
+}
+
 impl ComputeNode {
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
@@ -158,7 +236,7 @@ impl ComputeNode {
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
-    #[instrument(skip(self, compute_state))]
+    #[instrument(skip_all, fields(%lsn))]
     fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Utc::now();
@@ -205,8 +283,8 @@ impl ComputeNode {
 
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
-    #[instrument(skip(self, storage_auth_token))]
-    fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+    #[instrument(skip_all)]
+    pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
@@ -250,7 +328,7 @@ impl ComputeNode {
 
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
-    #[instrument(skip(self, compute_state))]
+    #[instrument(skip_all)]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
@@ -308,7 +386,7 @@ impl ComputeNode {
 
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub fn start_postgres(
         &self,
         storage_auth_token: Option<String>,
@@ -332,7 +410,7 @@ impl ComputeNode {
     }
 
     /// Do initial configuration of the already started Postgres.
-    #[instrument(skip(self, compute_state))]
+    #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.
@@ -353,6 +431,8 @@ impl ComputeNode {
                     .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
                 let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                // Disable forwarding so that users don't get a cloud_admin role
+                client.simple_query("SET neon.forward_ddl = false")?;
                 client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
@@ -363,14 +443,16 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
-        // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.
         client.simple_query("SET neon.forward_ddl = false")?;
+
+        // Proceed with post-startup configuration. Note, that order of operations is important.
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+        create_neon_superuser(spec, &mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
@@ -382,7 +464,7 @@ impl ComputeNode {
     // We could've wrapped this around `pg_ctl reload`, but right now we don't use
     // `pg_ctl` for start / stop, so this just seems much easier to do as we already
     // have opened connection to Postgres and superuser access.
-    #[instrument(skip(self, client))]
+    #[instrument(skip_all)]
     fn pg_reload_conf(&self, client: &mut Client) -> Result<()> {
         client.simple_query("SELECT pg_reload_conf()")?;
         Ok(())
@@ -390,7 +472,7 @@ impl ComputeNode {
 
     /// Similar to `apply_config()`, but does a bit different sequence of operations,
     /// as it's used to reconfigure a previously started and configured Postgres node.
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
@@ -408,7 +490,7 @@ impl ComputeNode {
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+            handle_grants(&spec, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
         }
 
@@ -425,7 +507,7 @@ impl ComputeNode {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub fn start_compute(&self) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
@@ -440,9 +522,9 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
-
         let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
 
+        let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
             self.apply_config(&compute_state)?;
         }
@@ -450,8 +532,13 @@ impl ComputeNode {
         let startup_end_time = Utc::now();
         {
             let mut state = self.state.lock().unwrap();
-            state.metrics.config_ms = startup_end_time
+            state.metrics.start_postgres_ms = config_time
                 .signed_duration_since(start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.config_ms = startup_end_time
+                .signed_duration_since(config_time)
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;

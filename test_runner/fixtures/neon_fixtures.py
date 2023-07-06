@@ -102,8 +102,8 @@ def base_dir() -> Iterator[Path]:
     yield base_dir
 
 
-@pytest.fixture(scope="session")
-def neon_binpath(base_dir: Path) -> Iterator[Path]:
+@pytest.fixture(scope="function")
+def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have neon binaries locally
         # this is the case for benchmarks run on self-hosted runner
@@ -113,7 +113,6 @@ def neon_binpath(base_dir: Path) -> Iterator[Path]:
     if env_neon_bin := os.environ.get("NEON_BIN"):
         binpath = Path(env_neon_bin)
     else:
-        build_type = os.environ.get("BUILD_TYPE", "debug")
         binpath = base_dir / "target" / build_type
     log.info(f"neon_binpath is {binpath}")
 
@@ -123,7 +122,7 @@ def neon_binpath(base_dir: Path) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
         distrib_dir = Path(env_postgres_bin).resolve()
@@ -147,7 +146,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
     yield output_dir
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
     versioned_dir = pg_distrib_dir / pg_version.v_prefixed
 
@@ -174,7 +173,23 @@ def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "fu
     def myfixture(...)
        ...
     """
-    return "function" if os.environ.get("TEST_SHARED_FIXTURES") is None else "session"
+    scope: Literal["session", "function"]
+
+    if os.environ.get("TEST_SHARED_FIXTURES") is None:
+        # Create the environment in the per-test output directory
+        scope = "function"
+    elif (
+        os.environ.get("BUILD_TYPE") is not None
+        and os.environ.get("DEFAULT_PG_VERSION") is not None
+    ):
+        scope = "session"
+    else:
+        pytest.fail(
+            "Shared environment(TEST_SHARED_FIXTURES) requires BUILD_TYPE and DEFAULT_PG_VERSION to be set",
+            pytrace=False,
+        )
+
+    return scope
 
 
 @pytest.fixture(scope="session")

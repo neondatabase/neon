@@ -394,10 +394,11 @@ impl Layer for DeltaLayer {
     fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
+}
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
 }
 

@@ -186,10 +186,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
     delete:
-      description: "Attempts to delete specified timeline. On 500 errors should be retried"
+      description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
-        "200":
-          description: Ok
         "400":
           description: Error when no tenant id found in path or no timeline id
           content:
@@ -214,6 +212,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Deletion is already in progress, continue polling
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
         "412":
           description: Tenant is missing, or timeline has children
           content:
@@ -718,6 +722,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "406":
+          description: Permanently unsatisfiable request, don't retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "409":
           description: Timeline already exists, creation skipped
           content:

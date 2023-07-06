@@ -23,7 +23,6 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::disk_usage_eviction_task;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -35,6 +34,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
+use crate::{disk_usage_eviction_task, tenant};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -187,6 +187,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
             ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
@@ -327,15 +328,22 @@ async fn timeline_create_handler(
             &ctx,
         )
         .await {
-            Ok(Some(new_timeline)) => {
+            Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
-            Err(err) => Err(ApiError::InternalServerError(err)),
+            Err(tenant::CreateTimelineError::AlreadyExists) => {
+                json_response(StatusCode::CONFLICT, ())
+            }
+            Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
+                json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
+                    format!("{err:#}")
+                ))
+            }
+            Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
     .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
@@ -1128,8 +1136,6 @@ async fn disk_usage_eviction_run(
         freed_bytes: 0,
     };
 
-    use crate::task_mgr::MGMT_REQUEST_RUNTIME;
-
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     let state = get_state(&r);
@@ -1147,7 +1153,7 @@ async fn disk_usage_eviction_run(
     let _g = cancel.drop_guard();
 
     crate::task_mgr::spawn(
-        MGMT_REQUEST_RUNTIME.handle(),
+        crate::task_mgr::BACKGROUND_RUNTIME.handle(),
         TaskKind::DiskUsageEviction,
         None,
         None,

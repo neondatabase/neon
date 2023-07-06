@@ -54,8 +54,14 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
+const BUILD_TAG_DEFAULT: &str = "local";
+
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+
+    let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
+
+    info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
 
@@ -248,6 +254,16 @@ fn main() -> Result<()> {
             .expect("failed to start waiting on Postgres process");
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
+    }
+
+    // Maybe sync safekeepers again, to speed up next startup
+    let compute_state = compute.state.lock().unwrap().clone();
+    let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+    if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        info!("syncing safekeepers on shutdown");
+        let storage_auth_token = pspec.storage_auth_token.clone();
+        let lsn = compute.sync_safekeepers(storage_auth_token)?;
+        info!("synced safekeepers at lsn {lsn}");
     }
 
     if let Err(err) = compute.check_for_core_dumps() {

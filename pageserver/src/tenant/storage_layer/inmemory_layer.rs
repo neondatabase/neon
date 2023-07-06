@@ -131,13 +131,6 @@ impl Layer for InMemoryLayer {
         true
     }
 
-    fn short_id(&self) -> String {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
-        format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
-    }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
@@ -237,6 +230,15 @@ impl Layer for InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
+    }
+}
+
+impl std::fmt::Display for InMemoryLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.read().unwrap();
+
+        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
+        write!(f, "inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
 }
 

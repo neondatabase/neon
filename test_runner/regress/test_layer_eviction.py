@@ -58,7 +58,7 @@ def test_basic_eviction(
     for sk in env.safekeepers:
         sk.stop()
 
-    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_path = env.timeline_dir(tenant_id, timeline_id)
     initial_local_layers = sorted(
         list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
     )

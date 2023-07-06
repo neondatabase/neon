@@ -17,7 +17,7 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
 /// Escape a string for including it in a SQL literal
-fn escape_literal(s: &str) -> String {
+pub fn escape_literal(s: &str) -> String {
     s.replace('\'', "''").replace('\\', "\\\\")
 }
 
@@ -215,7 +215,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
-#[instrument(skip(pg))]
+#[instrument(skip_all, fields(pgdata = %pgdata.display()))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 

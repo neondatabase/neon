@@ -190,7 +190,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
-	elog(LOG, "set local file cache limit to %d", new_size);
+	elog(DEBUG1, "set local file cache limit to %d", new_size);
 	LWLockRelease(lfc_lock);
 }
 

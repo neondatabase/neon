@@ -59,9 +59,14 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "libmetrics_tracing_event_count_total",
     "pageserver_materialized_cache_hits_total",
     "pageserver_materialized_cache_hits_direct_total",
+    "pageserver_page_cache_read_hits_total",
+    "pageserver_page_cache_read_accesses_total",
+    "pageserver_page_cache_size_current_bytes",
+    "pageserver_page_cache_size_max_bytes",
     "pageserver_getpage_reconstruct_seconds_bucket",
     "pageserver_getpage_reconstruct_seconds_count",
     "pageserver_getpage_reconstruct_seconds_sum",
+    *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
