@@ -1,6 +1,9 @@
 //!
 
 mod eviction_task;
+mod logical_size;
+pub mod span;
+pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -8,7 +11,6 @@ use bytes::Bytes;
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
-use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceEventReason, LayerResidenceStatus,
@@ -17,7 +19,7 @@ use pageserver_api::models::{
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
-use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
+use tokio::sync::{oneshot, watch, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantTimelineId;
@@ -28,7 +30,7 @@ use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,6 +40,7 @@ use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
     LayerAccessStats, LayerFileName, RemoteLayer,
 };
+use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
     layer_map::{LayerMap, SearchResult},
@@ -79,6 +82,7 @@ use crate::{is_temporary, task_mgr};
 
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
+use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
@@ -129,7 +133,7 @@ impl LayerFileManager {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename().file_name()))
+            .with_context(|| format!("get layer from desc: {}", desc.filename()))
             .expect("not found")
             .clone()
     }
@@ -364,126 +368,6 @@ pub struct Timeline {
     /// Completion shared between all timelines loaded during startup; used to delay heavier
     /// background tasks until some logical sizes have been calculated.
     initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
-}
-
-/// Internal structure to hold all data needed for logical size calculation.
-///
-/// Calculation consists of two stages:
-///
-/// 1. Initial size calculation. That might take a long time, because it requires
-/// reading all layers containing relation sizes at `initial_part_end`.
-///
-/// 2. Collecting an incremental part and adding that to the initial size.
-/// Increments are appended on walreceiver writing new timeline data,
-/// which result in increase or decrease of the logical size.
-struct LogicalSize {
-    /// Size, potentially slow to compute. Calculating this might require reading multiple
-    /// layers, and even ancestor's layers.
-    ///
-    /// NOTE: size at a given LSN is constant, but after a restart we will calculate
-    /// the initial size at a different LSN.
-    initial_logical_size: OnceCell<u64>,
-
-    /// Semaphore to track ongoing calculation of `initial_logical_size`.
-    initial_size_computation: Arc<tokio::sync::Semaphore>,
-
-    /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
-    initial_part_end: Option<Lsn>,
-
-    /// All other size changes after startup, combined together.
-    ///
-    /// Size shouldn't ever be negative, but this is signed for two reasons:
-    ///
-    /// 1. If we initialized the "baseline" size lazily, while we already
-    /// process incoming WAL, the incoming WAL records could decrement the
-    /// variable and temporarily make it negative. (This is just future-proofing;
-    /// the initialization is currently not done lazily.)
-    ///
-    /// 2. If there is a bug and we e.g. forget to increment it in some cases
-    /// when size grows, but remember to decrement it when it shrinks again, the
-    /// variable could go negative. In that case, it seems better to at least
-    /// try to keep tracking it, rather than clamp or overflow it. Note that
-    /// get_current_logical_size() will clamp the returned value to zero if it's
-    /// negative, and log an error. Could set it permanently to zero or some
-    /// special value to indicate "broken" instead, but this will do for now.
-    ///
-    /// Note that we also expose a copy of this value as a prometheus metric,
-    /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
-    /// to modify this, it will also keep the prometheus metric in sync.
-    size_added_after_initial: AtomicI64,
-}
-
-/// Normalized current size, that the data in pageserver occupies.
-#[derive(Debug, Clone, Copy)]
-enum CurrentLogicalSize {
-    /// The size is not yet calculated to the end, this is an intermediate result,
-    /// constructed from walreceiver increments and normalized: logical data could delete some objects, hence be negative,
-    /// yet total logical size cannot be below 0.
-    Approximate(u64),
-    // Fully calculated logical size, only other future walreceiver increments are changing it, and those changes are
-    // available for observation without any calculations.
-    Exact(u64),
-}
-
-impl CurrentLogicalSize {
-    fn size(&self) -> u64 {
-        *match self {
-            Self::Approximate(size) => size,
-            Self::Exact(size) => size,
-        }
-    }
-}
-
-impl LogicalSize {
-    fn empty_initial() -> Self {
-        Self {
-            initial_logical_size: OnceCell::with_value(0),
-            //  initial_logical_size already computed, so, don't admit any calculations
-            initial_size_computation: Arc::new(Semaphore::new(0)),
-            initial_part_end: None,
-            size_added_after_initial: AtomicI64::new(0),
-        }
-    }
-
-    fn deferred_initial(compute_to: Lsn) -> Self {
-        Self {
-            initial_logical_size: OnceCell::new(),
-            initial_size_computation: Arc::new(Semaphore::new(1)),
-            initial_part_end: Some(compute_to),
-            size_added_after_initial: AtomicI64::new(0),
-        }
-    }
-
-    fn current_size(&self) -> anyhow::Result<CurrentLogicalSize> {
-        let size_increment: i64 = self.size_added_after_initial.load(AtomicOrdering::Acquire);
-        //                  ^^^ keep this type explicit so that the casts in this function break if
-        //                  we change the type.
-        match self.initial_logical_size.get() {
-            Some(initial_size) => {
-                initial_size.checked_add_signed(size_increment)
-                    .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                    .map(CurrentLogicalSize::Exact)
-            }
-            None => {
-                let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
-                Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
-            }
-        }
-    }
-
-    fn increment_size(&self, delta: i64) {
-        self.size_added_after_initial
-            .fetch_add(delta, AtomicOrdering::SeqCst);
-    }
-
-    /// Make the value computed by initial logical size computation
-    /// available for re-use. This doesn't contain the incremental part.
-    fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
-        match self.initial_part_end {
-            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
-            _ => None,
-        }
-    }
 }
 
 pub struct WalReceiverInfo {
@@ -1382,9 +1266,9 @@ impl Timeline {
                         .read()
                         .unwrap()
                         .observe(delta);
-                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
-                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
+                    info!(layer=%local_layer, "evicted layer after unknown residence period");
                 }
 
                 true
@@ -2249,7 +2133,7 @@ impl Timeline {
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
@@ -2472,11 +2356,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 format!("{}", local_path.display())
             }
             None => {
-                format!(
-                    "remote {}/{}",
-                    self.get_timeline_id(),
-                    self.filename().file_name()
-                )
+                format!("remote {}/{self}", self.get_timeline_id())
             }
         }
     }
@@ -2484,11 +2364,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!(
-            "timeline {} in-memory {}",
-            self.get_timeline_id(),
-            self.short_id()
-        )
+        format!("timeline {} in-memory {self}", self.get_timeline_id())
     }
 }
 
@@ -3008,7 +2884,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -3687,7 +3563,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .inspect(|l| info!("compact requires download of {l}"))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3711,7 +3587,7 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            info!("compact includes {l}");
         }
 
         // We don't need the original list of layers anymore. Drop it so that
@@ -4326,8 +4202,8 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename().file_name(),
-                    horizon_cutoff
+                    l.filename(),
+                    horizon_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
@@ -4337,8 +4213,8 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename().file_name(),
-                    pitr_cutoff
+                    l.filename(),
+                    pitr_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
@@ -4356,7 +4232,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename().file_name(),
+                        l.filename(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -4387,10 +4263,7 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
             {
-                debug!(
-                    "keeping {} because it is the latest layer",
-                    l.filename().file_name()
-                );
+                debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
                 // collecting the layers.
                 // It is not so obvious whether we need to propagate information only about
@@ -4407,7 +4280,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename().file_name(),
+                l.filename(),
                 l.is_incremental(),
             );
             layers_to_remove.push(Arc::clone(&l));
@@ -4561,12 +4434,12 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -4599,7 +4472,7 @@ impl Timeline {
             TaskKind::RemoteDownloadTask,
             Some(self.tenant_id),
             Some(self.timeline_id),
-            &format!("download layer {}", remote_layer.short_id()),
+            &format!("download layer {}", remote_layer),
             false,
             async move {
                 let remote_client = self_clone.remote_client.as_ref().unwrap();
@@ -4875,15 +4748,12 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = l
-                .access_stats()
-                .latest_activity()
-                .unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
+                // We only use this fallback if there's an implementation error.
+                // `latest_activity` already does rate-limited warn!() log.
+                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
+                SystemTime::now()
+            });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,
@@ -5001,33 +4871,6 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
-
-#[cfg(debug_assertions)]
-#[inline]
-pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
-    use utils::tracing_span_assert;
-
-    pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
-        tracing_span_assert::MultiNameExtractor<2>,
-    > = once_cell::sync::Lazy::new(|| {
-        tracing_span_assert::MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"])
-    });
-
-    match tracing_span_assert::check_fields_present([
-        &*super::TENANT_ID_EXTRACTOR,
-        &*TIMELINE_ID_EXTRACTOR,
-    ]) {
-        Ok(()) => (),
-        Err(missing) => panic!(
-            "missing extractors: {:?}",
-            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
-        ),
-    }
 }
 
 /// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.

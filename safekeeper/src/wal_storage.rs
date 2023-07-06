@@ -248,6 +248,10 @@ impl PhysicalStorage {
         };
 
         file.write_all(buf).await?;
+        // Note: flush just ensures write above reaches the OS (this is not
+        // needed in case of sync IO as Write::write there calls directly write
+        // syscall, but needed in case of async). It does *not* fsyncs the file.
+        file.flush().await?;
 
         if xlogoff + buf.len() == self.wal_seg_size {
             // If we reached the end of a WAL segment, flush and close it.
@@ -716,6 +720,7 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
         count -= XLOG_BLCKSZ;
     }
     file.write_all(&ZERO_BLOCK[0..count]).await?;
+    file.flush().await?;
     Ok(())
 }
 
