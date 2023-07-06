@@ -150,8 +150,8 @@ impl Layer for InMemoryLayer {
             .unwrap_or_default();
 
         println!(
-            "----- in-memory layer for tli {} LSNs {}-{} ----",
-            self.timeline_id, self.start_lsn, end_str,
+            "----- in-memory layer LSNs {}-{} ----",
+            self.start_lsn, end_str,
         );
 
         if !verbose {
