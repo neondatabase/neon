@@ -257,7 +257,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
     local_layer_truncated = None
     for path in Path.iterdir(timeline_dir):
         if path.name.startswith("00000"):

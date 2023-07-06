@@ -189,8 +189,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.4.0.tar.gz -O pgvector.tar.gz && \
-    echo "b76cf84ddad452cc880a6c8c661d137ddd8679c000a16332f4f03ecf6e10bcc8 pgvector.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.4.4.tar.gz -O pgvector.tar.gz && \
+    echo "1cb70a63f8928e396474796c22a20be9f7285a8a013009deb8152445b61b72e6 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -517,6 +517,45 @@ RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4
 
 #########################################################################################
 #
+# Layer "pg-embedding-pg-build"
+# compile pg_embedding extension
+#
+#########################################################################################
+FROM build-deps AS pg-embedding-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+# 2465f831ea1f8d49c1d74f8959adb7fc277d70cd made on 05/07/2023
+# There is no release tag yet
+RUN wget https://github.com/neondatabase/pg_embedding/archive/2465f831ea1f8d49c1d74f8959adb7fc277d70cd.tar.gz -O pg_embedding.tar.gz && \
+    echo "047af2b1f664a1e6e37867bd4eeaf5934fa27d6ba3d6c4461efa388ddf7cd1d5 pg_embedding.tar.gz" | sha256sum --check && \
+    mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/embedding.control
+
+#########################################################################################
+#
+# Layer "pg-anon-pg-build"
+# compile anon extension
+#
+#########################################################################################
+FROM build-deps AS pg-anon-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+# Kaniko doesn't allow to do `${from#/usr/local/pgsql/}`, so we use `${from:17}` instead
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgresql_anonymizer-1.1.0.tar.gz -O pg_anon.tar.gz && \
+    echo "08b09d2ff9b962f96c60db7e6f8e79cf7253eb8772516998fc35ece08633d3ad pg_anon.tar.gz" | sha256sum --check && \
+    mkdir pg_anon-src && cd pg_anon-src && tar xvzf ../pg_anon.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sort  > /before.txt && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
+    find /usr/local/pgsql -type f | sort  > /after.txt && \
+    /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done'
+
+#########################################################################################
+#
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
 #
@@ -623,6 +662,7 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -
 #
 #########################################################################################
 FROM build-deps AS neon-pg-ext-build
+# Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=postgis-build /sfcgal/* /
 COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -650,6 +690,7 @@ COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -697,6 +738,22 @@ RUN rm -r /usr/local/pgsql/include
 # can now remove these files - they must be included in other binaries by now
 # if they were to be used by other libraries.
 RUN rm /usr/local/pgsql/lib/lib*.a
+
+#########################################################################################
+#
+# Extenstion only
+#
+#########################################################################################
+FROM scratch AS postgres-extensions
+# After the transition this layer will include all extensitons.
+# As for now, it's only for new custom ones
+#
+# # Default extensions
+# COPY --from=postgres-cleanup-layer /usr/local/pgsql/share/extension /usr/local/pgsql/share/extension
+# COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
+# Custom extensions
+COPY --from=pg-anon-pg-build /extensions/anon/lib/ /extensions/anon/lib
+COPY --from=pg-anon-pg-build /extensions/anon/share/extension /extensions/anon/share/extension
 
 #########################################################################################
 #

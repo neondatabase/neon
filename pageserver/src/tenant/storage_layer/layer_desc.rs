@@ -1,4 +1,5 @@
 use anyhow::Result;
+use core::fmt::Display;
 use std::ops::Range;
 use utils::{
     id::{TenantId, TimelineId},
@@ -48,8 +49,8 @@ impl PersistentLayerDesc {
         }
     }
 
-    pub fn short_id(&self) -> String {
-        self.filename().file_name()
+    pub fn short_id(&self) -> impl Display {
+        self.filename()
     }
 
     #[cfg(test)]

@@ -1,25 +1,21 @@
+use std::sync::Arc;
+
 use futures::pin_mut;
 use futures::StreamExt;
-use futures::TryFutureExt;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::{Body, HeaderMap, Request};
-use pq_proto::StartupMessageParams;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::Row;
-use tracing::error;
-use tracing::info;
-use tracing::instrument;
 use url::Url;
 
-use crate::proxy::invalidate_cache;
-use crate::proxy::NUM_RETRIES_WAKE_COMPUTE;
-use crate::{auth, config::ProxyConfig, console};
+use super::conn_pool::ConnInfo;
+use super::conn_pool::GlobalConnPool;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -27,12 +23,13 @@ struct QueryData {
     params: Vec<serde_json::Value>,
 }
 
-const APP_NAME: &str = "sql_over_http";
-const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
+pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 //
@@ -94,13 +91,6 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
             Ok(Some(format!("{{{}}}", vals)))
         }
     }
-}
-
-struct ConnInfo {
-    username: String,
-    dbname: String,
-    hostname: String,
-    password: String,
 }
 
 fn get_conn_info(
@@ -169,50 +159,23 @@ fn get_conn_info(
 
 // TODO: return different http error codes
 pub async fn handle(
-    config: &'static ProxyConfig,
     request: Request<Body>,
     sni_hostname: Option<String>,
+    conn_pool: Arc<GlobalConnPool>,
 ) -> anyhow::Result<Value> {
     //
     // Determine the destination and connection params
     //
     let headers = request.headers();
     let conn_info = get_conn_info(headers, sni_hostname)?;
-    let credential_params = StartupMessageParams::new([
-        ("user", &conn_info.username),
-        ("database", &conn_info.dbname),
-        ("application_name", APP_NAME),
-    ]);
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
     let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
-    //
-    // Wake up the destination if needed. Code here is a bit involved because
-    // we reuse the code from the usual proxy and we need to prepare few structures
-    // that this code expects.
-    //
-    let tls = config.tls_config.as_ref();
-    let common_names = tls.and_then(|tls| tls.common_names.clone());
-    let creds = config
-        .auth_backend
-        .as_ref()
-        .map(|_| {
-            auth::ClientCredentials::parse(
-                &credential_params,
-                Some(&conn_info.hostname),
-                common_names,
-            )
-        })
-        .transpose()?;
-    let extra = console::ConsoleReqExtra {
-        session_id: uuid::Uuid::new_v4(),
-        application_name: Some(APP_NAME),
-    };
-
-    let mut node_info = creds.wake_compute(&extra).await?.expect("msg");
+    // Allow connection pooling only if explicitly requested
+    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -235,7 +198,8 @@ pub async fn handle(
     //
     // Now execute the query and return the result
     //
-    let client = connect_to_compute(&mut node_info, &extra, &creds, &conn_info).await?;
+    let client = conn_pool.get(&conn_info, !allow_pool).await?;
+
     let row_stream = client.query_raw_txt(query, query_params).await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
@@ -292,6 +256,13 @@ pub async fn handle(
         .map(|row| pg_text_row_to_json(row, raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
+    if allow_pool {
+        // return connection to the pool
+        tokio::task::spawn(async move {
+            let _ = conn_pool.put(&conn_info, client).await;
+        });
+    }
+
     // resulting JSON format is based on the format of node-postgres result
     Ok(json!({
         "command": command_tag_name,
@@ -300,70 +271,6 @@ pub async fn handle(
         "fields": fields,
         "rowAsArray": array_mode,
     }))
-}
-
-/// This function is a copy of `connect_to_compute` from `src/proxy.rs` with
-/// the difference that it uses `tokio_postgres` for the connection.
-#[instrument(skip_all)]
-async fn connect_to_compute(
-    node_info: &mut console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-    conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
-
-    loop {
-        match connect_to_compute_once(node_info, conn_info).await {
-            Err(e) if num_retries > 0 => {
-                info!("compute node's state has changed; requesting a wake-up");
-                match creds.wake_compute(extra).await? {
-                    // Update `node_info` and try one more time.
-                    Some(new) => {
-                        *node_info = new;
-                    }
-                    // Link auth doesn't work that way, so we just exit.
-                    None => return Err(e),
-                }
-            }
-            other => return other,
-        }
-
-        num_retries -= 1;
-        info!("retrying after wake-up ({num_retries} attempts left)");
-    }
-}
-
-async fn connect_to_compute_once(
-    node_info: &console::CachedNodeInfo,
-    conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
-    let mut config = (*node_info.config).clone();
-
-    let (client, connection) = config
-        .user(&conn_info.username)
-        .password(&conn_info.password)
-        .dbname(&conn_info.dbname)
-        .max_backend_message_size(MAX_RESPONSE_SIZE)
-        .connect(tokio_postgres::NoTls)
-        .inspect_err(|e: &tokio_postgres::Error| {
-            error!(
-                "failed to connect to compute node hosts={:?} ports={:?}: {}",
-                node_info.config.get_hosts(),
-                node_info.config.get_ports(),
-                e
-            );
-            invalidate_cache(node_info)
-        })
-        .await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });
-
-    Ok(client)
 }
 
 //

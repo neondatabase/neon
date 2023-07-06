@@ -535,7 +535,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             "pitr_interval": "0s",
         }
     )
-    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
     client = env.pageserver.http_client()
 

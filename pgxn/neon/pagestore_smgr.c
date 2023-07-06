@@ -489,7 +489,8 @@ prefetch_wait_for(uint64 ring_index)
 	if (MyPState->ring_flush <= ring_index &&
 		MyPState->ring_unused > MyPState->ring_flush)
 	{
-		page_server->flush();
+		if (!page_server->flush())
+			return false;
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
@@ -666,7 +667,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		 * smaller than the current WAL insert/redo pointer, which is already
 		 * larger than this prefetch_lsn. So in any case, that would
 		 * invalidate this cache.
-		 * 
+		 *
 		 * The best LSN to use for effective_request_lsn would be
 		 * XLogCtl->Insert.RedoRecPtr, but that's expensive to access.
 		 */
@@ -677,7 +678,8 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
-	page_server->send((NeonRequest *) &request);
+
+	while (!page_server->send((NeonRequest *) &request));
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
@@ -686,6 +688,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
+
 
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
@@ -743,6 +746,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 				}
+
 			}
 			/* if we don't want the latest version, only accept requests with the exact same LSN */
 			else
@@ -756,20 +760,23 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 			}
 		}
 
-		/*
-		 * We received a prefetch for a page that was recently read and
-		 * removed from the buffers. Remove that request from the buffers.
-		 */
-		else if (slot->status == PRFS_TAG_REMAINS)
+		if (entry != NULL)
 		{
-			prefetch_set_unused(ring_index);
-			entry = NULL;
-		}
-		else
-		{
-			/* The buffered request is good enough, return that index */
-			pgBufferUsage.prefetch.duplicates++;
-			return ring_index;
+			/*
+			 * We received a prefetch for a page that was recently read and
+			 * removed from the buffers. Remove that request from the buffers.
+			 */
+			if (slot->status == PRFS_TAG_REMAINS)
+			{
+				prefetch_set_unused(ring_index);
+				entry = NULL;
+			}
+			else
+			{
+				/* The buffered request is good enough, return that index */
+				pgBufferUsage.prefetch.duplicates++;
+				return ring_index;
+			}
 		}
 	}
 
@@ -859,8 +866,7 @@ page_server_request(void const *req)
 {
 	NeonResponse* resp;
 	do {
-		page_server->send((NeonRequest *) req);
-		page_server->flush();
+		while (!page_server->send((NeonRequest *) req) || !page_server->flush());
 		MyPState->ring_flush = MyPState->ring_unused;
 		consume_prefetch_responses();
 		resp = page_server->receive();
@@ -2675,7 +2681,6 @@ bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
 	XLogRecPtr	end_recptr = record->EndRecPtr;
-	XLogRecPtr	prev_end_recptr = record->ReadRecPtr - 1;
 	RelFileNode	rnode;
 	ForkNumber	forknum;
 	BlockNumber	blkno;
@@ -2719,16 +2724,15 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 	no_redo_needed = buffer < 0;
 
-	/* we don't have the buffer in memory, update lwLsn past this record */
+	/* In both cases st lwlsn past this WAL record */
+	SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
+
+	/* we don't have the buffer in memory, update lwLsn past this record,
+	 * also evict page fro file cache
+	 */
 	if (no_redo_needed)
-	{
-		SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
 		lfc_evict(rnode, forknum, blkno);
-	}
-	else
-	{
-		SetLastWrittenLSNForBlock(prev_end_recptr, rnode, forknum, blkno);
-	}
+
 
 	LWLockRelease(partitionLock);
 
@@ -2736,7 +2740,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (get_cached_relsize(rnode, forknum, &relsize))
 	{
 		if (relsize < blkno + 1)
+		{
 			update_cached_relsize(rnode, forknum, blkno + 1);
+			SetLastWrittenLSNForRelation(end_recptr, rnode, forknum);
+		}
 	}
 	else
 	{
@@ -2768,6 +2775,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		Assert(nbresponse->n_blocks > blkno);
 
 		set_cached_relsize(rnode, forknum, nbresponse->n_blocks);
+		SetLastWrittenLSNForRelation(end_recptr, rnode, forknum);
 
 		elog(SmgrTrace, "Set length to %d", nbresponse->n_blocks);
 	}

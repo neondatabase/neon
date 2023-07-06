@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
-use crate::tenant::timeline::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;

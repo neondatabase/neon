@@ -34,7 +34,6 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-stream = "0.3"
 async-trait = "0.1"
-atty = "0.2.14"
 aws-config = { version = "0.55", default-features = false, features=["rustls"] }
 aws-sdk-s3 = "0.27"
 aws-smithy-http = "0.55"
@@ -87,6 +86,7 @@ opentelemetry = "0.18.0"
 opentelemetry-otlp = { version = "0.11.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.10.0"
 parking_lot = "0.12"
+pbkdf2 = "0.12.1"
 pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
@@ -95,6 +95,7 @@ regex = "1.4"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_18"] }
 reqwest-middleware = "0.2.0"
+reqwest-retry = "0.2.2"
 routerify = "3"
 rpds = "0.13"
 rustls = "0.20"
@@ -128,7 +129,7 @@ tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.18.0"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter"] }
 url = "2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
 walkdir = "2.3.2"
@@ -170,7 +171,7 @@ utils = { version = "0.1", path = "./libs/utils/" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
-criterion = "0.4"
+criterion = "0.5.1"
 rcgen = "0.10"
 rstest = "0.17"
 tempfile = "3.4"
