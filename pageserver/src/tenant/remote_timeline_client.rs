@@ -840,7 +840,7 @@ impl RemoteTimelineClient {
             )
         };
 
-        receiver.changed().await?;
+        receiver.changed().await.context("upload queue shut down")?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
