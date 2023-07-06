@@ -60,7 +60,6 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
-use super::storage_layer::range_eq;
 use super::storage_layer::PersistentLayerDesc;
 
 ///
@@ -365,7 +364,7 @@ impl LayerMap {
     }
 
     pub fn is_l0(layer: &PersistentLayerDesc) -> bool {
-        range_eq(&layer.get_key_range(), &(Key::MIN..Key::MAX))
+        &layer.get_key_range() == &(Key::MIN..Key::MAX)
     }
 
     /// This function determines which layers are counted in `count_deltas`:
@@ -397,7 +396,7 @@ impl LayerMap {
         }
 
         // Case 2
-        if range_eq(partition_range, &(Key::MIN..Key::MAX)) {
+        if partition_range == &(Key::MIN..Key::MAX) {
             return true;
         }
 
