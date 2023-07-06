@@ -756,6 +756,13 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  # (fprasx): this step is currently modified to test a new autoscaling setup that
+  # uses a different version of vm-builder. The plan is to deploy on staging to
+  # see what happens and then revert no matter what. These changes are NOT intended
+  # for an actual release.
+  #
+  # The neon repository will eventually revert back to the original vm-builder
+  # (left commented) once changes in neondatabase/autoscaling have been merged.
   vm-compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag, compute-node-image ]
@@ -782,19 +789,14 @@ jobs:
           curl -fL ec2-18-217-40-54.us-east-2.compute.amazonaws.com:8000/vm-builder -o vm-builder
           chmod +x vm-builder
 
-      # We need to provide vm-informant/vm-monitor images for vm-builder since it was not
-      # compiled through the release pipeline
-      - name: Pull informant and monitor image image
-        run: |
-          docker pull fprasx/vm-informant:monitor-testing
-          docker pull fprasx/vm-monitor:monitor-testing
-
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
+      # Note(fprasx): we need to provide vm-informant/vm-monitor images for vm-builder since
+      # it was not compiled through the release pipeline
       - name: Build vm image
         run: |
           ./vm-builder \
