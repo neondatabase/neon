@@ -6,25 +6,6 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def test_basebackup_size(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-
-    # Start
-    env.neon_cli.create_branch("test_startup")
-    endpoint = env.endpoints.create_start("test_startup")
-
-    # Get metrics
-    metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
-    basebackup_bytes = metrics["basebackup_bytes"]
-    zenbenchmark.record(
-        "basebackup_size", basebackup_bytes / 1024, "KB", report=MetricReport.LOWER_IS_BETTER
-    )
-
-    # Seems reasonable for a compressed basebackup of an empty database
-    assert basebackup_bytes < 20 * 1024
-
-
 # Just start and measure duration.
 #
 # This test runs pretty quickly and can be informative when used in combination
@@ -78,6 +59,11 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
         for key, name in durations.items():
             value = metrics[key]
             zenbenchmark.record(name, value, "ms", report=MetricReport.LOWER_IS_BETTER)
+
+        # Check basebackup size makes sense
+        basebackup_bytes = metrics["basebackup_bytes"]
+        if i > 0:
+            assert basebackup_bytes < 20 * 1024
 
         # Stop so we can restart
         endpoint.stop()
