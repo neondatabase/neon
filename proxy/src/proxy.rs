@@ -6,12 +6,17 @@ use crate::{
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
-    console::{self, messages::MetricsAuxInfo},
+    console::{
+        self,
+        errors::{ApiError, WakeComputeError},
+        messages::MetricsAuxInfo,
+    },
     error::io_error,
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
+use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
@@ -25,7 +30,9 @@ use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
-pub const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
+/// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
+pub const NUM_RETRIES_WAKE_COMPUTE: u32 = 10;
+pub const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -315,7 +322,6 @@ async fn connect_to_compute_once(
     node_info
         .config
         .connect(allow_self_signed_compute, timeout)
-        .inspect_err(|_: &compute::ConnectionError| invalidate_cache(node_info))
         .await
 }
 
@@ -328,7 +334,8 @@ async fn connect_to_compute(
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    let mut num_retries = 0;
+    let mut should_wake = true;
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
         node_info.config.set_startup_params(params);
@@ -346,30 +353,83 @@ async fn connect_to_compute(
         // We only use caching in case of scram proxy backed by the console, so reduce
         // the timeout only in that case.
         let is_scram_proxy = matches!(creds, auth::BackendType::Console(_, _));
-        let timeout = if is_scram_proxy && num_retries == NUM_RETRIES_WAKE_COMPUTE {
+        let timeout = if is_scram_proxy && num_retries == 0 {
             time::Duration::from_secs(2)
         } else {
             time::Duration::from_secs(10)
         };
 
         match connect_to_compute_once(node_info, timeout).await {
-            Err(e) if num_retries > 0 => {
-                info!("compute node's state has changed; requesting a wake-up");
-                match creds.wake_compute(extra).map_err(io_error).await? {
-                    // Update `node_info` and try one more time.
-                    Some(mut new) => {
-                        new.config.reuse_password(&node_info.config);
-                        *node_info = new;
+            Err(e) if num_retries < NUM_RETRIES_WAKE_COMPUTE => {
+                if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
+                    error!(error = ?e, "could not connect to compute node");
+                    if should_wake {
+                        match try_wake(node_info, extra, creds).await {
+                            Ok(Some(x)) => {
+                                should_wake = x;
+                            }
+                            Ok(None) => return Err(e),
+                            Err(e) => return Err(io_error(e).into()),
+                        }
                     }
-                    // Link auth doesn't work that way, so we just exit.
-                    None => return Err(e),
+                    if !wait_duration.is_zero() {
+                        time::sleep(wait_duration).await;
+                    }
+                } else {
+                    return Err(e);
                 }
             }
             other => return other,
         }
 
-        num_retries -= 1;
-        info!("retrying after wake-up ({num_retries} attempts left)");
+        num_retries += 1;
+        info!(retries_left = num_retries, "retrying connect");
+    }
+}
+
+/// Attempts to wake up the compute node.
+/// * Returns Ok(Some(true)) if there was an error waking but retries are acceptable
+/// * Returns Ok(Some(false)) if the wakeup succeeded
+/// * Returns Ok(None) or Err(e) if there was an error
+pub async fn try_wake(
+    node_info: &mut console::CachedNodeInfo,
+    extra: &console::ConsoleReqExtra<'_>,
+    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+) -> Result<Option<bool>, WakeComputeError> {
+    info!("compute node's state has likely changed; requesting a wake-up");
+    invalidate_cache(node_info);
+    match creds.wake_compute(extra).await {
+        // retry wake if the compute was in an invalid state
+        Err(WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::BAD_REQUEST,
+            ..
+        })) => Ok(Some(true)),
+        // Update `node_info` and try again.
+        Ok(Some(mut new)) => {
+            new.config.reuse_password(&node_info.config);
+            *node_info = new;
+            Ok(Some(false))
+        }
+        Err(e) => Err(e),
+        Ok(None) => Ok(None),
+    }
+}
+
+fn retry_connect_in(err: &compute::ConnectionError, num_retries: u32) -> Option<time::Duration> {
+    use std::io::ErrorKind;
+    match err {
+        // retry all errors at least once immediately
+        _ if num_retries == 0 => Some(time::Duration::ZERO),
+        // keep retrying connection errors every 100ms
+        compute::ConnectionError::CouldNotConnect(io_err) => match io_err.kind() {
+            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => {
+                // 3/2 = 1.5 which seems to be an ok growth factor heuristic
+                Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
+            }
+            _ => None,
+        },
+        // otherwise, don't retry
+        _ => None,
     }
 }
 
