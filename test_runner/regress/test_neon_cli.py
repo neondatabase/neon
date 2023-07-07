@@ -1,10 +1,14 @@
+import subprocess
+from pathlib import Path
 from typing import cast
 
+import pytest
 import requests
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
+    parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import TenantId, TimelineId
@@ -131,3 +135,54 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     # Default stop
     res = env.neon_cli.raw_cli(["stop"])
     res.check_returncode()
+
+
+def test_parse_project_git_version_output_positive():
+    commit = "b6f77b5816cf1dba12a3bc8747941182ce220846"
+
+    positive = [
+        # most likely when developing locally
+        f"Neon CLI git:{commit}-modified",
+        # when developing locally
+        f"Neon CLI git:{commit}",
+        # this is not produced in practice, but the impl supports it
+        f"Neon CLI git-env:{commit}-modified",
+        # most likely from CI or docker build
+        f"Neon CLI git-env:{commit}",
+    ]
+
+    for example in positive:
+        assert parse_project_git_version_output(example) == commit
+
+
+def test_parse_project_git_version_output_local_docker():
+    """
+    Makes sure the tests don't accept the default version in Dockerfile one gets without providing
+    a commit lookalike in --build-arg GIT_VERSION=XXX
+    """
+    input = "Neon CLI git-env:local"
+
+    with pytest.raises(ValueError) as e:
+        parse_project_git_version_output(input)
+
+    assert input in str(e)
+
+
+def test_binaries_version_parses(neon_binpath: Path):
+    """
+    Ensures that we can parse the actual outputs of --version from a set of binaries.
+
+    The list is not meant to be exhaustive, and compute_ctl has a different way for example.
+    """
+
+    binaries = [
+        "neon_local",
+        "pageserver",
+        "safekeeper",
+        "proxy",
+        "pg_sni_router",
+        "storage_broker",
+    ]
+    for bin in binaries:
+        out = subprocess.check_output([neon_binpath / bin, "--version"]).decode("utf-8")
+        parse_project_git_version_output(out)

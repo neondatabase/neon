@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     PortDistributor,
+    parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -351,14 +352,8 @@ def prepare_snapshot(
 
 # get git SHA of neon binary
 def get_neon_version(neon_binpath: Path):
-    import re
-
     out = subprocess.check_output([neon_binpath / "neon_local", "--version"]).decode("utf-8")
-    res = re.search(r"git(-env)?:([0-9a-fA-F]+)(-\S+)?", out)
-    if res and res.group(2):
-        return res.group(2).strip()
-
-    raise ValueError(f"unable to parse neon_local --version output: '{out}'")
+    return parse_project_git_version_output(out)
 
 
 def check_neon_works(
