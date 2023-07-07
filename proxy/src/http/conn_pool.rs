@@ -10,7 +10,7 @@ use crate::{auth, console};
 use super::sql_over_http::MAX_RESPONSE_SIZE;
 
 use crate::proxy::try_wake;
-use crate::proxy::{NUM_RETRIES_WAKE_COMPUTE, RETRY_WAIT_DURATION};
+use crate::proxy::{BASE_RETRY_WAIT_DURATION, NUM_RETRIES_WAKE_COMPUTE};
 
 use tracing::error;
 use tracing::info;
@@ -222,11 +222,11 @@ async fn connect_to_compute(
 
     // This code is a copy of `connect_to_compute` from `src/proxy.rs` with
     // the difference that it uses `tokio_postgres` for the connection.
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    let mut num_retries = 0;
     let mut should_wake = true;
     loop {
         match connect_to_compute_once(node_info, conn_info).await {
-            Err(e) if num_retries > 0 => {
+            Err(e) if num_retries == NUM_RETRIES_WAKE_COMPUTE => {
                 if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
                     if should_wake {
                         match try_wake(node_info, &extra, &creds).await {
@@ -243,23 +243,26 @@ async fn connect_to_compute(
             other => return Ok(other?),
         }
 
-        num_retries -= 1;
+        num_retries += 1;
         info!(retries_left = num_retries, "retrying connect");
     }
 }
 
-fn retry_connect_in(err: &tokio_postgres::Error, num_retries: usize) -> Option<time::Duration> {
+fn retry_connect_in(err: &tokio_postgres::Error, num_retries: u32) -> Option<time::Duration> {
     use tokio_postgres::error::SqlState;
     match err.code() {
         // retry all errors at least once immediately
-        _ if num_retries == NUM_RETRIES_WAKE_COMPUTE => Some(time::Duration::ZERO),
+        _ if num_retries == 0 => Some(time::Duration::ZERO),
         // keep retrying connection errors every 100ms
         Some(
             &SqlState::CONNECTION_FAILURE
             | &SqlState::CONNECTION_EXCEPTION
             | &SqlState::CONNECTION_DOES_NOT_EXIST
             | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        ) => Some(RETRY_WAIT_DURATION),
+        ) => {
+            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
+            Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
+        }
         // otherwise, don't retry
         _ => None,
     }

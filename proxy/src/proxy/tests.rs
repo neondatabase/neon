@@ -1,4 +1,6 @@
 //! A group of high-level tests for connection establishing logic and auth.
+use std::io;
+
 use super::*;
 use crate::{auth, sasl, scram};
 use async_trait::async_trait;
@@ -293,4 +295,19 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .context("server shouldn't accept client")?;
 
     Ok(())
+}
+
+#[test]
+fn connect_compute_total_wait() {
+    let err = compute::ConnectionError::CouldNotConnect(io::Error::new(
+        io::ErrorKind::ConnectionRefused,
+        "conn refused",
+    ));
+
+    let mut total_wait = tokio::time::Duration::ZERO;
+    for num_retries in 0..10 {
+        total_wait += retry_connect_in(&err, num_retries).unwrap();
+    }
+    assert!(total_wait < tokio::time::Duration::from_secs(12));
+    assert!(total_wait > tokio::time::Duration::from_secs(10));
 }

@@ -30,9 +30,9 @@ use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
-/// 50 * 100ms = 5s
-pub const NUM_RETRIES_WAKE_COMPUTE: usize = 50;
-pub const RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
+/// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
+pub const NUM_RETRIES_WAKE_COMPUTE: u32 = 10;
+pub const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -334,7 +334,7 @@ async fn connect_to_compute(
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    let mut num_retries = 0;
     let mut should_wake = true;
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
@@ -353,14 +353,14 @@ async fn connect_to_compute(
         // We only use caching in case of scram proxy backed by the console, so reduce
         // the timeout only in that case.
         let is_scram_proxy = matches!(creds, auth::BackendType::Console(_, _));
-        let timeout = if is_scram_proxy && num_retries == NUM_RETRIES_WAKE_COMPUTE {
+        let timeout = if is_scram_proxy && num_retries == 0 {
             time::Duration::from_secs(2)
         } else {
             time::Duration::from_secs(10)
         };
 
         match connect_to_compute_once(node_info, timeout).await {
-            Err(e) if num_retries > 0 => {
+            Err(e) if num_retries < NUM_RETRIES_WAKE_COMPUTE => {
                 if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
                     if should_wake {
                         match try_wake(node_info, extra, creds).await {
@@ -379,7 +379,7 @@ async fn connect_to_compute(
             other => return other,
         }
 
-        num_retries -= 1;
+        num_retries += 1;
         info!(retries_left = num_retries, "retrying connect");
     }
 }
@@ -412,14 +412,17 @@ pub async fn try_wake(
     }
 }
 
-fn retry_connect_in(err: &compute::ConnectionError, num_retries: usize) -> Option<time::Duration> {
+fn retry_connect_in(err: &compute::ConnectionError, num_retries: u32) -> Option<time::Duration> {
     use std::io::ErrorKind;
     match err {
         // retry all errors at least once immediately
-        _ if num_retries == NUM_RETRIES_WAKE_COMPUTE => Some(time::Duration::ZERO),
+        _ if num_retries == 0 => Some(time::Duration::ZERO),
         // keep retrying connection errors every 100ms
         compute::ConnectionError::CouldNotConnect(io_err) => match io_err.kind() {
-            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => Some(RETRY_WAIT_DURATION),
+            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => {
+                // 3/2 = 1.5 which seems to be an ok growth factor heuristic
+                Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
+            }
             _ => None,
         },
         // otherwise, don't retry
