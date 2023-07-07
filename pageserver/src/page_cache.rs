@@ -53,8 +53,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::repository::Key;
 use crate::tenant::writeback_ephemeral_file;
+use crate::{metrics::PageCacheSizeMetrics, repository::Key};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -187,6 +187,8 @@ pub struct PageCache {
     /// Index of the next candidate to evict, for the Clock replacement algorithm.
     /// This is interpreted modulo the page cache size.
     next_evict_slot: AtomicUsize,
+
+    size_metrics: &'static PageCacheSizeMetrics,
 }
 
 ///
@@ -313,6 +315,10 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
+        crate::metrics::PAGE_CACHE
+            .read_accesses_materialized_page
+            .inc();
+
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
@@ -323,8 +329,21 @@ impl PageCache {
         };
 
         if let Some(guard) = self.try_lock_for_read(&mut cache_key) {
-            if let CacheKey::MaterializedPage { hash_key: _, lsn } = cache_key {
-                Some((lsn, guard))
+            if let CacheKey::MaterializedPage {
+                hash_key: _,
+                lsn: available_lsn,
+            } = cache_key
+            {
+                if available_lsn == lsn {
+                    crate::metrics::PAGE_CACHE
+                        .read_hits_materialized_page_exact
+                        .inc();
+                } else {
+                    crate::metrics::PAGE_CACHE
+                        .read_hits_materialized_page_older_lsn
+                        .inc();
+                }
+                Some((available_lsn, guard))
             } else {
                 panic!("unexpected key type in slot");
             }
@@ -499,11 +518,31 @@ impl PageCache {
     /// ```
     ///
     fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
+        let (read_access, hit) = match cache_key {
+            CacheKey::MaterializedPage { .. } => {
+                unreachable!("Materialized pages use lookup_materialized_page")
+            }
+            CacheKey::EphemeralPage { .. } => (
+                &crate::metrics::PAGE_CACHE.read_accesses_ephemeral,
+                &crate::metrics::PAGE_CACHE.read_hits_ephemeral,
+            ),
+            CacheKey::ImmutableFilePage { .. } => (
+                &crate::metrics::PAGE_CACHE.read_accesses_immutable,
+                &crate::metrics::PAGE_CACHE.read_hits_immutable,
+            ),
+        };
+        read_access.inc();
+
+        let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
+                if is_first_iteration {
+                    hit.inc();
+                }
                 return Ok(ReadBufResult::Found(read_guard));
             }
+            is_first_iteration = false;
 
             // Not found. Find a victim buffer
             let (slot_idx, mut inner) =
@@ -681,6 +720,9 @@ impl PageCache {
 
                     if let Ok(version_idx) = versions.binary_search_by_key(old_lsn, |v| v.lsn) {
                         versions.remove(version_idx);
+                        self.size_metrics
+                            .current_bytes_materialized_page
+                            .sub_page_sz(1);
                         if versions.is_empty() {
                             old_entry.remove_entry();
                         }
@@ -693,11 +735,13 @@ impl PageCache {
                 let mut map = self.ephemeral_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
+                self.size_metrics.current_bytes_ephemeral.sub_page_sz(1);
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let mut map = self.immutable_page_map.write().unwrap();
                 map.remove(&(*file_id, *blkno))
                     .expect("could not find old key in mapping");
+                self.size_metrics.current_bytes_immutable.sub_page_sz(1);
             }
         }
     }
@@ -725,6 +769,9 @@ impl PageCache {
                                 slot_idx,
                             },
                         );
+                        self.size_metrics
+                            .current_bytes_materialized_page
+                            .add_page_sz(1);
                         None
                     }
                 }
@@ -735,6 +782,7 @@ impl PageCache {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
+                        self.size_metrics.current_bytes_ephemeral.add_page_sz(1);
                         None
                     }
                 }
@@ -745,6 +793,7 @@ impl PageCache {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
+                        self.size_metrics.current_bytes_immutable.add_page_sz(1);
                         None
                     }
                 }
@@ -844,6 +893,12 @@ impl PageCache {
 
         let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
 
+        let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
+        size_metrics.max_bytes.set_page_sz(num_pages);
+        size_metrics.current_bytes_ephemeral.set_page_sz(0);
+        size_metrics.current_bytes_immutable.set_page_sz(0);
+        size_metrics.current_bytes_materialized_page.set_page_sz(0);
+
         let slots = page_buffer
             .chunks_exact_mut(PAGE_SZ)
             .map(|chunk| {
@@ -866,6 +921,30 @@ impl PageCache {
             immutable_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
+            size_metrics,
         }
+    }
+}
+
+trait PageSzBytesMetric {
+    fn set_page_sz(&self, count: usize);
+    fn add_page_sz(&self, count: usize);
+    fn sub_page_sz(&self, count: usize);
+}
+
+#[inline(always)]
+fn count_times_page_sz(count: usize) -> u64 {
+    u64::try_from(count).unwrap() * u64::try_from(PAGE_SZ).unwrap()
+}
+
+impl PageSzBytesMetric for metrics::UIntGauge {
+    fn set_page_sz(&self, count: usize) {
+        self.set(count_times_page_sz(count));
+    }
+    fn add_page_sz(&self, count: usize) {
+        self.add(count_times_page_sz(count));
+    }
+    fn sub_page_sz(&self, count: usize) {
+        self.sub(count_times_page_sz(count));
     }
 }

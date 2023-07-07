@@ -153,12 +153,14 @@ impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} ----",
+            "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
-            self.lsn
+            self.lsn,
+            self.desc.is_incremental,
+            self.desc.file_size
         );
 
         if !verbose {
@@ -230,10 +232,12 @@ impl Layer for ImageLayer {
     fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
+}
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
 }
 

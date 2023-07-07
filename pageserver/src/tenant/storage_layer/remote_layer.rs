@@ -71,22 +71,22 @@ impl Layer for RemoteLayer {
         _reconstruct_state: &mut ValueReconstructState,
         _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
-        bail!(
-            "layer {} needs to be downloaded",
-            self.filename().file_name()
-        );
+        bail!("layer {self} needs to be downloaded");
     }
 
     /// debugging function to print out the contents of the layer
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} is_delta {} is_incremental {} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.desc.lsn_range.start,
-            self.desc.lsn_range.end
+            self.desc.lsn_range.end,
+            self.desc.is_delta,
+            self.desc.is_incremental,
+            self.desc.file_size,
         );
 
         Ok(())
@@ -106,10 +106,12 @@ impl Layer for RemoteLayer {
     fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
+}
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for RemoteLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
 }
 

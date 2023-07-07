@@ -71,6 +71,8 @@ pub(super) async fn handle_walreceiver_connection(
     ctx: RequestContext,
     node: NodeId,
 ) -> anyhow::Result<()> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
     WALRECEIVER_STARTED_CONNECTIONS.inc();
 
     // Connect to the database in replication mode.
@@ -140,6 +142,9 @@ pub(super) async fn handle_walreceiver_connection(
             }
             Ok(())
         }
+        // Enrich the log lines emitted by this closure with meaningful context.
+        // TODO: technically, this task outlives the surrounding function, so, the
+        // spans won't be properly nested.
         .instrument(tracing::info_span!("poller")),
     );
 

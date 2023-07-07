@@ -54,13 +54,6 @@ where
     }
 }
 
-pub fn range_eq<T>(a: &Range<T>, b: &Range<T>) -> bool
-where
-    T: PartialEq<T>,
-{
-    a.start == b.start && a.end == b.end
-}
-
 /// Struct used to communicate across calls to 'get_value_reconstruct_data'.
 ///
 /// Before first call, you can fill in 'page_img' if you have an older cached
@@ -335,7 +328,7 @@ impl LayerAccessStats {
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
-pub trait Layer: std::fmt::Debug + Send + Sync {
+pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -372,9 +365,6 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
-
-    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
-    fn short_id(&self) -> String;
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
@@ -512,10 +502,12 @@ pub mod tests {
         fn is_incremental(&self) -> bool {
             self.layer_desc().is_incremental
         }
+    }
 
-        /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-        fn short_id(&self) -> String {
-            self.layer_desc().short_id()
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    impl std::fmt::Display for LayerDescriptor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.layer_desc().short_id())
         }
     }
 
