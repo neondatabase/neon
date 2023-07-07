@@ -53,6 +53,24 @@ pub enum StorageTimeOperation {
     CreateTenant,
 }
 
+pub static NUM_TIERS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_storage_tiers_num",
+        "Number of sorted runs",
+        &["tenant_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub static NUM_COMPACTIONS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_storage_compaction_num",
+        "Number of ongoing compactions",
+        &["tenant_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
 pub static STORAGE_PHYSICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_storage_physical_size_sum",
@@ -784,6 +802,8 @@ pub struct TimelineMetrics {
     pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
+    pub num_tiers: IntGauge,
+    pub num_compactions: IntGauge,
 }
 
 impl TimelineMetrics {
@@ -849,6 +869,12 @@ impl TimelineMetrics {
             .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
+        let num_tiers = NUM_TIERS
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let num_compactions = NUM_COMPACTIONS
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
 
         TimelineMetrics {
             tenant_id,
@@ -875,6 +901,8 @@ impl TimelineMetrics {
                 evictions_with_low_residence_duration,
             ),
             read_num_fs_layers,
+            num_tiers,
+            num_compactions,
         }
     }
 }

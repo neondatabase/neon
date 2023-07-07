@@ -173,9 +173,7 @@ impl PersistentLayerDesc {
 
     pub fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} size {} is_delta {} is_incremental {} ----",
-            self.tenant_id,
-            self.timeline_id,
+            "----- layer for keys {}-{} lsn {}-{} size {} is_delta {} is_incremental {} ----",
             self.key_range.start,
             self.key_range.end,
             self.lsn_range.start,
