@@ -322,7 +322,6 @@ async fn connect_to_compute_once(
     node_info
         .config
         .connect(allow_self_signed_compute, timeout)
-        // .inspect_err(|_: &compute::ConnectionError| invalidate_cache(node_info))
         .await
 }
 
