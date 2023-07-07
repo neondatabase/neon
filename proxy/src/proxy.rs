@@ -362,6 +362,7 @@ async fn connect_to_compute(
         match connect_to_compute_once(node_info, timeout).await {
             Err(e) if num_retries < NUM_RETRIES_WAKE_COMPUTE => {
                 if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
+                    error!(error = ?e, "could not connect to compute node");
                     if should_wake {
                         match try_wake(node_info, extra, creds).await {
                             Ok(Some(x)) => {
@@ -374,6 +375,8 @@ async fn connect_to_compute(
                     if !wait_duration.is_zero() {
                         time::sleep(wait_duration).await;
                     }
+                } else {
+                    return Err(e);
                 }
             }
             other => return other,
