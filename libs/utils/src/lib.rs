@@ -151,7 +151,7 @@ macro_rules! project_git_version {
                 ::core::option::Option::None => ["git:", __COMMIT_FROM_GIT],
             };
 
-            ::utils::__const_format::concatcp!(__ARG[0], __ARG[1])
+            $crate::__const_format::concatcp!(__ARG[0], __ARG[1])
         };
     };
 }
