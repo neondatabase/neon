@@ -179,7 +179,7 @@ pub struct FeExecuteMessage {
 #[derive(Debug)]
 pub struct FeCloseMessage;
 
-/// An error occured while parsing or serializing raw stream into Postgres
+/// An error occurred while parsing or serializing raw stream into Postgres
 /// messages.
 #[derive(thiserror::Error, Debug)]
 pub enum ProtocolError {

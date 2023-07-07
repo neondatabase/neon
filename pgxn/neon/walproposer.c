@@ -788,7 +788,7 @@ ReconnectSafekeepers(void)
 
 /*
  * Performs the logic for advancing the state machine of the specified safekeeper,
- * given that a certain set of events has occured.
+ * given that a certain set of events has occurred.
  */
 static void
 AdvancePollState(Safekeeper *sk, uint32 events)

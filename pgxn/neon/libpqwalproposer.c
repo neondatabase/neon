@@ -292,7 +292,7 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 	/*
 	 * The docs for PQgetCopyData list the return values as: 0 if the copy is
 	 * still in progress, but no "complete row" is available -1 if the copy is
-	 * done -2 if an error occured (> 0) if it was successful; that value is
+	 * done -2 if an error occurred (> 0) if it was successful; that value is
 	 * the amount transferred.
 	 *
 	 * The protocol we use between walproposer and safekeeper means that we
@@ -353,7 +353,7 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 	/*
 	 * The docs for PQputcopyData list the return values as: 1 if the data was
 	 * queued, 0 if it was not queued because of full buffers, or -1 if an
-	 * error occured
+	 * error occurred
 	 */
 	result = PQputCopyData(conn->pg_conn, buf, size);
 
