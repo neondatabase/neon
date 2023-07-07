@@ -72,9 +72,15 @@ fn main() -> Result<()> {
     let pgbin_default = String::from("postgres");
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
-    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
+    // let remote_ext_config = matches.get_one::<String>("remote-ext-config");
+    // in this branch we no longer pass this as a config var.
+    // we just force it to be enabled.
+    // Note: this is no longer suitable for mock s3 tests
+    let remote_ext_config = Some(
+        r#"{"bucket": "neon-dev-extensions-us-east-2", "region": "us-east-2", "endpoint": null, "prefix": "5412197734"}"#.to_string(),
+    );
     let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(x, build_tag)
+        init_remote_storage(&x, build_tag)
             .expect("cannot initialize remote extension storage from config")
     });
 

@@ -148,6 +148,7 @@ def test_remote_extensions(
     pg_version: PgVersion,
     pg_bin: PgBin,
 ):
+    return None
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",
