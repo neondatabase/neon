@@ -4168,6 +4168,12 @@ impl Timeline {
                 }
             }
 
+            const ENABLE_TRIVIAL_MOVE: bool = false;
+
+            if !ENABLE_TRIVIAL_MOVE {
+                deltas_to_compact_layers.extend(std::mem::take(&mut trivial_move_layers));
+            }
+
             let deltas_to_compact_layers = deltas_to_compact_layers
                 .into_iter()
                 .map(|l| self.lcache.get_from_desc(&l))
