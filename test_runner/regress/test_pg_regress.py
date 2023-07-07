@@ -3,15 +3,11 @@
 #
 from pathlib import Path
 
-import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_pg_regress(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
@@ -69,9 +65,6 @@ def test_pg_regress(
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,

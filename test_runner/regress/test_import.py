@@ -23,7 +23,6 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
 
-@pytest.mark.timeout(600)
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     # Put data in vanilla pg
     vanilla_pg.start()
@@ -163,7 +162,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
 
-@pytest.mark.timeout(600)
 def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
