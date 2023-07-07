@@ -1,6 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use futures::Future;
 use scopeguard::ScopeGuard;
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
@@ -307,7 +308,7 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    let func = || {
+    let func = || async {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
@@ -333,28 +334,34 @@ pub async fn create_tenant(
             None,
             ctx,
         )?;
+
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
-        let created_tenant = scopeguard::guard(created_tenant, |tenant| {
-            // As we might have removed the directory, the tenant should directly go into the broken state.
-            task_mgr::BACKGROUND_RUNTIME.block_on(async {
-                tenant.set_broken("failed to create".into()).await;
+
+        // Put all code that might error into the check function.
+
+        let check = || {
+            fail::fail_point!("tenant-create-fail", |_| {
+                anyhow::bail!("failpoint: tenant-create-fail");
             });
-        });
 
-        fail::fail_point!("tenant-create-fail", |_| {
-            anyhow::bail!("failpoint: tenant-create-fail");
-        });
+            let crated_tenant_id = created_tenant.tenant_id();
+            anyhow::ensure!(
+                tenant_id == crated_tenant_id,
+                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
+            );
 
-        let crated_tenant_id = created_tenant.tenant_id();
-        anyhow::ensure!(
-            tenant_id == crated_tenant_id,
-            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
-        );
+            Ok(())
+        };
+
+        if let Err(e) = check() {
+            created_tenant.set_broken("failed to create".into()).await;
+            return Err(e);
+        }
 
         // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
-        Ok(ScopeGuard::into_inner(created_tenant))
+        Ok(created_tenant)
     };
     tenant_map_insert(tenant_id, func).await
 }
@@ -486,7 +493,7 @@ pub async fn load_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
+    tenant_map_insert(tenant_id, || async {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
         if tenant_ignore_mark.exists() {
@@ -555,7 +562,7 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let func = || {
+    let func = || async {
         let tenant_dir =
             create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
 
@@ -586,22 +593,26 @@ pub async fn attach_tenant(
         )?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
-        let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
-            // As we might have removed the directory, the tenant should directly go into the broken state.
-            task_mgr::BACKGROUND_RUNTIME.block_on(async {
-                tenant.set_broken("failed to create".into()).await;
-            });
-        });
 
-        let attached_tenant_id = attached_tenant.tenant_id();
-        anyhow::ensure!(
-            tenant_id == attached_tenant_id,
-            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
-        );
+        // Put all code that might error in the check function.
+
+        let check = || {
+            let attached_tenant_id = attached_tenant.tenant_id();
+            anyhow::ensure!(
+                tenant_id == attached_tenant_id,
+                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+            );
+            Ok(())
+        };
+
+        if let Err(e) = check() {
+            attached_tenant.set_broken("failed to create".into()).await;
+            return Err(e);
+        }
 
         // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
-        Ok(ScopeGuard::into_inner(attached_tenant))
+        Ok(attached_tenant)
     };
 
     tenant_map_insert(tenant_id, func).await?;
@@ -626,12 +637,13 @@ pub enum TenantMapInsertError {
 ///
 /// NB: the closure should return quickly because the current implementation of tenants map
 /// serializes access through an `RwLock`.
-async fn tenant_map_insert<F>(
+async fn tenant_map_insert<F, Ft>(
     tenant_id: TenantId,
     insert_fn: F,
 ) -> Result<Arc<Tenant>, TenantMapInsertError>
 where
-    F: FnOnce() -> anyhow::Result<Arc<Tenant>>,
+    F: FnOnce() -> Ft,
+    Ft: Future<Output = anyhow::Result<Arc<Tenant>>>,
 {
     let mut guard = TENANTS.write().await;
     let m = match &mut *guard {
@@ -644,7 +656,7 @@ where
             tenant_id,
             e.get().current_state(),
         )),
-        hash_map::Entry::Vacant(v) => match insert_fn() {
+        hash_map::Entry::Vacant(v) => match insert_fn().await {
             Ok(tenant) => {
                 v.insert(tenant.clone());
                 Ok(tenant)
