@@ -54,13 +54,6 @@ where
     }
 }
 
-pub fn range_eq<T>(a: &Range<T>, b: &Range<T>) -> bool
-where
-    T: PartialEq<T>,
-{
-    a.start == b.start && a.end == b.end
-}
-
 /// Struct used to communicate across calls to 'get_value_reconstruct_data'.
 ///
 /// Before first call, you can fill in 'page_img' if you have an older cached

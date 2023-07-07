@@ -10,7 +10,7 @@
 //! The delta files are stored in timelines/<timeline_id> directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
-//!    <key start>-<key end>__<start LSN>-<end LSN
+//!    <key start>-<key end>__<start LSN>-<end LSN>
 //!
 //! For example:
 //!
