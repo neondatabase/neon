@@ -961,6 +961,7 @@ jobs:
           # In compute image we have a bit different directory layout
           mkdir -p extensions-to-upload/share
           docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension/*.tar.gz ./extensions-to-upload/share/extension
+          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension/*.control ./extensions-to-upload/share/extension
           docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/lib/*.tar.gz             ./extensions-to-upload/lib
 
           # Delete Neon extensitons (they always present on compute-node image)
