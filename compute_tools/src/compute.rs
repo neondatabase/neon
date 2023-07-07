@@ -142,14 +142,14 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .cluster
         .roles
         .iter()
-        .map(|r| format!("'{}'", escape_literal(&r.name)))
+        .map(|r| escape_literal(&r.name))
         .collect::<Vec<_>>();
 
     let dbs = spec
         .cluster
         .databases
         .iter()
-        .map(|db| format!("'{}'", escape_literal(&db.name)))
+        .map(|db| escape_literal(&db.name))
         .collect::<Vec<_>>();
 
     let roles_decl = if roles.is_empty() {
