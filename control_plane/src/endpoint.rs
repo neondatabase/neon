@@ -497,7 +497,9 @@ impl Endpoint {
             //
             // The proper way to implement this is to pass the custom extension
             // in spec, but we don't have a way to do that yet in the python tests.
-            custom_extensions: Some(vec![self.tenant_id.to_string()]),
+            // NEW HACK: we enable the anon custom extension for everyone! this is of course just for testing
+            // how will we do it for real?
+            custom_extensions: Some(vec!["anon".to_string()]),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
