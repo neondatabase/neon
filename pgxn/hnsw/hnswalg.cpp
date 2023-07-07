@@ -223,6 +223,7 @@ dist_t fstdistfunc_scalar(const coord_t *x, const coord_t *y, size_t n)
 {
     dist_t 	distance = 0.0;
 
+    #pragma clang loop vectorize(enable)
     for (size_t i = 0; i < n; i++)
     {
         dist_t diff = x[i] - y[i];

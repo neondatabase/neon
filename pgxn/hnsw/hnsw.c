@@ -149,7 +149,7 @@ hnsw_check_available_memory(Size requested)
 	struct sysinfo si;
 	Size total;
 	if (sysinfo(&si) < 0)
-		elog(ERROR, "Failed to get amount of RAM: %n");
+		elog(ERROR, "Failed to get amount of RAM: %m");
 
 	total = si.totalram*si.mem_unit;
 	if ((Size)NBuffers*BLCKSZ + requested >= total)
