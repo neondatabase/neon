@@ -554,7 +554,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
     find /usr/local/pgsql -type f | sort  > /after.txt && \
     /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
     tar -zcvf /extensions/anon/share/extension/anon.tar.gz /extensions/anon/share/extension && \
-    tar -zcvf /extensions/anon/lib/anon.tar.gz /extensions/anon/lib && \
+    tar -zcvf /extensions/anon/lib/anon.tar.gz /extensions/anon/lib
 
 #########################################################################################
 #
