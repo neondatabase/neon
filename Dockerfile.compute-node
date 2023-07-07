@@ -753,7 +753,7 @@ FROM scratch AS postgres-extensions
 # COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
 # Custom extensions
 COPY --from=pg-anon-pg-build /extensions/anon/lib/ /extensions/anon/lib
-RUN --from=pg-anon-pg-build zip /extensions/anon/share/extension /extensions/anon/share/extension/anon.zip
+RUN --from=pg-anon-pg-build tar -zcvf /extensions/anon/share/extension/anon.tar.gz /extensions/anon/share/extension
 
 #########################################################################################
 #
