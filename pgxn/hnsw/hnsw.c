@@ -580,6 +580,7 @@ l2_distance(PG_FUNCTION_ARGS)
 				 errmsg("different array dimensions %d and %d", a_dim, b_dim)));
 	}
 
+	#pragma clang loop vectorize(enable)
 	for (int i = 0; i < a_dim; i++)
 	{
 		diff = ax[i] - bx[i];
