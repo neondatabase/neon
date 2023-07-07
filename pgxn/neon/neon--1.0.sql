@@ -32,3 +32,7 @@ CREATE VIEW local_cache AS
 	SELECT P.* FROM local_cache_pages() AS P
 	(pageoffs int8, relfilenode oid, reltablespace oid, reldatabase oid,
 	 relforknumber int2, relblocknumber int8, accesscount int4);
+
+CREATE FUNCTION copy_from(conninfo cstring) RETURNS BIGINT
+AS 'MODULE_PATHNAME', 'copy_from'
+LANGUAGE C;
