@@ -4096,7 +4096,7 @@ impl Timeline {
             // compute deltas that can be trivially moved
             let mut deltas_to_compact_layers = vec![];
             let mut trivial_move_layers = vec![];
-            for (idx, (image_layers, delta_layers)) in layers_in_tier.into_iter().enumerate() {
+            for (idx, (_, delta_layers)) in layers_in_tier.iter().enumerate() {
                 let range_to_check = {
                     let start = layers_range
                         .iter()
@@ -4115,21 +4115,55 @@ impl Timeline {
                     start..end
                 };
                 for layer in delta_layers.into_iter() {
-                    if overlaps_with(&range_to_check, &layer.get_key_range()) {
+                    if overlaps_with(&range_to_check, &layer.key_range) {
                         // compact if overlaps
-                        deltas_to_compact_layers.push(layer);
+                        deltas_to_compact_layers.push(layer.clone());
                     } else {
                         // if delta layer does not overlap, trivial move
-                        trivial_move_layers.push(layer);
+                        trivial_move_layers.push(layer.clone());
                     }
                 }
-                for layer in image_layers.into_iter() {
-                    if contains(&range_to_check, &layer.get_key_range()) {
+            }
+
+            // delta no overlap, directly return
+            if deltas_to_compact_layers.is_empty() {
+                for (idx, (image_layers, _)) in layers_in_tier.iter().enumerate() {
+                    trivial_move_layers.extend(image_layers.iter().cloned());
+                }
+                return Ok(Some(CompactTieredPhase1Result {
+                    new_layers: vec![],
+                    new_tier_at: *tier_to_compact.last().unwrap(),
+                    removed_tiers: tier_to_compact,
+                    trivial_move_layers: trivial_move_layers
+                        .iter()
+                        .map(|x| self.lcache.get_from_desc(x))
+                        .collect_vec(),
+                }));
+            }
+
+            // otherwise, find containing image layers
+            let compacting_key_range = {
+                let start = deltas_to_compact_layers
+                    .iter()
+                    .map(|x| x.key_range.start)
+                    .min()
+                    .unwrap();
+                let end = deltas_to_compact_layers
+                    .iter()
+                    .map(|x| x.key_range.end)
+                    .max()
+                    .unwrap();
+                start..end
+            };
+
+            for (idx, (image_layers, _)) in layers_in_tier.iter().enumerate() {
+                for layer in image_layers {
+                    if contains(&compacting_key_range, &layer.key_range) {
                         // if image layer is within compaction range, remove it
-                        deltas_to_compact_layers.push(layer);
+                        deltas_to_compact_layers.push(layer.clone());
                     } else {
                         // otherwise, trivially move
-                        trivial_move_layers.push(layer);
+                        trivial_move_layers.push(layer.clone());
                     }
                 }
             }
@@ -4137,7 +4171,6 @@ impl Timeline {
             let deltas_to_compact_layers = deltas_to_compact_layers
                 .into_iter()
                 .map(|l| self.lcache.get_from_desc(&l))
-                .filter(|l| l.layer_desc().is_delta())
                 .collect_vec();
 
             let lsn_range = {
@@ -4172,15 +4205,6 @@ impl Timeline {
             )
         };
 
-        if deltas_to_compact_layers.is_empty() {
-            return Ok(Some(CompactTieredPhase1Result {
-                new_layers: vec![],
-                new_tier_at: *tier_to_compact.last().unwrap(),
-                removed_tiers: tier_to_compact,
-                trivial_move_layers,
-            }));
-        }
-
         async fn run_compaction_for_range(
             tl: Arc<Timeline>,
             deltas_to_compact_layers: Vec<Arc<dyn PersistentLayer>>,
@@ -4189,6 +4213,10 @@ impl Timeline {
             lsn_range: Range<Lsn>,
             target_file_size: u64,
         ) -> Result<Vec<Arc<dyn PersistentLayer>>, CompactionError> {
+            let deltas_to_compact_layers = deltas_to_compact_layers
+                .into_iter()
+                .filter(|x| x.layer_desc().is_delta())
+                .collect_vec();
             // This iterator walks through all key-value pairs from all the layers
             // we're compacting, in key, LSN order.
             let all_values_iter = itertools::process_results(
@@ -4237,45 +4265,13 @@ impl Timeline {
                         break;
                     }
                 }
+
                 let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
                 if same_key {
                     same_key_cnt += 1;
                 } else {
                     same_key_cnt = 1;
                     construct_image_for_key = false;
-                }
-                if same_key_cnt >= PAGE_MATERIALIZE_THRESHOLD {
-                    assert!(lsn <= image_lsn);
-                    if !construct_image_for_key {
-                        let img = match tl.get(key, image_lsn, ctx).await {
-                            Ok(img) => img,
-                            Err(err) => {
-                                if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                                    warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                                    ZERO_PAGE.clone()
-                                } else {
-                                    return Err(CompactionError::Other(err.into()));
-                                }
-                            }
-                        };
-                        if image_writer.is_none() {
-                            // Create writer if not initiaized yet
-                            image_writer = Some(ImageLayerWriter::new(
-                                tl.conf,
-                                tl.timeline_id,
-                                tl.tenant_id,
-                                // TODO(chi): should not use the full key range
-                                key.clone(),
-                                image_lsn,
-                                true,
-                            )?);
-                        }
-
-                        let image_writer_mut = image_writer.as_mut().unwrap();
-                        image_writer_mut.put_image(key, &img)?;
-                        construct_image_for_key = true;
-                        prev_image_key = Some(key);
-                    }
                 }
 
                 // We need to check key boundaries once we reach next key or end of layer with the same key
@@ -4295,7 +4291,7 @@ impl Timeline {
                             if image_writer.is_some() {
                                 let image_writer_mut = image_writer.as_mut().unwrap();
                                 let written_size: u64 = image_writer_mut.size();
-                                if written_size > target_file_size / 2 {
+                                if written_size > target_file_size {
                                     new_layers.push(Arc::new(
                                         image_writer
                                             .take()
@@ -4324,6 +4320,41 @@ impl Timeline {
                 fail_point!("delta-layer-writer-fail-before-finish", |_| {
                     Err(anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into())
                 });
+
+                if same_key_cnt >= PAGE_MATERIALIZE_THRESHOLD {
+                    assert!(lsn <= image_lsn);
+                    if !construct_image_for_key {
+                        let img = match tl.get(key, image_lsn, ctx).await {
+                            Ok(img) => img,
+                            Err(err) => {
+                                if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
+                                    warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
+                                    ZERO_PAGE.clone()
+                                } else {
+                                    return Err(CompactionError::Other(err.into()));
+                                }
+                            }
+                        };
+
+                        if image_writer.is_none() {
+                            // Create writer if not initiaized yet
+                            image_writer = Some(ImageLayerWriter::new(
+                                tl.conf,
+                                tl.timeline_id,
+                                tl.tenant_id,
+                                // TODO(chi): should not use the full key range
+                                key.clone(),
+                                image_lsn,
+                                true,
+                            )?);
+                        }
+
+                        let image_writer_mut = image_writer.as_mut().unwrap();
+                        image_writer_mut.put_image(key, &img)?;
+                        construct_image_for_key = true;
+                        prev_image_key = Some(key);
+                    }
+                }
 
                 writer.as_mut().unwrap().put_value(key, lsn, value)?;
                 prev_key = Some(key);
