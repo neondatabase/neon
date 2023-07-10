@@ -551,7 +551,7 @@ impl ComputeNode {
 
         // Log metrics so that we can search for slow operations in logs
         let metrics = {
-            let mut state = self.state.lock().unwrap();
+            let state = self.state.lock().unwrap();
             state.metrics.clone()
         };
         event!(Level::INFO, message = "compute start finished", metrics = ?metrics);
