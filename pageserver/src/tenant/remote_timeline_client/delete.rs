@@ -19,9 +19,10 @@ pub(super) async fn delete_layer<'a>(
 
     let path_to_delete = conf.remote_path(local_layer_path)?;
 
-    // XXX: If the deletion fails because the object already didn't exist,
-    // it would be good to just issue a warning but consider it success.
-    // https://github.com/neondatabase/neon/issues/2934
+    // We don't want to print an error if the delete failed if the file has
+    // already been deleted. Thankfully, in this situation S3 already
+    // does not yield an error. While OS-provided local file system APIs do yield
+    // errors, we avoid them in the `LocalFs` wrapper.
     storage.delete(&path_to_delete).await.with_context(|| {
         format!("Failed to delete remote layer from storage at {path_to_delete:?}")
     })
