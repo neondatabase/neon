@@ -233,13 +233,17 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
-#[instrument]
+#[instrument(skip_all)]
 pub async fn shutdown_all_tenants() {
+    shutdown_all_tenants0(&*TENANTS).await
+}
+
+async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
     use utils::completion;
 
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
-        let mut m = TENANTS.write().await;
+        let mut m = tenants.write().await;
         match &mut *m {
             TenantsMap::Initializing => {
                 *m = TenantsMap::ShuttingDown(HashMap::default());
@@ -433,6 +437,15 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
+    detach_tenant0(conf, &*TENANTS, tenant_id, detach_ignored).await
+}
+
+async fn detach_tenant0(
+    conf: &'static PageServerConf,
+    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenant_id: TenantId,
+    detach_ignored: bool,
+) -> Result<(), TenantStateError> {
     let local_files_cleanup_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
         fs::remove_dir_all(&local_tenant_directory)
@@ -444,7 +457,8 @@ pub async fn detach_tenant(
     };
 
     let removal_result =
-        remove_tenant_from_memory(tenant_id, local_files_cleanup_operation(tenant_id)).await;
+        remove_tenant_from_memory(tenants, tenant_id, local_files_cleanup_operation(tenant_id))
+            .await;
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
@@ -491,7 +505,15 @@ pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
-    remove_tenant_from_memory(tenant_id, async {
+    ignore_tenant0(conf, &*TENANTS, tenant_id).await
+}
+
+async fn ignore_tenant0(
+    conf: &'static PageServerConf,
+    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenant_id: TenantId,
+) -> Result<(), TenantStateError> {
+    remove_tenant_from_memory(tenants, tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_id);
         fs::File::create(&ignore_mark_file)
             .await
@@ -616,6 +638,7 @@ where
 /// If the cleanup fails, tenant will stay in memory in [`TenantState::Broken`] state, and another removal
 /// operation would be needed to remove it.
 async fn remove_tenant_from_memory<V, F>(
+    tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     tenant_cleanup: F,
 ) -> Result<V, TenantStateError>
@@ -629,7 +652,7 @@ where
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
     let tenant = {
-        TENANTS
+        tenants
             .write()
             .await
             .get(&tenant_id)
@@ -659,14 +682,14 @@ where
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))
     {
         Ok(hook_value) => {
-            let mut tenants_accessor = TENANTS.write().await;
+            let mut tenants_accessor = tenants.write().await;
             if tenants_accessor.remove(&tenant_id).is_none() {
                 warn!("Tenant {tenant_id} got removed from memory before operation finished");
             }
             Ok(hook_value)
         }
         Err(e) => {
-            let tenants_accessor = TENANTS.read().await;
+            let tenants_accessor = tenants.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
                     tenant.set_broken(e.to_string()).await;
