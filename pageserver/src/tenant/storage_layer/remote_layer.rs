@@ -20,8 +20,8 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -115,11 +115,13 @@ impl std::fmt::Display for RemoteLayer {
     }
 }
 
-impl PersistentLayer for RemoteLayer {
+impl AsLayerDesc for RemoteLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for RemoteLayer {
     fn local_path(&self) -> Option<PathBuf> {
         None
     }

@@ -90,7 +90,8 @@ use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
-    DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc, PersistentLayerKey,
+    AsLayerDesc, DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc,
+    PersistentLayerKey,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -124,10 +125,12 @@ impl PartialOrd for Hole {
     }
 }
 
-pub struct LayerFileManager(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
+pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
+    HashMap<PersistentLayerKey, Arc<T>>,
+);
 
-impl LayerFileManager {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
@@ -137,7 +140,7 @@ impl LayerFileManager {
             .clone()
     }
 
-    pub(crate) fn insert(&mut self, layer: Arc<dyn PersistentLayer>) {
+    pub(crate) fn insert(&mut self, layer: Arc<T>) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
@@ -148,7 +151,7 @@ impl LayerFileManager {
         Self(HashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: Arc<dyn PersistentLayer>) {
+    pub(crate) fn remove(&mut self, layer: Arc<T>) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
@@ -158,11 +161,7 @@ impl LayerFileManager {
         }
     }
 
-    pub(crate) fn replace_and_verify(
-        &mut self,
-        expected: Arc<dyn PersistentLayer>,
-        new: Arc<dyn PersistentLayer>,
-    ) -> Result<()> {
+    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
         let key = expected.layer_desc().key();
         let other = new.layer_desc().key();
 
@@ -209,7 +208,6 @@ fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
 fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
-
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,

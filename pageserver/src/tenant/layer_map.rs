@@ -651,18 +651,34 @@ impl LayerMap {
 #[cfg(test)]
 mod tests {
     use super::LayerMap;
-    use crate::tenant::storage_layer::{tests::LayerDescriptor, LayerFileName};
+    use crate::tenant::storage_layer::LayerFileName;
     use std::str::FromStr;
     use std::sync::Arc;
 
     mod l0_delta_layers_updated {
 
         use crate::tenant::{
-            storage_layer::{PersistentLayer, PersistentLayerDesc},
+            storage_layer::{AsLayerDesc, PersistentLayerDesc},
             timeline::LayerFileManager,
         };
 
         use super::*;
+
+        struct LayerObject(PersistentLayerDesc);
+
+        impl AsLayerDesc for LayerObject {
+            fn layer_desc(&self) -> &PersistentLayerDesc {
+                &self.0
+            }
+        }
+
+        impl LayerObject {
+            fn new(desc: PersistentLayerDesc) -> Self {
+                LayerObject(desc)
+            }
+        }
+
+        type TestLayerFileManager = LayerFileManager<LayerObject>;
 
         #[test]
         fn for_full_range_delta() {
@@ -700,18 +716,18 @@ mod tests {
 
             let layer = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69";
             let layer = LayerFileName::from_str(layer).unwrap();
-            let layer = LayerDescriptor::from(layer);
+            let layer = PersistentLayerDesc::from(layer);
 
             // same skeletan construction; see scenario below
-            let not_found = Arc::new(layer.clone());
-            let new_version = Arc::new(layer);
+            let not_found = Arc::new(LayerObject::new(layer.clone()));
+            let new_version = Arc::new(LayerObject::new(layer));
 
             // after the immutable storage state refactor, the replace operation
             // will not use layer map any more. We keep it here for consistency in test cases
             // and can remove it in the future.
             let _map = LayerMap::default();
 
-            let mut mapping = LayerFileManager::new();
+            let mut mapping = TestLayerFileManager::new();
 
             mapping
                 .replace_and_verify(not_found, new_version)
@@ -720,10 +736,10 @@ mod tests {
 
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let name = LayerFileName::from_str(layer_name).unwrap();
-            let skeleton = LayerDescriptor::from(name);
+            let skeleton = PersistentLayerDesc::from(name);
 
-            let remote = Arc::new(skeleton.clone());
-            let downloaded = Arc::new(skeleton);
+            let remote = Arc::new(LayerObject::new(skeleton.clone()));
+            let downloaded = Arc::new(LayerObject::new(skeleton));
 
             let mut map = LayerMap::default();
             let mut mapping = LayerFileManager::new();

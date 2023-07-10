@@ -56,8 +56,8 @@ use utils::{
 };
 
 use super::{
-    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    PathOrConf, PersistentLayerDesc,
+    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, PathOrConf, PersistentLayerDesc,
 };
 
 ///
@@ -403,11 +403,13 @@ impl std::fmt::Display for DeltaLayer {
     }
 }
 
-impl PersistentLayer for DeltaLayer {
+impl AsLayerDesc for DeltaLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for DeltaLayer {
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }

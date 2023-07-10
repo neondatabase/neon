@@ -53,7 +53,9 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc};
+use super::{
+    AsLayerDesc, Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -241,11 +243,13 @@ impl std::fmt::Display for ImageLayer {
     }
 }
 
-impl PersistentLayer for ImageLayer {
+impl AsLayerDesc for ImageLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for ImageLayer {
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
