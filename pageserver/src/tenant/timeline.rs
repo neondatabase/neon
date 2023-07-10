@@ -121,7 +121,9 @@ impl PartialOrd for Hole {
     }
 }
 
-pub struct LayerFileManager<T: AsLayerDesc + ?Sized>(HashMap<PersistentLayerKey, Arc<T>>);
+pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
+    HashMap<PersistentLayerKey, Arc<T>>,
+);
 
 impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
@@ -202,9 +204,6 @@ fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
 fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
-
-type TimelineLayerFileManager = LayerFileManager<dyn PersistentLayer>;
-
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
@@ -233,7 +232,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, TimelineLayerFileManager)>>,
+    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1302,7 +1301,7 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         batch_updates: &mut BatchedUpdates<'_>,
-        mapping: &mut TimelineLayerFileManager,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<bool> {
         if local_layer.is_remote_layer() {
             // TODO(issue #3851): consider returning an err here instead of false,
@@ -2396,7 +2395,7 @@ impl Timeline {
         &self,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut TimelineLayerFileManager,
+        mapping: &mut LayerFileManager,
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
@@ -2408,7 +2407,7 @@ impl Timeline {
         &self,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut TimelineLayerFileManager,
+        mapping: &mut LayerFileManager,
     ) {
         updates.remove_historic(layer.layer_desc().clone());
         mapping.remove(layer);
@@ -2422,7 +2421,7 @@ impl Timeline {
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<PersistentLayerDesc>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut TimelineLayerFileManager,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
         let layer = mapping.get_from_desc(&layer);
         if !layer.is_remote_layer() {
@@ -3608,7 +3607,7 @@ impl Timeline {
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, TimelineLayerFileManager)>,
+        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
