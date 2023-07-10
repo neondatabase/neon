@@ -13,3 +13,6 @@ for prefix in os.listdir("."):
                 "control": control
             }
 
+with open("control_index.json", "w") as f:
+    json.dump(index, f)
+

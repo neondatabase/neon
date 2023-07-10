@@ -977,6 +977,7 @@ jobs:
         run: |
           for BUCKET in $(echo ${S3_BUCKETS}); do
             aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
+            aws s3 cp --only-show-errors ./control_files/control_index.json s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
           done
 
       - name: Cleanup
