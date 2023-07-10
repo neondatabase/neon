@@ -20,8 +20,8 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -112,11 +112,13 @@ impl std::fmt::Display for RemoteLayer {
     }
 }
 
-impl PersistentLayer for RemoteLayer {
+impl AsLayerDesc for RemoteLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for RemoteLayer {
     fn local_path(&self) -> Option<PathBuf> {
         None
     }
@@ -213,17 +215,6 @@ impl RemoteLayer {
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
             download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(desc: PersistentLayerDesc) -> RemoteLayer {
-        RemoteLayer {
-            layer_metadata: LayerFileMetadata::new(desc.file_size),
-            desc,
-            ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
-            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
         }
     }
 

@@ -659,11 +659,27 @@ mod tests {
     mod l0_delta_layers_updated {
 
         use crate::tenant::{
-            storage_layer::{PersistentLayer, PersistentLayerDesc, RemoteLayer},
+            storage_layer::{AsLayerDesc, PersistentLayerDesc},
             timeline::LayerFileManager,
         };
 
         use super::*;
+
+        struct LayerObject(PersistentLayerDesc);
+
+        impl AsLayerDesc for LayerObject {
+            fn layer_desc(&self) -> &PersistentLayerDesc {
+                &self.0
+            }
+        }
+
+        impl LayerObject {
+            fn new(desc: PersistentLayerDesc) -> Self {
+                LayerObject(desc)
+            }
+        }
+
+        type TestLayerFileManager = LayerFileManager<LayerObject>;
 
         #[test]
         fn for_full_range_delta() {
@@ -704,15 +720,15 @@ mod tests {
             let layer = PersistentLayerDesc::from(layer);
 
             // same skeletan construction; see scenario below
-            let not_found = Arc::new(RemoteLayer::new_for_test(layer.clone()));
-            let new_version = Arc::new(RemoteLayer::new_for_test(layer));
+            let not_found = Arc::new(LayerObject::new(layer.clone()));
+            let new_version = Arc::new(LayerObject::new(layer));
 
             // after the immutable storage state refactor, the replace operation
             // will not use layer map any more. We keep it here for consistency in test cases
             // and can remove it in the future.
             let _map = LayerMap::default();
 
-            let mut mapping = LayerFileManager::new();
+            let mut mapping = TestLayerFileManager::new();
 
             mapping
                 .replace_and_verify(not_found, new_version)
@@ -723,8 +739,8 @@ mod tests {
             let name = LayerFileName::from_str(layer_name).unwrap();
             let skeleton = PersistentLayerDesc::from(name);
 
-            let remote = Arc::new(RemoteLayer::new_for_test(skeleton.clone()));
-            let downloaded = Arc::new(RemoteLayer::new_for_test(skeleton));
+            let remote = Arc::new(LayerObject::new(skeleton.clone()));
+            let downloaded = Arc::new(LayerObject::new(skeleton));
 
             let mut map = LayerMap::default();
             let mut mapping = LayerFileManager::new();
