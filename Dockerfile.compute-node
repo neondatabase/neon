@@ -536,6 +536,7 @@ RUN wget https://github.com/neondatabase/pg_embedding/archive/2465f831ea1f8d49c1
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/embedding.control &&\
     find /usr/local/pgsql -type f | sort  > /after_embedding.txt &&\
     /bin/bash -c 'for from in $(comm -13 /before_embedding.txt /after_embedding.txt); do to=/extensions/public/embedding/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
+    mkdir /control_files &&\
     tar -zcvf /extensions/public/embedding.tar.gz /extensions/public/embedding && \
     cp /usr/local/pgsql/share/extension/embedding.control /control_files/embedding.control
 
@@ -558,6 +559,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
     find /usr/local/pgsql -type f | sort  > /after.txt && \
     /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/123454321/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
+    mkdir /control_files &&\
     tar -zcvf /extensions/123454321/anon.tar.gz /extensions/123454321/anon && \
     cp /usr/local/pgsql/share/extension/anon.control /control_files/anon.control
 
@@ -756,7 +758,7 @@ FROM scratch AS postgres-extensions
 # As for now, it's only for new custom ones
 #
 # extensions
-COPY --from=pg-anon-pg-build /extensions/123456789/anon.tar.gz /extensions/123456789/anon.tar.gz
+COPY --from=pg-anon-pg-build /extensions/123454321/anon.tar.gz /extensions/123454321/anon.tar.gz
 COPY --from=pg-anon-pg-build /control_files/anon.control /control_files/anon.control
 
 COPY --from=pg-embedding-pg-build /extensions/public/embedding.tar.gz /extensions/public/embedding.tar.gz
