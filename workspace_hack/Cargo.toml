@@ -48,7 +48,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 socket2 = { version = "0.4", default-features = false, features = ["all"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.23" }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
+tokio-util = { version = "0.7", features = ["codec", "io", "time"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.19", features = ["serde"] }
 tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }
