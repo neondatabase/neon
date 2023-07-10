@@ -554,7 +554,7 @@ impl ComputeNode {
             let state = self.state.lock().unwrap();
             state.metrics.clone()
         };
-        event!(Level::INFO, message = "compute start finished", metrics = ?metrics);
+        info!(?metrics, "compute start finished");
 
         Ok(pg)
     }
