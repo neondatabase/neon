@@ -2596,11 +2596,7 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
         let mut guard = self.layers.write().await;
-        let end_lsn = Lsn(self.get_last_record_lsn().0 + 1);
-        if guard.try_freeze_in_memory_layer(end_lsn) {
-            self.last_freeze_at.store(end_lsn);
-        }
-        drop_wlock(guard);
+        guard.try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at);
     }
 
     /// Layer flusher task's main loop.

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
     id::{TenantId, TimelineId},
-    lsn::Lsn,
+    lsn::{AtomicLsn, Lsn},
 };
 
 use crate::{
@@ -18,8 +18,6 @@ use crate::{
         timeline::compare_arced_layers,
     },
 };
-
-use super::Timeline;
 
 /// Provides semantic APIs to manipulate the layer map.
 pub struct LayerManager {
@@ -132,8 +130,13 @@ impl LayerManager {
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    #[must_use]
-    pub fn try_freeze_in_memory_layer(&mut self, end_lsn: Lsn) -> bool {
+    pub fn try_freeze_in_memory_layer(
+        &mut self,
+        Lsn(last_record_lsn): Lsn,
+        last_freeze_at: &AtomicLsn,
+    ) {
+        let end_lsn = Lsn(last_record_lsn + 1);
+
         if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
@@ -144,9 +147,7 @@ impl LayerManager {
             self.layer_map.frozen_layers.push_back(open_layer_rc);
             self.layer_map.open_layer = None;
             self.layer_map.next_open_layer_at = Some(end_lsn);
-            true
-        } else {
-            false
+            last_freeze_at.store(end_lsn);
         }
     }
 
