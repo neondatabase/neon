@@ -138,11 +138,6 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
-	+@echo "Compiling hnsw $*"
-	mkdir -p $(POSTGRES_INSTALL_DIR)/build/hnsw-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
-		-C $(POSTGRES_INSTALL_DIR)/build/hnsw-$* \
-		-f $(ROOT_PROJECT_DIR)/pgxn/hnsw/Makefile install
 
 .PHONY: neon-pg-ext-clean-%
 neon-pg-ext-clean-%:
@@ -158,9 +153,6 @@ neon-pg-ext-clean-%:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
 	-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 	-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile clean
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
-	-C $(POSTGRES_INSTALL_DIR)/build/hnsw-$* \
-	-f $(ROOT_PROJECT_DIR)/pgxn/hnsw/Makefile clean
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \
