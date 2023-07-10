@@ -990,7 +990,8 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     needs: [ upload-postgres-extensions-to-s3, promote-images, tag, regress-tests ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
+    if: ( github.ref_name == 'release' || github.ref_name == 'zip_ext') && github.event_name != 'workflow_dispatch'
+    # if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
         run: |
@@ -1012,7 +1013,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+          # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+          if [[ "$GITHUB_REF_NAME" == "zip_ext" ]]; then
             gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
