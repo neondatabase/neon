@@ -235,6 +235,8 @@ pub fn schedule_local_tenant_processing(
 /// We would then be in split-brain once this pageserver restarts.
 #[instrument]
 pub async fn shutdown_all_tenants() {
+    use utils::completion;
+
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
         let mut m = TENANTS.write().await;
@@ -262,14 +264,31 @@ pub async fn shutdown_all_tenants() {
     for (tenant_id, tenant) in tenants_to_shut_down {
         join_set.spawn(
             async move {
+                let (_guard, shutdown_progress) = completion::channel();
                 let freeze_and_flush = true;
+                if let Err(progress) = tenant.shutdown(shutdown_progress, freeze_and_flush).await {
+                    drop(_guard);
+                    // there is already something else shutting down the tenant (detach, ignore), lets wait for it
+                    let mut remaining = std::pin::pin!(progress.wait());
+                    let remaining = tokio::select! {
+                        biased;
+                        _ = &mut remaining => {
+                            None
+                        },
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                            // in practice we might not have a lot to go, since systemd is going to
+                            // SIGKILL us at 10s, but we can try. delete tenant might take a while,
+                            // so put out a warning.
+                            warn!("waiting for the other shutdown to complete");
+                            Some(remaining)
+                        }
+                    };
 
-                match tenant.shutdown(freeze_and_flush).await {
-                    Ok(()) => debug!("tenant successfully stopped"),
-                    Err(super::ShutdownError::AlreadyStopping) => {
-                        warn!("tenant was already shutting down")
+                    if let Some(remaining) = remaining {
+                        remaining.await;
                     }
                 }
+                debug!("tenant successfully stopped");
             }
             .instrument(info_span!("shutdown", %tenant_id)),
         );
@@ -603,6 +622,8 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
+    use utils::completion;
+
     // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
@@ -616,14 +637,20 @@ where
             .ok_or(TenantStateError::NotFound(tenant_id))?
     };
 
+    // allow pageserver shutdown to await for our completion
+    let (_guard, progress) = completion::channel();
+
+    // whenever we remove a tenant from memory, we don't want to flush and wait for upload
     let freeze_and_flush = false;
 
     // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
     // that we can continue safely to cleanup.
-    match tenant.shutdown(freeze_and_flush).await {
+    match tenant.shutdown(progress, freeze_and_flush).await {
         Ok(()) => {}
-        Err(super::ShutdownError::AlreadyStopping) => {
-            return Err(TenantStateError::IsStopping(tenant_id))
+        Err(_other) => {
+            // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
+            // wait for it but return an error right away because these are distinct requests.
+            return Err(TenantStateError::IsStopping(tenant_id));
         }
     }
 

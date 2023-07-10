@@ -281,7 +281,7 @@ pub enum DeleteTimelineError {
 }
 
 pub enum SetStoppingError {
-    AlreadyStopping,
+    AlreadyStopping(completion::Barrier),
     Broken,
 }
 
@@ -316,10 +316,6 @@ impl std::fmt::Display for WaitToBecomeActiveError {
             }
         }
     }
-}
-
-pub(crate) enum ShutdownError {
-    AlreadyStopping,
 }
 
 struct DeletionGuard(OwnedMutexGuard<bool>);
@@ -1721,7 +1717,7 @@ impl Tenant {
         self.state.send_modify(|current_state| {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
-                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
+                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
                 TenantState::Loading => {
@@ -1785,7 +1781,11 @@ impl Tenant {
     /// - detach + ignore (freeze_and_flush == false)
     ///
     /// This will attempt to shutdown even if tenant is broken.
-    pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+    async fn shutdown(
+        &self,
+        shutdown_progress: completion::Barrier,
+        freeze_and_flush: bool,
+    ) -> Result<(), completion::Barrier> {
         span::debug_assert_current_span_has_tenant_id();
         // Set tenant (and its timlines) to Stoppping state.
         //
@@ -1804,12 +1804,16 @@ impl Tenant {
         // But the tenant background loops are joined-on in our caller.
         // It's mesed up.
         // we just ignore the failure to stop
-        match self.set_stopping().await {
+
+        match self.set_stopping(shutdown_progress).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
             }
-            Err(SetStoppingError::AlreadyStopping) => return Err(ShutdownError::AlreadyStopping),
+            Err(SetStoppingError::AlreadyStopping(other)) => {
+                // give caller the option to wait for this this shutdown
+                return Err(other);
+            }
         };
 
         if freeze_and_flush {
@@ -1841,7 +1845,7 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
@@ -1853,7 +1857,7 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
@@ -1868,7 +1872,7 @@ impl Tenant {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
-                *current_state = TenantState::Stopping;
+                *current_state = TenantState::Stopping { progress };
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
                 true
@@ -1880,9 +1884,9 @@ impl Tenant {
                 err = Some(SetStoppingError::Broken);
                 false
             }
-            TenantState::Stopping => {
+            TenantState::Stopping { progress } => {
                 info!("Tenant is already in Stopping state");
-                err = Some(SetStoppingError::AlreadyStopping);
+                err = Some(SetStoppingError::AlreadyStopping(progress.clone()));
                 false
             }
         });
@@ -1926,7 +1930,7 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
@@ -1949,7 +1953,7 @@ impl Tenant {
                     warn!("Tenant is already in Broken state");
                 }
                 // This is the only "expected" path, any other path is a bug.
-                TenantState::Stopping => {
+                TenantState::Stopping { .. } => {
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
@@ -1982,7 +1986,7 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken { .. } | TenantState::Stopping => {
+                TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
                     return Err(WaitToBecomeActiveError::WillNotBecomeActive {
                         tenant_id: self.tenant_id,
