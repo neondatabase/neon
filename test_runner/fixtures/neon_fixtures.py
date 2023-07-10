@@ -3119,8 +3119,8 @@ def parse_project_git_version_output(s: str) -> str:
     """
     import re
 
-    res = re.search(r"git(-env)?:([0-9a-fA-F]+)(-\S+)?", s)
-    if res and res.group(2):
-        return res.group(2)
+    res = re.search(r"git(-env)?:([0-9a-fA-F]{8,40})(-\S+)?", s)
+    if res and (commit := res.group(2)):
+        return commit
 
     raise ValueError(f"unable to parse --version output: '{s}'")
