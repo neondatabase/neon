@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
 use tokio_postgres;
-use tracing::{info, instrument, warn};
+use tracing::{event, info, instrument, warn, Level};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -548,6 +548,13 @@ impl ComputeNode {
             "finished configuration of compute for project {}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
+
+        // Log metrics so that we can search for slow operations in logs
+        let metrics = {
+            let mut state = self.state.lock().unwrap();
+            state.metrics.clone()
+        };
+        event!(Level::INFO, message = "compute start finished", metrics = ?metrics);
 
         Ok(pg)
     }
