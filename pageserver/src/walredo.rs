@@ -1068,7 +1068,7 @@ impl Drop for NoLeakChild {
             tokio::task::spawn_blocking(move || {
                 // Intentionally don't inherit the tracing context from whoever is dropping us.
                 // This thread here is going to outlive of our dropper.
-                let span = tracing::info_span!("NoLeakChild::drop", %tenant_id);
+                let span = tracing::info_span!("walredo", %tenant_id);
                 let _entered = span.enter();
                 Self::kill_and_wait_impl(child);
             })
