@@ -90,7 +90,6 @@ use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
     AsLayerDesc, DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc,
-   
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -121,78 +120,6 @@ impl Ord for Hole {
 impl PartialOrd for Hole {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
-    HashMap<PersistentLayerKey, Arc<T>>,
-);
-
-impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
-        // The assumption for the `expect()` is that all code maintains the following invariant:
-        // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
-        self.0
-            .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename()))
-            .expect("not found")
-            .clone()
-    }
-
-    pub(crate) fn insert(&mut self, layer: Arc<T>) {
-        let present = self.0.insert(layer.layer_desc().key(), layer.clone());
-        if present.is_some() && cfg!(debug_assertions) {
-            panic!("overwriting a layer: {:?}", layer.layer_desc())
-        }
-    }
-
-    pub(crate) fn new() -> Self {
-        Self(HashMap::new())
-    }
-
-    pub(crate) fn remove(&mut self, layer: Arc<T>) {
-        let present = self.0.remove(&layer.layer_desc().key());
-        if present.is_none() && cfg!(debug_assertions) {
-            panic!(
-                "removing layer that is not present in layer mapping: {:?}",
-                layer.layer_desc()
-            )
-        }
-    }
-
-    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
-        let key = expected.layer_desc().key();
-        let other = new.layer_desc().key();
-
-        let expected_l0 = LayerMap::is_l0(expected.layer_desc());
-        let new_l0 = LayerMap::is_l0(new.layer_desc());
-
-        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
-            "layermap-replace-notfound"
-        ));
-
-        anyhow::ensure!(
-            key == other,
-            "expected and new layer have different keys: {key:?} != {other:?}"
-        );
-
-        anyhow::ensure!(
-            expected_l0 == new_l0,
-            "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
-        );
-
-        if let Some(layer) = self.0.get_mut(&expected.layer_desc().key()) {
-            anyhow::ensure!(
-                compare_arced_layers(&expected, layer),
-                "another layer was found instead of expected, expected={expected:?}, new={new:?}",
-                expected = Arc::as_ptr(&expected),
-                new = Arc::as_ptr(layer),
-            );
-            *layer = new;
-            Ok(())
-        } else {
-            anyhow::bail!("layer was not found");
-        }
     }
 }
 
