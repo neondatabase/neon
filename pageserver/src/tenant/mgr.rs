@@ -308,7 +308,7 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    let func = || async {
+    tenant_map_insert(tenant_id, async {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
@@ -362,8 +362,7 @@ pub async fn create_tenant(
         // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
         Ok(created_tenant)
-    };
-    tenant_map_insert(tenant_id, func).await
+    }).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -493,7 +492,7 @@ pub async fn load_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || async {
+    tenant_map_insert(tenant_id, async {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
         if tenant_ignore_mark.exists() {
@@ -562,7 +561,7 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let func = || async {
+    tenant_map_insert(tenant_id, async {
         let tenant_dir =
             create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
 
@@ -613,9 +612,7 @@ pub async fn attach_tenant(
         // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
         Ok(attached_tenant)
-    };
-
-    tenant_map_insert(tenant_id, func).await?;
+    }).await?;
     Ok(())
 }
 
@@ -637,13 +634,12 @@ pub enum TenantMapInsertError {
 ///
 /// NB: the closure should return quickly because the current implementation of tenants map
 /// serializes access through an `RwLock`.
-async fn tenant_map_insert<F, Ft>(
+async fn tenant_map_insert<Fut>(
     tenant_id: TenantId,
-    insert_fn: F,
+    insert_fut: Fut,
 ) -> Result<Arc<Tenant>, TenantMapInsertError>
 where
-    F: FnOnce() -> Ft,
-    Ft: Future<Output = anyhow::Result<Arc<Tenant>>>,
+    Fut: Future<Output = anyhow::Result<Arc<Tenant>>>,
 {
     let mut guard = TENANTS.write().await;
     let m = match &mut *guard {
@@ -656,7 +652,7 @@ where
             tenant_id,
             e.get().current_state(),
         )),
-        hash_map::Entry::Vacant(v) => match insert_fn().await {
+        hash_map::Entry::Vacant(v) => match insert_fut.await {
             Ok(tenant) => {
                 v.insert(tenant.clone());
                 Ok(tenant)
