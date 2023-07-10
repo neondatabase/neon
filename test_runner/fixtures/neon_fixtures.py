@@ -800,16 +800,16 @@ class NeonEnvBuilder:
             bucket_region=region,
             access_key=access_key,
             secret_key=secret_key,
-            prefix_in_bucket=f"{self.remote_storage_prefix}/pageserver",
+            prefix_in_bucket=self.remote_storage_prefix,
         )
 
         if enable_remote_extensions:
             self.ext_remote_storage = S3Storage(
-                bucket_name=bucket_name,
-                bucket_region=region,
+                bucket_name="neon-dev-extensions-us-east-2",
+                bucket_region="us-east-2",
                 access_key=access_key,
                 secret_key=secret_key,
-                prefix_in_bucket=f"{self.remote_storage_prefix}/ext",
+                prefix_in_bucket="5412197734",
             )
 
     def cleanup_local_storage(self):
