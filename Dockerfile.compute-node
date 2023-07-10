@@ -530,9 +530,14 @@ ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/neondatabase/pg_embedding/archive/2465f831ea1f8d49c1d74f8959adb7fc277d70cd.tar.gz -O pg_embedding.tar.gz && \
     echo "047af2b1f664a1e6e37867bd4eeaf5934fa27d6ba3d6c4461efa388ddf7cd1d5 pg_embedding.tar.gz" | sha256sum --check && \
     mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sort  > /before_embedding.txt && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/embedding.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/embedding.control &&\
+    find /usr/local/pgsql -type f | sort  > /after_embedding.txt &&\
+    /bin/bash -c 'for from in $(comm -13 /before_embedding.txt /after_embedding.txt); do to=/extensions/public/embedding/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
+    tar -zcvf /extensions/public/embedding.tar.gz /extensions/public/embedding && \
+    cp /usr/local/pgsql/share/extension/embedding.control /control_files/embedding.control
 
 #########################################################################################
 #
@@ -552,10 +557,9 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
     find /usr/local/pgsql -type f | sort  > /after.txt && \
-    /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
-    tar -zcvf /extensions/anon/share/extension/anon.tar.gz /extensions/anon/share/extension && \
-    tar -zcvf /extensions/anon/lib/anon.tar.gz /extensions/anon/lib && \
-    cp /usr/local/pgsql/share/extension/anon.control /extensions/anon/share/extension/anon.control
+    /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/123454321/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done' && \
+    tar -zcvf /extensions/123454321/anon.tar.gz /extensions/123454321/anon && \
+    cp /usr/local/pgsql/share/extension/anon.control /control_files/anon.control
 
 #########################################################################################
 #
@@ -751,13 +755,12 @@ FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
 # As for now, it's only for new custom ones
 #
-# # Default extensions
-# COPY --from=postgres-cleanup-layer /usr/local/pgsql/share/extension /usr/local/pgsql/share/extension
-# COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
-# Custom extensions
-COPY --from=pg-anon-pg-build /extensions/anon/lib/anon.tar.gz /extensions/anon/lib/anon.tar.gz
-COPY --from=pg-anon-pg-build /extensions/anon/share/extension/anon.tar.gz /extensions/anon/share/extension/anon.tar.gz
-COPY --from=pg-anon-pg-build /extensions/anon/share/extension/anon.control /extensions/anon/share/extension/anon.control
+# extensions
+COPY --from=pg-anon-pg-build /extensions/123456789/anon.tar.gz /extensions/123456789/anon.tar.gz
+COPY --from=pg-anon-pg-build /control_files/anon.control /control_files/anon.control
+
+COPY --from=pg-embedding-pg-build /extensions/public/embedding.tar.gz /extensions/public/embedding.tar.gz
+COPY --from=pg-embedding-pg-build /control_files/embedding.control /control_files/embedding.control
 
 #########################################################################################
 #

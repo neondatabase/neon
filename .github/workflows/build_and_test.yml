@@ -956,29 +956,19 @@ jobs:
 
       - name: Extract postgres-extensions from container
         run: |
-          rm -rf ./extensions-to-upload ./custom-extensions # Just in case
+          rm -rf ./extensions-to-upload # Just in case
+          mkdir extensions-to-upload
 
-          # In compute image we have a bit different directory layout
-          mkdir -p extensions-to-upload/share
-          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension/*.tar.gz ./extensions-to-upload/share/extension
-          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension/*.control ./extensions-to-upload/share/extension
-          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/lib/*.tar.gz             ./extensions-to-upload/lib
+          # TODO: Delete Neon extensitons (they always present on compute-node image)
+          # rm -rf ./extensions-to-upload/share/extension/neon*
+          # rm -rf ./extensions-to-upload/lib/neon*
 
-          # Delete Neon extensitons (they always present on compute-node image)
-          rm -rf ./extensions-to-upload/share/extension/neon*
-          rm -rf ./extensions-to-upload/lib/neon*
+          # # TODO: Delete leftovers from the extension build step
+          # # (This step, if desired, should be moved to Dockerfile.compute-node before the files are zipped)
+          # rm -rf ./extensions-to-upload/lib/pgxs
+          # rm -rf ./extensions-to-upload/lib/pkgconfig
 
-          # Delete leftovers from the extension build step
-          rm -rf ./extensions-to-upload/lib/pgxs
-          rm -rf ./extensions-to-upload/lib/pkgconfig
-
-          docker cp ${{ steps.create-container.outputs.EID }}:/extensions ./custom-extensions
-          for EXT_NAME in $(ls ./custom-extensions); do
-            mkdir -p ./extensions-to-upload/${EXT_NAME}/share
-
-            mv ./custom-extensions/${EXT_NAME}/share/extension ./extensions-to-upload/${EXT_NAME}/share/extension
-            mv ./custom-extensions/${EXT_NAME}/lib             ./extensions-to-upload/${EXT_NAME}/lib
-          done
+          docker cp -r ${{ steps.create-container.outputs.EID }}:/extensions ./extensions-to-upload
 
       - name: Upload postgres-extensions to S3
         run: |
