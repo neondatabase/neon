@@ -1734,7 +1734,7 @@ impl Timeline {
             }
         }
 
-        guard.initialize(loaded_layers, Lsn(disk_consistent_lsn.0) + 1);
+        guard.initialize_local_layers(loaded_layers, Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -3035,7 +3035,7 @@ impl Timeline {
             LayerResidenceStatus::Resident,
             LayerResidenceEventReason::LayerCreate,
         );
-        guard.flush_l0_delta_layer(l);
+        guard.track_new_l0_delta_layer(l);
 
         // update metrics
         self.metrics.resident_physical_size_gauge.add(sz);
@@ -3284,7 +3284,7 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
         }
-        guard.create_image_layers(image_layers);
+        guard.track_new_image_layers(image_layers);
         drop_wlock(guard);
         timer.stop_and_record();
 
@@ -3918,7 +3918,7 @@ impl Timeline {
             remove_layers.push(guard.get_from_desc(&l));
         }
 
-        guard.compact_l0(
+        guard.finish_compact_l0(
             layer_removal_cs,
             remove_layers,
             insert_layers,
@@ -4259,7 +4259,7 @@ impl Timeline {
                 layer_names_to_delete.push(doomed_layer.filename());
                 result.layers_removed += 1;
             }
-            let apply = guard.gc_timeline(layer_removal_cs, gc_layers, &self.metrics)?;
+            let apply = guard.finish_gc_timeline(layer_removal_cs, gc_layers, &self.metrics)?;
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");

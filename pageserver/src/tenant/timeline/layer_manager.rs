@@ -60,7 +60,7 @@ impl LayerManager {
     /// Called from `load_layer_map`. Initialize the layer manager with:
     /// 1. all on-disk layers
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
-    pub fn initialize(
+    pub fn initialize_local_layers(
         &mut self,
         on_disk_layers: Vec<Arc<dyn PersistentLayer>>,
         next_open_layer_at: Lsn,
@@ -124,7 +124,7 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub fn create_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
+    pub fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
             Self::insert_historic_layer(Arc::new(layer), &mut updates, &mut self.layer_fmgr);
@@ -133,14 +133,14 @@ impl LayerManager {
     }
 
     /// Insert into the layer map when a new delta layer is created, called from `create_delta_layer`.
-    pub fn flush_l0_delta_layer(&mut self, delta_layer: Arc<DeltaLayer>) {
+    pub fn track_new_l0_delta_layer(&mut self, delta_layer: Arc<DeltaLayer>) {
         let mut updates = self.layer_map.batch_update();
         Self::insert_historic_layer(delta_layer, &mut updates, &mut self.layer_fmgr);
         updates.flush();
     }
 
     /// Called when compaction is completed.
-    pub fn compact_l0(
+    pub fn finish_compact_l0(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<dyn PersistentLayer>>,
@@ -153,7 +153,7 @@ impl LayerManager {
         }
         for l in compact_from {
             // NB: the layer file identified by descriptor `l` is guaranteed to be present
-            // in the LayerFileManager because we kept holding `layer_removal_cs` the entire
+            // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
             // time, even though we dropped `Timeline::layers` inbetween.
             Self::delete_historic_layer(
                 layer_removal_cs.clone(),
@@ -168,7 +168,7 @@ impl LayerManager {
     }
 
     /// Called when garbage collect the timeline.
-    pub fn gc_timeline(
+    pub fn finish_gc_timeline(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         gc_layers: Vec<Arc<dyn PersistentLayer>>,
