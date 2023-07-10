@@ -956,8 +956,9 @@ jobs:
 
       - name: Extract postgres-extensions from container
         run: |
-          rm -rf ./extensions-to-upload # Just in case
+          rm -rf ./extensions-to-upload ./control_files # Just in case
           mkdir extensions-to-upload
+          mkdir control_files
 
           # TODO: Delete Neon extensitons (they always present on compute-node image)
           # rm -rf ./extensions-to-upload/share/extension/neon*
@@ -969,6 +970,8 @@ jobs:
           # rm -rf ./extensions-to-upload/lib/pkgconfig
 
           docker cp -r ${{ steps.create-container.outputs.EID }}:/extensions ./extensions-to-upload
+          docker cp -r ${{ steps.create-container.outputs.EID }}:/control_files ./control_files
+          python3 combine_control_files.py
 
       - name: Upload postgres-extensions to S3
         run: |

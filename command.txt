@@ -1,0 +1,9 @@
+docker build --build-arg PG_VERSION=v15 -f Dockerfile.compute-node --tag neondatabase/compute-node:pg-embedding-pg-build --target pg-embedding-pg-build .
+docker create --name pg-embedding-pg-build neondatabase/compute-node:pg-embedding-pg-build
+docker cp pg-embedding-pg-build:/ ./pg-embedding-pg-build
+docker build --build-arg PG_VERSION=v15 -f Dockerfile.compute-node --tag neondatabase/compute-node:pg-anon-pg-build --target pg-anon-pg-build .
+docker create --name pg-anon-pg-build neondatabase/compute-node:pg-anon-pg-build
+docker cp pg-anon-pg-build:/ ./pg-anon-pg-build
+docker build --build-arg PG_VERSION=v15 -f Dockerfile.compute-node --tag neondatabase/compute-node:postgres-extensions --target postgres-extensions .
+docker create --name postgres-extensions neondatabase/compute-node:postgres-extensions true
+docker cp postgres-extensions:/ ./postgres-extensions
