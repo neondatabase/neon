@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
 use tokio_postgres;
-use tracing::{event, info, instrument, warn, Level};
+use tracing::{info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -554,7 +554,7 @@ impl ComputeNode {
             let state = self.state.lock().unwrap();
             state.metrics.clone()
         };
-        event!(Level::INFO, message = "compute start finished", metrics = ?metrics);
+        info!(?metrics, "compute start finished");
 
         Ok(pg)
     }
