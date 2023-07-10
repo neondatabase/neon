@@ -2,7 +2,7 @@
 // and put them in the right place in the postgres directory
 use crate::compute::ComputeNode;
 use anyhow::{self, bail, Context, Result};
-use futures::future::join_all;
+use futures::future::{join_all, Remote};
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::collections::HashMap;
@@ -102,24 +102,15 @@ pub async fn get_available_extensions(
     pgbin: &str,
     pg_version: &str,
     custom_ext_prefixes: &Vec<String>,
-) -> anyhow::Result<HashMap<String, Vec<PathAndFlag>>> {
+) -> anyhow::Result<Vec<RemotePath>> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-
     // public path, plus any private paths to download extensions from
     let mut paths: Vec<RemotePath> = Vec::new();
-    paths.push(RemotePath::new(
-        &Path::new(pg_version).join(SHARE_EXT_PATH),
-    )?);
+    paths.push(RemotePath::new(&Path::new(pg_version).join("public"))?);
     for custom_prefix in custom_ext_prefixes {
-        paths.push(RemotePath::new(
-            &Path::new(pg_version)
-                .join(custom_prefix)
-                .join(SHARE_EXT_PATH),
-        )?);
+        paths.push(RemotePath::new(&Path::new(pg_version).join(custom_prefix))?);
     }
-
-    let (extension_files, control_files) =
-        organized_extension_files(remote_storage, &paths).await?;
+    let (control_files, zip_files) = organized_extension_files(remote_storage, &paths).await?;
 
     let mut control_file_download_tasks = Vec::new();
     // download all control files
@@ -132,7 +123,16 @@ pub async fn get_available_extensions(
         ));
     }
     pass_any_error(join_all(control_file_download_tasks).await)?;
-    Ok(extension_files)
+    Ok(zip_files)
+}
+
+pub async fn download_extensions(
+    remote_storage: &GenericRemoteStorage,
+    pgbin: &str,
+    pg_version: &str,
+    custom_ext_prefixes: &Vec<String>,
+) {
+    // OK I was just going to download everything, but that seems wrong.
 }
 
 // Download requested shared_preload_libraries
@@ -397,37 +397,28 @@ fn get_ext_name(path: &str) -> Result<(&str, bool)> {
     Ok((ext_name, false))
 }
 
-// helper to collect files of given prefixes for extensions and group them by extension
-// returns a hashmap of (extension_name, Vector of remote paths for all files needed for this extension)
-// and a list of control files
-// For example, an entry in the hashmap could be
-// {"anon": [RemotePath("v14/anon/share/extension/anon/address.csv"),
-// RemotePath("v14/anon/share/extension/anon/anon--1.1.0.sql")]},
-// with corresponding list of control files entry being
-// {"anon.control": RemotePath("v14/anon/share/extension/anon.control")}
+// list files in all given directories and find the zip / control file in them
 async fn organized_extension_files(
     remote_storage: &GenericRemoteStorage,
     paths: &Vec<RemotePath>,
-) -> Result<(HashMap<String, Vec<PathAndFlag>>, Vec<RemotePath>)> {
-    let mut grouped_dependencies = HashMap::new();
+) -> Result<(Vec<RemotePath>, Vec<RemotePath>)> {
     let mut control_files = Vec::new();
+    let mut zip_files = Vec::new();
 
-    for file in list_all_files(remote_storage, paths).await? {
-        if file.extension().context("bad file name")? == "control" {
-            control_files.push(file.to_owned());
-        } else {
-            let (file_ext_name, subdir_flag) =
-                get_ext_name(file.get_path().to_str().context("invalid path")?)?;
-            let ext_file_list = grouped_dependencies
-                .entry(file_ext_name.to_string())
-                .or_insert(Vec::new());
-            ext_file_list.push(PathAndFlag {
-                path: file.to_owned(),
-                subdir_flag,
-            });
+    let mut list_file_tasks = Vec::new();
+    for path in paths {
+        list_file_tasks.push(remote_storage.list_files(Some(path)));
+    }
+    for list_result in join_all(list_file_tasks).await {
+        for file in list_result? {
+            if file.extension().expect("bad file name") == "control" {
+                control_files.push(file.to_owned());
+            } else {
+                zip_files.push(file.to_owned());
+            }
         }
     }
-    Ok((grouped_dependencies, control_files))
+    Ok((control_files, zip_files))
 }
 
 pub fn launch_download_extensions(
