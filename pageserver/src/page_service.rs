@@ -479,7 +479,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(base_lsn=%base_lsn, end_lsn=%_end_lsn, pg_version=%pg_version))]
+    #[instrument(skip_all, fields(%base_lsn, end_lsn=%_end_lsn, %pg_version))]
     async fn handle_import_basebackup<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -539,7 +539,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(start_lsn=%start_lsn, end_lsn=%end_lsn))]
+    #[instrument(skip_all, fields(%start_lsn, %end_lsn))]
     async fn handle_import_wal<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -747,7 +747,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(lsn=?lsn, prev_lsn=?prev_lsn, full_backup=%full_backup))]
+    #[instrument(skip_all, fields(?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
