@@ -549,6 +549,13 @@ impl ComputeNode {
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
 
+        // Log metrics so that we can search for slow operations in logs
+        let metrics = {
+            let state = self.state.lock().unwrap();
+            state.metrics.clone()
+        };
+        info!(?metrics, "compute start finished");
+
         Ok(pg)
     }
 
