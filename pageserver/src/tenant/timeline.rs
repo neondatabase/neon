@@ -3987,8 +3987,6 @@ impl Timeline {
                         size, total_size_up_to_lvl
                     );
                     return Some(compact_tiers);
-                } else {
-                    return None;
                 }
             }
             if skip_tiers.contains(&tier_id) {
@@ -5590,6 +5588,7 @@ fn compaction_simulator_1() {
     let mut next_tier_id = 0;
     let mut write_total = 0;
     let l0_total = 400;
+    let threshold = 8;
 
     let mut last_round_tiers_to_compact = vec![];
     for i in 0..l0_total {
@@ -5626,12 +5625,14 @@ fn compaction_simulator_1() {
             tiers = new_tiers;
         }
 
-        if let Some(tiers_to_compact) = Timeline::get_compact_task(&skip_tiers, tiers.clone()) {
-            last_round_tiers_to_compact = tiers_to_compact.clone();
-            for &tier in &tiers_to_compact {
-                skip_tiers.insert(tier);
+        if tiers.len() > threshold {
+            if let Some(tiers_to_compact) = Timeline::get_compact_task(&skip_tiers, tiers.clone()) {
+                last_round_tiers_to_compact = tiers_to_compact.clone();
+                for &tier in &tiers_to_compact {
+                    skip_tiers.insert(tier);
+                }
+                println!("start {:?}", tiers_to_compact);
             }
-            println!("start {:?}", tiers_to_compact);
         }
         // println!("--- round {i} ---");
         // for &(tier_id, size) in &tiers {
@@ -5663,6 +5664,7 @@ fn compaction_simulator_2() {
     let mut write_total = 0;
     let l0_total = 400;
     let mut read_amp = 0;
+    let threshold = 8;
 
     for i in 0..l0_total {
         tiers.insert(0, (next_tier_id, 1));
@@ -5670,31 +5672,35 @@ fn compaction_simulator_2() {
 
         read_amp = read_amp.max(tiers.len());
 
-        if let Some(mut tiers_to_compact) = Timeline::get_compact_task(&skip_tiers, tiers.clone()) {
-            let mut new_tiers = vec![];
-            let mut new_tier_size = 0;
-            let mut insert_at = 0;
-            for &(tier_id, size) in &tiers {
-                if tiers_to_compact.contains(&tier_id) {
-                    new_tier_size += size;
-                    insert_at = new_tiers.len();
-                    tiers_to_compact.retain(|x| *x != tier_id);
-                } else {
-                    new_tiers.push((tier_id, size));
+        if tiers.len() > threshold {
+            if let Some(mut tiers_to_compact) =
+                Timeline::get_compact_task(&skip_tiers, tiers.clone())
+            {
+                let mut new_tiers = vec![];
+                let mut new_tier_size = 0;
+                let mut insert_at = 0;
+                for &(tier_id, size) in &tiers {
+                    if tiers_to_compact.contains(&tier_id) {
+                        new_tier_size += size;
+                        insert_at = new_tiers.len();
+                        tiers_to_compact.retain(|x| *x != tier_id);
+                    } else {
+                        new_tiers.push((tier_id, size));
+                    }
                 }
+                assert!(tiers_to_compact.is_empty());
+                new_tiers.insert(insert_at, (next_tier_id, new_tier_size));
+                next_tier_id += 1;
+                println!(
+                    "finish {:?} -> {}, size = {}",
+                    tiers_to_compact, next_tier_id, new_tier_size
+                );
+                for tier in &tiers_to_compact {
+                    skip_tiers.remove(tier);
+                }
+                write_total += new_tier_size;
+                tiers = new_tiers;
             }
-            assert!(tiers_to_compact.is_empty());
-            new_tiers.insert(insert_at, (next_tier_id, new_tier_size));
-            next_tier_id += 1;
-            println!(
-                "finish {:?} -> {}, size = {}",
-                tiers_to_compact, next_tier_id, new_tier_size
-            );
-            for tier in &tiers_to_compact {
-                skip_tiers.remove(tier);
-            }
-            write_total += new_tier_size;
-            tiers = new_tiers;
         }
 
         // println!("--- round {i} ---");
@@ -5728,6 +5734,7 @@ fn compaction_simulator_3() {
     let mut write_total = 0;
     let l0_total = 400;
     let mut read_amp = 0;
+    let threshold = 8;
 
     for i in 0..l0_total {
         tiers.insert(0, (next_tier_id, 1));
@@ -5737,34 +5744,39 @@ fn compaction_simulator_3() {
 
         let mut round = 0;
 
-        while let Some(mut tiers_to_compact) =
-            Timeline::get_compact_task(&skip_tiers, tiers.clone())
-        {
-            round += 1;
-            let mut new_tiers = vec![];
-            let mut new_tier_size = 0;
-            let mut insert_at = 0;
-            for &(tier_id, size) in &tiers {
-                if tiers_to_compact.contains(&tier_id) {
-                    new_tier_size += size;
-                    insert_at = new_tiers.len();
-                    tiers_to_compact.retain(|x| *x != tier_id);
-                } else {
-                    new_tiers.push((tier_id, size));
+        if tiers.len() > threshold {
+            while let Some(mut tiers_to_compact) =
+                Timeline::get_compact_task(&skip_tiers, tiers.clone())
+            {
+                if tiers.len() <= threshold {
+                    break;
                 }
+                round += 1;
+                let mut new_tiers = vec![];
+                let mut new_tier_size = 0;
+                let mut insert_at = 0;
+                for &(tier_id, size) in &tiers {
+                    if tiers_to_compact.contains(&tier_id) {
+                        new_tier_size += size;
+                        insert_at = new_tiers.len();
+                        tiers_to_compact.retain(|x| *x != tier_id);
+                    } else {
+                        new_tiers.push((tier_id, size));
+                    }
+                }
+                assert!(tiers_to_compact.is_empty());
+                new_tiers.insert(insert_at, (next_tier_id, new_tier_size));
+                next_tier_id += 1;
+                println!(
+                    "finish {:?} -> {}, size = {}",
+                    tiers_to_compact, next_tier_id, new_tier_size
+                );
+                for tier in &tiers_to_compact {
+                    skip_tiers.remove(tier);
+                }
+                write_total += new_tier_size;
+                tiers = new_tiers;
             }
-            assert!(tiers_to_compact.is_empty());
-            new_tiers.insert(insert_at, (next_tier_id, new_tier_size));
-            next_tier_id += 1;
-            println!(
-                "finish {:?} -> {}, size = {}",
-                tiers_to_compact, next_tier_id, new_tier_size
-            );
-            for tier in &tiers_to_compact {
-                skip_tiers.remove(tier);
-            }
-            write_total += new_tier_size;
-            tiers = new_tiers;
         }
 
         if round > 3 {
