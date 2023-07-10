@@ -971,7 +971,7 @@ jobs:
 
           docker cp -r ${{ steps.create-container.outputs.EID }}:/extensions ./extensions-to-upload
           docker cp -r ${{ steps.create-container.outputs.EID }}:/control_files ./control_files
-          python3 combine_control_files.py
+          python3 /scripts/combine_control_files.py
 
       - name: Upload postgres-extensions to S3
         run: |
