@@ -389,12 +389,6 @@ pub trait AsLayerDesc {
     fn layer_desc(&self) -> &PersistentLayerDesc;
 }
 
-impl<T: AsLayerDesc + ?Sized> AsLayerDesc for Arc<T> {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        (**self).layer_desc()
-    }
-}
-
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
