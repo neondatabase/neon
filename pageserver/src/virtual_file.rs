@@ -302,15 +302,6 @@ impl VirtualFile {
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
-        //
-        // TODO: We could downgrade the locks to read mode before calling
-        // 'func', to allow a little bit more concurrency, but the standard
-        // library RwLock doesn't allow downgrading without releasing the lock,
-        // and that doesn't seem worth the trouble.
-        //
-        // XXX: `parking_lot::RwLock` can enable such downgrades, yet its implementation is fair and
-        // may deadlock on subsequent read calls.
-        // Simply replacing all `RwLock` in project causes deadlocks, so use it sparingly.
         let result = STORAGE_IO_TIME
             .with_label_values(&[op, &self.tenant_id, &self.timeline_id])
             .observe_closure_duration(|| func(&file));

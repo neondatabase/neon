@@ -10,7 +10,7 @@
 //! The delta files are stored in timelines/<timeline_id> directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
-//!    <key start>-<key end>__<start LSN>-<end LSN
+//!    <key start>-<key end>__<start LSN>-<end LSN>
 //!
 //! For example:
 //!
@@ -56,8 +56,8 @@ use utils::{
 };
 
 use super::{
-    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    PathOrConf, PersistentLayerDesc,
+    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, PathOrConf, PersistentLayerDesc,
 };
 
 ///
@@ -222,13 +222,14 @@ impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.desc.lsn_range.start,
-            self.desc.lsn_range.end
+            self.desc.lsn_range.end,
+            self.desc.file_size,
         );
 
         if !verbose {
@@ -394,18 +395,21 @@ impl Layer for DeltaLayer {
     fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
+}
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
+impl AsLayerDesc for DeltaLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
 }
 
 impl PersistentLayer for DeltaLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
@@ -457,22 +461,22 @@ impl PersistentLayer for DeltaLayer {
 impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
         fname: &DeltaFileName,
     ) -> PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.clone(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
+                .timeline_path(tenant_id, timeline_id)
                 .join(fname.to_string()),
         }
     }
 
     fn temp_path_for(
         conf: &PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> PathBuf {
@@ -482,7 +486,7 @@ impl DeltaLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id).join(format!(
+        conf.timeline_path(tenant_id, timeline_id).join(format!(
             "{}-XXX__{:016X}-{:016X}.{}.{}",
             key_start,
             u64::from(lsn_range.start),
@@ -604,8 +608,8 @@ impl DeltaLayer {
     pub fn path(&self) -> PathBuf {
         Self::path_for(
             &self.path_or_conf,
-            self.desc.timeline_id,
-            self.desc.tenant_id,
+            &self.desc.tenant_id,
+            &self.desc.timeline_id,
             &self.layer_name(),
         )
     }
@@ -653,7 +657,7 @@ impl DeltaLayerWriterInner {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = DeltaLayer::temp_path_for(conf, timeline_id, tenant_id, key_start, &lsn_range);
+        let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
@@ -768,8 +772,8 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let final_path = DeltaLayer::path_for(
             &PathOrConf::Conf(self.conf),
-            self.timeline_id,
-            self.tenant_id,
+            &self.tenant_id,
+            &self.timeline_id,
             &DeltaFileName {
                 key_range: self.key_start..key_end,
                 lsn_range: self.lsn_range,

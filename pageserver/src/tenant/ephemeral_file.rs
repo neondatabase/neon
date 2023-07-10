@@ -55,7 +55,7 @@ impl EphemeralFile {
         l.next_file_id += 1;
 
         let filename = conf
-            .timeline_path(&timeline_id, &tenant_id)
+            .timeline_path(&tenant_id, &timeline_id)
             .join(PathBuf::from(format!("ephemeral-{}", file_id)));
 
         let file = VirtualFile::open_with_options(
@@ -346,7 +346,7 @@ mod tests {
 
         let tenant_id = TenantId::from_str("11000000000000000000000000000000").unwrap();
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
-        fs::create_dir_all(conf.timeline_path(&timeline_id, &tenant_id))?;
+        fs::create_dir_all(conf.timeline_path(&tenant_id, &timeline_id))?;
 
         Ok((conf, tenant_id, timeline_id))
     }

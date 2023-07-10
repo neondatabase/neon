@@ -516,9 +516,9 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
-
         let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
 
+        let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
             self.apply_config(&compute_state)?;
         }
@@ -526,8 +526,13 @@ impl ComputeNode {
         let startup_end_time = Utc::now();
         {
             let mut state = self.state.lock().unwrap();
-            state.metrics.config_ms = startup_end_time
+            state.metrics.start_postgres_ms = config_time
                 .signed_duration_since(start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            state.metrics.config_ms = startup_end_time
+                .signed_duration_since(config_time)
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;
@@ -543,6 +548,13 @@ impl ComputeNode {
             "finished configuration of compute for project {}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
+
+        // Log metrics so that we can search for slow operations in logs
+        let metrics = {
+            let state = self.state.lock().unwrap();
+            state.metrics.clone()
+        };
+        info!(?metrics, "compute start finished");
 
         Ok(pg)
     }

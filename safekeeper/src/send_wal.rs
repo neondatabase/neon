@@ -403,16 +403,18 @@ impl SafekeeperPostgresHandler {
         };
 
         // take the latest commit_lsn if don't have stop_pos
-        let mut end_pos = stop_pos.unwrap_or(*commit_lsn_watch_rx.borrow());
+        let end_pos = stop_pos.unwrap_or(*commit_lsn_watch_rx.borrow());
 
         if end_pos < start_pos {
-            warn!("start_pos {} is ahead of end_pos {}", start_pos, end_pos);
-            end_pos = start_pos;
+            warn!(
+                "requested start_pos {} is ahead of available WAL end_pos {}",
+                start_pos, end_pos
+            );
         }
 
         info!(
-            "starting streaming from {:?} till {:?}",
-            start_pos, stop_pos
+            "starting streaming from {:?} till {:?}, available WAL ends at {}",
+            start_pos, stop_pos, end_pos
         );
 
         // switch to copy
@@ -547,12 +549,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             self.end_pos = *self.commit_lsn_watch_rx.borrow();
             if self.end_pos > self.start_pos {
                 // We have something to send.
+                trace!("got end_pos {:?}, streaming", self.end_pos);
                 return Ok(());
             }
 
             // Wait for WAL to appear, now self.end_pos == self.start_pos.
             if let Some(lsn) = wait_for_lsn(&mut self.commit_lsn_watch_rx, self.start_pos).await? {
                 self.end_pos = lsn;
+                trace!("got end_pos {:?}, streaming", self.end_pos);
                 return Ok(());
             }
 

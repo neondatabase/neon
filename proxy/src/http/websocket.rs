@@ -35,7 +35,7 @@ use utils::http::{error::ApiError, json::json_response};
 // Tracking issue: https://github.com/rust-lang/rust/issues/98407.
 use sync_wrapper::SyncWrapper;
 
-use super::sql_over_http;
+use super::{conn_pool::GlobalConnPool, sql_over_http};
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
@@ -164,6 +164,7 @@ async fn serve_websocket(
 async fn ws_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
+    conn_pool: Arc<GlobalConnPool>,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
@@ -192,7 +193,7 @@ async fn ws_handler(
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = sql_over_http::handle(config, request, sni_hostname)
+        let result = sql_over_http::handle(request, sni_hostname, conn_pool)
             .instrument(info_span!("sql-over-http"))
             .await;
         let status_code = match result {
@@ -234,6 +235,8 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
+    let conn_pool: Arc<GlobalConnPool> = GlobalConnPool::new(config);
+
     let tls_config = config.tls_config.as_ref().map(|cfg| cfg.to_server_config());
     let tls_acceptor: tokio_rustls::TlsAcceptor = match tls_config {
         Some(config) => config.into(),
@@ -258,15 +261,18 @@ pub async fn task_main(
     let make_svc =
         hyper::service::make_service_fn(|stream: &tokio_rustls::server::TlsStream<AddrStream>| {
             let sni_name = stream.get_ref().1.sni_hostname().map(|s| s.to_string());
+            let conn_pool = conn_pool.clone();
 
             async move {
                 Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| {
                     let sni_name = sni_name.clone();
+                    let conn_pool = conn_pool.clone();
+
                     async move {
                         let cancel_map = Arc::new(CancelMap::default());
                         let session_id = uuid::Uuid::new_v4();
 
-                        ws_handler(req, config, cancel_map, session_id, sni_name)
+                        ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
                             .instrument(info_span!(
                                 "ws-client",
                                 session = format_args!("{session_id}")

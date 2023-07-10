@@ -191,6 +191,12 @@ impl Storage for FileStorage {
                 control_partial_path.display()
             )
         })?;
+        control_partial.flush().await.with_context(|| {
+            format!(
+                "failed to flush safekeeper state into control file at: {}",
+                control_partial_path.display()
+            )
+        })?;
 
         // fsync the file
         if !self.conf.no_sync {
