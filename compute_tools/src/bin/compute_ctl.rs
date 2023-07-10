@@ -65,20 +65,17 @@ fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
-
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
     let pgbin_default = String::from("postgres");
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
-    // let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    // in this branch we no longer pass this as a config var.
-    // we just force it to be enabled.
-    // Note: this is no longer suitable for mock s3 tests
-    let remote_ext_config = Some(
-        r#"{"bucket": "neon-dev-extensions-us-east-2", "region": "us-east-2", "endpoint": null, "prefix": "5412197734"}"#.to_string(),
-    );
+    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
+    // NOTE TODO FIXME: until control-plane changes, we can use the following line to forcibly enable remote extensions
+    // let remote_ext_config = Some(
+    //     r#"{"bucket": "neon-dev-extensions-us-east-2", "region": "us-east-2", "endpoint": null, "prefix": "5412197734"}"#.to_string(),
+    // );
     let ext_remote_storage = remote_ext_config.map(|x| {
         init_remote_storage(&x, build_tag)
             .expect("cannot initialize remote extension storage from config")
