@@ -200,7 +200,7 @@ impl LayerManager {
         Ok(())
     }
 
-    /// Called when garbage collect the timeline.
+    /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
     pub fn finish_gc_timeline(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
