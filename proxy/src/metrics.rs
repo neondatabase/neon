@@ -1,6 +1,6 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-use crate::{config::MetricCollectionConfig, http};
+use crate::{config::MetricCollectionConfig, http, proxy::proxy_metrics_sweep};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
@@ -50,7 +50,12 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
 
         match res {
             Err(e) => error!("failed to send consumption metrics: {e} "),
-            Ok(_) => trace!("periodic metrics collection completed successfully"),
+            Ok(_) => {
+                trace!("periodic metrics collection completed successfully");
+
+                // perform a cleanup only if we could collect the metrics
+                proxy_metrics_sweep();
+            }
         }
     }
 }

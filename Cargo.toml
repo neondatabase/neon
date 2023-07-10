@@ -122,7 +122,7 @@ tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.9.0"
 tokio-rustls = "0.23"
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "time"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}

@@ -15,17 +15,21 @@ use crate::{
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
-use futures::TryFutureExt;
+use futures::{FutureExt, StreamExt, TryFutureExt};
+use hashbrown::HashMap;
 use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, time::DelayQueue};
 use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
@@ -70,6 +74,30 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+#[derive(Default)]
+struct ProxyState {
+    /// if we resume proxying, we should cancel the cleanup
+    gc_cancel:
+        HashMap<crate::console::messages::MetricsAuxInfo, tokio_util::time::delay_queue::Key>,
+    /// after we finish proxying, we should clean up the metrics
+    gc: DelayQueue<crate::console::messages::MetricsAuxInfo>,
+}
+
+static ACTIVE_PROXIES: Lazy<Mutex<ProxyState>> = Lazy::new(Default::default);
+
+pub fn proxy_metrics_sweep() {
+    let mut active = ACTIVE_PROXIES.lock().unwrap();
+    while let Some(expired) = active.gc.next().now_or_never().flatten() {
+        active.gc_cancel.remove(expired.get_ref());
+        NUM_BYTES_PROXIED_COUNTER
+            .remove_label_values(&expired.get_ref().traffic_labels("tx"))
+            .unwrap();
+        NUM_BYTES_PROXIED_COUNTER
+            .remove_label_values(&expired.get_ref().traffic_labels("rx"))
+            .unwrap();
+    }
+}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -478,6 +506,13 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    {
+        let mut active = ACTIVE_PROXIES.lock().unwrap();
+        if let Some(key) = active.gc_cancel.remove(aux) {
+            active.gc.remove(&key);
+        }
+    }
+
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
@@ -500,8 +535,16 @@ pub async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
+    let res = tokio::io::copy_bidirectional(&mut client, &mut compute).await;
 
+    {
+        // schedule a metrics cleanup
+        let mut active = ACTIVE_PROXIES.lock().unwrap();
+        let key = active.gc.insert(aux.clone(), Duration::from_secs(15 * 60));
+        active.gc_cancel.insert(aux.clone(), key);
+    }
+
+    res?;
     Ok(())
 }
 
