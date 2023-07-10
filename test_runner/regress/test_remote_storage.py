@@ -777,6 +777,98 @@ def test_empty_branch_remote_storage_upload_on_restart(
         create_thread.join()
 
 
+# Regression test for a race condition where files are compactified before the upload,
+# resulting in the uploading complaining about the file not being found
+# https://github.com/neondatabase/neon/issues/4526
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_compaction_delete_before_upload(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_compaction_delete_before_upload",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # Set a small compaction threshold
+            "compaction_threshold": "3",
+            # Disable GC
+            "gc_period": "0s",
+            # disable PITR so that GC considers just gc_horizon
+            "pitr_interval": "0s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+
+    # Build two tables with some data inside
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE bar (x INTEGER)",
+            "INSERT INTO bar SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # Now pause the compaction
+    client.configure_failpoints(("flush-frozen-before-sync", "pause"))
+
+    endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x=1")
+
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    barrier = threading.Barrier(2)
+
+    def checkpoint_in_background():
+        barrier.wait()
+        try:
+            client.timeline_checkpoint(tenant_id, timeline_id)
+            q.put(None)
+        except PageserverApiException as e:
+            q.put(e)
+
+    create_thread = threading.Thread(target=checkpoint_in_background)
+    create_thread.start()
+
+    try:
+        barrier.wait()
+
+        time.sleep(4)
+        client.timeline_compact(tenant_id, timeline_id)
+
+        client.configure_failpoints(("flush-frozen-before-sync", "off"))
+
+        conflict = q.get()
+
+        assert conflict is None
+    finally:
+        create_thread.join()
+
+    time.sleep(4)
+
+    # Ensure that this actually terminates
+    wait_upload_queue_empty(client, tenant_id, timeline_id)
+
+
 def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):

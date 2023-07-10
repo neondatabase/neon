@@ -2918,7 +2918,20 @@ impl Timeline {
                 HashMap::from([(delta_path, metadata)])
             };
 
-        fail_point!("flush-frozen-before-sync");
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint flush-frozen-before-sync");
+                    fail::fail_point!("flush-frozen-before-sync");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. We do not modify `LayerFileManager` because
