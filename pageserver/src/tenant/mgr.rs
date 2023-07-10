@@ -806,3 +806,85 @@ pub async fn immediate_compact(
 
     Ok(wait_task_done)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tracing::{info_span, Instrument};
+
+    use super::{super::harness::TenantHarness, TenantsMap};
+
+    #[tokio::test]
+    async fn shutdown_joins_remove_tenant_from_memory() {
+        let (t, _ctx) = TenantHarness::create("shutdown_joins_detach")
+            .unwrap()
+            .load()
+            .await;
+
+        // harness loads it to active, which is forced and nothing is running on the tenant
+
+        let id = t.tenant_id();
+        let tenants = HashMap::from([(id, t.clone())]);
+
+        let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
+
+        let (until_cleanup_completed, can_complete_cleanup) = utils::completion::channel();
+        let (until_cleanup_started, cleanup_started) = utils::completion::channel();
+
+        // start a "detaching operation", which will take a while
+        let cleanup_task = tokio::spawn({
+            let tenants = tenants.clone();
+            async move {
+                let cleanup = async move {
+                    drop(until_cleanup_started);
+                    can_complete_cleanup.wait().await;
+                    anyhow::Ok(())
+                };
+                super::remove_tenant_from_memory(&*tenants, id, cleanup).await
+            }
+            .instrument(info_span!("foobar", tenant_id = %id))
+        });
+
+        // now the long cleanup should be in place, with the stopping state
+        cleanup_started.wait().await;
+
+        let mut cleanup_progress = std::pin::pin!(t
+            .shutdown(utils::completion::Barrier::default(), false)
+            .await
+            .unwrap_err()
+            .wait());
+
+        let (until_shutdown_started, shutdown_started) = utils::completion::channel();
+
+        let mut shutdown_task = tokio::spawn(async move {
+            drop(until_shutdown_started);
+            super::shutdown_all_tenants0(&*tenants).await;
+        });
+
+        shutdown_started.wait().await;
+
+        tokio::select! {
+            _ = &mut shutdown_task => unreachable!("shutdown must continue, until_cleanup_completed is not dropped"),
+            _ = &mut cleanup_progress => unreachable!("cleanup progress must continue, until_cleanup_completed is not dropped"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+        }
+
+        drop(until_cleanup_completed);
+
+        // FIXME: we cannot really assert that these all complete at the same time.
+        let (je, ()) = tokio::join!(shutdown_task, cleanup_progress);
+        je.unwrap();
+
+        cleanup_task.await.unwrap().unwrap();
+
+        futures::future::poll_immediate(
+            t.shutdown(utils::completion::Barrier::default(), false)
+                .await
+                .unwrap_err()
+                .wait(),
+        )
+        .await
+        .expect("the stopping progress is still complete");
+    }
+}
