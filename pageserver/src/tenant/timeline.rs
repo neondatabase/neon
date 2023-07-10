@@ -1613,7 +1613,7 @@ impl Timeline {
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
         // total size of layer files in the current timeline directory
         let mut total_physical_size = 0;
 
@@ -2208,7 +2208,7 @@ impl Timeline {
         fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
             if !self
                 .conf
-                .metadata_path(self.timeline_id, self.tenant_id)
+                .metadata_path(&self.tenant_id, &self.timeline_id)
                 .exists()
             {
                 error!("timeline-calculate-logical-size-pre metadata file does not exist")
@@ -3003,8 +3003,8 @@ impl Timeline {
 
         save_metadata(
             self.conf,
-            self.timeline_id,
-            self.tenant_id,
+            &self.tenant_id,
+            &self.timeline_id,
             &metadata,
             false,
         )
@@ -3053,7 +3053,7 @@ impl Timeline {
                 par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
-                    .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
+                    .timeline_path(&self_clone.tenant_id, &self_clone.timeline_id)])
                 .context("fsync of timeline dir")?;
 
                 anyhow::Ok(new_delta)
@@ -3296,7 +3296,7 @@ impl Timeline {
             .await
             .context("fsync of newly created layer files")?;
 
-        par_fsync::par_fsync_async(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
+        par_fsync::par_fsync_async(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
             .await
             .context("fsync of timeline dir")?;
 
@@ -3305,7 +3305,7 @@ impl Timeline {
         let mut guard = self.layers.write().await;
         let (layers, mapping) = &mut *guard;
         let mut updates = layers.batch_update();
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
+        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
 
         for l in image_layers {
             let path = l.filename();
@@ -3820,7 +3820,7 @@ impl Timeline {
             // minimize latency.
             par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
 
-            par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
+            par_fsync::par_fsync(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
                 .context("fsync of timeline dir")?;
 
             layer_paths.pop().unwrap();

@@ -421,8 +421,8 @@ impl Tenant {
         if !picked_local {
             save_metadata(
                 self.conf,
-                timeline_id,
-                tenant_id,
+                &tenant_id,
+                &timeline_id,
                 up_to_date_metadata,
                 first_save,
             )
@@ -451,7 +451,7 @@ impl Tenant {
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let tenant_conf =
-            Self::load_tenant_config(conf, tenant_id).context("load tenant config")?;
+            Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -646,7 +646,7 @@ impl Tenant {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
-        tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
+        tokio::fs::create_dir_all(self.conf.timeline_path(&self.tenant_id, &timeline_id))
             .await
             .context("Failed to create new timeline directory")?;
 
@@ -724,7 +724,7 @@ impl Tenant {
     ) -> Arc<Tenant> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
+        let tenant_conf = match Self::load_tenant_config(conf, &tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
                 error!("load tenant config failed: {:?}", e);
@@ -835,7 +835,7 @@ impl Tenant {
                             timeline_uninit_mark_file.display()
                         )
                     })?;
-                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+                let timeline_dir = self.conf.timeline_path(&self.tenant_id, &timeline_id);
                 if let Err(e) =
                     remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                 {
@@ -880,7 +880,7 @@ impl Tenant {
                 if let Ok(timeline_id) =
                     file_name.to_str().unwrap_or_default().parse::<TimelineId>()
                 {
-                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+                    let metadata = load_metadata(self.conf, &self.tenant_id, &timeline_id)
                         .context("failed to load metadata")?;
                     timelines_to_load.insert(timeline_id, metadata);
                 } else {
@@ -1445,7 +1445,7 @@ impl Tenant {
 
             let local_timeline_directory = self
                 .conf
-                .timeline_path(&timeline.timeline_id, &self.tenant_id);
+                .timeline_path(&self.tenant_id, &timeline.timeline_id);
 
             fail::fail_point!("timeline-delete-before-rm", |_| {
                 Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
@@ -2226,7 +2226,7 @@ impl Tenant {
     /// Locate and load config
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
@@ -2813,7 +2813,7 @@ impl Tenant {
         timeline_struct.init_empty_layer_map(start_lsn);
 
         if let Err(e) =
-            self.create_timeline_files(&uninit_mark.timeline_path, new_timeline_id, new_metadata)
+            self.create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
         {
             error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
@@ -2832,7 +2832,7 @@ impl Tenant {
     fn create_timeline_files(
         &self,
         timeline_path: &Path,
-        new_timeline_id: TimelineId,
+        new_timeline_id: &TimelineId,
         new_metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
@@ -2843,8 +2843,8 @@ impl Tenant {
 
         save_metadata(
             self.conf,
+            &self.tenant_id,
             new_timeline_id,
-            self.tenant_id,
             new_metadata,
             true,
         )
@@ -2867,7 +2867,7 @@ impl Tenant {
             timelines.get(&timeline_id).is_none(),
             "Timeline {tenant_id}/{timeline_id} already exists in pageserver's memory"
         );
-        let timeline_path = self.conf.timeline_path(&timeline_id, &tenant_id);
+        let timeline_path = self.conf.timeline_path(&tenant_id, &timeline_id);
         anyhow::ensure!(
             !timeline_path.exists(),
             "Timeline {} already exists, cannot create its uninit mark file",
@@ -2998,10 +2998,10 @@ pub(crate) enum CreateTenantFilesMode {
 pub(crate) fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
-    let target_tenant_directory = conf.tenant_path(&tenant_id);
+    let target_tenant_directory = conf.tenant_path(tenant_id);
     anyhow::ensure!(
         !target_tenant_directory
             .try_exists()
@@ -3052,7 +3052,7 @@ pub(crate) fn create_tenant_files(
 fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
     target_tenant_directory: &Path,
@@ -3076,7 +3076,7 @@ fn try_create_target_tenant_dir(
     }
 
     let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
+        &conf.timelines_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
@@ -3088,7 +3088,7 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(&tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
@@ -3376,7 +3376,7 @@ pub mod harness {
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
-            self.conf.timeline_path(timeline_id, &self.tenant_id)
+            self.conf.timeline_path(&self.tenant_id, timeline_id)
         }
     }
 
@@ -4370,7 +4370,7 @@ mod tests {
 
         assert!(!harness
             .conf
-            .timeline_path(&TIMELINE_ID, &tenant.tenant_id)
+            .timeline_path(&tenant.tenant_id, &TIMELINE_ID)
             .exists());
 
         assert!(!harness

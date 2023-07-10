@@ -184,9 +184,9 @@ pub fn schedule_local_tenant_processing(
             format!("Could not parse tenant id out of the tenant dir name in path {tenant_path:?}")
         })?;
 
-    let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
+    let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
     anyhow::ensure!(
-        !conf.tenant_ignore_mark_file_path(tenant_id).exists(),
+        !conf.tenant_ignore_mark_file_path(&tenant_id).exists(),
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
@@ -310,7 +310,7 @@ pub async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
+        let tenant_directory = super::create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Create)?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -344,14 +344,9 @@ pub async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
-    let tenant_config_path = conf.tenant_config_path(tenant_id);
-    Tenant::persist_tenant_config(
-        &tenant.tenant_id(),
-        &tenant_config_path,
-        new_tenant_conf,
-        false,
-    )
-    .map_err(SetNewTenantConfigError::Persist)?;
+    let tenant_config_path = conf.tenant_config_path(&tenant_id);
+    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, new_tenant_conf, false)
+        .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
 }
@@ -435,7 +430,7 @@ pub async fn detach_tenant(
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
     if detach_ignored && matches!(removal_result, Err(TenantStateError::NotFound(_))) {
-        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
+        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
             info!("Detaching an ignored tenant");
             local_files_cleanup_operation(tenant_id)
@@ -457,7 +452,7 @@ pub async fn load_tenant(
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
         let tenant_path = conf.tenant_path(&tenant_id);
-        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
+        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
             std::fs::remove_file(&tenant_ignore_mark)
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
@@ -478,7 +473,7 @@ pub async fn ignore_tenant(
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
-        let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
+        let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_id);
         fs::File::create(&ignore_mark_file)
             .await
             .context("Failed to create ignore mark file")
@@ -525,7 +520,7 @@ pub async fn attach_tenant(
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
-        let tenant_dir = create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
+        let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach)?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 

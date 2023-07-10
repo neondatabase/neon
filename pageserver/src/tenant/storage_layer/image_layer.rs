@@ -288,7 +288,7 @@ impl ImageLayer {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
+                .timeline_path(&tenant_id, &timeline_id)
                 .join(fname.to_string()),
         }
     }
@@ -305,7 +305,7 @@ impl ImageLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id)
+        conf.timeline_path(&tenant_id, &timeline_id)
             .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 
