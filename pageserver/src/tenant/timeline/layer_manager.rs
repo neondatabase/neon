@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use std::{collections::HashMap, sync::Arc};
-use utils::lsn::Lsn;
+use tracing::trace;
+use utils::{
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+};
 
 use crate::{
+    config::PageServerConf,
     metrics::TimelineMetrics,
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
@@ -14,12 +19,16 @@ use crate::{
     },
 };
 
+use super::Timeline;
+
 /// Provides semantic APIs to manipulate the layer map.
 pub struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager,
 }
 
+/// After GC, the layer map changes will not be applied immediately. Users should manually apply the changes after
+/// scheduling deletes in remote client.
 pub struct ApplyGcResultGuard<'a>(BatchedUpdates<'a>);
 
 impl ApplyGcResultGuard<'_> {
@@ -94,9 +103,32 @@ impl LayerManager {
     }
 
     /// Open a new writable layer to append data, called within `get_layer_for_write`.
-    pub fn open_new_layer(&mut self, layer: Arc<InMemoryLayer>) {
-        self.layer_map.open_layer = Some(layer);
+    pub fn open_new_layer(
+        &mut self,
+        lsn: Lsn,
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+        tenant_id: TenantId,
+    ) -> Result<Arc<InMemoryLayer>> {
+        let start_lsn = self
+            .layer_map
+            .next_open_layer_at
+            .context("No next open layer found")?;
+
+        trace!(
+            "creating layer for write at {}/{} for record at {}",
+            timeline_id,
+            start_lsn,
+            lsn
+        );
+
+        let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+        let layer = Arc::new(new_layer);
+
+        self.layer_map.open_layer = Some(layer.clone());
         self.layer_map.next_open_layer_at = None;
+
+        Ok(layer)
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.

@@ -2562,22 +2562,7 @@ impl Timeline {
             layer = Arc::clone(open_layer);
         } else {
             // No writeable layer yet. Create one.
-            let start_lsn = layers
-                .next_open_layer_at
-                .context("No next open layer found")?;
-
-            trace!(
-                "creating layer for write at {}/{} for record at {}",
-                self.timeline_id,
-                start_lsn,
-                lsn
-            );
-            let new_layer =
-                InMemoryLayer::create(self.conf, self.timeline_id, self.tenant_id, start_lsn)?;
-            let layer_rc = Arc::new(new_layer);
-
-            guard.open_new_layer(Arc::clone(&layer_rc));
-            layer = layer_rc;
+            layer = guard.open_new_layer(lsn, self.conf, self.timeline_id, self.tenant_id)?;
         }
         Ok(layer)
     }
