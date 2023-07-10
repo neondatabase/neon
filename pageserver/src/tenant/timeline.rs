@@ -3623,11 +3623,7 @@ impl Timeline {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
                     let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn < b_lsn,
-                        Ordering::Greater => false,
-                    }
+                    (a_key, a_lsn) < (b_key, b_lsn)
                 })
             },
         )?;
