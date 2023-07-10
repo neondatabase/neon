@@ -20,7 +20,7 @@ use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::sync::Arc;
+use std::{ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -32,7 +32,7 @@ use utils::measured_stream::MeasuredStream;
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 /// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
 pub const NUM_RETRIES_WAKE_COMPUTE: u32 = 10;
-pub const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
+const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -335,10 +335,36 @@ async fn connect_to_compute(
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
     let mut num_retries = 0;
-    let mut should_wake = true;
+    let mut wait_duration = time::Duration::ZERO;
+    let mut should_wake_with_error = None;
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
         node_info.config.set_startup_params(params);
+
+        if !wait_duration.is_zero() {
+            time::sleep(wait_duration).await;
+        }
+
+        // try wake the compute node if we have determined it's sensible to do so
+        if let Some(err) = should_wake_with_error.take() {
+            match try_wake(node_info, extra, creds).await {
+                // we can't wake up the compute node
+                Ok(None) => return Err(err),
+                // there was an error communicating with the control plane
+                Err(e) => return Err(io_error(e).into()),
+                // failed to wake up but we can continue to retry
+                Ok(Some(ControlFlow::Continue(()))) => {
+                    wait_duration = retry_after(num_retries);
+                    should_wake_with_error = Some(err);
+
+                    num_retries += 1;
+                    info!(num_retries, "retrying wake compute");
+                    continue;
+                }
+                // successfully woke up a compute node and can break the wakeup loop
+                Ok(Some(ControlFlow::Break(()))) => {}
+            }
+        }
 
         // Set a shorter timeout for the initial connection attempt.
         //
@@ -360,30 +386,25 @@ async fn connect_to_compute(
         };
 
         match connect_to_compute_once(node_info, timeout).await {
-            Err(e) if num_retries < NUM_RETRIES_WAKE_COMPUTE => {
-                if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
-                    error!(error = ?e, "could not connect to compute node");
-                    if should_wake {
-                        match try_wake(node_info, extra, creds).await {
-                            Ok(Some(x)) => {
-                                should_wake = x;
-                            }
-                            Ok(None) => return Err(e),
-                            Err(e) => return Err(io_error(e).into()),
-                        }
-                    }
-                    if !wait_duration.is_zero() {
-                        time::sleep(wait_duration).await;
-                    }
-                } else {
+            Ok(res) => return Ok(res),
+            Err(e) => {
+                error!(error = ?e, "could not connect to compute node");
+                if !can_retry_error(&e, num_retries) {
                     return Err(e);
                 }
+                wait_duration = retry_after(num_retries);
+
+                // after the first connect failure,
+                // we should invalidate the cache and wake up a new compute node
+                if num_retries == 0 {
+                    invalidate_cache(node_info);
+                    should_wake_with_error = Some(e);
+                }
             }
-            other => return other,
         }
 
         num_retries += 1;
-        info!(retries_left = num_retries, "retrying connect");
+        info!(num_retries, "retrying connect");
     }
 }
 
@@ -395,41 +416,51 @@ pub async fn try_wake(
     node_info: &mut console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-) -> Result<Option<bool>, WakeComputeError> {
+) -> Result<Option<ControlFlow<()>>, WakeComputeError> {
     info!("compute node's state has likely changed; requesting a wake-up");
-    invalidate_cache(node_info);
     match creds.wake_compute(extra).await {
         // retry wake if the compute was in an invalid state
         Err(WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::BAD_REQUEST,
             ..
-        })) => Ok(Some(true)),
+        })) => Ok(Some(ControlFlow::Continue(()))),
         // Update `node_info` and try again.
         Ok(Some(mut new)) => {
             new.config.reuse_password(&node_info.config);
             *node_info = new;
-            Ok(Some(false))
+            Ok(Some(ControlFlow::Break(())))
         }
         Err(e) => Err(e),
         Ok(None) => Ok(None),
     }
 }
 
-fn retry_connect_in(err: &compute::ConnectionError, num_retries: u32) -> Option<time::Duration> {
+fn can_retry_error(err: &compute::ConnectionError, num_retries: u32) -> bool {
     use std::io::ErrorKind;
     match err {
-        // retry all errors at least once immediately
-        _ if num_retries == 0 => Some(time::Duration::ZERO),
-        // keep retrying connection errors every 100ms
-        compute::ConnectionError::CouldNotConnect(io_err) => match io_err.kind() {
-            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => {
-                // 3/2 = 1.5 which seems to be an ok growth factor heuristic
-                Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
-            }
-            _ => None,
-        },
+        // retry all errors at least once
+        _ if num_retries == 0 => true,
+        // keep retrying connection errors
+        compute::ConnectionError::CouldNotConnect(io_err)
+            if num_retries < NUM_RETRIES_WAKE_COMPUTE =>
+        {
+            matches!(
+                io_err.kind(),
+                ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable
+            )
+        }
         // otherwise, don't retry
-        _ => None,
+        _ => false,
+    }
+}
+
+pub fn retry_after(num_retries: u32) -> time::Duration {
+    match num_retries {
+        0 => time::Duration::ZERO,
+        _ => {
+            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
+            BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries)
+        }
     }
 }
 
