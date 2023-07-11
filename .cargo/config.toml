@@ -12,6 +12,9 @@ opt-level = 3
 # Turn on a small amount of optimization in Development mode.
 opt-level = 1
 
+[build]
+rustdocflags = ["-Arustdoc::private_intra_doc_links"]
+
 [alias]
 build_testing = ["build", "--features", "testing"]
 neon = ["run", "--bin", "neon_local"]
