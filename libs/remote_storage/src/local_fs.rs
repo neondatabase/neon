@@ -344,20 +344,20 @@ impl RemoteStorage for LocalFs {
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
-        if !file_path.exists() {
+        let Ok(metadata) = file_path.metadata() else {
+            // The file either doesn't exist or access is not allowed.
+            // We want to prevent the first situation from yielding an error to mirror S3's behaviour.
             // See https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
             // > If there isn't a null version, Amazon S3 does not remove any objects but will still respond that the command was successful.
             return Ok(());
-        }
-        if !file_path.is_file() {
+        };
+        if !metadata.is_file() {
             anyhow::bail!("{file_path:?} is not a file");
         }
         match fs::remove_file(file_path).await {
             Ok(()) => Ok(()),
-            // See above for why we don't error on situations where the file does not exist.
+            // See above for why we avoid the error here.
             // This second check is here only to prevent TOCTOU situations.
-            // We also don't want to remove the first check,
-            // because otherwise the `!file_path.is_file()` check will be hit.
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
             Err(e) => Err(anyhow::anyhow!(e)),
         }
