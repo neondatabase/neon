@@ -7,6 +7,7 @@
 use std::{
     borrow::Cow,
     future::Future,
+    io::ErrorKind,
     path::{Path, PathBuf},
     pin::Pin,
 };
@@ -348,13 +349,18 @@ impl RemoteStorage for LocalFs {
             // > If there isn't a null version, Amazon S3 does not remove any objects but will still respond that the command was successful.
             return Ok(());
         }
-
         if !file_path.is_file() {
             anyhow::bail!("{file_path:?} is not a file");
         }
-        Ok(fs::remove_file(file_path)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?)
+        match fs::remove_file(file_path).await {
+            Ok(()) => Ok(()),
+            // See above for why we don't error on situations where the file does not exist.
+            // This second check is here only to prevent TOCTOU situations.
+            // We also don't want to remove the first check,
+            // because otherwise the `!file_path.is_file()` check will be hit.
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::anyhow!(e)),
+        }
     }
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
