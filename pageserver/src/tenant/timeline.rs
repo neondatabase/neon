@@ -2570,6 +2570,7 @@ impl Timeline {
                                     let open_layer = Arc::clone(open_layer);
                                     move || open_layer.traversal_id()
                                 }),
+                                false,
                             ));
                             continue 'outer;
                         }
@@ -2598,6 +2599,7 @@ impl Timeline {
                                     let frozen_layer = Arc::clone(frozen_layer);
                                     move || frozen_layer.traversal_id()
                                 }),
+                                false,
                             ));
                             continue 'outer;
                         }
@@ -2632,9 +2634,7 @@ impl Timeline {
                                 && matches!(result, ValueReconstructResult::Continue)
                             {
                                 last_round_image = true;
-                                continue 'outer;
-                            };
-
+                            }
                             cont_lsn = lsn_floor;
                             *read_count += 1;
                             traversal_path.push((
@@ -2644,6 +2644,7 @@ impl Timeline {
                                     let layer = Arc::clone(&layer);
                                     move || layer.traversal_id()
                                 }),
+                                exclude_image_this_round,
                             ));
                             continue 'outer;
                         }
@@ -5419,6 +5420,7 @@ type TraversalPathItem = (
     ValueReconstructResult,
     Lsn,
     Box<dyn Send + FnOnce() -> TraversalId>,
+    bool,
 );
 
 /// Helper function for get_reconstruct_data() to add the path of layers traversed
@@ -5428,12 +5430,13 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
     // is the most high-level information, which also gets propagated to the client.
     let mut msg_iter = path
         .into_iter()
-        .map(|(r, c, l)| {
+        .map(|(r, c, l, exclude_image)| {
             format!(
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}, exclude_image: {}",
                 r,
                 c,
                 l(),
+                exclude_image,
             )
         })
         .chain(std::iter::once(msg));

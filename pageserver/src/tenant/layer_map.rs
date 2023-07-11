@@ -269,7 +269,7 @@ impl LayerMap {
         match (latest_delta, latest_image) {
             (None, None) => None,
             (None, Some(image)) => {
-                let lsn_floor = image.get_lsn_range().start;
+                let lsn_floor = image.get_lsn_range().end;
                 Some(SearchResult {
                     layer: image,
                     lsn_floor,
@@ -289,7 +289,7 @@ impl LayerMap {
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
                         layer: image,
-                        lsn_floor: img_lsn,
+                        lsn_floor: img_lsn + 1,
                     })
                 } else {
                     let lsn_floor =
