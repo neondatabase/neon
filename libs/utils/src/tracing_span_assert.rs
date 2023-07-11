@@ -81,9 +81,28 @@ pub fn check_fields_present<const L: usize>(
     });
     if missing.is_empty() {
         Ok(())
+    } else if !tracing_subscriber_configured() {
+        Ok(())
     } else {
         Err(missing)
     }
+}
+
+fn tracing_subscriber_configured() -> bool {
+    // SpanTrace::status() is not a strong indicator because it short circuits to EMPTY on empty
+    // spans, so let's check if there's an ErrorLayer directly. alas, we cannot due to
+    // pub(crate) but we can check if the subscriber is the noop impl.
+
+    let span = tracing::Span::current();
+    let mut configured_at_all = false;
+    span.with_subscriber(|(_, s)| {
+        // assume that if there is a non-NoSubscriber, it's a proper one
+        configured_at_all = s
+            .downcast_ref::<tracing::subscriber::NoSubscriber>()
+            .is_none();
+    });
+
+    configured_at_all
 }
 
 #[cfg(test)]
@@ -252,13 +271,17 @@ mod tests {
     #[test]
     fn tracing_error_subscriber_not_set_up() {
         // no setup
-
         let span = tracing::info_span!("foo", e = "some value");
         let _guard = span.enter();
 
         let extractor = MultiNameExtractor::new("E", ["e"]);
-        let missing = check_fields_present([&extractor]).unwrap_err();
-        assert_missing(missing, vec![&extractor]);
+        check_fields_present([&extractor])
+            .expect("without any subscriber, should still return Ok(())");
+
+        // similarly for a not found key
+        let extractor = MultiNameExtractor::new("E", ["foobar"]);
+        check_fields_present([&extractor])
+            .expect("without any subscriber, should still return Ok(())");
     }
 
     #[test]
