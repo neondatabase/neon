@@ -723,7 +723,13 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                extension_server::download_extension(ext_name, remote_storage, &self.pgbin).await
+                extension_server::download_extension(
+                    ext_name,
+                    remote_storage,
+                    &self.pgbin,
+                    &self.pgversion,
+                )
+                .await
             }
         }
     }
@@ -732,6 +738,7 @@ LIMIT 100",
     pub async fn prepare_preload_libraries(&self, compute_state: &ComputeState) -> Result<()> {
         // TODO: revive some  of the old logic for downloading shared preload libaries
         info!("I HAVENT IMPLEMENTED DOWNLOADING SHARED PRELOAD LIBRARIES YET");
+        dbg!(compute_state);
         Ok(())
     }
 }

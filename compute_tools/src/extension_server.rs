@@ -17,12 +17,10 @@ extensions enabled for specific tenant-ids.
 */
 use crate::compute::ComputeNode;
 use anyhow::{self, bail, Result};
-use futures::future::ok;
 use remote_storage::*;
-use serde_json::{self, Map, Value};
+use serde_json::{self, Value};
 use std::collections::HashSet;
 use std::fs::File;
-use std::hash::Hash;
 use std::io::BufWriter;
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -78,6 +76,7 @@ pub async fn get_available_extensions(
 
     dbg!(all_files);
 
+    // TODO: if index_path already exists, don't re-download it, just read it.
     let mut download = remote_storage.download(&index_path).await?;
     let mut write_data_buffer = Vec::new();
     download
@@ -137,33 +136,40 @@ pub async fn get_available_extensions(
 }
 
 // download all sqlfiles (and possibly data files) for a given extension name
-//
 pub async fn download_extension(
     ext_name: &str,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    pg_version: &str,
 ) -> Result<()> {
-    todo!();
-    // let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    // let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
-    // info!("Start downloading extension {:?}", ext_name);
-    // let mut download = remote_storage.download(&ext_path).await?;
-    // let mut write_data_buffer = Vec::new();
-    // download
-    //     .download_stream
-    //     .read_to_end(&mut write_data_buffer)
-    //     .await?;
-    // let zip_name = ext_path.object_name().expect("invalid extension path");
-    // let mut output_file = BufWriter::new(File::create(zip_name)?);
-    // output_file.write_all(&write_data_buffer)?;
-    // info!("Download {:?} completed successfully", &ext_path);
-    // info!("Unzipping extension {:?}", zip_name);
+    let ext_path = RemotePath::new(
+        &Path::new(pg_version)
+            .join("extensions")
+            .join(ext_name.to_owned() + ".tar.gz"),
+    )?;
+    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
+    info!(
+        "Start downloading extension {:?} from {:?}",
+        ext_name, ext_path
+    );
+    let mut download = remote_storage.download(&ext_path).await?;
+    let mut write_data_buffer = Vec::new();
+    download
+        .download_stream
+        .read_to_end(&mut write_data_buffer)
+        .await?;
+    let zip_name = ext_path.object_name().expect("invalid extension path");
+    let mut output_file = BufWriter::new(File::create(zip_name)?);
+    output_file.write_all(&write_data_buffer)?;
+    info!("Download {:?} completed successfully", &ext_path);
+    info!("Unzipping extension {:?}", zip_name);
 
-    // // TODO unzip and place files in appropriate locations
-    // info!("unzip {zip_name:?}");
-    // info!("place extension files in {local_sharedir:?}");
-    // info!("place library files in {local_libdir:?}");
-    // Ok(())
+    // TODO unzip and place files in appropriate locations
+    info!("unzip {zip_name:?}");
+    info!("place extension files in {local_sharedir:?}");
+    info!("place library files in {local_libdir:?}");
+    Ok(())
 }
 
 // This function initializes the necessary structs to use remmote storage (should be fairly cheap)

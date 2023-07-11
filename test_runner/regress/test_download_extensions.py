@@ -1,3 +1,4 @@
+import os
 from contextlib import closing
 
 import pytest
@@ -54,45 +55,50 @@ def test_remote_extensions(
             env.remote_storage_client.upload_fileobj(
                 f,
                 env.ext_remote_storage.bucket_name,
-                f"ext/v{pg_version}/anon.tar.gz",
+                f"ext/v{pg_version}/extensions/anon.tar.gz",
             )
         with open("test_runner/regress/data/extension_test/embedding.tar.gz", "rb") as f:
             env.remote_storage_client.upload_fileobj(
                 f,
                 env.ext_remote_storage.bucket_name,
-                f"ext/v{pg_version}/embedding.tar.gz",
+                f"ext/v{pg_version}/extensions/embedding.tar.gz",
             )
 
-    # Start a compute node and check that it can download the extensions
-    # and use them to CREATE EXTENSION and LOAD
-    endpoint = env.endpoints.create_start(
-        "test_remote_extensions",
-        tenant_id=tenant_id,
-        remote_ext_config=env.ext_remote_storage.to_string(),
-        # config_lines=["log_min_messages=debug3"],
-    )
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            # Check that appropriate control files were downloaded
-            cur.execute("SELECT * FROM pg_available_extensions")
-            all_extensions = [x[0] for x in cur.fetchall()]
-            log.info(all_extensions)
-            assert "anon" in all_extensions
-            assert "embedding" in all_extensions
-            # TODO: check that we don't have download custom extensions for other tenant ids
-            # TODO: not sure how private extension will work with REAL_S3 test. can we rig the tenant id?
+    try:
+        # Start a compute node and check that it can download the extensions
+        # and use them to CREATE EXTENSION and LOAD
+        endpoint = env.endpoints.create_start(
+            "test_remote_extensions",
+            tenant_id=tenant_id,
+            remote_ext_config=env.ext_remote_storage.to_string(),
+            # config_lines=["log_min_messages=debug3"],
+        )
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                # Check that appropriate control files were downloaded
+                cur.execute("SELECT * FROM pg_available_extensions")
+                all_extensions = [x[0] for x in cur.fetchall()]
+                log.info(all_extensions)
+                assert "anon" in all_extensions
+                assert "embedding" in all_extensions
+                # TODO: check that we don't have download custom extensions for other tenant ids
+                # TODO: not sure how private extension will work with REAL_S3 test. can we rig the tenant id?
 
-            # check that we can download public extension
-            cur.execute("CREATE EXTENSION embedding")
-            cur.execute("SELECT extname FROM pg_extension")
-            assert "embedding" in [x[0] for x in cur.fetchall()]
+                # check that we can download public extension
+                cur.execute("CREATE EXTENSION embedding")
+                cur.execute("SELECT extname FROM pg_extension")
+                assert "embedding" in [x[0] for x in cur.fetchall()]
 
-            # check that we can download private extension
-            # TODO: this will fail locally because we don't have the required dependencies
-            cur.execute("CREATE EXTENSION anon")
-            cur.execute("SELECT extname FROM pg_extension")
-            assert "embedding" in [x[0] for x in cur.fetchall()]
+                # check that we can download private extension
+                # TODO: this will fail locally because we don't have the required dependencies
+                cur.execute("CREATE EXTENSION anon")
+                cur.execute("SELECT extname FROM pg_extension")
+                assert "embedding" in [x[0] for x in cur.fetchall()]
 
-            # TODO: should we try libraries too?
+                # TODO: should we try libraries too?
 
-    # TODO: cleanup downloaded files in mock tests.
+    finally:
+        cleanup_files = ["embedding.tar.gz", "anon.tar.gz"]
+        # for file in cleanup_files:
+        #     os.remove(file)
+        log.info("For now, please manually cleanup ", cleanup_files)
