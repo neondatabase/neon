@@ -162,7 +162,10 @@ pub async fn handle_ws_client(
             .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
-        async { result }.or_else(|e| stream.throw_error(e)).await?
+        match result {
+            Ok(creds) => creds,
+            Err(e) => stream.throw_error(e).await?,
+        }
     };
 
     let client = Client::new(stream, creds, &params, session_id, false);
@@ -201,7 +204,10 @@ async fn handle_client(
             .map(|_| auth::ClientCredentials::parse(&params, sni, common_names))
             .transpose();
 
-        async { result }.or_else(|e| stream.throw_error(e)).await?
+        match result {
+            Ok(creds) => creds,
+            Err(e) => stream.throw_error(e).await?,
+        }
     };
 
     let allow_self_signed_compute = config.allow_self_signed_compute;
@@ -561,15 +567,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
-        let auth_result = async {
-            // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds
-                .authenticate(&extra, &mut stream, allow_cleartext)
-                .await;
-
-            async { res }.or_else(|e| stream.throw_error(e)).await
-        }
-        .await?;
+        let auth_result = match creds
+            .authenticate(&extra, &mut stream, allow_cleartext)
+            .await
+        {
+            Err(e) => return stream.throw_error(e).await,
+            Ok(auth_result) => auth_result,
+        };
 
         let AuthSuccess {
             reported_auth_ok,
