@@ -235,7 +235,7 @@ pub fn schedule_local_tenant_processing(
 /// We would then be in split-brain once this pageserver restarts.
 #[instrument(skip_all)]
 pub async fn shutdown_all_tenants() {
-    shutdown_all_tenants0(&*TENANTS).await
+    shutdown_all_tenants0(&TENANTS).await
 }
 
 async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
@@ -437,7 +437,7 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
-    detach_tenant0(conf, &*TENANTS, tenant_id, detach_ignored).await
+    detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await
 }
 
 async fn detach_tenant0(
@@ -505,7 +505,7 @@ pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
-    ignore_tenant0(conf, &*TENANTS, tenant_id).await
+    ignore_tenant0(conf, &TENANTS, tenant_id).await
 }
 
 async fn ignore_tenant0(
@@ -841,7 +841,7 @@ mod tests {
                     can_complete_cleanup.wait().await;
                     anyhow::Ok(())
                 };
-                super::remove_tenant_from_memory(&*tenants, id, cleanup).await
+                super::remove_tenant_from_memory(&tenants, id, cleanup).await
             }
             .instrument(info_span!("foobar", tenant_id = %id))
         });
@@ -859,7 +859,7 @@ mod tests {
 
         let mut shutdown_task = tokio::spawn(async move {
             drop(until_shutdown_started);
-            super::shutdown_all_tenants0(&*tenants).await;
+            super::shutdown_all_tenants0(&tenants).await;
         });
 
         shutdown_started.wait().await;
