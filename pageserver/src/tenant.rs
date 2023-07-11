@@ -1781,6 +1781,10 @@ impl Tenant {
     /// - detach + ignore (freeze_and_flush == false)
     ///
     /// This will attempt to shutdown even if tenant is broken.
+    ///
+    /// `shutdown_progress` is a [`completion::Barrier`] which later shutdown attempts can join to
+    /// await tenant's shutdown, returned as an error if caller was not the first caller to
+    /// initiate shutdown.
     async fn shutdown(
         &self,
         shutdown_progress: completion::Barrier,
