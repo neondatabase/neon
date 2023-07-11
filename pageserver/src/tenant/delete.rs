@@ -354,7 +354,7 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip(tenant), fields(tenant_id=%tenant.tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%tenant.tenant_id, %timeline_id))]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
