@@ -9,8 +9,10 @@ for prefix in os.listdir("."):
         with open(os.path.join(prefix, file), "r") as f:
             ext_name = file.replace(".control", "")
             control = f.read()
-            ext_index[prefix][ext_name] = {"path": f"extensions/{prefix}/{ext_name}.tar.gz", "control": control}
+            ext_index[prefix][ext_name] = {
+                "path": f"extensions/{prefix}/{ext_name}.tar.gz",
+                "control": control,
+            }
 
 with open("../ext_index.json", "w") as f:
     json.dump(ext_index, f)
-
