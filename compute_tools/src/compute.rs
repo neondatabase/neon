@@ -271,6 +271,12 @@ impl ComputeNode {
         // of gzip compression might send us uncompressed data. After some time
         // passes we can assume all pageservers know how to compress and we can
         // delete this check.
+        //
+        // If the data is not gzip, it will be tar. It will not be mistakenly
+        // recognized as gzip because tar starts with an ascii encoding of a filename,
+        // and 0x1f and 0x8b are unlikely first characters for any filename. Moreover,
+        // we send the "global" directory first from the pageserver, so it definitely
+        // won't be recognized as gzip.
         let mut bufreader = std::io::BufReader::new(&mut measured_reader);
         let gzip = {
             let peek = bufreader.fill_buf().unwrap();
