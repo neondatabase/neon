@@ -385,6 +385,9 @@ async fn connect_to_compute(
             time::Duration::from_secs(10)
         };
 
+        // do this again to ensure we have username?
+        node_info.config.set_startup_params(params);
+
         match connect_to_compute_once(node_info, timeout).await {
             Ok(res) => return Ok(res),
             Err(e) => {
