@@ -325,7 +325,7 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
         );
 
-        if let Some(layer) = self.0.get_mut(&expected.layer_desc().key()) {
+        if let Some(layer) = self.0.get_mut(&key) {
             anyhow::ensure!(
                 compare_arced_layers(&expected, layer),
                 "another layer was found instead of expected, expected={expected:?}, new={new:?}",
