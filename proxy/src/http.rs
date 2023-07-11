@@ -4,6 +4,7 @@
 
 pub mod conn_pool;
 pub mod server;
+pub mod serverless;
 pub mod sql_over_http;
 pub mod websocket;
 

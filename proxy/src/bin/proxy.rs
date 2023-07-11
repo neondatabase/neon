@@ -129,14 +129,16 @@ async fn main() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ));
 
-    if let Some(wss_address) = args.wss {
-        let wss_address: SocketAddr = wss_address.parse()?;
-        info!("Starting wss on {wss_address}");
-        let wss_listener = TcpListener::bind(wss_address).await?;
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.spawn(http::websocket::task_main(
+        client_tasks.spawn(http::serverless::task_main(
             config,
-            wss_listener,
+            serverless_listener,
             cancellation_token.clone(),
         ));
     }
