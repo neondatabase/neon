@@ -2434,7 +2434,11 @@ impl Timeline {
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
+        let mut last_round_image = false;
+
         'outer: loop {
+            let exclude_image_this_round = last_round_image;
+            last_round_image = false;
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
@@ -2599,8 +2603,8 @@ impl Timeline {
                         }
                     }
 
-                    if let Some((SearchResult { lsn_floor, layer }, next)) =
-                        layers.search_incremental(key, cont_lsn)
+                    if let Some(SearchResult { lsn_floor, layer }) =
+                        layers.search_incremental(key, cont_lsn, exclude_image_this_round)
                     {
                         let layer = timeline.lcache.get_from_desc(&layer);
                         // If it's a remote layer, download it and retry.
@@ -2627,46 +2631,8 @@ impl Timeline {
                             if !layer.layer_desc().is_delta
                                 && matches!(result, ValueReconstructResult::Continue)
                             {
-                                let old_layer = layer.clone();
-                                // if is incremental image layer and not found, try again with delta layer
-                                if let Some(SearchResult { lsn_floor, layer }) = next {
-                                    traversal_path.push((
-                                        result,
-                                        cont_lsn,
-                                        Box::new({
-                                            let layer = Arc::clone(&old_layer);
-                                            move || layer.traversal_id()
-                                        }),
-                                    ));
-
-                                    // HACK: no remote storage for now, safely get and downcast
-                                    let layer = timeline.lcache.get_from_desc(&layer);
-
-                                    // Get all the data needed to reconstruct the page version from this layer.
-                                    // But if we have an older cached page image, no need to go past that.
-                                    let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                                    result = match layer.get_value_reconstruct_data(
-                                        key,
-                                        lsn_floor..cont_lsn,
-                                        reconstruct_state,
-                                        ctx,
-                                    ) {
-                                        Ok(result) => result,
-                                        Err(e) => return Err(PageReconstructError::from(e)),
-                                    };
-
-                                    cont_lsn = lsn_floor;
-                                    *read_count += 2;
-                                    traversal_path.push((
-                                        result,
-                                        cont_lsn,
-                                        Box::new({
-                                            let layer = Arc::clone(&layer);
-                                            move || layer.traversal_id()
-                                        }),
-                                    ));
-                                    continue 'outer;
-                                }
+                                last_round_image = true;
+                                continue 'outer;
                             };
 
                             cont_lsn = lsn_floor;
@@ -4166,7 +4132,7 @@ impl Timeline {
                 }
             }
 
-            const ENABLE_TRIVIAL_MOVE: bool = false;
+            const ENABLE_TRIVIAL_MOVE: bool = true;
 
             if !ENABLE_TRIVIAL_MOVE {
                 deltas_to_compact_layers.extend(std::mem::take(&mut trivial_move_layers));
