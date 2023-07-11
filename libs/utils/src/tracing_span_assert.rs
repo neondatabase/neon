@@ -79,9 +79,7 @@ pub fn check_fields_present<const L: usize>(
         });
         !missing.is_empty() // continue walking up until we've found all missing
     });
-    if missing.is_empty() {
-        Ok(())
-    } else if !tracing_subscriber_configured() {
+    if missing.is_empty() || !tracing_subscriber_configured() {
         Ok(())
     } else {
         Err(missing)
