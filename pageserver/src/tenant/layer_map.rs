@@ -286,7 +286,7 @@ impl LayerMap {
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
-                if image_is_newer {
+                if image_is_newer || image_exact_match {
                     Some(SearchResult {
                         layer: image,
                         lsn_floor: img_lsn,
