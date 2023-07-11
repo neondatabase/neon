@@ -396,13 +396,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -411,6 +409,7 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
+          extra_params: --splits ${{ strategy.job-total }} --group ${{ matrix.pytest_split_group }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
