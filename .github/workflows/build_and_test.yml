@@ -964,11 +964,6 @@ jobs:
           # rm -rf ./extensions/share/extension/neon*
           # rm -rf ./extensions/lib/neon*
 
-          # # TODO: Delete leftovers from the extension build step
-          # # (This step, if desired, should be moved to Dockerfile.compute-node before the files are zipped)
-          # rm -rf ./extensions/lib/pgxs
-          # rm -rf ./extensions/lib/pkgconfig
-
           docker cp ${{ steps.create-container.outputs.EID }}:/ ./
           poetry run python3 ./scripts/combine_control_files.py
 
@@ -976,7 +971,7 @@ jobs:
         run: |
           for BUCKET in $(echo ${S3_BUCKETS}); do
             aws s3 cp --recursive --only-show-errors ./extensions s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
-            aws s3 cp --only-show-errors ./control_files/ext_index.json s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
+            aws s3 cp --only-show-errors ./ext_index.json s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
           done
 
       - name: Cleanup
