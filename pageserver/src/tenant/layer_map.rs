@@ -261,7 +261,8 @@ impl LayerMap {
         let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = if exclude_image {
-            None
+            let version = self.historic.get().unwrap().get_version(end_lsn.0 - 2)?;
+            version.image_coverage.query(key.to_i128())
         } else {
             version.image_coverage.query(key.to_i128())
         };

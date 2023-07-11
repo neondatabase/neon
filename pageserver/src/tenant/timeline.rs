@@ -2449,7 +2449,7 @@ impl Timeline {
                         self.metrics.materialized_page_cache_hit_counter.inc_by(1);
                         return Ok(());
                     }
-                    if prev_lsn <= cont_lsn {
+                    if cont_lsn > prev_lsn || (cont_lsn == prev_lsn && !exclude_image_this_round) {
                         // Didn't make any progress in last iteration. Error out to avoid
                         // getting stuck in the loop.
                         return Err(layer_traversal_error(format!(
@@ -2633,6 +2633,10 @@ impl Timeline {
                             if !layer.layer_desc().is_delta
                                 && matches!(result, ValueReconstructResult::Continue)
                             {
+                                assert!(
+                                    !exclude_image_this_round
+                                        || (exclude_image_this_round && lsn_floor != cont_lsn)
+                                );
                                 last_round_image = true;
                             }
                             cont_lsn = lsn_floor;
@@ -2644,7 +2648,7 @@ impl Timeline {
                                     let layer = Arc::clone(&layer);
                                     move || layer.traversal_id()
                                 }),
-                                exclude_image_this_round,
+                                last_round_image,
                             ));
                             continue 'outer;
                         }
