@@ -272,25 +272,19 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
                 let freeze_and_flush = true;
                 if let Err(progress) = tenant.shutdown(shutdown_progress, freeze_and_flush).await {
                     drop(_guard);
+
                     // there is already something else shutting down the tenant (detach, ignore), lets wait for it
                     let mut remaining = std::pin::pin!(progress.wait());
-                    let remaining = tokio::select! {
-                        biased;
-                        _ = &mut remaining => {
-                            None
-                        },
+                    tokio::select! {
+                        _ = &mut remaining => {},
                         _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                             // in practice we might not have a lot to go, since systemd is going to
                             // SIGKILL us at 10s, but we can try. delete tenant might take a while,
                             // so put out a warning.
                             warn!("waiting for the other shutdown to complete");
-                            Some(remaining)
+                            remaining.await;
                         }
                     };
-
-                    if let Some(remaining) = remaining {
-                        remaining.await;
-                    }
                 }
                 debug!("tenant successfully stopped");
             }
