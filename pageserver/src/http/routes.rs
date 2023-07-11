@@ -1143,7 +1143,7 @@ async fn disk_usage_eviction_run(
     let Some(storage) = state.remote_storage.clone() else {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
-        )))
+        )));
     };
 
     let state = state.disk_usage_eviction_state.clone();

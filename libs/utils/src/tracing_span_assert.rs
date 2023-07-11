@@ -28,7 +28,7 @@
 //! }
 //! ```
 //!
-//! Recommended reading: https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
+//! Recommended reading: <https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering>
 //!
 
 use std::{
@@ -95,7 +95,7 @@ impl<'a> fmt::Debug for MemoryIdentity<'a> {
     }
 }
 
-/// The extractor names passed as keys to [`new`].
+/// The extractor names passed as keys to [`MultiNameExtractor::new`].
 pub fn check_fields_present<const L: usize>(
     must_be_present: [&dyn Extractor; L],
 ) -> Result<(), Vec<&dyn Extractor>> {

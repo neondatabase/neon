@@ -323,7 +323,7 @@ impl LayerAccessStats {
 }
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`].
+/// required by [`LayerMap`](super::layer_map::LayerMap).
 ///
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
@@ -370,10 +370,10 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
-/// Returned by [`Layer::iter`]
+/// Returned by [`PersistentLayer::iter`]
 pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
 
-/// Returned by [`Layer::key_iter`]
+/// Returned by [`PersistentLayer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
 
 /// Get a layer descriptor from a layer.

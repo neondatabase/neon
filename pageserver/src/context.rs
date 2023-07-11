@@ -179,6 +179,9 @@ impl RequestContext {
     /// a context and you are unwilling to change all callers to provide one.
     ///
     /// Before we add cancellation, we should get rid of this method.
+    ///
+    /// [`attached_child`]: Self::attached_child
+    /// [`detached_child`]: Self::detached_child
     pub fn todo_child(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
         Self::new(task_kind, download_behavior)
     }

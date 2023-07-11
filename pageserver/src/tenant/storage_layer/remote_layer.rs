@@ -25,7 +25,7 @@ use super::{
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
-/// [`crate::storage_layer::DeltaLayer`].
+/// [`DeltaLayer`](super::DeltaLayer).
 ///
 /// RemoteLayer might be downloaded on-demand during operations which are
 /// allowed download remote layers and during which, it gets replaced with a

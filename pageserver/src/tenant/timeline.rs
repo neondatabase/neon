@@ -257,7 +257,7 @@ pub struct Timeline {
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
     /// Remote storage client.
-    /// See [`storage_sync`] module comment for details.
+    /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
@@ -1053,8 +1053,12 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
-        let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
+        let Some(layer) = self.find_layer(layer_file_name).await else {
+            return Ok(None);
+        };
+        let Some(remote_layer) = layer.downcast_remote_layer() else {
+            return Ok(Some(false));
+        };
         if self.remote_client.is_none() {
             return Ok(Some(false));
         }
@@ -1063,10 +1067,12 @@ impl Timeline {
         Ok(Some(true))
     }
 
-    /// Like [`evict_layer_batch`], but for just one layer.
+    /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(local_layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
+        let Some(local_layer) = self.find_layer(layer_file_name).await else {
+            return Ok(None);
+        };
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1087,9 +1093,9 @@ impl Timeline {
 
     /// Evict a batch of layers.
     ///
-    /// GenericRemoteStorage reference is required as a witness[^witness_article] for "remote storage is configured."
+    /// GenericRemoteStorage reference is required as a (witness)[witness_article] for "remote storage is configured."
     ///
-    /// [^witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
+    /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
     pub async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
@@ -1864,7 +1870,7 @@ impl Timeline {
     /// 3. Schedule upload of local-only layer files (which will then also update the remote
     ///    IndexPart to include the new layer files).
     ///
-    /// Refer to the `storage_sync` module comment for more context.
+    /// Refer to the [`remote_timeline_client`] module comment for more context.
     ///
     /// # TODO
     /// May be a bit cleaner to do things based on populated remote client,
@@ -2806,7 +2812,9 @@ impl Timeline {
                     layers.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
-                let Some(layer_to_flush) = layer_to_flush else { break Ok(()) };
+                let Some(layer_to_flush) = layer_to_flush else {
+                    break Ok(());
+                };
                 if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
                     error!("could not flush frozen layer: {err:?}");
                     break Err(err);
@@ -3903,7 +3911,7 @@ impl Timeline {
         }
 
         // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
+        // See remote_timeline_client module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
         if let Some(remote_client) = &self.remote_client {
             debug!("waiting for upload ops to complete");

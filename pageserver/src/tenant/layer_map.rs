@@ -16,7 +16,7 @@
 //! Other read methods are less critical but still impact performance of background tasks.
 //!
 //! This data structure relies on a persistent/immutable binary search tree. See the
-//! following lecture for an introduction https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
+//! following lecture for an introduction <https://www.youtube.com/watch?v=WqCWghETNDc&t=581s>
 //! Summary: A persistent/immutable BST (and persistent data structures in general) allows
 //! you to modify the tree in such a way that each modification creates a new "version"
 //! of the tree. When you modify it, you get a new version, but all previous versions are
@@ -40,7 +40,7 @@
 //! afterwards. We can add layers as long as they have larger LSNs than any previous layer in
 //! the map, but if we need to remove a layer, or insert anything with an older LSN, we need
 //! to throw away most of the persistent BST and build a new one, starting from the oldest
-//! LSN. See `LayerMap::flush_updates()`.
+//! LSN. See [`LayerMap::flush_updates()`].
 //!
 
 mod historic_layer_coverage;

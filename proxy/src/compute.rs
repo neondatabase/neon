@@ -13,7 +13,7 @@ const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 #[derive(Debug, Error)]
 pub enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
-    /// [`tokio_postgres::error::Kind`] doesn't contain ip addresses and such.
+    /// `tokio_postgres::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
     Postgres(#[from] tokio_postgres::Error),
 
