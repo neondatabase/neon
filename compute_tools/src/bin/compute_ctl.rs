@@ -198,7 +198,7 @@ fn main() -> Result<()> {
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
         ext_remote_storage,
-        available_libraries: OnceLock::new(),
+        // available_libraries: OnceLock::new(),
         available_extensions: OnceLock::new(),
     };
     let compute = Arc::new(compute_node);

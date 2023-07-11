@@ -1,16 +1,13 @@
-import json
 from contextlib import closing
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    PgBin,
     RemoteStorageKind,
     available_s3_storages,
 )
 from fixtures.pg_version import PgVersion
-
 
 # Generate mock extension files and upload them to the mock bucket.
 #
