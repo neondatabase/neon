@@ -811,6 +811,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_joins_remove_tenant_from_memory() {
+        // the test is a bit ugly with the lockstep together with spawned tasks. the aim is to make
+        // sure `shutdown_all_tenants0` per-tenant processing joins in any active
+        // remove_tenant_from_memory calls, which is enforced by making the operation last until
+        // we've ran `shutdown_all_tenants0` for 100ms.
+
         let (t, _ctx) = TenantHarness::create("shutdown_joins_detach")
             .unwrap()
             .load()
@@ -820,13 +825,12 @@ mod tests {
 
         let id = t.tenant_id();
         let tenants = HashMap::from([(id, t.clone())]);
-
         let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
 
         let (until_cleanup_completed, can_complete_cleanup) = utils::completion::channel();
         let (until_cleanup_started, cleanup_started) = utils::completion::channel();
 
-        // start a "detaching operation", which will take a while
+        // start a "detaching operation", which will take a while, until can_complete_cleanup
         let cleanup_task = tokio::spawn({
             let tenants = tenants.clone();
             async move {
@@ -858,19 +862,23 @@ mod tests {
 
         shutdown_started.wait().await;
 
+        // if the joining in is removed from shutdown_all_tenants0, the shutdown_task should always
+        // get to complete within 100ms and fail the test.
         tokio::select! {
             _ = &mut shutdown_task => unreachable!("shutdown must continue, until_cleanup_completed is not dropped"),
             _ = &mut cleanup_progress => unreachable!("cleanup progress must continue, until_cleanup_completed is not dropped"),
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
         }
 
+        // allow the remove_tenant_from_memory and thus eventually the shutdown to continue
         drop(until_cleanup_completed);
 
-        // FIXME: we cannot really assert that these all complete at the same time.
         let (je, ()) = tokio::join!(shutdown_task, cleanup_progress);
-        je.unwrap();
-
-        cleanup_task.await.unwrap().unwrap();
+        je.expect("Tenant::shutdown shutdown not have panicked");
+        cleanup_task
+            .await
+            .expect("no panicking")
+            .expect("remove_tenant_from_memory");
 
         futures::future::poll_immediate(
             t.shutdown(utils::completion::Barrier::default(), false)
@@ -879,6 +887,6 @@ mod tests {
                 .wait(),
         )
         .await
-        .expect("the stopping progress is still complete");
+        .expect("the stopping progress must still be complete");
     }
 }
