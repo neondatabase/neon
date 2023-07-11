@@ -160,6 +160,8 @@ def get_scales_matrix(default: int = 10) -> List[int]:
             scale = get_scale_for_db(int(s.removesuffix("mb")))
         elif s.endswith("gb"):
             scale = get_scale_for_db(int(s.removesuffix("gb")) * 1024)
+        elif s.endswith("tb"):
+            scale = get_scale_for_db(int(s.removesuffix("tb")) * 1024 * 1024)
         else:
             scale = int(s)
         rv.append(scale)

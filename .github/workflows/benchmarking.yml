@@ -135,6 +135,7 @@ jobs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
       olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
       tpch-compare-matrix: ${{ steps.tpch-compare-matrix.outputs.matrix }}
+      pgbench-compare-big-db-matrix: ${{ steps.pgbench-compare-big-db-matrix.outputs.matrix }}
 
     steps:
     - name: Generate matrix for pgbench benchmark
@@ -159,6 +160,19 @@ jobs:
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
+    - name: Generate matrix for pgbench benchmark with big databases
+      id: pgbench-compare-big-db-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse",
+            "neonvm-captest-reuse"
+          ],
+          "db_size": [ "1tb" ]
+        }'
+
+        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
     - name: Generate matrix for OLAP benchmarks
       id: olap-compare-matrix
@@ -332,6 +346,103 @@ jobs:
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
         slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  pgbench-compare-big-db:
+    if: ${{ !cancelled() }}
+    needs: [ generate-matrices, pgbench-compare ]
+
+    strategy:
+      fail-fast: false
+      matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-big-db-matrix)}}
+
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
+      PLATFORM: ${{ matrix.platform }}
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      options: --init
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
+      run: |
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        case "${PLATFORM}" in
+          neon-captest-reuse)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_PGBENCH_1TB_CONNSTR }}
+            ;;
+          neonvm-captest-reuse)
+            CONNSTR=${{ secrets.BENCHMARK_NEONVM_PGBENCH_1TB_CONNSTR }}
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
+            exit 1
+            ;;
+        esac
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+        psql ${CONNSTR} -c "SELECT version();"
+
+    - name: Benchmark simple-update
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark select-only
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Create Allure report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic perf testing ${{ matrix.platform }} (${{ matrix.db_size }}): ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
