@@ -956,28 +956,27 @@ jobs:
 
       - name: Extract postgres-extensions from container
         run: |
-          rm -rf ./extensions-to-upload ./control_files # Just in case
-          mkdir extensions-to-upload
+          rm -rf ./extensions ./control_files # Just in case
+          mkdir extensions
           mkdir control_files
 
           # TODO: Delete Neon extensitons (they always present on compute-node image)
-          # rm -rf ./extensions-to-upload/share/extension/neon*
-          # rm -rf ./extensions-to-upload/lib/neon*
+          # rm -rf ./extensions/share/extension/neon*
+          # rm -rf ./extensions/lib/neon*
 
           # # TODO: Delete leftovers from the extension build step
           # # (This step, if desired, should be moved to Dockerfile.compute-node before the files are zipped)
-          # rm -rf ./extensions-to-upload/lib/pgxs
-          # rm -rf ./extensions-to-upload/lib/pkgconfig
+          # rm -rf ./extensions/lib/pgxs
+          # rm -rf ./extensions/lib/pkgconfig
 
-          docker cp ${{ steps.create-container.outputs.EID }}:/extensions ./extensions-to-upload
-          docker cp ${{ steps.create-container.outputs.EID }}:/control_files ./control_files
+          docker cp ${{ steps.create-container.outputs.EID }}:/ ./
           poetry run python3 ./scripts/combine_control_files.py
 
       - name: Upload postgres-extensions to S3
         run: |
           for BUCKET in $(echo ${S3_BUCKETS}); do
-            aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
-            aws s3 cp --only-show-errors ./control_files/control_index.json s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
+            aws s3 cp --recursive --only-show-errors ./extensions s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
+            aws s3 cp --only-show-errors ./control_files/ext_index.json s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
           done
 
       - name: Cleanup
