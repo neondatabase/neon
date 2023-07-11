@@ -8,7 +8,7 @@ use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, Quer
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, info_span};
+use tracing::{error, info, info_span, Instrument};
 use tracing_utils::instrument::InstrumentCancel;
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
@@ -57,7 +57,8 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
                     info!("serving completed");
                 }
             }
-            .instrument_with_cancel(span),
+            .instrument(span)
+            .with_cancel_info(),
         );
     }
 }
