@@ -2,7 +2,10 @@ import json
 import os
 
 # enable custom extensions for specific tenants
-enabled_extensions = {"123454321": ["anon"]}
+enabled_extensions = {
+    "123454321": ["anon"],
+    "public": ["embedding"]
+}
 
 control_data = {}
 for control_file in os.listdir("control_files"):

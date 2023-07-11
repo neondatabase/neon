@@ -921,6 +921,9 @@ jobs:
     #   (github.ref_name == 'main' || github.ref_name == 'release') &&
     #    github.event_name != 'workflow_dispatch'
     runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
     needs: [ tag, promote-images ]
     strategy:
       fail-fast: false
