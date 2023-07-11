@@ -10,6 +10,7 @@
 //
 
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -31,6 +32,7 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 use tracing::field;
@@ -756,6 +758,7 @@ impl PageServerHandler {
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
+        gzip: bool,
         ctx: RequestContext,
     ) -> anyhow::Result<()>
     where
@@ -783,8 +786,9 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
-        // Send a tarball of the latest layer on the timeline
-        {
+        // Send a tarball of the latest layer on the timeline. Compress if not
+        // fullbackup. TODO Compress in that case too (tests need to be updated)
+        if full_backup {
             let mut writer = pgb.copyout_writer();
             basebackup::send_basebackup_tarball(
                 &mut writer,
@@ -795,6 +799,40 @@ impl PageServerHandler {
                 &ctx,
             )
             .await?;
+        } else {
+            let mut writer = pgb.copyout_writer();
+            if gzip {
+                let mut encoder = GzipEncoder::with_quality(
+                    writer,
+                    // NOTE using fast compression because it's on the critical path
+                    //      for compute startup. For an empty database, we get
+                    //      <100KB with this method. The Level::Best compression method
+                    //      gives us <20KB, but maybe we should add basebackup caching
+                    //      on compute shutdown first.
+                    async_compression::Level::Fastest,
+                );
+                basebackup::send_basebackup_tarball(
+                    &mut encoder,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+                // shutdown the encoder to ensure the gzip footer is written
+                encoder.shutdown().await?;
+            } else {
+                basebackup::send_basebackup_tarball(
+                    &mut writer,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+            }
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
@@ -933,6 +971,19 @@ where
                 None
             };
 
+            let gzip = if params.len() >= 4 {
+                if params[3] == "--gzip" {
+                    true
+                } else {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "Parameter in position 3 unknown {}",
+                        params[3],
+                    )));
+                }
+            } else {
+                false
+            };
+
             metrics::metric_vec_duration::observe_async_block_duration_by_result(
                 &*crate::metrics::BASEBACKUP_QUERY_TIME,
                 async move {
@@ -943,6 +994,7 @@ where
                         lsn,
                         None,
                         false,
+                        gzip,
                         ctx,
                     )
                     .await?;
@@ -1028,8 +1080,17 @@ where
             self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
-                .await?;
+            self.handle_basebackup_request(
+                pgb,
+                tenant_id,
+                timeline_id,
+                lsn,
+                prev_lsn,
+                true,
+                false,
+                ctx,
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
