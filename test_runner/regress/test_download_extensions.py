@@ -29,7 +29,7 @@ def test_remote_extensions(
         return None
 
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",
         enable_remote_extensions=True,
     )
@@ -43,17 +43,24 @@ def test_remote_extensions(
 
     # For MOCK_S3 we upload some test files. for REAL_S3 we use the files created in CICD
     if remote_storage_kind == RemoteStorageKind.MOCK_S3:
+        log.info("Uploading test files to mock bucket")
+        with open("test_runner/regress/data/extension_test/ext_index.json", "rb") as f:
+            env.remote_storage_client.upload_fileobj(
+                f,
+                env.ext_remote_storage.bucket_name,
+                f"ext/v{pg_version}/ext_index.json",
+            )
         with open("test_runner/regress/data/extension_test/anon.tar.gz", "rb") as f:
             env.remote_storage_client.upload_fileobj(
-                f.read(),
+                f,
                 env.ext_remote_storage.bucket_name,
-                f"{pg_version}/{str(tenant_id)}/anon.tar.gz",
+                f"ext/v{pg_version}/anon.tar.gz",
             )
         with open("test_runner/regress/data/extension_test/embedding.tar.gz", "rb") as f:
             env.remote_storage_client.upload_fileobj(
-                f.read(),
+                f,
                 env.ext_remote_storage.bucket_name,
-                f"{pg_version}/public/embedding.tar.gz",
+                f"ext/v{pg_version}/embedding.tar.gz",
             )
 
     # Start a compute node and check that it can download the extensions

@@ -1,11 +1,28 @@
 // Download extension files from the extension store
 // and put them in the right place in the postgres directory
+/*
+The layout of the S3 bucket is as follows:
+
+v14/ext_index.json
+    -- this contains information necessary to create control files
+v14/extensions/test_ext1.tar.gz
+    -- this contains the library files and sql files necessary to create this extension
+v14/extensions/custom_ext1.tar.gz
+
+The difference between a private and public extensions is determined by who can
+load the extension this is specified in ext_index.json
+
+Speicially, ext_index.json has a list of public extensions, and a list of
+extensions enabled for specific tenant-ids.
+*/
 use crate::compute::ComputeNode;
 use anyhow::{self, bail, Result};
+use futures::future::ok;
 use remote_storage::*;
-use serde_json::{self, Value};
-use std::collections::HashMap;
+use serde_json::{self, Map, Value};
+use std::collections::HashSet;
 use std::fs::File;
+use std::hash::Hash;
 use std::io::BufWriter;
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -14,7 +31,7 @@ use std::str;
 use std::sync::Arc;
 use std::thread;
 use tokio::io::AsyncReadExt;
-use tracing::{info, warn};
+use tracing::info;
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -49,87 +66,104 @@ pub async fn get_available_extensions(
     pgbin: &str,
     pg_version: &str,
     custom_ext_prefixes: &Vec<String>,
-) -> Result<HashMap<String, RemotePath>> {
+) -> Result<HashSet<String>> {
+    // TODO: in this function change expect's to pass the error instead of panic-ing
+
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
 
-    let index_path = RemotePath::new(Path::new(&format!("{:?}/ext_index.json", pg_version)))
-        .expect("error forming path");
+    let index_path = pg_version.to_owned() + "/ext_index.json";
+    let index_path = RemotePath::new(Path::new(&index_path)).expect("error forming path");
+    info!("download extension index json: {:?}", &index_path);
+    let all_files = remote_storage.list_files(None).await?;
+
+    dbg!(all_files);
+
     let mut download = remote_storage.download(&index_path).await?;
     let mut write_data_buffer = Vec::new();
     download
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
-    let ext_index_str =
-        serde_json::to_string(&write_data_buffer).expect("Failed to convert to JSON");
+    let ext_index_str = match str::from_utf8(&write_data_buffer) {
+        Ok(v) => v,
+        Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+    };
+
+    dbg!(ext_index_str);
+
     let ext_index_full = match serde_json::from_str(&ext_index_str) {
         Ok(Value::Object(map)) => map,
         _ => bail!("error parsing json"),
     };
+    let control_data = ext_index_full["control_data"]
+        .as_object()
+        .expect("json parse error");
+    let enabled_extensions = ext_index_full["enabled_extensions"]
+        .as_object()
+        .expect("json parse error");
+
+    dbg!(ext_index_full.clone());
+    dbg!(control_data.clone());
+    dbg!(enabled_extensions.clone());
 
     let mut prefixes = vec!["public".to_string()];
     prefixes.extend(custom_ext_prefixes.clone());
-    let mut ext_index_limited = HashMap::new();
+    dbg!(prefixes.clone());
+    let mut all_extensions = HashSet::new();
     for prefix in prefixes {
-        let ext_details_str = ext_index_full.get(&prefix);
-        if let Some(ext_details_str) = ext_details_str {
-            let ext_details =
-                serde_json::to_string(ext_details_str).expect("Failed to convert to JSON");
-            let ext_details = match serde_json::from_str(&ext_details) {
-                Ok(Value::Object(map)) => map,
-                _ => bail!("error parsing json"),
-            };
-            let control_contents = match ext_details.get("control").expect("broken json file") {
-                Value::String(s) => s,
-                _ => bail!("broken json file"),
-            };
-            let path = RemotePath::new(Path::new(&format!(
-                "{:?}/{:?}",
-                pg_version,
-                ext_details.get("path")
-            )))
-            .expect("error forming path");
-
-            let control_path = format!("{:?}/{:?}.control", &local_sharedir, &prefix);
-            std::fs::write(control_path, &control_contents)?;
-
-            ext_index_limited.insert(prefix, path);
-        } else {
-            warn!("BAD PREFIX {:?}", prefix);
+        let prefix_extensions = match enabled_extensions.get(&prefix) {
+            Some(Value::Array(ext_name)) => ext_name,
+            _ => {
+                info!("prefix {} has no extensions", prefix);
+                continue;
+            }
+        };
+        dbg!(prefix_extensions);
+        for ext_name in prefix_extensions {
+            all_extensions.insert(ext_name.as_str().expect("json parse error").to_string());
         }
     }
-    Ok(ext_index_limited)
+
+    // TODO: this is probably I/O bound, could benefit from parallelizing
+    for prefix in &all_extensions {
+        let control_contents = control_data[prefix].as_str().expect("json parse error");
+        let control_path = local_sharedir.join(prefix.to_owned() + ".control");
+
+        info!("WRITING FILE {:?}{:?}", control_path, control_contents);
+        std::fs::write(control_path, &control_contents)?;
+    }
+
+    Ok(all_extensions.into_iter().collect())
 }
 
 // download all sqlfiles (and possibly data files) for a given extension name
 //
 pub async fn download_extension(
     ext_name: &str,
-    ext_path: &RemotePath,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
 ) -> Result<()> {
-    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
-    info!("Start downloading extension {:?}", ext_name);
-    let mut download = remote_storage.download(&ext_path).await?;
-    let mut write_data_buffer = Vec::new();
-    download
-        .download_stream
-        .read_to_end(&mut write_data_buffer)
-        .await?;
-    let zip_name = ext_path.object_name().expect("invalid extension path");
-    let mut output_file = BufWriter::new(File::create(zip_name)?);
-    output_file.write_all(&write_data_buffer)?;
-    info!("Download {:?} completed successfully", &ext_path);
-    info!("Unzipping extension {:?}", zip_name);
+    todo!();
+    // let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+    // let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
+    // info!("Start downloading extension {:?}", ext_name);
+    // let mut download = remote_storage.download(&ext_path).await?;
+    // let mut write_data_buffer = Vec::new();
+    // download
+    //     .download_stream
+    //     .read_to_end(&mut write_data_buffer)
+    //     .await?;
+    // let zip_name = ext_path.object_name().expect("invalid extension path");
+    // let mut output_file = BufWriter::new(File::create(zip_name)?);
+    // output_file.write_all(&write_data_buffer)?;
+    // info!("Download {:?} completed successfully", &ext_path);
+    // info!("Unzipping extension {:?}", zip_name);
 
-    // TODO unzip and place files in appropriate locations
-    info!("unzip {zip_name:?}");
-    info!("place extension files in {local_sharedir:?}");
-    info!("place library files in {local_libdir:?}");
-
-    Ok(())
+    // // TODO unzip and place files in appropriate locations
+    // info!("unzip {zip_name:?}");
+    // info!("place extension files in {local_sharedir:?}");
+    // info!("place library files in {local_libdir:?}");
+    // Ok(())
 }
 
 // This function initializes the necessary structs to use remmote storage (should be fairly cheap)

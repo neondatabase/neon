@@ -1,0 +1,14 @@
+{
+  "enabled_extensions": {
+    "123454321": [
+      "anon"
+    ],
+    "public": [
+      "embedding"
+    ]
+  },
+  "control_data": {
+    "embedding": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
+    "anon": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+  }
+}

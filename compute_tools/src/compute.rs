@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -18,7 +18,7 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::GenericRemoteStorage;
 
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -54,7 +54,7 @@ pub struct ComputeNode {
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     // cached lists of available extensions and libraries
     // pub available_libraries: OnceLock<HashMap<String, Vec<RemotePath>>>,
-    pub available_extensions: OnceLock<HashMap<String, RemotePath>>,
+    pub available_extensions: OnceLock<HashSet<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -723,17 +723,7 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                extension_server::download_extension(
-                    ext_name,
-                    self.available_extensions
-                        .get()
-                        .context("extension download error")?
-                        .get(ext_name)
-                        .context("cannot find extension")?,
-                    remote_storage,
-                    &self.pgbin,
-                )
-                .await
+                extension_server::download_extension(ext_name, remote_storage, &self.pgbin).await
             }
         }
     }
@@ -741,7 +731,7 @@ LIMIT 100",
     #[tokio::main]
     pub async fn prepare_preload_libraries(&self, compute_state: &ComputeState) -> Result<()> {
         // TODO: revive some  of the old logic for downloading shared preload libaries
-        info!("ERRRRRORRRR");
+        info!("I HAVENT IMPLEMENTED DOWNLOADING SHARED PRELOAD LIBRARIES YET");
         Ok(())
     }
 }
