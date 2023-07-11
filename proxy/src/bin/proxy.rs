@@ -8,6 +8,7 @@ use proxy::metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
+use proxy::serverless;
 use std::pin::pin;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -136,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Starting wss on {serverless_address}");
         let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.spawn(http::serverless::task_main(
+        client_tasks.spawn(serverless::task_main(
             config,
             serverless_listener,
             cancellation_token.clone(),
@@ -146,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
-    maintenance_tasks.spawn(http::server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {

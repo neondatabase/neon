@@ -2,12 +2,14 @@
 //!
 //! Handles both SQL over HTTP and SQL over Websockets.
 
+mod conn_pool;
+mod sql_over_http;
+mod websocket;
+
 use anyhow::bail;
 use hyper::StatusCode;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-
-use crate::http::conn_pool::GlobalConnPool;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
@@ -29,8 +31,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
-use super::websocket::serve_websocket;
-
 pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
@@ -40,7 +40,7 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
-    let conn_pool: Arc<GlobalConnPool> = GlobalConnPool::new(config);
+    let conn_pool = conn_pool::GlobalConnPool::new(config);
 
     // shutdown the connection pool
     tokio::spawn({
@@ -166,7 +166,7 @@ where
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
-    conn_pool: Arc<GlobalConnPool>,
+    conn_pool: Arc<conn_pool::GlobalConnPool>,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
@@ -188,7 +188,8 @@ async fn request_handler(
         tokio::spawn(
             async move {
                 if let Err(e) =
-                    serve_websocket(websocket, config, &cancel_map, session_id, host).await
+                    websocket::serve_websocket(websocket, config, &cancel_map, session_id, host)
+                        .await
                 {
                     error!(session_id = ?session_id, "error in websocket connection: {e:#}");
                 }
@@ -199,7 +200,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        super::sql_over_http::handle(
+        sql_over_http::handle(
             request,
             sni_hostname,
             conn_pool,

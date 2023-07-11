@@ -20,6 +20,7 @@ pub mod protocol2;
 pub mod proxy;
 pub mod sasl;
 pub mod scram;
+pub mod serverless;
 pub mod stream;
 pub mod url;
 pub mod waiters;
