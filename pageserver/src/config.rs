@@ -571,21 +571,21 @@ impl PageServerConf {
             .join(TENANT_ATTACHING_MARKER_FILENAME)
     }
 
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: TenantId) -> PathBuf {
-        self.tenant_path(&tenant_id).join(IGNORED_TENANT_FILE_NAME)
+    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn tenant_config_path(&self, tenant_id: TenantId) -> PathBuf {
-        self.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
+    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
     }
 
     pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
+    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
@@ -595,7 +595,7 @@ impl PageServerConf {
         timeline_id: TimelineId,
     ) -> PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&timeline_id, &tenant_id),
+            self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
@@ -606,7 +606,7 @@ impl PageServerConf {
         timeline_id: TimelineId,
     ) -> PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&timeline_id, &tenant_id),
+            self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
@@ -629,8 +629,8 @@ impl PageServerConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
-        self.timeline_path(&timeline_id, &tenant_id)
+    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
+        self.timeline_path(tenant_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 

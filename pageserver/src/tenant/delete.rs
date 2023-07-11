@@ -141,7 +141,7 @@ async fn delete_local_layer_files(
     // NB: storage_sync upload tasks that reference these layers have been cancelled
     //     by the caller.
 
-    let local_timeline_directory = conf.timeline_path(&timeline.timeline_id, &tenant_id);
+    let local_timeline_directory = conf.timeline_path(&tenant_id, &timeline.timeline_id);
 
     fail::fail_point!("timeline-delete-before-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
@@ -177,7 +177,7 @@ async fn delete_local_layer_files(
         return Ok(());
     }
 
-    let metadata_path = conf.metadata_path(timeline.timeline_id, tenant_id);
+    let metadata_path = conf.metadata_path(&tenant_id, &timeline.timeline_id);
 
     for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
         #[cfg(feature = "testing")]
@@ -270,7 +270,7 @@ async fn cleanup_remaining_timeline_fs_traces(
     timeline_id: TimelineId,
 ) -> anyhow::Result<()> {
     // Remove local metadata
-    tokio::fs::remove_file(conf.metadata_path(timeline_id, tenant_id))
+    tokio::fs::remove_file(conf.metadata_path(&tenant_id, &timeline_id))
         .await
         .or_else(fs_ext::ignore_not_found)
         .context("remove metadata")?;
@@ -282,7 +282,7 @@ async fn cleanup_remaining_timeline_fs_traces(
     });
 
     // Remove timeline dir
-    tokio::fs::remove_dir(conf.timeline_path(&timeline_id, &tenant_id))
+    tokio::fs::remove_dir(conf.timeline_path(&tenant_id, &timeline_id))
         .await
         .or_else(fs_ext::ignore_not_found)
         .context("timeline dir")?;

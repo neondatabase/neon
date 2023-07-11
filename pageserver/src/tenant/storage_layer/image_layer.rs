@@ -53,7 +53,9 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc};
+use super::{
+    AsLayerDesc, Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -241,11 +243,13 @@ impl std::fmt::Display for ImageLayer {
     }
 }
 
-impl PersistentLayer for ImageLayer {
+impl AsLayerDesc for ImageLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for ImageLayer {
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
@@ -288,7 +292,7 @@ impl ImageLayer {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
+                .timeline_path(&tenant_id, &timeline_id)
                 .join(fname.to_string()),
         }
     }
@@ -305,7 +309,7 @@ impl ImageLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id)
+        conf.timeline_path(&tenant_id, &timeline_id)
             .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 

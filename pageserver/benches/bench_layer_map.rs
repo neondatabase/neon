@@ -1,8 +1,8 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::{tests::LayerDescriptor, Layer, LayerFileName};
-use pageserver::tenant::storage_layer::{PersistentLayer, PersistentLayerDesc};
+use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::storage_layer::PersistentLayerDesc;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -28,13 +28,13 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
     for fname in filenames {
         let fname = fname.unwrap();
         let fname = LayerFileName::from_str(&fname).unwrap();
-        let layer = LayerDescriptor::from(fname);
+        let layer = PersistentLayerDesc::from(fname);
 
         let lsn_range = layer.get_lsn_range();
         min_lsn = min(min_lsn, lsn_range.start);
         max_lsn = max(max_lsn, Lsn(lsn_range.end.0 - 1));
 
-        updates.insert_historic(layer.layer_desc().clone());
+        updates.insert_historic(layer);
     }
 
     println!("min: {min_lsn}, max: {max_lsn}");
@@ -210,15 +210,15 @@ fn bench_sequential(c: &mut Criterion) {
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
-        let layer = LayerDescriptor::from(PersistentLayerDesc::new_img(
+        let layer = PersistentLayerDesc::new_img(
             TenantId::generate(),
             TimelineId::generate(),
             zero.add(10 * i32)..zero.add(10 * i32 + 1),
             Lsn(i),
             false,
             0,
-        ));
-        updates.insert_historic(layer.layer_desc().clone());
+        );
+        updates.insert_historic(layer);
     }
     updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());

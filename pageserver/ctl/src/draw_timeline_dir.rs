@@ -117,7 +117,8 @@ pub fn main() -> Result<()> {
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
         let mut fill = Fill::None;
-        let mut margin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
+        let mut ymargin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
+        let xmargin = 0.05; // Height-dependent margin to disambiguate overlapping deltas
         let mut lsn_offset = 0.0;
 
         // Fill in and thicken rectangle if it's an
@@ -128,7 +129,7 @@ pub fn main() -> Result<()> {
                 num_images += 1;
                 lsn_diff = 0.3;
                 lsn_offset = -lsn_diff / 2.0;
-                margin = 0.05;
+                ymargin = 0.05;
                 fill = Fill::Color(rgb(0, 0, 0));
             }
             Ordering::Greater => panic!("Invalid lsn range {}-{}", lsn_start, lsn_end),
@@ -137,10 +138,10 @@ pub fn main() -> Result<()> {
         println!(
             "    {}",
             rectangle(
-                key_start as f32 + stretch * margin,
-                stretch * (lsn_max as f32 - (lsn_end as f32 - margin - lsn_offset)),
-                key_diff as f32 - stretch * 2.0 * margin,
-                stretch * (lsn_diff - 2.0 * margin)
+                key_start as f32 + stretch * xmargin,
+                stretch * (lsn_max as f32 - (lsn_end as f32 - ymargin - lsn_offset)),
+                key_diff as f32 - stretch * 2.0 * xmargin,
+                stretch * (lsn_diff - 2.0 * ymargin)
             )
             .fill(fill)
             .stroke(Stroke::Color(rgb(0, 0, 0), 0.1))

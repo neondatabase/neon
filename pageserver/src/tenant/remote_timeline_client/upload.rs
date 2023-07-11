@@ -15,8 +15,8 @@ use super::index::LayerFileMetadata;
 pub(super) async fn upload_index_part<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
@@ -31,7 +31,7 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
     let index_part_path = conf
-        .metadata_path(timeline_id, tenant_id)
+        .metadata_path(tenant_id, timeline_id)
         .with_file_name(IndexPart::FILE_NAME);
     let storage_path = conf.remote_path(&index_part_path)?;
 

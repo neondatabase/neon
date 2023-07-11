@@ -155,7 +155,7 @@ jobs:
         build_type: [ debug, release ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
-      GIT_VERSION: ${{ github.sha }}
+      GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
 
     steps:
       - name: Fix git ownership
@@ -614,7 +614,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -658,7 +658,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
@@ -715,7 +715,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
@@ -742,7 +742,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true \
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
                            --context . \
-                           --build-arg GIT_VERSION=${{ github.sha }} \
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }} \
                            --build-arg PG_VERSION=${{ matrix.version }} \
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}} \
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
@@ -767,7 +767,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.11.1
+      VM_BUILDER_VERSION: v0.12.1
 
     steps:
       - name: Checkout

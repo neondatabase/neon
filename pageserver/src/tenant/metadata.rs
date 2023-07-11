@@ -232,13 +232,13 @@ impl TimelineMetadata {
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
     data: &TimelineMetadata,
     first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
-    let path = conf.metadata_path(timeline_id, tenant_id);
+    let path = conf.metadata_path(tenant_id, timeline_id);
     // use OpenOptions to ensure file presence is consistent with first_save
     let mut file = VirtualFile::open_with_options(
         &path,
@@ -267,10 +267,10 @@ pub fn save_metadata(
 
 pub fn load_metadata(
     conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
 ) -> anyhow::Result<TimelineMetadata> {
-    let metadata_path = conf.metadata_path(timeline_id, tenant_id);
+    let metadata_path = conf.metadata_path(tenant_id, timeline_id);
     let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
         format!(
             "Failed to read metadata bytes from path {}",
