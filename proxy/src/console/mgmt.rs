@@ -8,7 +8,8 @@ use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, Quer
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span};
+use tracing_utils::instrument::InstrumentCancel;
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
@@ -50,23 +51,13 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
             async move {
                 info!("serving a new console management API connection");
 
-                // these might be long running connections, have a separate logging for cancelling
-                // on shutdown and other ways of stopping.
-                let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
-                    let _e = span.entered();
-                    info!("console management API task cancelled");
-                });
-
                 if let Err(e) = handle_connection(socket).await {
                     error!("serving failed with an error: {e}");
                 } else {
                     info!("serving completed");
                 }
-
-                // we can no longer get dropped
-                scopeguard::ScopeGuard::into_inner(cancelled);
             }
-            .instrument(span),
+            .instrument_with_cancel(span),
         );
     }
 }

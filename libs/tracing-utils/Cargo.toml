@@ -16,3 +16,4 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 
 workspace_hack.workspace = true
+pin-project-lite = "0.2"

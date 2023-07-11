@@ -4666,6 +4666,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
+ "pin-project-lite",
  "reqwest",
  "tokio",
  "tracing",
