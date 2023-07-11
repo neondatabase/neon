@@ -31,12 +31,7 @@
 //! Recommended reading: https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
 //!
 
-use std::{
-    collections::HashSet,
-    fmt::{self},
-    hash::{Hash, Hasher},
-};
-
+#[derive(Debug)]
 pub enum ExtractionResult {
     Present,
     Absent,
@@ -71,39 +66,14 @@ impl<const L: usize> Extractor for MultiNameExtractor<L> {
     }
 }
 
-struct MemoryIdentity<'a>(&'a dyn Extractor);
-
-impl<'a> MemoryIdentity<'a> {
-    fn as_ptr(&self) -> *const () {
-        self.0 as *const _ as *const ()
-    }
-}
-impl<'a> PartialEq for MemoryIdentity<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_ptr() == other.as_ptr()
-    }
-}
-impl<'a> Eq for MemoryIdentity<'a> {}
-impl<'a> Hash for MemoryIdentity<'a> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_ptr().hash(state);
-    }
-}
-impl<'a> fmt::Debug for MemoryIdentity<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:p}: {}", self.as_ptr(), self.0.name())
-    }
-}
-
 /// The extractor names passed as keys to [`new`].
 pub fn check_fields_present<const L: usize>(
     must_be_present: [&dyn Extractor; L],
 ) -> Result<(), Vec<&dyn Extractor>> {
-    let mut missing: HashSet<MemoryIdentity> =
-        HashSet::from_iter(must_be_present.into_iter().map(|r| MemoryIdentity(r)));
+    let mut missing = must_be_present.into_iter().collect::<Vec<_>>();
     let trace = tracing_error::SpanTrace::capture();
     trace.with_spans(|md, _formatted_fields| {
-        missing.retain(|extractor| match extractor.0.extract(md.fields()) {
+        missing.retain(|extractor| match extractor.extract(md.fields()) {
             ExtractionResult::Present => false,
             ExtractionResult::Absent => true,
         });
@@ -112,7 +82,7 @@ pub fn check_fields_present<const L: usize>(
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(missing.into_iter().map(|mi| mi.0).collect())
+        Err(missing)
     }
 }
 
@@ -122,6 +92,36 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    use std::{
+        collections::HashSet,
+        fmt::{self},
+        hash::{Hash, Hasher},
+    };
+
+    struct MemoryIdentity<'a>(&'a dyn Extractor);
+
+    impl<'a> MemoryIdentity<'a> {
+        fn as_ptr(&self) -> *const () {
+            self.0 as *const _ as *const ()
+        }
+    }
+    impl<'a> PartialEq for MemoryIdentity<'a> {
+        fn eq(&self, other: &Self) -> bool {
+            self.as_ptr() == other.as_ptr()
+        }
+    }
+    impl<'a> Eq for MemoryIdentity<'a> {}
+    impl<'a> Hash for MemoryIdentity<'a> {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.as_ptr().hash(state);
+        }
+    }
+    impl<'a> fmt::Debug for MemoryIdentity<'a> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:p}: {}", self.as_ptr(), self.0.name())
+        }
+    }
 
     struct Setup {
         _current_thread_subscriber_guard: tracing::subscriber::DefaultGuard,
