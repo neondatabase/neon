@@ -431,7 +431,8 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
-        // Note that delete mark can be missing because we create delete mark after we set deleted_at in the index part.
+        // Note that delete mark can be missing on resume
+        // because we create delete mark after we set deleted_at in the index part.
         create_delete_mark(tenant.conf, tenant.tenant_id, timeline_id).await?;
 
         Self::schedule_background(guard, tenant.conf, tenant, timeline);
