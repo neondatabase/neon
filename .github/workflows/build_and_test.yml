@@ -917,8 +917,9 @@ jobs:
         run: rm -rf ~/.ecr
 
   upload-postgres-extensions-to-s3:
+      # (github.ref_name == 'main' || github.ref_name == 'release') &&
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      (github.ref_name == 'zip_ext' || github.ref_name == 'release') &&
        github.event_name != 'workflow_dispatch'
     runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
     needs: [ tag, promote-images ]
@@ -929,7 +930,7 @@ jobs:
 
     env:
       # While on transition period we extract public extensions from compute-node image and custom extensions from extensions image.
-      # Later all the extensions will be moved to extensions image.
+      # Later all the extensions will be moved to extensions image. (unless that is too slow)
       EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:latest
       COMPUTE_NODE_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:latest
       AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
