@@ -1,4 +1,3 @@
-import os
 from contextlib import closing
 
 import pytest
@@ -93,12 +92,13 @@ def test_remote_extensions(
                 # TODO: this will fail locally because we don't have the required dependencies
                 cur.execute("CREATE EXTENSION anon")
                 cur.execute("SELECT extname FROM pg_extension")
-                assert "embedding" in [x[0] for x in cur.fetchall()]
+                assert "anon" in [x[0] for x in cur.fetchall()]
 
-                # TODO: should we try libraries too?
+                # TODO: try to load libraries as well
 
     finally:
         cleanup_files = ["embedding.tar.gz", "anon.tar.gz"]
+        _cleanup_folders = ["extensions"]
         # for file in cleanup_files:
         #     os.remove(file)
-        log.info("For now, please manually cleanup ", cleanup_files)
+        log.info(f"For now, please manually cleanup {cleanup_files}")

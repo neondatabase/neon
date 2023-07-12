@@ -146,6 +146,7 @@ pub async fn download_extension(
     pgbin: &str,
     pg_version: &str,
 ) -> Result<()> {
+    info!("DOWNLOAD EXTENSION {:?}", ext_name);
     let ext_name_targz = ext_name.to_owned() + ".tar.gz";
     let ext_path = RemotePath::new(
         &Path::new(pg_version)
@@ -171,20 +172,30 @@ pub async fn download_extension(
     info!("Download {:?} completed successfully", &ext_path);
     info!("Unzipping extension {:?}", zip_name);
 
-    // TODO unzip and place files in appropriate locations
+    // TODO unzip and place files in appropriate locations using the library suggested by some ppl
     info!("unzip {zip_name:?}");
-    std::process::Command::new("tar").arg("xvzf").arg(zip_name);
+    std::process::Command::new("tar")
+        .arg("xzvf")
+        .arg(zip_name)
+        .spawn()?
+        .wait()?;
 
-    info!("place extension files in {local_sharedir:?}");
-    info!("place library files in {local_libdir:?}");
-    let zip_sharedir = format!("extensions/{ext_name}/share");
+    let zip_sharedir = format!("extensions/{ext_name}/share/extension");
+    info!("mv {zip_sharedir:?}/* {local_sharedir:?}");
+    for file in std::fs::read_dir(zip_sharedir)? {
+        let old_file = file?.path();
+        let new_file =
+            Path::new(&local_sharedir).join(old_file.file_name().expect("error parsing file"));
+        std::fs::rename(old_file, new_file)?;
+    }
     let zip_libdir = format!("extensions/{ext_name}/lib");
-    std::process::Command::new("mv")
-        .arg(local_sharedir)
-        .arg(zip_sharedir);
-    std::process::Command::new("mv")
-        .arg(local_libdir)
-        .arg(zip_libdir);
+    info!("mv {zip_libdir:?}/* {local_libdir:?}");
+    for file in std::fs::read_dir(zip_libdir)? {
+        let old_file = file?.path();
+        let new_file =
+            Path::new(&local_libdir).join(old_file.file_name().expect("error parsing file"));
+        std::fs::rename(old_file, new_file)?;
+    }
     Ok(())
 }
 
