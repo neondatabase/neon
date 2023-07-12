@@ -31,6 +31,10 @@ use std::thread;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
+// TODO: use these, it's better
+// use tar::Archive;
+// use flate2::read::GzDecoder;
+
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
     // where argument is a flag like `--version` or `--sharedir`
@@ -142,10 +146,11 @@ pub async fn download_extension(
     pgbin: &str,
     pg_version: &str,
 ) -> Result<()> {
+    let ext_name_targz = ext_name.to_owned() + ".tar.gz";
     let ext_path = RemotePath::new(
         &Path::new(pg_version)
             .join("extensions")
-            .join(ext_name.to_owned() + ".tar.gz"),
+            .join(ext_name_targz.clone()),
     )?;
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
@@ -154,6 +159,7 @@ pub async fn download_extension(
         ext_name, ext_path
     );
     let mut download = remote_storage.download(&ext_path).await?;
+    // TODO: skip download if files already
     let mut write_data_buffer = Vec::new();
     download
         .download_stream
@@ -167,8 +173,18 @@ pub async fn download_extension(
 
     // TODO unzip and place files in appropriate locations
     info!("unzip {zip_name:?}");
+    std::process::Command::new("tar").arg("xvzf").arg(zip_name);
+
     info!("place extension files in {local_sharedir:?}");
     info!("place library files in {local_libdir:?}");
+    let zip_sharedir = format!("extensions/{ext_name}/share");
+    let zip_libdir = format!("extensions/{ext_name}/lib");
+    std::process::Command::new("mv")
+        .arg(local_sharedir)
+        .arg(zip_sharedir);
+    std::process::Command::new("mv")
+        .arg(local_libdir)
+        .arg(zip_libdir);
     Ok(())
 }
 
