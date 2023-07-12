@@ -350,12 +350,7 @@ impl RemoteStorage for LocalFs {
             // See https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
             // > If there isn't a null version, Amazon S3 does not remove any objects but will still respond that the command was successful.
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => {
-                if !file_path.is_file() {
-                    anyhow::bail!("{file_path:?} is not a file");
-                }
-                Err(anyhow::anyhow!(e))
-            }
+            Err(e) => Err(anyhow::anyhow!(e)),
         }
     }
 
