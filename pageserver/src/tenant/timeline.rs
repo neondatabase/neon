@@ -25,7 +25,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -159,6 +159,10 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
                 layer.layer_desc()
             )
         }
+    }
+
+    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
+        self.0.contains_key(&layer.layer_desc().key())
     }
 
     pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
@@ -3917,6 +3921,12 @@ impl Timeline {
         let (layers, mapping) = &mut *guard;
         let mut updates = layers.batch_update();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
+
+        // In some rare cases, we may generate a file with exactly the same key range / LSN as before the compaction.
+        // We should move to numbering the layer files instead of naming them using key range / LSN some day. But for
+        // now, we just skip the file to avoid unintentional modification to files on the disk and in the layer map.
+        let mut duplicated_layers = HashSet::new();
+
         for l in new_layers {
             let new_delta_path = l.path();
 
@@ -3946,13 +3956,26 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            self.insert_historic_layer(x, &mut updates, mapping);
+            if mapping.contains(&x) {
+                duplicated_layers.insert(x.layer_desc().key());
+                warn!(
+                    "duplicated layers generated in compaction: {:?}",
+                    x.layer_desc().key() // TODO: change to use Display
+                );
+            } else {
+                self.insert_historic_layer(x, &mut updates, mapping);
+            }
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
+            if duplicated_layers.contains(&l.key()) {
+                // skip duplicated layers, they will not be removed; we have already overwritten them
+                // with new layers in the compaction phase 1.
+                continue;
+            }
             layer_names_to_delete.push(l.filename());
             // NB: the layer file identified by descriptor `l` is guaranteed to be present
             // in the LayerFileManager because we kept holding `layer_removal_cs` the entire
