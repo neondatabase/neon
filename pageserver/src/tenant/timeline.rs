@@ -1051,7 +1051,7 @@ impl Timeline {
         }
     }
 
-    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
@@ -1539,7 +1539,7 @@ impl Timeline {
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
+            .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
         );
     }
 
@@ -4104,7 +4104,7 @@ impl Timeline {
                 new_gc_cutoff,
             )
             .instrument(
-                info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
+                info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
             .await?;
 
@@ -4590,7 +4590,7 @@ impl Timeline {
                 };
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant = %self.tenant_id, timeline = %self.timeline_id))
+            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
         );
 
         let initial_info = DownloadRemoteLayersTaskInfo {

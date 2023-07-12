@@ -560,7 +560,7 @@ impl Tenant {
                 .map(move |res| {
                     res.with_context(|| format!("download index part for timeline {timeline_id}"))
                 })
-                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+                .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
         // Wait for all the download tasks to complete & collect results.
@@ -1349,7 +1349,7 @@ impl Tenant {
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
                 .compact(ctx)
-                .instrument(info_span!("compact_timeline", timeline = %timeline_id))
+                .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
 

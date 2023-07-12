@@ -933,11 +933,11 @@ impl RemoteTimelineClient {
 
             // Assign unique ID to this task
             upload_queue.task_counter += 1;
-            let task_id = upload_queue.task_counter;
+            let upload_task_id = upload_queue.task_counter;
 
             // Add it to the in-progress map
             let task = Arc::new(UploadTask {
-                task_id,
+                task_id: upload_task_id,
                 op: next_op,
                 retries: AtomicU32::new(0),
             });
@@ -947,6 +947,8 @@ impl RemoteTimelineClient {
 
             // Spawn task to perform the task
             let self_rc = Arc::clone(self);
+            let tenant_id = self.tenant_id;
+            let timeline_id = self.timeline_id;
             task_mgr::spawn(
                 self.runtime.handle(),
                 TaskKind::RemoteUploadTask,
@@ -958,7 +960,7 @@ impl RemoteTimelineClient {
                     self_rc.perform_upload_task(task).await;
                     Ok(())
                 }
-                .instrument(info_span!(parent: None, "remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
+                .instrument(info_span!(parent: None, "remote_upload", %tenant_id, %timeline_id, %upload_task_id)),
             );
 
             // Loop back to process next task
