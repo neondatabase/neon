@@ -68,7 +68,7 @@ pub(super) async fn upload_timeline_layer<'a>(
             // file might not have been written in the first place, which also indicates
             // a bug. Still log the situation so that we can keep an eye on it.
             // See https://github.com/neondatabase/neon/issues/4526
-            info!("Couldn't find a file at the layer's path {source_path:?} for upload. Likely the file was deleted before and an upload is not required any more.");
+            info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
         Err(e) => Err(e)

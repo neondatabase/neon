@@ -807,33 +807,22 @@ def test_compaction_delete_before_upload(
 
     client = env.pageserver.http_client()
 
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        # Build two tables with some data inside
+        endpoint.safe_psql("CREATE TABLE foo AS SELECT x FROM generate_series(1, 10000) g(x)")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    # Build two tables with some data inside
-    endpoint.safe_psql_many(
-        [
-            "CREATE TABLE foo (x INTEGER)",
-            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
-        ]
-    )
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id)
 
-    client.timeline_checkpoint(tenant_id, timeline_id)
+        endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    endpoint.safe_psql_many(
-        [
-            "CREATE TABLE bar (x INTEGER)",
-            "INSERT INTO bar SELECT g FROM generate_series(1, 10000) g",
-        ]
-    )
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+        # Now make the flushing hang and update one small piece of data
+        client.configure_failpoints(("flush-frozen-before-sync", "pause"))
 
-    # Now pause the compaction
-    client.configure_failpoints(("flush-frozen-before-sync", "pause"))
+        endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
 
-    endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x=1")
-
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
     barrier = threading.Barrier(2)
@@ -863,6 +852,7 @@ def test_compaction_delete_before_upload(
     finally:
         create_thread.join()
 
+    # Add a delay for the uploads to run into either the file not found or the
     time.sleep(4)
 
     # Ensure that this actually terminates
@@ -871,7 +861,9 @@ def test_compaction_delete_before_upload(
     # For now we are hitting this message.
     # Maybe in the future the underlying race condition will be fixed,
     # but until then, ensure that this message is hit instead.
-    assert env.pageserver.log_contains("for upload, assuming an upload is not required any more.")
+    assert env.pageserver.log_contains(
+        "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
+    )
 
 
 def wait_upload_queue_empty(
