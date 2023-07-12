@@ -852,7 +852,13 @@ impl RemoteTimelineClient {
         let remaining: Vec<RemotePath> = remaining
             .into_iter()
             .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
-            .inspect(|path| info!(%path, "deleting a file unbound to index_part.json"))
+            .inspect(|path| {
+                if let Some(name) = path.object_name() {
+                    info!(%name, "deleting a file unbound to index_part.json");
+                } else {
+                    warn!(%path, "deleting a nameless or non-utf8 object unbound to index_part.json");
+                }
+            })
             .collect();
 
         if !remaining.is_empty() {
