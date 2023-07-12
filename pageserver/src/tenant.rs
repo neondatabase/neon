@@ -84,6 +84,25 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
+/// Declare a failpoint that can use the `pause` failpoint action.
+/// We don't want to block the executor thread, hence, spawn_blocking + await.
+macro_rules! pausable_failpoint {
+    ($name:literal) => {
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint {}", $name);
+                    fail::fail_point!($name);
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+    };
+}
+
 pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
@@ -1498,20 +1517,7 @@ impl Tenant {
             remote_client.delete_all().await.context("delete_all")?
         };
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint in_progress_delete");
-                    fail::fail_point!("in_progress_delete");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("in_progress_delete");
 
         {
             // Remove the timeline from the map.

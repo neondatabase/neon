@@ -748,20 +748,8 @@ impl RemoteTimelineClient {
             stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint persist_deleted_index_part");
-                    fail::fail_point!("persist_deleted_index_part");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("persist_deleted_index_part");
+
         upload::upload_index_part(
             self.conf,
             &self.storage_impl,
