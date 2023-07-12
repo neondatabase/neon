@@ -146,6 +146,8 @@ pub async fn download_extension(
     pgbin: &str,
     pg_version: &str,
 ) -> Result<()> {
+    let ext_name = ext_name.replace(".so", "");
+
     info!("DOWNLOAD EXTENSION {:?}", ext_name);
     let ext_name_targz = ext_name.to_owned() + ".tar.gz";
     let ext_path = RemotePath::new(
@@ -154,7 +156,7 @@ pub async fn download_extension(
             .join(ext_name_targz.clone()),
     )?;
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).to_owned();
+    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql");
     info!(
         "Start downloading extension {:?} from {:?}",
         ext_name, ext_path
