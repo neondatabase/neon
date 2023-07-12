@@ -150,6 +150,14 @@ runs:
           EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
         fi
 
+        # We use pytest-split plugin to run benchmarks in parallel on different CI runners
+        if [ "${TEST_SELECTION}" = "test_runner/performance" ] && [ "${{ inputs.build_type }}" != "remote" ]; then
+          mkdir -p $TEST_OUTPUT
+          poetry run ./scripts/benchmark_durations.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/benchmark_durations.json"
+
+          EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
+        fi
+
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
         elif [[ "${{ inputs.build_type }}" == "release" ]]; then
