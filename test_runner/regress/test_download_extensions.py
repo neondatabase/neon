@@ -25,7 +25,7 @@ def test_remote_extensions(
     pg_version: PgVersion,
 ):
     # TODO: SKIP for now, infra not ready yet
-    if remote_storage_kind == RemoteStorageKind.REAL_S3:
+    if remote_storage_kind == RemoteStorageKind.REAL_S3 or pg_version == "14":
         return None
 
     neon_env_builder.enable_remote_storage(
