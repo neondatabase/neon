@@ -968,7 +968,7 @@ jobs:
           # rm -rf ./extensions/lib/neon*
 
           docker cp ${{ steps.create-container.outputs.EID }}:/ ./
-          poetry run python3 ./scripts/combine_control_files.py
+          sh ./scripts/combine_control_files.sh
 
       - name: Upload postgres-extensions to S3
         run: |
