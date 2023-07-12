@@ -105,7 +105,7 @@ runs:
         # Get previously uploaded data for this run
         ZSTD_NBTHREADS=0
 
-        S3_FILEPATHS=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${RAW_PREFIX}/ | jq --raw-output  '.Contents[].Key')
+        S3_FILEPATHS=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${RAW_PREFIX}/ | jq --raw-output '.Contents[]?.Key')
         if [ -z "$S3_FILEPATHS" ]; then
           # There's no previously uploaded data for this $GITHUB_RUN_ID
           exit 0
