@@ -16,7 +16,7 @@ The script fetches the durations of benchmarks from the database and stores it i
 BENCHMARKS_DURATION_QUERY = """
     SELECT
         DISTINCT parent_suite, suite, test,
-        PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms) as p99_ms
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms) as percentile_ms
     FROM
         (
             SELECT
@@ -130,9 +130,9 @@ def main(args: argparse.Namespace):
 
     for row in rows:
         pytest_name = f"{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}"
-        p99 = row["p99_ms"] // 1000
-        logging.info(f"\t{pytest_name}: {p99}")
-        res[pytest_name] = p99
+        percentile = row["percentile_ms"] // 1000
+        logging.info(f"\t{pytest_name}: {percentile}")
+        res[pytest_name] = percentile
 
     logging.info(f"saving results to {output.name}")
     json.dump(res, output, indent=2)
@@ -140,7 +140,7 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Get p99 of benchmarks duration for the last N days"
+        description="Get p50 of benchmarks duration for the last N days"
     )
     parser.add_argument(
         "--output",
