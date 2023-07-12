@@ -852,14 +852,10 @@ impl RemoteTimelineClient {
         let remaining: Vec<RemotePath> = remaining
             .into_iter()
             .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
+            .inspect(|path| info!(%path, "deleting a file unbound to index_part.json"))
             .collect();
 
         if !remaining.is_empty() {
-            warn!(
-                "Found {} files not bound to index_file.json, proceeding with their deletion",
-                remaining.len()
-            );
-            warn!("About to remove {} files", remaining.len());
             self.storage_impl.delete_objects(&remaining).await?;
         }
 
