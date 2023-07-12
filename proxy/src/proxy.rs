@@ -571,8 +571,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .authenticate(&extra, &mut stream, allow_cleartext)
             .await
         {
-            Err(e) => return stream.throw_error(e).await,
             Ok(auth_result) => auth_result,
+            Err(e) => return stream.throw_error(e).await,
         };
 
         let AuthSuccess {
