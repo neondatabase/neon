@@ -1,0 +1,4 @@
+version: "prometheus/v1"
+service: "pageserver"
+slos: []
+

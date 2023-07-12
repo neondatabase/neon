@@ -1,0 +1,63 @@
+version: "prometheus/v1"
+service: "pageserver"
+#labels:
+#  owner: "pageserver-team"
+#  repo: "myorg/myservice"
+#  tier: "2"
+slos:
+  # # We allow failing (5xx and 429) 1 request every 1000 requests (99.9%).
+  # - name: "requests-availability"
+  #   objective: 99.9
+  #   description: "Common SLO based on availability for HTTP request responses."
+  #   sli:
+  #     events:
+  #       error_query: sum(rate(http_request_duration_seconds_count{job="myservice",code=~"(5..|429)"}[{{.window}}]))
+  #       total_query: sum(rate(http_request_duration_seconds_count{job="myservice"}[{{.window}}]))
+  #   alerting:
+  #     name: MyServiceHighErrorRate
+  #     labels:
+  #       category: "availability"
+  #     annotations:
+  #       # Overwrite default Sloth SLO alert summmary on ticket and page alerts.
+  #       summary: "High error rate on 'myservice' requests responses"
+  #     page_alert:
+  #       labels:
+  #         severity: pageteam
+  #         routing_key: myteam
+  #     ticket_alert:
+  #       labels:
+  #         severity: "slack"
+  #         slack_channel: "#alerts-myteam"
+
+  - name: "basebackup_ms-latency"
+    description: "basebackup_ms latency should be less than 0.2s for 99.9% of requests"
+    objective: 99.9
+    #labels:
+    sli:
+      raw:
+        # VictoriaMetrics-only (fails due to sloth validation pass)
+        error_ratio_query: |
+          histogram_share(200, sum by (le) (compute_basebackup_ms_bucket[5m]))
+        # error_ratio_query: |
+        #    https://docs.victoriametrics.com/MetricsQL.html#share_le_over_time
+        #
+        # Prometheus has a native one, not supported by VictoriaMetrics validation pass
+        #error_ratio_query: |
+        #  histogram_fraction(0, 200, compute_basebackup_ms_bucket[{{.window}}])
+        # error_ratio_query: |
+        #  histogram_quantile(0.999, sum by (le) (rate(compute_basebackup_ms_bucket[{{.window}}])))
+    alerting:
+      name: "basebackup_ms-latency"
+      labels:
+        category: "latency"
+      annotations: {}
+      page_alert:
+        labels:
+          severity: "pageteam"
+          routing_key: "myteam"
+      ticket_alert:
+        labels:
+          severity: "slack"
+          slack_channel: "#alerts-myteam"
+
+
