@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context};
 use fail::fail_point;
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 use tokio::fs;
 
 use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
@@ -10,6 +10,8 @@ use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
+
+use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
@@ -56,9 +58,20 @@ pub(super) async fn upload_timeline_layer<'a>(
     });
     let storage_path = conf.remote_path(source_path)?;
 
-    let source_file = fs::File::open(&source_path)
-        .await
-        .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?;
+    let source_file_res = fs::File::open(&source_path).await;
+    let source_file = match source_file_res {
+        Ok(source_file) => source_file,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            // Sometimes, race conditions might cause an upload not completing before the underlying file is deleted
+            // due to compaction. Even if we wait before for completion. Assume that the delete means we don't need
+            // to upload the file any more. Still log the situation so that we can keep an eye on it.
+            // See https://github.com/neondatabase/neon/issues/4526
+            info!("Ignoring not finding layer file {source_path:?} for upload, assuming an upload is not required any more.");
+            return Ok(());
+        }
+        Err(e) => Err(e)
+            .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?,
+    };
 
     let fs_size = source_file
         .metadata()

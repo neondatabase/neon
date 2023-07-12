@@ -868,6 +868,8 @@ def test_compaction_delete_before_upload(
     # Ensure that this actually terminates
     wait_upload_queue_empty(client, tenant_id, timeline_id)
 
+    assert env.pageserver.log_contains("for upload, assuming an upload is not required any more.")
+
 
 def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
