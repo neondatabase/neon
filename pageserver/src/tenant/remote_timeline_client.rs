@@ -870,7 +870,7 @@ impl RemoteTimelineClient {
         debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
-        info!(deletions_queued, "done deleting, including index_part.json");
+        info!(bound=deletions_queued, unbound=%remaining.len(), "done deleting, including index_part.json");
 
         Ok(())
     }
