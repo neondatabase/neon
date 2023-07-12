@@ -2918,7 +2918,7 @@ impl Timeline {
                 HashMap::from([(delta_path, metadata)])
             };
 
-        fail_point!("flush-frozen-before-sync");
+        pausable_failpoint!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. We do not modify `LayerFileManager` because
