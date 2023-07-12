@@ -149,12 +149,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
     )
 
-    # NOTE: delete can easily come before upload operations are completed
-    # https://github.com/neondatabase/neon/issues/4326
-    env.pageserver.allowed_errors.append(
-        ".*files not bound to index_file.json, proceeding with their deletion.*"
-    )
-
     timeline_delete_wait_completed(client, tenant, timeline)
 
     # Importing correct backup works
