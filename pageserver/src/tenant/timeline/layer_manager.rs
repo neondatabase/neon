@@ -55,6 +55,12 @@ impl LayerManager {
         &self.layer_map
     }
 
+    /// Get a mutable reference to the layer map. This function will be removed once `flush_frozen_layer`
+    /// gets a refactor.
+    pub fn layer_map_mut(&mut self) -> &mut LayerMap {
+        &mut self.layer_map
+    }
+
     /// Replace layers in the layer file manager, used in evictions and layer downloads.
     pub fn replace_and_verify(
         &mut self,
@@ -149,11 +155,6 @@ impl LayerManager {
             self.layer_map.next_open_layer_at = Some(end_lsn);
             last_freeze_at.store(end_lsn);
         }
-    }
-
-    /// Pop the last frozen layer from the layer map, called from `flush_frozen_layer`.
-    pub fn flush_frozen_layer(&mut self) -> Option<Arc<InMemoryLayer>> {
-        self.layer_map.frozen_layers.pop_front()
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.

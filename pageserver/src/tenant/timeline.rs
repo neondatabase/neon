@@ -2743,7 +2743,7 @@ impl Timeline {
         // the mapping in `create_delta_layer`.
         {
             let mut guard = self.layers.write().await;
-            let l = guard.flush_frozen_layer();
+            let l = guard.layer_map_mut().frozen_layers.pop_front();
 
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
