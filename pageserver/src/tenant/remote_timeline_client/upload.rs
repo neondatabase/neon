@@ -62,11 +62,13 @@ pub(super) async fn upload_timeline_layer<'a>(
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            // Sometimes, race conditions might cause an upload not completing before the underlying file is deleted
-            // due to compaction. Even if we wait before for completion. Assume that the delete means we don't need
-            // to upload the file any more. Still log the situation so that we can keep an eye on it.
+            // In some situations we might run into the underlying file being deleted by
+            // e.g. compaction before the uploader gets to it. In that instance, we don't
+            // want to retry the error: a deleted file won't come back. In theory, the
+            // file might not have been written in the first place, which also indicates
+            // a bug. Still log the situation so that we can keep an eye on it.
             // See https://github.com/neondatabase/neon/issues/4526
-            info!("Ignoring not finding layer file {source_path:?} for upload, assuming an upload is not required any more.");
+            info!("Couldn't find a file at the layer's path {source_path:?} for upload. Likely the file was deleted before and an upload is not required any more.");
             return Ok(());
         }
         Err(e) => Err(e)

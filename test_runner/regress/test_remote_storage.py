@@ -793,14 +793,14 @@ def test_compaction_delete_before_upload(
     env = neon_env_builder.init_start()
 
     # create tenant with config that will determinstically allow
-    # compaction and gc
+    # compaction and disables gc
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
             # Set a small compaction threshold
             "compaction_threshold": "3",
             # Disable GC
             "gc_period": "0s",
-            # disable PITR so that GC considers just gc_horizon
+            # disable PITR
             "pitr_interval": "0s",
         }
     )
@@ -868,6 +868,9 @@ def test_compaction_delete_before_upload(
     # Ensure that this actually terminates
     wait_upload_queue_empty(client, tenant_id, timeline_id)
 
+    # For now we are hitting this message.
+    # Maybe in the future the underlying race condition will be fixed,
+    # but until then, ensure that this message is hit instead.
     assert env.pageserver.log_contains("for upload, assuming an upload is not required any more.")
 
 
