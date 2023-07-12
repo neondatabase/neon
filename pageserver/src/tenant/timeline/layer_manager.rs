@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
@@ -12,7 +12,7 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, PersistentLayer,
+            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, Layer, PersistentLayer,
             PersistentLayerDesc, PersistentLayerKey, RemoteLayer,
         },
         timeline::compare_arced_layers,
@@ -106,31 +106,59 @@ impl LayerManager {
         updates.flush();
     }
 
-    /// Open a new writable layer to append data, called within `get_layer_for_write`.
-    pub fn open_new_layer(
+    /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
+    /// called within `get_layer_for_write`.
+    pub fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
+        last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
     ) -> Result<Arc<InMemoryLayer>> {
-        let start_lsn = self
-            .layer_map
-            .next_open_layer_at
-            .context("No next open layer found")?;
+        ensure!(lsn.is_aligned());
 
-        trace!(
-            "creating layer for write at {}/{} for record at {}",
-            timeline_id,
-            start_lsn,
-            lsn
+        ensure!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})\n{}",
+            lsn,
+            last_record_lsn,
+            std::backtrace::Backtrace::force_capture(),
         );
 
-        let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
-        let layer = Arc::new(new_layer);
+        // Do we have a layer open for writing already?
+        let layer = if let Some(open_layer) = &self.layer_map.open_layer {
+            if open_layer.get_lsn_range().start > lsn {
+                bail!(
+                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
+                    open_layer.get_lsn_range().start,
+                    lsn
+                );
+            }
 
-        self.layer_map.open_layer = Some(layer.clone());
-        self.layer_map.next_open_layer_at = None;
+            Arc::clone(open_layer)
+        } else {
+            // No writeable layer yet. Create one.
+            let start_lsn = self
+                .layer_map
+                .next_open_layer_at
+                .context("No next open layer found")?;
+
+            trace!(
+                "creating layer for write at {}/{} for record at {}",
+                timeline_id,
+                start_lsn,
+                lsn
+            );
+
+            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+            let layer = Arc::new(new_layer);
+
+            self.layer_map.open_layer = Some(layer.clone());
+            self.layer_map.next_open_layer_at = None;
+
+            layer
+        };
 
         Ok(layer)
     }

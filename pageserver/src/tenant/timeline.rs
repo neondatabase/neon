@@ -2535,35 +2535,13 @@ impl Timeline {
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let layers = guard.layer_map();
-
-        ensure!(lsn.is_aligned());
-
-        let last_record_lsn = self.get_last_record_lsn();
-        ensure!(
-            lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})\n{}",
+        let layer = guard.get_layer_for_write(
             lsn,
-            last_record_lsn,
-            std::backtrace::Backtrace::force_capture(),
-        );
-
-        // Do we have a layer open for writing already?
-        let layer;
-        if let Some(open_layer) = &layers.open_layer {
-            if open_layer.get_lsn_range().start > lsn {
-                bail!(
-                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
-                    open_layer.get_lsn_range().start,
-                    lsn
-                );
-            }
-
-            layer = Arc::clone(open_layer);
-        } else {
-            // No writeable layer yet. Create one.
-            layer = guard.open_new_layer(lsn, self.conf, self.timeline_id, self.tenant_id)?;
-        }
+            self.get_last_record_lsn(),
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+        )?;
         Ok(layer)
     }
 
