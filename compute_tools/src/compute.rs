@@ -1,14 +1,17 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures::future::join_all;
 use postgres::{Client, NoTls};
+use tokio;
 use tokio_postgres;
 use tracing::{info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -18,9 +21,11 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use crate::config;
+use remote_storage::GenericRemoteStorage;
+
 use crate::pg_helpers::*;
 use crate::spec::*;
+use crate::{config, extension_server};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -28,6 +33,7 @@ pub struct ComputeNode {
     pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
+    pub pgversion: String,
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -47,6 +53,10 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
+    ///  the S3 bucket that we search for extensions in
+    pub ext_remote_storage: Option<GenericRemoteStorage>,
+    // cached lists of available extensions and libraries
+    pub available_extensions: OnceLock<HashSet<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -357,14 +367,22 @@ impl ComputeNode {
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
-    pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+    pub fn prepare_pgdata(
+        &self,
+        compute_state: &ComputeState,
+        extension_server_port: u16,
+    ) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
+        config::write_postgres_conf(
+            &pgdata_path.join("postgresql.conf"),
+            &pspec.spec,
+            Some(extension_server_port),
+        )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
@@ -506,7 +524,7 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
         self.pg_reload_conf(&mut client)?;
@@ -536,7 +554,7 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(&self) -> Result<std::process::Child> {
+    pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -547,7 +565,26 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
-        self.prepare_pgdata(&compute_state)?;
+        // This part is sync, because we need to download
+        // remote shared_preload_libraries before postgres start (if any)
+        {
+            let library_load_start_time = Utc::now();
+            self.prepare_preload_libraries(&compute_state)?;
+
+            let library_load_time = Utc::now()
+                .signed_duration_since(library_load_start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            let mut state = self.state.lock().unwrap();
+            state.metrics.load_libraries_ms = library_load_time;
+            info!(
+                "Loading shared_preload_libraries took {:?}ms",
+                library_load_time
+            );
+        }
+
+        self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
         let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
@@ -694,5 +731,93 @@ LIMIT 100",
         } else {
             "{{\"pg_stat_statements\": []}}".to_string()
         }
+    }
+
+    // If remote extension storage is configured,
+    // download extension control files
+    #[tokio::main]
+    pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+        if let Some(ref ext_remote_storage) = self.ext_remote_storage {
+            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+            let spec = &pspec.spec;
+            let custom_ext_prefixes = spec.custom_extensions.clone().unwrap_or(Vec::new());
+            info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
+            let available_extensions = extension_server::get_available_extensions(
+                ext_remote_storage,
+                &self.pgbin,
+                &self.pgversion,
+                &custom_ext_prefixes,
+            )
+            .await?;
+            self.available_extensions
+                .set(available_extensions)
+                .expect("available_extensions.set error");
+        }
+        Ok(())
+    }
+
+    pub async fn download_extension(&self, ext_name: &str) -> Result<()> {
+        match &self.ext_remote_storage {
+            None => anyhow::bail!("No remote extension storage"),
+            Some(remote_storage) => {
+                extension_server::download_extension(
+                    ext_name,
+                    remote_storage,
+                    &self.pgbin,
+                    &self.pgversion,
+                )
+                .await
+            }
+        }
+    }
+
+    #[tokio::main]
+    pub async fn prepare_preload_libraries(&self, compute_state: &ComputeState) -> Result<()> {
+        if self.ext_remote_storage.is_none() {
+            return Ok(());
+        }
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
+
+        info!("parse shared_preload_libraries from spec.cluster.settings");
+        let mut libs_vec = Vec::new();
+        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+            libs_vec = libs
+                .split(&[',', '\'', ' '])
+                .filter(|s| *s != "neon" && !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        info!("parse shared_preload_libraries from provided postgresql.conf");
+        // that is used in neon_local and python tests
+        if let Some(conf) = &spec.cluster.postgresql_conf {
+            let conf_lines = conf.split('\n').collect::<Vec<&str>>();
+            let mut shared_preload_libraries_line = "";
+            for line in conf_lines {
+                if line.starts_with("shared_preload_libraries") {
+                    shared_preload_libraries_line = line;
+                }
+            }
+            let mut preload_libs_vec = Vec::new();
+            if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
+                preload_libs_vec = libs
+                    .split(&[',', '\'', ' '])
+                    .filter(|s| *s != "neon" && !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            libs_vec.extend(preload_libs_vec);
+        }
+
+        info!("Downloading to shared preload libraries: {:?}", &libs_vec);
+        let mut download_tasks = Vec::new();
+        for library in &libs_vec {
+            download_tasks.push(self.download_extension(library));
+        }
+        let results = join_all(download_tasks).await;
+        for result in results {
+            result?; // propogate any errors
+        }
+        Ok(())
     }
 }
