@@ -26,9 +26,6 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
-    if pg_version != "15":
-        # TODO: for right now we only have test files for v15
-        return None
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",
@@ -47,7 +44,9 @@ def test_remote_extensions(
         def upload_test_file(from_path, to_path):
             assert env.ext_remote_storage is not None  # satisfy mypy
             assert env.remote_storage_client is not None  # satisfy mypy
-            with open(f"test_runner/regress/data/extension_test/{from_path}", "rb") as f:
+            with open(
+                f"test_runner/regress/data/extension_test/v{pg_version}/{from_path}", "rb"
+            ) as f:
                 env.remote_storage_client.upload_fileobj(
                     f,
                     env.ext_remote_storage.bucket_name,
@@ -78,7 +77,6 @@ def test_remote_extensions(
                 assert "anon" in all_extensions
                 assert "embedding" in all_extensions
                 # TODO: check that we cant't download custom extensions for other tenant ids
-                # TODO: not sure how private extension will work with REAL_S3 test. can we rig the tenant id?
 
                 # check that we can download public extension
                 cur.execute("CREATE EXTENSION embedding")
@@ -95,8 +93,21 @@ def test_remote_extensions(
                 # TODO: try to load libraries as well
 
     finally:
-        cleanup_files = ["embedding.tar.gz", "anon.tar.gz"]
-        cleanup_folders = ["extensions"]
+        # Cleaning up downloaded files is important for local tests
+        # or else one test could reuse the files from another test or another test run
+        cleanup_files = [
+            "embedding.tar.gz",
+            "anon.tar.gz",
+            f"pg_install/v{pg_version}/lib/postgresql/anon.so",
+            f"pg_install/v{pg_version}/lib/postgresql/embedding.so",
+            f"pg_install/v{pg_version}/share/postgresql/extension/anon.control",
+            f"pg_install/v{pg_version}/share/postgresql/extension/embedding--0.1.0.sql",
+            f"pg_install/v{pg_version}/share/postgresql/extension/embedding.control",
+        ]
+        cleanup_folders = [
+            "extensions",
+            f"pg_install/v{pg_version}/share/postgresql/extension/anon",
+        ]
         for file in cleanup_files:
             try:
                 os.remove(file)
