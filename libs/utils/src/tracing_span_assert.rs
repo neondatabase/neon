@@ -126,7 +126,7 @@ macro_rules! __check_fields_present {
         {
             use $crate::tracing_span_assert::{check_fields_present0, Summary::*, Extractor};
 
-            match dbg!(check_fields_present0($extractors)) {
+            match check_fields_present0($extractors) {
                 Ok(FoundEverything) => Ok(()),
                 Ok(Unconfigured) if cfg!(test) => {
                     // allow unconfigured in tests
