@@ -222,15 +222,14 @@ async fn ws_handler(
             r
         })
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
-      Response::builder()
-        .header("Allow", "OPTIONS, POST")
-        .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Headers", "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In")
-        .header("Access-Control-Max-Age", "86400" /* 24 hours */)
-        .status(StatusCode::OK)  // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
-        .body(Body::empty())
-        .map_err(|e| ApiError::BadRequest(e.into()))
-
+        Response::builder()
+            .header("Allow", "OPTIONS, POST")
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Headers", "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In")
+            .header("Access-Control-Max-Age", "86400" /* 24 hours */)
+            .status(StatusCode::OK)  // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
+            .body(Body::empty())
+            .map_err(|e| ApiError::BadRequest(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
