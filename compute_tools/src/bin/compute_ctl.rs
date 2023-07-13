@@ -77,7 +77,7 @@ fn main() -> Result<()> {
     //     r#"{"bucket": "neon-dev-extensions-us-east-2", "region": "us-east-2", "endpoint": null, "prefix": "5412197734"}"#.to_string(),
     // );
     let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(&x, build_tag)
+        init_remote_storage(x, build_tag)
             .expect("cannot initialize remote extension storage from config")
     });
 
