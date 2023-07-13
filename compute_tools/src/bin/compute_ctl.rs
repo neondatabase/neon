@@ -60,6 +60,7 @@ use compute_tools::params::*;
 use compute_tools::spec::*;
 
 const BUILD_TAG_DEFAULT: &str = "local";
+const DEFAULT_REMOTE_EXT_CONFIG: &str = r#"{"bucket": "neon-dev-extensions", "region": "eu-central-1", "endpoint": null, "prefix": "5555"}"#;
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -72,12 +73,12 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    // NOTE TODO: until control-plane changes, we can use the following line to forcibly enable remote extensions
-    // let remote_ext_config = Some(
-    //     r#"{"bucket": "neon-dev-extensions", "region": "eu-central-1", "endpoint": null, "prefix": "5555"}"#.to_string(),
-    // );
+    // TODO NOTE: until control-plane changes, we can use the following line to forcibly enable remote extensions
+    let remote_ext_config = remote_ext_config.map(|x| x.to_owned());
+    let remote_ext_config =
+        Some(remote_ext_config.unwrap_or(DEFAULT_REMOTE_EXT_CONFIG.to_string()));
     let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(x, build_tag)
+        init_remote_storage(&x, build_tag)
             .expect("cannot initialize remote extension storage from config")
     });
 
