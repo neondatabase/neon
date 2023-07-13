@@ -17,7 +17,7 @@ extensions enabled for specific tenant-ids.
 */
 use crate::compute::ComputeNode;
 use anyhow::Context;
-use anyhow::{self, bail, Result};
+use anyhow::{self, Result};
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::collections::HashSet;
@@ -39,7 +39,11 @@ use tracing::info;
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
     // where argument is a flag like `--version` or `--sharedir`
-    let pgconfig = pgbin.replace("postgres", "pg_config");
+    let pgconfig = pgbin
+        .strip_suffix("postgres")
+        .expect("bad pgbin")
+        .to_owned()
+        + "/pg_config";
     let config_output = std::process::Command::new(pgconfig)
         .arg(argument)
         .output()
@@ -73,7 +77,6 @@ pub async fn get_available_extensions(
     // TODO: figure out why it's calling library loads
 
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-
     let index_path = pg_version.to_owned() + "/ext_index.json";
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download extension index json: {:?}", &index_path);
@@ -170,7 +173,7 @@ pub async fn download_extension(
     let mut output_file = BufWriter::new(File::create(zip_name)?);
     output_file.write_all(&write_data_buffer)?;
     info!("Download {:?} completed successfully", &ext_path);
-    info!("Unzipping extension {:?}", zip_name);
+    info!("Unzipping extension to {:?}", zip_name);
     std::process::Command::new("tar")
         .arg("xzvf")
         .arg(zip_name)
