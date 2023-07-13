@@ -186,14 +186,14 @@ pub trait Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<Option<AuthInfo>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 

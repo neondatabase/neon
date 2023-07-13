@@ -11,10 +11,10 @@ use crate::{
         errors::{ApiError, WakeComputeError},
         messages::MetricsAuxInfo,
     },
-    error::io_error,
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
+use async_trait::async_trait;
 use futures::TryFutureExt;
 use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
@@ -336,19 +336,61 @@ pub enum ConnectionState<E> {
     Invalid(compute::ConnCfg, E),
 }
 
+#[async_trait]
+pub trait ConnectMechanism {
+    type Connection;
+    type ConnectError;
+    type Error: From<Self::ConnectError>;
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<Self::Connection, Self::ConnectError>;
+
+    fn update_connect_config(&self, conf: &mut compute::ConnCfg);
+}
+
+pub struct TcpMechanism<'a> {
+    /// KV-dictionary with PostgreSQL connection params.
+    pub params: &'a StartupMessageParams,
+}
+
+#[async_trait]
+impl ConnectMechanism for TcpMechanism<'_> {
+    type Connection = PostgresConnection;
+    type ConnectError = compute::ConnectionError;
+    type Error = compute::ConnectionError;
+
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<PostgresConnection, Self::Error> {
+        connect_to_compute_once(node_info, timeout).await
+    }
+
+    fn update_connect_config(&self, config: &mut compute::ConnCfg) {
+        config.set_startup_params(self.params);
+    }
+}
+
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
-async fn connect_to_compute(
+pub async fn connect_to_compute<M: ConnectMechanism>(
+    mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    params: &StartupMessageParams,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-) -> Result<PostgresConnection, compute::ConnectionError> {
-    node_info.config.set_startup_params(params);
+) -> Result<M::Connection, M::Error>
+where
+    M::ConnectError: ShouldRetry + std::fmt::Debug,
+    M::Error: From<WakeComputeError>,
+{
+    mechanism.update_connect_config(&mut node_info.config);
 
     let mut num_retries = 0;
-    let mut state = ConnectionState::Cached(node_info);
+    let mut state = ConnectionState::<M::ConnectError>::Cached(node_info);
 
     loop {
         // Set a shorter timeout for the initial connection attempt.
@@ -374,9 +416,9 @@ async fn connect_to_compute(
             ConnectionState::Invalid(config, err) => {
                 match try_wake(&config, extra, creds).await {
                     // we can't wake up the compute node
-                    Ok(None) => return Err(err),
+                    Ok(None) => return Err(err.into()),
                     // there was an error communicating with the control plane
-                    Err(e) => return Err(io_error(e).into()),
+                    Err(e) => return Err(e.into()),
                     // failed to wake up but we can continue to retry
                     Ok(Some(ControlFlow::Continue(()))) => {
                         state = ConnectionState::Invalid(config, err);
@@ -389,18 +431,21 @@ async fn connect_to_compute(
                     }
                     // successfully woke up a compute node and can break the wakeup loop
                     Ok(Some(ControlFlow::Break(mut node_info))) => {
-                        node_info.config.set_startup_params(params);
+                        mechanism.update_connect_config(&mut node_info.config);
                         state = ConnectionState::Cached(node_info)
                     }
                 }
             }
             ConnectionState::Cached(node_info) => {
-                match connect_to_compute_once(&node_info, timeout).await {
+                match mechanism
+                    .connect_once(&node_info, timeout)
+                    .await
+                {
                     Ok(res) => return Ok(res),
                     Err(e) => {
                         error!(error = ?e, "could not connect to compute node");
                         if !e.should_retry(num_retries) {
-                            return Err(e);
+                            return Err(e.into());
                         }
 
                         // after the first connect failure,
@@ -427,7 +472,7 @@ async fn connect_to_compute(
 /// * Returns Ok(Some(true)) if there was an error waking but retries are acceptable
 /// * Returns Ok(Some(false)) if the wakeup succeeded
 /// * Returns Ok(None) or Err(e) if there was an error
-pub async fn try_wake(
+async fn try_wake(
     config: &compute::ConnCfg,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
@@ -660,7 +705,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(node_info, params, &extra, &creds)
+        let mut node = connect_to_compute(&TcpMechanism { params }, node_info, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
