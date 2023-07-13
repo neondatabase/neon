@@ -1,3 +1,4 @@
+use anyhow::Context;
 use parking_lot::Mutex;
 use pq_proto::StartupMessageParams;
 use std::fmt;
@@ -10,10 +11,7 @@ use crate::{auth, console};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
 
-use crate::proxy::{
-    can_retry_tokio_postgres_error, invalidate_cache, retry_after, try_wake,
-    NUM_RETRIES_WAKE_COMPUTE,
-};
+use crate::proxy::{invalidate_cache, retry_after, try_wake, ConnectionState, ShouldRetry};
 
 use tracing::error;
 use tracing::info;
@@ -220,66 +218,64 @@ async fn connect_to_compute(
         application_name: Some(APP_NAME),
     };
 
-    let node_info = &mut creds.wake_compute(&extra).await?.expect("msg");
+    let node_info = creds
+        .wake_compute(&extra)
+        .await?
+        .context("missing cache entry from wake_compute")?;
+    let mut state = ConnectionState::Cached(node_info);
 
     let mut num_retries = 0;
-    let mut wait_duration = time::Duration::ZERO;
-    let mut should_wake_with_error = None;
+
     loop {
-        if !wait_duration.is_zero() {
-            time::sleep(wait_duration).await;
-        }
+        match state {
+            ConnectionState::Invalid(config, err) => {
+                match try_wake(&config, &extra, &creds).await {
+                    // we can't wake up the compute node
+                    Ok(None) => return Err(err),
+                    // there was an error communicating with the control plane
+                    Err(e) => return Err(e.into()),
+                    // failed to wake up but we can continue to retry
+                    Ok(Some(ControlFlow::Continue(()))) => {
+                        state = ConnectionState::Invalid(config, err);
+                        let wait_duration = retry_after(num_retries);
+                        num_retries += 1;
 
-        // try wake the compute node if we have determined it's sensible to do so
-        if let Some(err) = should_wake_with_error.take() {
-            match try_wake(node_info, &extra, &creds).await {
-                // we can't wake up the compute node
-                Ok(None) => return Err(err),
-                // there was an error communicating with the control plane
-                Err(e) => return Err(e.into()),
-                // failed to wake up but we can continue to retry
-                Ok(Some(ControlFlow::Continue(()))) => {
-                    wait_duration = retry_after(num_retries);
-                    should_wake_with_error = Some(err);
-
-                    num_retries += 1;
-                    info!(num_retries, "retrying wake compute");
-                    continue;
-                }
-                // successfully woke up a compute node and can break the wakeup loop
-                Ok(Some(ControlFlow::Break(()))) => {}
-            }
-        }
-
-        match connect_to_compute_once(node_info, conn_info).await {
-            Ok(res) => return Ok(res),
-            Err(e) => {
-                error!(error = ?e, "could not connect to compute node");
-                if !can_retry_error(&e, num_retries) {
-                    return Err(e.into());
-                }
-                wait_duration = retry_after(num_retries);
-
-                // after the first connect failure,
-                // we should invalidate the cache and wake up a new compute node
-                if num_retries == 0 {
-                    invalidate_cache(node_info);
-                    should_wake_with_error = Some(e.into());
+                        info!(num_retries, "retrying wake compute");
+                        time::sleep(wait_duration).await;
+                        continue;
+                    }
+                    // successfully woke up a compute node and can break the wakeup loop
+                    Ok(Some(ControlFlow::Break(node_info))) => {
+                        state = ConnectionState::Cached(node_info)
+                    }
                 }
             }
+            ConnectionState::Cached(node_info) => {
+                match connect_to_compute_once(&node_info, conn_info).await {
+                    Ok(res) => return Ok(res),
+                    Err(e) => {
+                        error!(error = ?e, "could not connect to compute node");
+                        if !e.should_retry(num_retries) {
+                            return Err(e.into());
+                        }
+
+                        // after the first connect failure,
+                        // we should invalidate the cache and wake up a new compute node
+                        if num_retries == 0 {
+                            state = ConnectionState::Invalid(invalidate_cache(node_info), e.into());
+                        } else {
+                            state = ConnectionState::Cached(node_info);
+                        }
+
+                        let wait_duration = retry_after(num_retries);
+                        num_retries += 1;
+
+                        info!(num_retries, "retrying wake compute");
+                        time::sleep(wait_duration).await;
+                    }
+                }
+            }
         }
-
-        num_retries += 1;
-        info!(num_retries, "retrying connect");
-    }
-}
-
-fn can_retry_error(err: &tokio_postgres::Error, num_retries: u32) -> bool {
-    match err {
-        // retry all errors at least once
-        _ if num_retries == 0 => true,
-        _ if num_retries >= NUM_RETRIES_WAKE_COMPUTE => false,
-        err => can_retry_tokio_postgres_error(err),
     }
 }
 
