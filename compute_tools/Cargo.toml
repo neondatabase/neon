@@ -32,3 +32,4 @@ utils.workspace = true
 workspace_hack.workspace = true
 toml_edit.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
+flate2 = "1.0.26"

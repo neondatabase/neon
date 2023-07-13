@@ -96,17 +96,17 @@ def test_remote_extensions(
         # Cleaning up downloaded files is important for local tests
         # or else one test could reuse the files from another test or another test run
         cleanup_files = [
-            "embedding.tar.gz",
-            "anon.tar.gz",
-            f"pg_install/v{pg_version}/lib/postgresql/anon.so",
-            f"pg_install/v{pg_version}/lib/postgresql/embedding.so",
-            f"pg_install/v{pg_version}/share/postgresql/extension/anon.control",
-            f"pg_install/v{pg_version}/share/postgresql/extension/embedding--0.1.0.sql",
-            f"pg_install/v{pg_version}/share/postgresql/extension/embedding.control",
+            "lib/postgresql/anon.so",
+            "lib/postgresql/embedding.so",
+            "share/postgresql/extension/anon.control",
+            "share/postgresql/extension/embedding--0.1.0.sql",
+            "share/postgresql/extension/embedding.control",
         ]
+        cleanup_files = [f"pg_install/v{pg_version}/" + x for x in cleanup_files]
         cleanup_folders = [
             "extensions",
             f"pg_install/v{pg_version}/share/postgresql/extension/anon",
+            f"pg_install/v{pg_version}/extensions",
         ]
         for file in cleanup_files:
             try:

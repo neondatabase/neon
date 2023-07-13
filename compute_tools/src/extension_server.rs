@@ -18,23 +18,18 @@ extensions enabled for specific tenant-ids.
 use crate::compute::ComputeNode;
 use anyhow::Context;
 use anyhow::{self, Result};
+use flate2::read::GzDecoder;
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::str;
 use std::sync::Arc;
 use std::thread;
+use tar::Archive;
 use tokio::io::AsyncReadExt;
 use tracing::info;
-
-// TODO: use these crates for untarring, it's better
-// use tar::Archive;
-// use flate2::read::GzDecoder;
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -169,19 +164,14 @@ pub async fn download_extension(
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
-    let zip_name = ext_path.object_name().context("invalid extension path")?;
-    let mut output_file = BufWriter::new(File::create(zip_name)?);
-    output_file.write_all(&write_data_buffer)?;
-    info!("Download {:?} completed successfully", &ext_path);
-    info!("Unzipping extension to {:?}", zip_name);
-    std::process::Command::new("tar")
-        .arg("xzvf")
-        .arg(zip_name)
-        .spawn()?
-        .wait()?;
+    let unzip_dest = pgbin.strip_suffix("/bin/postgres").expect("bad pgbin");
+    let tar = GzDecoder::new(std::io::Cursor::new(write_data_buffer));
+    let mut archive = Archive::new(tar);
+    archive.unpack(unzip_dest)?;
+    info!("Download + unzip {:?} completed successfully", &ext_path);
 
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let zip_sharedir = format!("extensions/{ext_name}/share/extension");
+    let zip_sharedir = format!("{unzip_dest}/extensions/{ext_name}/share/extension");
     info!("mv {zip_sharedir:?}/* {local_sharedir:?}");
     for file in std::fs::read_dir(zip_sharedir)? {
         let old_file = file?.path();
@@ -190,7 +180,7 @@ pub async fn download_extension(
         std::fs::rename(old_file, new_file)?;
     }
     let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql");
-    let zip_libdir = format!("extensions/{ext_name}/lib");
+    let zip_libdir = format!("{unzip_dest}/extensions/{ext_name}/lib");
     info!("mv {zip_libdir:?}/* {local_libdir:?}");
     for file in std::fs::read_dir(zip_libdir)? {
         let old_file = file?.path();
