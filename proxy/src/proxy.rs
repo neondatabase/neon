@@ -20,7 +20,7 @@ use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::{ops::ControlFlow, sync::Arc};
+use std::{error::Error, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -439,22 +439,43 @@ pub async fn try_wake(
 }
 
 fn can_retry_error(err: &compute::ConnectionError, num_retries: u32) -> bool {
-    use std::io::ErrorKind;
     match err {
         // retry all errors at least once
         _ if num_retries == 0 => true,
-        // keep retrying connection errors
-        compute::ConnectionError::CouldNotConnect(io_err)
-            if num_retries < NUM_RETRIES_WAKE_COMPUTE =>
-        {
-            matches!(
-                io_err.kind(),
-                ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable
-            )
-        }
-        // otherwise, don't retry
+        _ if num_retries >= NUM_RETRIES_WAKE_COMPUTE => false,
+        compute::ConnectionError::Postgres(err) => can_retry_tokio_postgres_error(err),
+        compute::ConnectionError::CouldNotConnect(err) => is_io_connection_err(err),
         _ => false,
     }
+}
+
+pub fn can_retry_tokio_postgres_error(err: &tokio_postgres::Error) -> bool {
+    if let Some(io_err) = err.source().and_then(|x| x.downcast_ref()) {
+        is_io_connection_err(io_err)
+    } else if let Some(db_err) = err.source().and_then(|x| x.downcast_ref()) {
+        is_sql_connection_err(db_err)
+    } else {
+        false
+    }
+}
+
+fn is_sql_connection_err(err: &tokio_postgres::error::DbError) -> bool {
+    use tokio_postgres::error::SqlState;
+    matches!(
+        err.code(),
+        &SqlState::CONNECTION_FAILURE
+            | &SqlState::CONNECTION_EXCEPTION
+            | &SqlState::CONNECTION_DOES_NOT_EXIST
+            | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+    )
+}
+
+fn is_io_connection_err(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable | ErrorKind::TimedOut
+    )
 }
 
 pub fn retry_after(num_retries: u32) -> time::Duration {
