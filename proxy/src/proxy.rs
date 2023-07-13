@@ -393,25 +393,6 @@ where
     let mut state = ConnectionState::<M::ConnectError>::Cached(node_info);
 
     loop {
-        // Set a shorter timeout for the initial connection attempt.
-        //
-        // In case we try to connect to an outdated address that is no longer valid, the
-        // default behavior of Kubernetes is to drop the packets, causing us to wait for
-        // the entire timeout period. We want to fail fast in such cases.
-        //
-        // A specific case to consider is when we have cached compute node information
-        // with a 4-minute TTL (Time To Live), but the user has executed a `/suspend` API
-        // call, resulting in the nonexistence of the compute node.
-        //
-        // We only use caching in case of scram proxy backed by the console, so reduce
-        // the timeout only in that case.
-        let is_scram_proxy = matches!(creds, auth::BackendType::Console(_, _));
-        let timeout = if is_scram_proxy && num_retries == 0 {
-            time::Duration::from_secs(2)
-        } else {
-            time::Duration::from_secs(10)
-        };
-
         match state {
             ConnectionState::Invalid(config, err) => {
                 match try_wake(&config, extra, creds).await {
@@ -437,7 +418,7 @@ where
                 }
             }
             ConnectionState::Cached(node_info) => {
-                match mechanism.connect_once(&node_info, timeout).await {
+                match mechanism.connect_once(&node_info, time::Duration::from_secs(2)).await {
                     Ok(res) => return Ok(res),
                     Err(e) => {
                         error!(error = ?e, "could not connect to compute node");
