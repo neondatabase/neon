@@ -68,15 +68,14 @@ pub async fn get_available_extensions(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
     pg_version: &str,
-    custom_ext_prefixes: &Vec<String>,
+    custom_ext_prefixes: &[String],
 ) -> Result<HashSet<String>> {
-    // TODO: in this function change expect's to pass the error instead of panic-ing
     // TODO: figure out why it's calling library loads
 
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
 
     let index_path = pg_version.to_owned() + "/ext_index.json";
-    let index_path = RemotePath::new(Path::new(&index_path)).expect("error forming path");
+    let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download extension index json: {:?}", &index_path);
     let all_files = remote_storage.list_files(None).await?;
 
@@ -96,23 +95,21 @@ pub async fn get_available_extensions(
 
     dbg!(ext_index_str);
 
-    let ext_index_full = match serde_json::from_str(&ext_index_str) {
-        Ok(Value::Object(map)) => map,
-        _ => bail!("error parsing json"),
-    };
+    let ext_index_full: Value = serde_json::from_str(ext_index_str)?;
+    let ext_index_full = ext_index_full.as_object().context("error parsing json")?;
     let control_data = ext_index_full["control_data"]
         .as_object()
-        .expect("json parse error");
+        .context("json parse error")?;
     let enabled_extensions = ext_index_full["enabled_extensions"]
         .as_object()
-        .expect("json parse error");
+        .context("json parse error")?;
 
     dbg!(ext_index_full.clone());
     dbg!(control_data.clone());
     dbg!(enabled_extensions.clone());
 
     let mut prefixes = vec!["public".to_string()];
-    prefixes.extend(custom_ext_prefixes.clone());
+    prefixes.extend(custom_ext_prefixes.to_owned());
     dbg!(prefixes.clone());
     let mut all_extensions = HashSet::new();
     for prefix in prefixes {
@@ -125,17 +122,17 @@ pub async fn get_available_extensions(
         };
         dbg!(prefix_extensions);
         for ext_name in prefix_extensions {
-            all_extensions.insert(ext_name.as_str().expect("json parse error").to_string());
+            all_extensions.insert(ext_name.as_str().context("json parse error")?.to_string());
         }
     }
 
     // TODO: this is probably I/O bound, could benefit from parallelizing
     for prefix in &all_extensions {
-        let control_contents = control_data[prefix].as_str().expect("json parse error");
+        let control_contents = control_data[prefix].as_str().context("json parse error")?;
         let control_path = local_sharedir.join(prefix.to_owned() + ".control");
 
         info!("WRITING FILE {:?}{:?}", control_path, control_contents);
-        std::fs::write(control_path, &control_contents)?;
+        std::fs::write(control_path, control_contents)?;
     }
 
     Ok(all_extensions.into_iter().collect())
@@ -169,7 +166,7 @@ pub async fn download_extension(
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
-    let zip_name = ext_path.object_name().expect("invalid extension path");
+    let zip_name = ext_path.object_name().context("invalid extension path")?;
     let mut output_file = BufWriter::new(File::create(zip_name)?);
     output_file.write_all(&write_data_buffer)?;
     info!("Download {:?} completed successfully", &ext_path);
@@ -186,7 +183,7 @@ pub async fn download_extension(
     for file in std::fs::read_dir(zip_sharedir)? {
         let old_file = file?.path();
         let new_file =
-            Path::new(&local_sharedir).join(old_file.file_name().expect("error parsing file"));
+            Path::new(&local_sharedir).join(old_file.file_name().context("error parsing file")?);
         std::fs::rename(old_file, new_file)?;
     }
     let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql");
@@ -195,7 +192,7 @@ pub async fn download_extension(
     for file in std::fs::read_dir(zip_libdir)? {
         let old_file = file?.path();
         let new_file =
-            Path::new(&local_libdir).join(old_file.file_name().expect("error parsing file"));
+            Path::new(&local_libdir).join(old_file.file_name().context("error parsing file")?);
         std::fs::rename(old_file, new_file)?;
     }
     Ok(())
