@@ -429,7 +429,7 @@ impl Tenant {
                     .layers
                     .read()
                     .await
-                    .0
+                    .layer_map()
                     .iter_historic_layers()
                     .next()
                     .is_some(),

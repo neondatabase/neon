@@ -659,7 +659,7 @@ mod tests {
 
         use crate::tenant::{
             storage_layer::{AsLayerDesc, PersistentLayerDesc},
-            timeline::LayerFileManager,
+            timeline::layer_manager::LayerFileManager,
         };
 
         use super::*;

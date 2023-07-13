@@ -4,9 +4,9 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
-use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -224,7 +224,7 @@ impl RemoteLayer {
     /// Create a Layer struct representing this layer, after it has been downloaded.
     pub fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_>,
+        layer_map_lock_held_witness: &LayerManager,
         conf: &'static PageServerConf,
         file_size: u64,
     ) -> Arc<dyn PersistentLayer> {
