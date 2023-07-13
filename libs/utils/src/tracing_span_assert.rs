@@ -1,7 +1,10 @@
 //! Assert that the current [`tracing::Span`] has a given set of fields.
 //!
-//! Only meaningful when tracing has been configured as in example. Absence of
-//! `tracing_error::ErrorLayer` is not detected yet.
+//! Can only produce meaningful positive results when tracing has been configured as in example.
+//! Absence of `tracing_error::ErrorLayer` is not detected yet.
+//!
+//! `#[cfg(test)]` code will get a pass when using the `check_fields_present` macro in case tracing
+//! is completly unconfigured.
 //!
 //! # Usage
 //!
@@ -81,11 +84,16 @@ pub fn check_fields_present0<const L: usize>(
     let mut missing = must_be_present.into_iter().collect::<Vec<_>>();
     let trace = tracing_error::SpanTrace::capture();
     trace.with_spans(|md, _formatted_fields| {
+        // when trying to understand the inner workings of how does the matching work, note that
+        // this closure might be called zero times if the span is disabled. normally it is called
+        // once per span hierarchy level.
         missing.retain(|extractor| match extractor.extract(md.fields()) {
             ExtractionResult::Present => false,
             ExtractionResult::Absent => true,
         });
-        !missing.is_empty() // continue walking up until we've found all missing
+
+        // continue walking up until we've found all missing
+        !missing.is_empty()
     });
     if missing.is_empty() {
         Ok(Summary::FoundEverything)
@@ -95,6 +103,10 @@ pub fn check_fields_present0<const L: usize>(
         // we can still hit here if a tracing subscriber has been configured but the ErrorLayer is
         // missing, which can be annoying. for this case, we could probably use
         // SpanTrace::status().
+        //
+        // another way to end up here is with RUST_LOG=pageserver=off while configuring the
+        // logging, though I guess in that case the SpanTrace::status() == EMPTY would be valid.
+        // this case is covered by test `not_found_if_tracing_error_subscriber_has_wrong_filter`.
         Err(missing)
     }
 }
