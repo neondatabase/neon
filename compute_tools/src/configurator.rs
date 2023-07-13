@@ -43,7 +43,6 @@ fn configurator_main_loop(compute: Arc<ComputeNode>) {
     }
 }
 
-
 pub fn launch_configurator(compute: Arc<ComputeNode>) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("compute-configurator".into())

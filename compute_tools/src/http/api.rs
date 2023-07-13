@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::str;
 use std::sync::Arc;
 use std::thread;
 
@@ -143,7 +142,7 @@ async fn handle_configure_request(
     }
 
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
-    if let Ok(request) = serde_json::from_slice::<ConfigurationRequest>(body_bytes) {
+    if let Ok(request) = serde_json::from_slice::<ConfigurationRequest>(&body_bytes) {
         let spec = request.spec;
 
         let parsed_spec = match ParsedSpec::try_from(spec) {
