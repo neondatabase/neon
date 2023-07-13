@@ -1,5 +1,8 @@
 //! Assert that the current [`tracing::Span`] has a given set of fields.
 //!
+//! Only meaningful when tracing has been configured as in example. Absence of
+//! `tracing_error::ErrorLayer` is not detected yet.
+//!
 //! # Usage
 //!
 //! ```
@@ -66,10 +69,12 @@ impl<const L: usize> Extractor for MultiNameExtractor<L> {
     }
 }
 
-/// The extractor names passed as keys to [`new`].
+/// Checks that the given extractors are satisfied with the current span hierarchy.
+///
+/// `Ok` is also returned when tracing is not configured.
 pub fn check_fields_present<const L: usize>(
     must_be_present: [&dyn Extractor; L],
-) -> Result<(), Vec<&dyn Extractor>> {
+) -> Result<Summary, Vec<&dyn Extractor>> {
     let mut missing = must_be_present.into_iter().collect::<Vec<_>>();
     let trace = tracing_error::SpanTrace::capture();
     trace.with_spans(|md, _formatted_fields| {
@@ -79,11 +84,31 @@ pub fn check_fields_present<const L: usize>(
         });
         !missing.is_empty() // continue walking up until we've found all missing
     });
-    if missing.is_empty() || !tracing_subscriber_configured() {
-        Ok(())
+    if missing.is_empty() {
+        Ok(Summary::FoundEverything)
+    } else if !tracing_subscriber_configured() {
+        Ok(Summary::Unconfigured)
     } else {
+        // we can still hit here if a tracing subscriber has been configured but the ErrorLayer is
+        // missing, which can be annoying. for this case, we could probably use
+        // SpanTrace::status().
         Err(missing)
     }
+}
+
+/// Explanation for why the check was deemed ok.
+///
+/// Mainly useful for testing.
+#[derive(Debug)]
+pub enum Summary {
+    /// All extractors were found.
+    ///
+    /// Should only happen when tracing is properly configured.
+    FoundEverything,
+
+    /// Tracing has not been configured at all. This is ok for tests running without tracing set
+    /// up.
+    Unconfigured,
 }
 
 fn tracing_subscriber_configured() -> bool {
@@ -267,19 +292,48 @@ mod tests {
     }
 
     #[test]
-    fn tracing_error_subscriber_not_set_up() {
+    fn tracing_error_subscriber_not_set_up_straight_line() {
         // no setup
         let span = tracing::info_span!("foo", e = "some value");
         let _guard = span.enter();
 
         let extractor = MultiNameExtractor::new("E", ["e"]);
-        check_fields_present([&extractor])
-            .expect("without any subscriber, should still return Ok(())");
+        let res = check_fields_present([&extractor]);
+        assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
 
         // similarly for a not found key
         let extractor = MultiNameExtractor::new("E", ["foobar"]);
-        check_fields_present([&extractor])
-            .expect("without any subscriber, should still return Ok(())");
+        let res = check_fields_present([&extractor]);
+        assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
+    }
+
+    #[test]
+    fn tracing_error_subscriber_not_set_up_with_instrument() {
+        // no setup
+
+        // demo a case where span entering is used to establish a parent child connection, but
+        // when we re-enter the subspan SpanTrace::with_spans iterates over nothing.
+        let span = tracing::info_span!("foo", e = "some value");
+        let _guard = span.enter();
+
+        let subspan = tracing::info_span!("bar", f = "foobar");
+        drop(_guard);
+
+        // normally this would work, but without any tracing-subscriber configured, both
+        // check_field_present find nothing
+        let _guard = subspan.enter();
+        let extractors: [&dyn Extractor; 2] = [
+            &MultiNameExtractor::new("E", ["e"]),
+            &MultiNameExtractor::new("F", ["f"]),
+        ];
+
+        let res = check_fields_present(extractors);
+        assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
+
+        // similarly for a not found key
+        let extractor = MultiNameExtractor::new("G", ["g"]);
+        let res = check_fields_present([&extractor]);
+        assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
     }
 
     #[test]
