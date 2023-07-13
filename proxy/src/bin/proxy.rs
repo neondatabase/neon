@@ -26,14 +26,6 @@ enum AuthBackend {
     Link,
 }
 
-fn true_or_false(s: &str) -> Result<bool, &'static str> {
-    match s.to_ascii_lowercase().as_str() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err("expected `true` or `false`"),
-    }
-}
-
 /// Neon proxy/router
 #[derive(Parser)]
 #[command(version = GIT_VERSION, about)]
