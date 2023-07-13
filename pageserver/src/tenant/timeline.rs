@@ -3710,7 +3710,6 @@ impl Timeline {
         // now, we just skip the file to avoid unintentional modification to files on the disk and in the layer map.
         let mut duplicated_layers = HashSet::new();
 
-
         let mut insert_layers = Vec::new();
         let mut remove_layers = Vec::new();
 
@@ -3743,12 +3742,9 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            if mapping.contains(&x) {
+            if guard.contains(&x) {
                 duplicated_layers.insert(x.layer_desc().key());
-                warn!(
-                    "duplicated layers generated in compaction: {:?}",
-                    x.layer_desc().key() // TODO: change to use Display
-                );
+                warn!("duplicated layers generated in compaction: {x}",);
             } else {
                 insert_layers.push(x);
             }
@@ -3757,14 +3753,14 @@ impl Timeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
-            if duplicated_layers.contains(&l.key()) {
+        for ldesc in deltas_to_compact {
+            if duplicated_layers.contains(&ldesc.key()) {
                 // skip duplicated layers, they will not be removed; we have already overwritten them
                 // with new layers in the compaction phase 1.
                 continue;
             }
-            layer_names_to_delete.push(l.filename());
-            remove_layers.push(guard.get_from_desc(&l));
+            layer_names_to_delete.push(ldesc.filename());
+            remove_layers.push(guard.get_from_desc(&ldesc));
         }
 
         guard.finish_compact_l0(
