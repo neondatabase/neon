@@ -10,7 +10,10 @@ use crate::{auth, console};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
 
-use crate::proxy::{invalidate_cache, retry_after, try_wake, NUM_RETRIES_WAKE_COMPUTE};
+use crate::proxy::{
+    can_retry_tokio_postgres_error, invalidate_cache, retry_after, try_wake,
+    NUM_RETRIES_WAKE_COMPUTE,
+};
 
 use tracing::error;
 use tracing::info;
@@ -272,19 +275,11 @@ async fn connect_to_compute(
 }
 
 fn can_retry_error(err: &tokio_postgres::Error, num_retries: u32) -> bool {
-    use tokio_postgres::error::SqlState;
-    match err.code() {
+    match err {
         // retry all errors at least once
         _ if num_retries == 0 => true,
-        // keep retrying connection errors
-        Some(
-            &SqlState::CONNECTION_FAILURE
-            | &SqlState::CONNECTION_EXCEPTION
-            | &SqlState::CONNECTION_DOES_NOT_EXIST
-            | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        ) if num_retries < NUM_RETRIES_WAKE_COMPUTE => true,
-        // otherwise, don't retry
-        _ => false,
+        _ if num_retries >= NUM_RETRIES_WAKE_COMPUTE => false,
+        err => can_retry_tokio_postgres_error(err),
     }
 }
 
