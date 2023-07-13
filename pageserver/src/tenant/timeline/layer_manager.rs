@@ -145,7 +145,7 @@ impl LayerManager {
                 .context("No next open layer found")?;
 
             trace!(
-                "creating layer for write at {}/{} for record at {}",
+                "creating in-memory layer at {}/{} for record at {}",
                 timeline_id,
                 start_lsn,
                 lsn
