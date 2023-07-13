@@ -3619,6 +3619,10 @@ impl Timeline {
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
 
+        fail_point!("compact-level0-phase1-finish", |_| {
+            Err(anyhow::anyhow!("failpoint compact-level0-phase1-finish").into())
+        });
+
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
             .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
         {
