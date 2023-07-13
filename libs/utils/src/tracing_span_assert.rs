@@ -392,26 +392,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn panics_if_tracing_error_subscriber_has_wrong_filter() {
+    fn not_found_if_tracing_error_subscriber_has_wrong_filter() {
         let r = tracing_subscriber::registry().with({
-            tracing_error::ErrorLayer::default().with_filter(
-                tracing_subscriber::filter::dynamic_filter_fn(|md, _| {
+            tracing_error::ErrorLayer::default().with_filter(tracing_subscriber::filter::filter_fn(
+                |md| {
                     if md.is_span() && *md.level() == tracing::Level::INFO {
-                        return false;
+                        false
+                    } else {
+                        true
                     }
-                    true
-                }),
-            )
+                },
+            ))
         });
 
         let _guard = tracing::subscriber::set_default(r);
 
         let span = tracing::info_span!("foo", e = "some value");
+        assert!(span.is_disabled(), "we want the filter to disable the span; it happens with filter_fn, but not with dynamic_filter_fn");
+
         let _guard = span.enter();
 
         let extractor = MultiNameExtractor::new("E", ["e"]);
-        let missing = check_fields_present([&extractor]).unwrap_err();
+        let missing = check_fields_present0([&extractor]).unwrap_err();
         assert_missing(missing, vec![&extractor]);
     }
 }
