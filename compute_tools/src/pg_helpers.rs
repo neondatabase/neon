@@ -16,15 +16,26 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-/// Escape a string for including it in a SQL literal
+/// Escape a string for including it in a SQL literal. Wrapping the result
+/// with `E'{}'` or `'{}'` is not required, as it returns a ready-to-use
+/// SQL string literal, e.g. `'db'''` or `E'db\\'`.
+/// See https://github.com/postgres/postgres/blob/da98d005cdbcd45af563d0c4ac86d0e9772cd15f/src/backend/utils/adt/quote.c#L47
+/// for the original implementation.
 pub fn escape_literal(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+
+    if res.contains('\\') {
+        format!("E'{}'", res)
+    } else {
+        format!("'{}'", res)
+    }
 }
 
-/// Escape a string so that it can be used in postgresql.conf.
-/// Same as escape_literal, currently.
+/// Escape a string so that it can be used in postgresql.conf. Wrapping the result
+/// with `'{}'` is not required, as it returns a ready-to-use config string.
 pub fn escape_conf_value(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+    format!("'{}'", res)
 }
 
 trait GenericOptionExt {
@@ -37,7 +48,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_option(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} '{}'", self.name, escape_literal(val)),
+                "string" => format!("{} {}", self.name, escape_literal(val)),
                 _ => format!("{} {}", self.name, val),
             }
         } else {
@@ -49,7 +60,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", self.name, escape_conf_value(val)),
+                "string" => format!("{} = {}", self.name, escape_conf_value(val)),
                 _ => format!("{} = {}", self.name, val),
             }
         } else {

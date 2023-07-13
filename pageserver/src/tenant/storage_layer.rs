@@ -41,7 +41,7 @@ pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use remote_layer::RemoteLayer;
 
-use super::layer_map::BatchedUpdates;
+use super::timeline::layer_manager::LayerManager;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -170,7 +170,7 @@ impl LayerAccessStats {
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
     pub(crate) fn for_loading_layer(
-        layer_map_lock_held_witness: &BatchedUpdates<'_>,
+        layer_map_lock_held_witness: &LayerManager,
         status: LayerResidenceStatus,
     ) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
@@ -189,7 +189,7 @@ impl LayerAccessStats {
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
     pub(crate) fn clone_for_residence_change(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_>,
+        layer_map_lock_held_witness: &LayerManager,
         new_status: LayerResidenceStatus,
     ) -> LayerAccessStats {
         let clone = {
@@ -221,7 +221,7 @@ impl LayerAccessStats {
     ///
     pub(crate) fn record_residence_event(
         &self,
-        _layer_map_lock_held_witness: &BatchedUpdates<'_>,
+        _layer_map_lock_held_witness: &LayerManager,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
     ) {

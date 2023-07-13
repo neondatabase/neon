@@ -1,3 +1,4 @@
+use futures::future::Either;
 use proxy::auth;
 use proxy::console;
 use proxy::http;
@@ -6,8 +7,10 @@ use proxy::metrics;
 use anyhow::bail;
 use clap::{self, Arg};
 use proxy::config::{self, ProxyConfig};
+use std::pin::pin;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
@@ -43,43 +46,59 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
-    let mut client_tasks = vec![tokio::spawn(proxy::proxy::task_main(
+    // client facing tasks. these will exit on error or on cancellation
+    // cancellation returns Ok(())
+    let mut client_tasks = JoinSet::new();
+    client_tasks.spawn(proxy::proxy::task_main(
         config,
         proxy_listener,
         cancellation_token.clone(),
-    ))];
+    ));
 
     if let Some(wss_address) = args.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
         info!("Starting wss on {wss_address}");
         let wss_listener = TcpListener::bind(wss_address).await?;
 
-        client_tasks.push(tokio::spawn(http::websocket::task_main(
+        client_tasks.spawn(http::websocket::task_main(
             config,
             wss_listener,
             cancellation_token.clone(),
-        )));
+        ));
     }
 
-    let mut tasks = vec![
-        tokio::spawn(proxy::handle_signals(cancellation_token)),
-        tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
-    ];
+    // maintenance tasks. these never return unless there's an error
+    let mut maintenance_tasks = JoinSet::new();
+    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
+    maintenance_tasks.spawn(http::server::task_main(http_listener));
+    maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
-        tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
+        maintenance_tasks.spawn(metrics::task_main(metrics_config));
     }
 
-    let tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err));
-    let client_tasks =
-        futures::future::try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
-    tokio::select! {
-        // We are only expecting an error from these forever tasks
-        res = tasks => { res?; },
-        res = client_tasks => { res?; },
-    }
-    Ok(())
+    let maintenance = loop {
+        // get one complete task
+        match futures::future::select(
+            pin!(maintenance_tasks.join_next()),
+            pin!(client_tasks.join_next()),
+        )
+        .await
+        {
+            // exit immediately on maintenance task completion
+            Either::Left((Some(res), _)) => break proxy::flatten_err(res)?,
+            // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
+            Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
+            // exit immediately on client task error
+            Either::Right((Some(res), _)) => proxy::flatten_err(res)?,
+            // exit if all our client tasks have shutdown gracefully
+            Either::Right((None, _)) => return Ok(()),
+        }
+    };
+
+    // maintenance tasks return Infallible success values, this is an impossible value
+    // so this match statically ensures that there are no possibilities for that value
+    match maintenance {}
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
