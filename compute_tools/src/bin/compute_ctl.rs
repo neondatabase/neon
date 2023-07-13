@@ -188,7 +188,7 @@ fn main() -> Result<()> {
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
     let _http_handle =
-        launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
+        launch_http_server(http_port, compute.clone()).expect("cannot launch http endpoint thread");
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -223,8 +223,8 @@ fn main() -> Result<()> {
     drop(state);
 
     // Launch remaining service threads
-    let _monitor_handle = launch_monitor(&compute);
-    let _configurator_handle = launch_configurator(&compute);
+    let _monitor_handle = launch_monitor(compute.clone());
+    let _configurator_handle = launch_configurator(compute.clone());
 
     // Start Postgres
     let mut delay_exit = false;

@@ -12,7 +12,7 @@ const MONITOR_CHECK_INTERVAL: u64 = 500; // milliseconds
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
 // XXX: the only expected panic is at `RwLock` unwrap().
-fn watch_compute_activity(compute: &ComputeNode) {
+fn watch_compute_activity(compute: Arc<ComputeNode>) {
     // Suppose that `connstr` doesn't change
     let connstr = compute.connstr.as_str();
     // Define `client` outside of the loop to reuse existing connection if it's active.
@@ -104,11 +104,9 @@ fn watch_compute_activity(compute: &ComputeNode) {
 }
 
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
-    let state = Arc::clone(state);
-
+pub fn launch_monitor(state: Arc<ComputeNode>) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&state))
+        .spawn(move || watch_compute_activity(state))
         .expect("cannot launch compute monitor thread")
 }
