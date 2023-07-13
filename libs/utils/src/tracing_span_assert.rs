@@ -395,13 +395,7 @@ mod tests {
     fn not_found_if_tracing_error_subscriber_has_wrong_filter() {
         let r = tracing_subscriber::registry().with({
             tracing_error::ErrorLayer::default().with_filter(tracing_subscriber::filter::filter_fn(
-                |md| {
-                    if md.is_span() && *md.level() == tracing::Level::INFO {
-                        false
-                    } else {
-                        true
-                    }
-                },
+                |md| !(md.is_span() && *md.level() == tracing::Level::INFO),
             ))
         });
 
