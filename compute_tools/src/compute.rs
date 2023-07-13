@@ -8,6 +8,7 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures::future::join_all;
 use postgres::{Client, NoTls};
 use tokio;
 use tokio_postgres;
@@ -53,7 +54,6 @@ pub struct ComputeNode {
     ///  the S3 bucket that we search for extensions in
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     // cached lists of available extensions and libraries
-    // pub available_libraries: OnceLock<HashMap<String, Vec<RemotePath>>>,
     pub available_extensions: OnceLock<HashSet<String>>,
 }
 
@@ -694,16 +694,8 @@ LIMIT 100",
         if let Some(ref ext_remote_storage) = self.ext_remote_storage {
             let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             let spec = &pspec.spec;
-
-            // 1. parse custom extension paths from spec
-            let custom_ext_prefixes = match &spec.custom_extensions {
-                Some(custom_extensions) => custom_extensions.clone(),
-                None => Vec::new(),
-            };
-
+            let custom_ext_prefixes = spec.custom_extensions.clone().unwrap_or(Vec::new());
             info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
-
-            // download extension control files
             let available_extensions = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
@@ -711,7 +703,6 @@ LIMIT 100",
                 &custom_ext_prefixes,
             )
             .await?;
-
             self.available_extensions
                 .set(available_extensions)
                 .expect("available_extensions.set error");
@@ -736,9 +727,51 @@ LIMIT 100",
 
     #[tokio::main]
     pub async fn prepare_preload_libraries(&self, compute_state: &ComputeState) -> Result<()> {
-        // TODO: revive some  of the old logic for downloading shared preload libaries
-        info!("I HAVENT IMPLEMENTED DOWNLOADING SHARED PRELOAD LIBRARIES YET");
-        dbg!(compute_state);
+        if self.ext_remote_storage.is_none() {
+            return Ok(());
+        }
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
+
+        info!("parse shared_preload_libraries from spec.cluster.settings");
+        let mut libs_vec = Vec::new();
+        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+            libs_vec = libs
+                .split(&[',', '\'', ' '])
+                .filter(|s| *s != "neon" && !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        info!("parse shared_preload_libraries from provided postgresql.conf");
+        // that is used in neon_local and python tests
+        if let Some(conf) = &spec.cluster.postgresql_conf {
+            let conf_lines = conf.split('\n').collect::<Vec<&str>>();
+            let mut shared_preload_libraries_line = "";
+            for line in conf_lines {
+                if line.starts_with("shared_preload_libraries") {
+                    shared_preload_libraries_line = line;
+                }
+            }
+            let mut preload_libs_vec = Vec::new();
+            if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
+                preload_libs_vec = libs
+                    .split(&[',', '\'', ' '])
+                    .filter(|s| *s != "neon" && !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            libs_vec.extend(preload_libs_vec);
+        }
+
+        info!("Downloading to shared preload libraries: {:?}", &libs_vec);
+        let mut download_tasks = Vec::new();
+        for library in &libs_vec {
+            download_tasks.push(self.download_extension(library));
+        }
+        let results = join_all(download_tasks).await;
+        for result in results {
+            result?; // propogate any errors
+        }
         Ok(())
     }
 }
