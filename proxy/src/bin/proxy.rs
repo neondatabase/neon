@@ -26,6 +26,14 @@ enum AuthBackend {
     Link,
 }
 
+fn true_or_false(s: &str) -> Result<bool, &'static str> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err("expected `true` or `false`"),
+    }
+}
+
 /// Neon proxy/router
 #[derive(Parser)]
 #[command(version = GIT_VERSION, about)]
@@ -77,7 +85,7 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
     wake_compute_cache: String,
     /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false)]
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
 }
 
