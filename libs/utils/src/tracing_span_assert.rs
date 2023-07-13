@@ -148,20 +148,16 @@ pub enum Summary {
 }
 
 fn tracing_subscriber_configured() -> bool {
-    // SpanTrace::status() is not a strong indicator because it short circuits to EMPTY on empty
-    // spans, so let's check if there's an ErrorLayer directly. alas, we cannot due to
-    // pub(crate) but we can check if the subscriber is the noop impl.
-
-    let span = tracing::Span::current();
-    let mut configured_at_all = false;
-    span.with_subscriber(|(_, s)| {
-        // assume that if there is a non-NoSubscriber, it's a proper one
-        configured_at_all = s
+    let mut noop_configured = false;
+    tracing::dispatcher::get_default(|d| {
+        // it is possible that this closure will not be invoked, but the current implementation
+        // always invokes it
+        noop_configured = d
             .downcast_ref::<tracing::subscriber::NoSubscriber>()
-            .is_none();
+            .is_some();
     });
 
-    configured_at_all
+    !noop_configured
 }
 
 #[cfg(test)]
@@ -370,6 +366,17 @@ mod tests {
         let extractor = MultiNameExtractor::new("G", ["g"]);
         let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
+    }
+
+    #[test]
+    fn tracing_subscriber_configured() {
+        // this will fail if any utils::logging::init callers appear, but let's hope they do not
+        // appear.
+        assert!(!super::tracing_subscriber_configured());
+
+        let _g = setup_current_thread();
+
+        assert!(super::tracing_subscriber_configured());
     }
 
     #[test]
