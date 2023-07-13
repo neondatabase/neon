@@ -16,7 +16,7 @@ The script fetches the durations of benchmarks from the database and stores it i
 BENCHMARKS_DURATION_QUERY = """
     SELECT
         DISTINCT parent_suite, suite, test,
-        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms) as percentile_ms
+        PERCENTILE_DISC(%s) WITHIN GROUP (ORDER BY duration_ms) as percentile_ms
     FROM
         (
             SELECT
@@ -113,6 +113,7 @@ def main(args: argparse.Namespace):
     connstr = args.connstr
     interval_days = args.days
     output = args.output
+    percentile = args.percentile
 
     res: Dict[str, float] = {}
 
@@ -121,7 +122,7 @@ def main(args: argparse.Namespace):
         with psycopg2.connect(connstr, connect_timeout=30) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 logging.info("fetching benchmarks...")
-                cur.execute(BENCHMARKS_DURATION_QUERY, (interval_days,))
+                cur.execute(BENCHMARKS_DURATION_QUERY, (percentile, interval_days))
                 rows = cur.fetchall()
     except psycopg2.OperationalError as exc:
         logging.error("cannot fetch benchmarks duration from the DB due to an error", exc)
@@ -130,9 +131,9 @@ def main(args: argparse.Namespace):
 
     for row in rows:
         pytest_name = f"{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}"
-        percentile = row["percentile_ms"] // 1000
-        logging.info(f"\t{pytest_name}: {percentile}")
-        res[pytest_name] = percentile
+        duration = row["percentile_ms"] / 1000
+        logging.info(f"\t{pytest_name}: {duration}")
+        res[pytest_name] = duration
 
     logging.info(f"saving results to {output.name}")
     json.dump(res, output, indent=2)
@@ -140,13 +141,19 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Get p50 of benchmarks duration for the last N days"
+        description="Get <percentile> of benchmarks duration for the last <N> days"
     )
     parser.add_argument(
         "--output",
         type=argparse.FileType("w"),
         default=".test_durations",
         help="path to output json file (default: .test_durations)",
+    )
+    parser.add_argument(
+        "--percentile",
+        type=float,
+        default="0.99",
+        help="percentile (default: 0.99)",
     )
     parser.add_argument(
         "--days",
