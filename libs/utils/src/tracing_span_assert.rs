@@ -24,7 +24,7 @@
 //!
 //! use utils::tracing_span_assert::{check_fields_present, MultiNameExtractor};
 //! let extractor = MultiNameExtractor::new("TestExtractor", ["test", "test_id"]);
-//! if let Err(missing) = check_fields_present([&extractor]) {
+//! if let Err(missing) = check_fields_present!([&extractor]) {
 //!    // if you copypaste this to a custom assert method, remember to add #[track_caller]
 //!    // to get the "user" code location for the panic.
 //!    panic!("Missing fields: {missing:?}");
@@ -72,8 +72,10 @@ impl<const L: usize> Extractor for MultiNameExtractor<L> {
 
 /// Checks that the given extractors are satisfied with the current span hierarchy.
 ///
-/// `Ok` is also returned when tracing is not configured.
-pub fn check_fields_present<const L: usize>(
+/// This should not be called directly, but used through [`check_fields_present`] which allows
+/// `Summary::Unconfigured` only when the calling crate is being `#[cfg(test)]` as a conservative default.
+#[doc(hidden)]
+pub fn check_fields_present0<const L: usize>(
     must_be_present: [&dyn Extractor; L],
 ) -> Result<Summary, Vec<&dyn Extractor>> {
     let mut missing = must_be_present.into_iter().collect::<Vec<_>>();
@@ -97,9 +99,42 @@ pub fn check_fields_present<const L: usize>(
     }
 }
 
+/// Checks that the given extractors are satisfied with the current span hierarchy.
+///
+/// The macro is the preferred way of checking if fields exist while passing checks if a test does
+/// not have tracing configured.
+///
+/// Why mangled name? Because #[macro_export] will expose it at utils::__check_fields_present.
+/// However we can game a module namespaced macro for `use` purposes by re-exporting the
+/// #[macro_export] exported name with an alias (below).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __check_fields_present {
+    ($extractors:expr) => {{
+        {
+            use $crate::tracing_span_assert::{check_fields_present0, Summary::*, Extractor};
+
+            match dbg!(check_fields_present0($extractors)) {
+                Ok(FoundEverything) => Ok(()),
+                Ok(Unconfigured) if cfg!(test) => {
+                    // allow unconfigured in tests
+                    Ok(())
+                },
+                Ok(Unconfigured) => {
+                    panic!("utils::tracing_span_assert: outside of #[cfg(test)] expected tracing to be configured with tracing_error::ErrorLayer")
+                },
+                Err(missing) => Err(missing)
+            }
+        }
+    }}
+}
+
+pub use crate::__check_fields_present as check_fields_present;
+
 /// Explanation for why the check was deemed ok.
 ///
-/// Mainly useful for testing.
+/// Mainly useful for testing, or configuring per-crate behaviour as in with
+/// [`check_fields_present`].
 #[derive(Debug)]
 pub enum Summary {
     /// All extractors were found.
@@ -202,7 +237,7 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", tenant_id = "tenant-1", timeline_id = "timeline-1");
         let _guard = span.enter();
-        check_fields_present([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
+        check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
     }
 
     #[test]
@@ -210,8 +245,8 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", timeline_id = "timeline-1");
         let _guard = span.enter();
-        let missing =
-            check_fields_present([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap_err();
+        let missing = check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor])
+            .unwrap_err();
         assert_missing(missing, vec![&setup.tenant_extractor]);
     }
 
@@ -228,7 +263,7 @@ mod tests {
         let span = tracing::info_span!("grandchild", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        check_fields_present([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
+        check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
     }
 
     #[test]
@@ -241,7 +276,7 @@ mod tests {
         let span = tracing::info_span!("child", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        let missing = check_fields_present([&setup.tenant_extractor]).unwrap_err();
+        let missing = check_fields_present0([&setup.tenant_extractor]).unwrap_err();
         assert_missing(missing, vec![&setup.tenant_extractor]);
     }
 
@@ -250,7 +285,7 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", tenant_id = "tenant-1", timeline_id = "timeline-1");
         let _guard = span.enter();
-        check_fields_present([&setup.tenant_extractor]).unwrap();
+        check_fields_present0([&setup.tenant_extractor]).unwrap();
     }
 
     #[test]
@@ -266,7 +301,7 @@ mod tests {
         let span = tracing::info_span!("grandchild", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        check_fields_present([&setup.tenant_extractor]).unwrap();
+        check_fields_present0([&setup.tenant_extractor]).unwrap();
     }
 
     #[test]
@@ -274,7 +309,7 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", timeline_id = "timeline-1");
         let _guard = span.enter();
-        let missing = check_fields_present([&setup.tenant_extractor]).unwrap_err();
+        let missing = check_fields_present0([&setup.tenant_extractor]).unwrap_err();
         assert_missing(missing, vec![&setup.tenant_extractor]);
     }
 
@@ -288,7 +323,7 @@ mod tests {
         let span = tracing::info_span!("child", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        let missing = check_fields_present([&setup.tenant_extractor]).unwrap_err();
+        let missing = check_fields_present0([&setup.tenant_extractor]).unwrap_err();
         assert_missing(missing, vec![&setup.tenant_extractor]);
     }
 
@@ -299,12 +334,12 @@ mod tests {
         let _guard = span.enter();
 
         let extractor = MultiNameExtractor::new("E", ["e"]);
-        let res = check_fields_present([&extractor]);
+        let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
 
         // similarly for a not found key
-        let extractor = MultiNameExtractor::new("E", ["foobar"]);
-        let res = check_fields_present([&extractor]);
+        let extractor = MultiNameExtractor::new("F", ["foobar"]);
+        let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
     }
 
@@ -328,12 +363,12 @@ mod tests {
             &MultiNameExtractor::new("F", ["f"]),
         ];
 
-        let res = check_fields_present(extractors);
+        let res = check_fields_present0(extractors);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
 
         // similarly for a not found key
         let extractor = MultiNameExtractor::new("G", ["g"]);
-        let res = check_fields_present([&extractor]);
+        let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
     }
 
