@@ -331,7 +331,7 @@ async fn connect_to_compute_once(
         .await
 }
 
-pub enum ConnectionState<E> {
+enum ConnectionState<E> {
     Cached(console::CachedNodeInfo),
     Invalid(compute::ConnCfg, E),
 }
@@ -437,10 +437,7 @@ where
                 }
             }
             ConnectionState::Cached(node_info) => {
-                match mechanism
-                    .connect_once(&node_info, timeout)
-                    .await
-                {
+                match mechanism.connect_once(&node_info, timeout).await {
                     Ok(res) => return Ok(res),
                     Err(e) => {
                         error!(error = ?e, "could not connect to compute node");
