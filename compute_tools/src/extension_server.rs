@@ -69,17 +69,12 @@ pub async fn get_available_extensions(
     pg_version: &str,
     custom_ext_prefixes: &[String],
 ) -> Result<HashSet<String>> {
-    // TODO: figure out why it's calling library loads
-
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let index_path = pg_version.to_owned() + "/ext_index.json";
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
-    info!("download extension index json: {:?}", &index_path);
-    let all_files = remote_storage.list_files(None).await?;
+    info!("download ext_index.json: {:?}", &index_path);
 
-    dbg!(all_files);
-
-    // TODO: if index_path already exists, don't re-download it, just read it.
+    // TODO: potential optimization: cache ext_index.json
     let mut download = remote_storage.download(&index_path).await?;
     let mut write_data_buffer = Vec::new();
     download
@@ -91,8 +86,6 @@ pub async fn get_available_extensions(
         Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
     };
 
-    dbg!(ext_index_str);
-
     let ext_index_full: Value = serde_json::from_str(ext_index_str)?;
     let ext_index_full = ext_index_full.as_object().context("error parsing json")?;
     let control_data = ext_index_full["control_data"]
@@ -101,14 +94,12 @@ pub async fn get_available_extensions(
     let enabled_extensions = ext_index_full["enabled_extensions"]
         .as_object()
         .context("json parse error")?;
-
-    dbg!(ext_index_full.clone());
-    dbg!(control_data.clone());
-    dbg!(enabled_extensions.clone());
+    info!("{:?}", control_data.clone());
+    info!("{:?}", enabled_extensions.clone());
 
     let mut prefixes = vec!["public".to_string()];
     prefixes.extend(custom_ext_prefixes.to_owned());
-    dbg!(prefixes.clone());
+    info!("{:?}", &prefixes);
     let mut all_extensions = HashSet::new();
     for prefix in prefixes {
         let prefix_extensions = match enabled_extensions.get(&prefix) {
@@ -118,13 +109,12 @@ pub async fn get_available_extensions(
                 continue;
             }
         };
-        dbg!(prefix_extensions);
+        info!("{:?}", prefix_extensions);
         for ext_name in prefix_extensions {
             all_extensions.insert(ext_name.as_str().context("json parse error")?.to_string());
         }
     }
 
-    // TODO: this is probably I/O bound, could benefit from parallelizing
     for prefix in &all_extensions {
         let control_contents = control_data[prefix].as_str().context("json parse error")?;
         let control_path = local_sharedir.join(prefix.to_owned() + ".control");
@@ -143,6 +133,8 @@ pub async fn download_extension(
     pgbin: &str,
     pg_version: &str,
 ) -> Result<()> {
+    // TODO: potential optimization: only download the extension if it doesn't exist
+    // problem: how would we tell if it exists?
     let ext_name = ext_name.replace(".so", "");
     let ext_name_targz = ext_name.to_owned() + ".tar.gz";
     if Path::new(&ext_name_targz).exists() {
@@ -210,8 +202,8 @@ pub fn init_remote_storage(
         .unwrap_or(default_prefix)
         .to_string();
 
-    // TODO: is this a valid assumption? some extensions are quite large
-    // load should not be large, so default parameters are fine
+    // TODO: potentially allow modification of other parameters
+    // however, default values should be fine for now
     let config = S3Config {
         bucket_name: remote_ext_bucket.to_string(),
         bucket_region: remote_ext_region.to_string(),
