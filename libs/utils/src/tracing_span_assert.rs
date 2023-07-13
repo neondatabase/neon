@@ -5,7 +5,8 @@
 //!
 //! # Usage
 //!
-//! ```
+//! ```rust
+//! # fn main() {
 //! use tracing_subscriber::prelude::*;
 //! let registry = tracing_subscriber::registry()
 //!    .with(tracing_error::ErrorLayer::default());
@@ -23,12 +24,12 @@
 //!
 //! use utils::tracing_span_assert::{check_fields_present, MultiNameExtractor};
 //! let extractor = MultiNameExtractor::new("TestExtractor", ["test", "test_id"]);
-//! match check_fields_present([&extractor]) {
-//!    Ok(()) => {},
-//!    Err(missing) => {
-//!        panic!("Missing fields: {:?}", missing.into_iter().map(|f| f.name() ).collect::<Vec<_>>());
-//!    }
+//! if let Err(missing) = check_fields_present([&extractor]) {
+//!    // if you copypaste this to a custom assert method, remember to add #[track_caller]
+//!    // to get the "user" code location for the panic.
+//!    panic!("Missing fields: {missing:?}");
 //! }
+//! # }
 //! ```
 //!
 //! Recommended reading: https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
