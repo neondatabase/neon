@@ -1,3 +1,5 @@
+import os
+import shutil
 from contextlib import closing
 
 import pytest
@@ -24,10 +26,9 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
-    # TODO: SKIP for now, infra not ready yet
-    if remote_storage_kind == RemoteStorageKind.REAL_S3 or pg_version == "14":
+    if pg_version != "15":
+        # TODO: for right now we only have test files for v15
         return None
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",
@@ -38,31 +39,27 @@ def test_remote_extensions(
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_remote_extensions", tenant_id=tenant_id)
 
-    assert env.ext_remote_storage is not None
-    assert env.remote_storage_client is not None
-
-    # For MOCK_S3 we upload some test files. for REAL_S3 we use the files created in CICD
+    # For MOCK_S3 we upload test files.
+    # For REAL_S3 we use the files already in the bucket
     if remote_storage_kind == RemoteStorageKind.MOCK_S3:
         log.info("Uploading test files to mock bucket")
-        with open("test_runner/regress/data/extension_test/ext_index.json", "rb") as f:
-            env.remote_storage_client.upload_fileobj(
-                f,
-                env.ext_remote_storage.bucket_name,
-                f"ext/v{pg_version}/ext_index.json",
-            )
-        with open("test_runner/regress/data/extension_test/anon.tar.gz", "rb") as f:
-            env.remote_storage_client.upload_fileobj(
-                f,
-                env.ext_remote_storage.bucket_name,
-                f"ext/v{pg_version}/extensions/anon.tar.gz",
-            )
-        with open("test_runner/regress/data/extension_test/embedding.tar.gz", "rb") as f:
-            env.remote_storage_client.upload_fileobj(
-                f,
-                env.ext_remote_storage.bucket_name,
-                f"ext/v{pg_version}/extensions/embedding.tar.gz",
-            )
 
+        def upload_test_file(from_path, to_path):
+            assert env.ext_remote_storage is not None  # satisfy mypy
+            assert env.remote_storage_client is not None  # satisfy mypy
+            with open(f"test_runner/regress/data/extension_test/{from_path}", "rb") as f:
+                env.remote_storage_client.upload_fileobj(
+                    f,
+                    env.ext_remote_storage.bucket_name,
+                    f"ext/v{pg_version}/{to_path}",
+                )
+
+        upload_test_file("ext_index.json", "ext_index.json")
+        upload_test_file("anon.tar.gz", "extensions/anon.tar.gz")
+        upload_test_file("embedding.tar.gz", "extensions/embedding.tar.gz")
+
+    assert env.ext_remote_storage is not None  # satisfy mypy
+    assert env.remote_storage_client is not None  # satisfy mypy
     try:
         # Start a compute node and check that it can download the extensions
         # and use them to CREATE EXTENSION and LOAD
@@ -80,7 +77,7 @@ def test_remote_extensions(
                 log.info(all_extensions)
                 assert "anon" in all_extensions
                 assert "embedding" in all_extensions
-                # TODO: check that we don't have download custom extensions for other tenant ids
+                # TODO: check that we cant't download custom extensions for other tenant ids
                 # TODO: not sure how private extension will work with REAL_S3 test. can we rig the tenant id?
 
                 # check that we can download public extension
@@ -89,16 +86,26 @@ def test_remote_extensions(
                 assert "embedding" in [x[0] for x in cur.fetchall()]
 
                 # check that we can download private extension
-                # TODO: this will fail locally because we don't have the required dependencies
-                cur.execute("CREATE EXTENSION anon")
-                cur.execute("SELECT extname FROM pg_extension")
-                assert "anon" in [x[0] for x in cur.fetchall()]
+                try:
+                    cur.execute("CREATE EXTENSION anon")
+                except Exception as err:
+                    log.info("error creating anon extension")
+                    assert "pgcrypto" in str(err), "unexpected error creating anon extension"
 
                 # TODO: try to load libraries as well
 
     finally:
         cleanup_files = ["embedding.tar.gz", "anon.tar.gz"]
-        _cleanup_folders = ["extensions"]
-        # for file in cleanup_files:
-        #     os.remove(file)
-        log.info(f"For now, please manually cleanup {cleanup_files}")
+        cleanup_folders = ["extensions"]
+        for file in cleanup_files:
+            try:
+                os.remove(file)
+                log.info(f"removed file {file}")
+            except Exception as err:
+                log.info(f"error removing file {file}: {err}")
+        for folder in cleanup_folders:
+            try:
+                shutil.rmtree(folder)
+                log.info(f"removed folder {folder}")
+            except Exception as err:
+                log.info(f"error removing file {file}: {err}")

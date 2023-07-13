@@ -805,11 +805,11 @@ class NeonEnvBuilder:
 
         if enable_remote_extensions:
             self.ext_remote_storage = S3Storage(
-                bucket_name="neon-dev-extensions-us-east-2",
-                bucket_region="us-east-2",
+                bucket_name="neon-dev-extensions",
+                bucket_region="eu-central-1",
                 access_key=access_key,
                 secret_key=secret_key,
-                prefix_in_bucket="5412197734",
+                prefix_in_bucket="5555",
             )
 
     def cleanup_local_storage(self):

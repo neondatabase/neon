@@ -16,6 +16,7 @@ Speicially, ext_index.json has a list of public extensions, and a list of
 extensions enabled for specific tenant-ids.
 */
 use crate::compute::ComputeNode;
+use anyhow::Context;
 use anyhow::{self, bail, Result};
 use remote_storage::*;
 use serde_json::{self, Value};
@@ -31,7 +32,7 @@ use std::thread;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-// TODO: use these, it's better
+// TODO: use these crates for untarring, it's better
 // use tar::Archive;
 // use flate2::read::GzDecoder;
 
@@ -70,6 +71,7 @@ pub async fn get_available_extensions(
     custom_ext_prefixes: &Vec<String>,
 ) -> Result<HashSet<String>> {
     // TODO: in this function change expect's to pass the error instead of panic-ing
+    // TODO: figure out why it's calling library loads
 
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
 
@@ -147,22 +149,21 @@ pub async fn download_extension(
     pg_version: &str,
 ) -> Result<()> {
     let ext_name = ext_name.replace(".so", "");
-
-    info!("DOWNLOAD EXTENSION {:?}", ext_name);
     let ext_name_targz = ext_name.to_owned() + ".tar.gz";
+    if Path::new(&ext_name_targz).exists() {
+        info!("extension {:?} already exists", ext_name_targz);
+        return Ok(());
+    }
     let ext_path = RemotePath::new(
         &Path::new(pg_version)
             .join("extensions")
             .join(ext_name_targz.clone()),
     )?;
-    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql");
     info!(
         "Start downloading extension {:?} from {:?}",
         ext_name, ext_path
     );
     let mut download = remote_storage.download(&ext_path).await?;
-    // TODO: skip download if files already
     let mut write_data_buffer = Vec::new();
     download
         .download_stream
@@ -173,15 +174,13 @@ pub async fn download_extension(
     output_file.write_all(&write_data_buffer)?;
     info!("Download {:?} completed successfully", &ext_path);
     info!("Unzipping extension {:?}", zip_name);
-
-    // TODO unzip and place files in appropriate locations using the library suggested by some ppl
-    info!("unzip {zip_name:?}");
     std::process::Command::new("tar")
         .arg("xzvf")
         .arg(zip_name)
         .spawn()?
         .wait()?;
 
+    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let zip_sharedir = format!("extensions/{ext_name}/share/extension");
     info!("mv {zip_sharedir:?}/* {local_sharedir:?}");
     for file in std::fs::read_dir(zip_sharedir)? {
@@ -190,6 +189,7 @@ pub async fn download_extension(
             Path::new(&local_sharedir).join(old_file.file_name().expect("error parsing file"));
         std::fs::rename(old_file, new_file)?;
     }
+    let local_libdir = Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql");
     let zip_libdir = format!("extensions/{ext_name}/lib");
     info!("mv {zip_libdir:?}/* {local_libdir:?}");
     for file in std::fs::read_dir(zip_libdir)? {
@@ -208,31 +208,25 @@ pub fn init_remote_storage(
 ) -> anyhow::Result<GenericRemoteStorage> {
     let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
 
-    let remote_ext_bucket = match &remote_ext_config["bucket"] {
-        Value::String(x) => x,
-        _ => bail!("remote_ext_config missing bucket"),
-    };
-    let remote_ext_region = match &remote_ext_config["region"] {
-        Value::String(x) => x,
-        _ => bail!("remote_ext_config missing region"),
-    };
-    let remote_ext_endpoint = match &remote_ext_config["endpoint"] {
-        Value::String(x) => Some(x.clone()),
-        _ => None,
-    };
-    let remote_ext_prefix = match &remote_ext_config["prefix"] {
-        Value::String(x) => Some(x.clone()),
-        // if prefix is not provided, use default, which is the build_tag
-        _ => Some(default_prefix.to_string()),
-    };
+    let remote_ext_bucket = remote_ext_config["bucket"]
+        .as_str()
+        .context("config parse error")?;
+    let remote_ext_region = remote_ext_config["region"]
+        .as_str()
+        .context("config parse error")?;
+    let remote_ext_endpoint = remote_ext_config["endpoint"].as_str();
+    let remote_ext_prefix = remote_ext_config["prefix"]
+        .as_str()
+        .unwrap_or(default_prefix)
+        .to_string();
 
     // TODO: is this a valid assumption? some extensions are quite large
     // load should not be large, so default parameters are fine
     let config = S3Config {
         bucket_name: remote_ext_bucket.to_string(),
         bucket_region: remote_ext_region.to_string(),
-        prefix_in_bucket: remote_ext_prefix,
-        endpoint: remote_ext_endpoint,
+        prefix_in_bucket: Some(remote_ext_prefix),
+        endpoint: remote_ext_endpoint.map(|x| x.to_string()),
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
     };
