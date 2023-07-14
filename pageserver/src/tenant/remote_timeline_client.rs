@@ -854,9 +854,9 @@ impl RemoteTimelineClient {
             .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
-                    info!(%name, "deleting a file unbound to index_part.json");
+                    info!(%name, "deleting a file not referenced from index_part.json");
                 } else {
-                    warn!(%path, "deleting a nameless or non-utf8 object unbound to index_part.json");
+                    warn!(%path, "deleting a nameless or non-utf8 object not referenced from index_part.json");
                 }
             })
             .collect();
@@ -870,7 +870,7 @@ impl RemoteTimelineClient {
         debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
-        info!(bound=deletions_queued, unbound=%remaining.len(), "done deleting, including index_part.json");
+        info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
 
         Ok(())
     }
