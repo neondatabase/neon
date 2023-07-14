@@ -245,7 +245,8 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", tenant_id = "tenant-1", timeline_id = "timeline-1");
         let _guard = span.enter();
-        check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
+        let res = check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]);
+        assert!(matches!(res, Ok(Summary::FoundEverything)), "{res:?}");
     }
 
     #[test]
@@ -271,7 +272,8 @@ mod tests {
         let span = tracing::info_span!("grandchild", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]).unwrap();
+        let res = check_fields_present0([&setup.tenant_extractor, &setup.timeline_extractor]);
+        assert!(matches!(res, Ok(Summary::FoundEverything)), "{res:?}");
     }
 
     #[test]
@@ -293,7 +295,8 @@ mod tests {
         let setup = setup_current_thread();
         let span = tracing::info_span!("root", tenant_id = "tenant-1", timeline_id = "timeline-1");
         let _guard = span.enter();
-        check_fields_present0([&setup.tenant_extractor]).unwrap();
+        let res = check_fields_present0([&setup.tenant_extractor]);
+        assert!(matches!(res, Ok(Summary::FoundEverything)), "{res:?}");
     }
 
     #[test]
@@ -309,7 +312,8 @@ mod tests {
         let span = tracing::info_span!("grandchild", timeline_id = "timeline-1");
         let _guard = span.enter();
 
-        check_fields_present0([&setup.tenant_extractor]).unwrap();
+        let res = check_fields_present0([&setup.tenant_extractor]);
+        assert!(matches!(res, Ok(Summary::FoundEverything)), "{res:?}");
     }
 
     #[test]
