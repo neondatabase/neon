@@ -56,12 +56,12 @@ struct ProxyCliArgs {
     auth_endpoint: String,
     /// path to TLS key for client postgres connections
     ///
-    /// backwards compability
+    /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'k', long, alias = "ssl-key")]
     tls_key: Option<String>,
     /// path to TLS cert for client postgres connections
     ///
-    /// backwards compability
+    /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<String>,
     /// path to directory with TLS certificates for client postgres connections
