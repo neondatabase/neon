@@ -128,9 +128,9 @@ jobs:
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
-        run: cargo doc --all
+        run: cargo doc --workspace --no-deps
         env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+            RUSTDOCFLAGS: "-Dwarnings"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
