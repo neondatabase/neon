@@ -598,9 +598,6 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
 
-    env.pageserver.allowed_errors.append(
-        ".*files not bound to index_file.json, proceeding with their deletion.*"
-    )
     timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()

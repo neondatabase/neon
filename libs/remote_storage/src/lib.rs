@@ -50,6 +50,12 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemotePath(PathBuf);
 
+impl std::fmt::Display for RemotePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
 impl RemotePath {
     pub fn new(relative_path: &Path) -> anyhow::Result<Self> {
         anyhow::ensure!(
