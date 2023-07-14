@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn not_found_if_tracing_error_subscriber_has_wrong_filter() {
+    fn not_found_when_disabled_by_filter() {
         let r = tracing_subscriber::registry().with({
             tracing_error::ErrorLayer::default().with_filter(tracing_subscriber::filter::filter_fn(
                 |md| !(md.is_span() && *md.level() == tracing::Level::INFO),
@@ -401,13 +401,37 @@ mod tests {
 
         let _guard = tracing::subscriber::set_default(r);
 
-        let span = tracing::info_span!("foo", e = "some value");
-        assert!(span.is_disabled(), "we want the filter to disable the span; it happens with filter_fn, but not with dynamic_filter_fn");
+        // this test is a rather tricky one, it has a number of possible outcomes depending on the
+        // execution order when executed with other tests even if no test sets the global default
+        // subscriber.
 
+        let span = tracing::info_span!("foo", e = "some value");
         let _guard = span.enter();
 
-        let extractor = MultiNameExtractor::new("E", ["e"]);
-        let missing = check_fields_present0([&extractor]).unwrap_err();
-        assert_missing(missing, vec![&extractor]);
+        let extractors: [&dyn Extractor; 1] = [&MultiNameExtractor::new("E", ["e"])];
+
+        if span.is_disabled() {
+            // the tests are running single threaded, or we got lucky and no other tests subscriber
+            // was got to register their per-CALLSITE::META interest between `set_default` and
+            // creation of the span, thus the filter got to apply and registered interest of Never,
+            // so the span was never created.
+            //
+            // as the span is disabled, no keys were recorded to it, leading check_fields_present0
+            // to find an error.
+
+            let missing = check_fields_present0(extractors).unwrap_err();
+            assert_missing(missing, vec![extractors[0]]);
+        } else {
+            // when the span is enabled, it is because some other test is running at the same time,
+            // and that tests registry has filters which are interested in our above span.
+            //
+            // because the span is now enabled, all keys will be found for it. the
+            // tracing_error::SpanTrace does not consider layer filters during the span hierarchy
+            // walk (SpanTrace::with_spans), nor is the SpanTrace::status a reliable indicator in
+            // this test-induced issue.
+
+            let res = check_fields_present0(extractors);
+            assert!(matches!(res, Ok(Summary::FoundEverything)), "{res:?}");
+        }
     }
 }
