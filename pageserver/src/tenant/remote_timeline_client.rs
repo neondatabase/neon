@@ -842,14 +842,16 @@ impl RemoteTimelineClient {
         let remaining: Vec<RemotePath> = remaining
             .into_iter()
             .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
+            .inspect(|path| {
+                if let Some(name) = path.object_name() {
+                    info!(%name, "deleting a file not referenced from index_part.json");
+                } else {
+                    warn!(%path, "deleting a nameless or non-utf8 object not referenced from index_part.json");
+                }
+            })
             .collect();
 
         if !remaining.is_empty() {
-            warn!(
-                "Found {} files not bound to index_file.json, proceeding with their deletion",
-                remaining.len()
-            );
-            warn!("About to remove {} files", remaining.len());
             self.storage_impl.delete_objects(&remaining).await?;
         }
 
@@ -858,7 +860,7 @@ impl RemoteTimelineClient {
         debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
-        info!(deletions_queued, "done deleting, including index_part.json");
+        info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
 
         Ok(())
     }

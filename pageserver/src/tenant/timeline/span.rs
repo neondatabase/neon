@@ -14,10 +14,7 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
         &*crate::tenant::span::TENANT_ID_EXTRACTOR,
         &*TIMELINE_ID_EXTRACTOR,
     ];
-    if let Err(missing) = check_fields_present(fields) {
-        panic!(
-            "missing extractors: {:?}",
-            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
-        )
+    if let Err(missing) = check_fields_present!(fields) {
+        panic!("missing extractors: {missing:?}")
     }
 }

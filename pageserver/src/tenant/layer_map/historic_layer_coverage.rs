@@ -122,8 +122,7 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         self.head = self
             .historic
             .iter()
-            .rev()
-            .next()
+            .next_back()
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
     }
