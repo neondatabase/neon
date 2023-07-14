@@ -194,10 +194,23 @@ impl LayerManager {
         updates.flush();
     }
 
-    /// Insert into the layer map when a new delta layer is created, called from `create_delta_layer`.
-    pub fn track_new_l0_delta_layer(&mut self, delta_layer: Arc<DeltaLayer>) {
+    /// Flush a frozen layer and add the written delta layer to the layer map.
+    pub fn finish_flush_l0_layer(
+        &mut self,
+        delta_layer: Option<DeltaLayer>,
+        frozen_layer_for_check: &Arc<InMemoryLayer>,
+    ) {
+        let l = self.layer_map.frozen_layers.pop_front();
         let mut updates = self.layer_map.batch_update();
-        Self::insert_historic_layer(delta_layer, &mut updates, &mut self.layer_fmgr);
+
+        // Only one thread may call this function at a time (for this
+        // timeline). If two threads tried to flush the same frozen
+        // layer to disk at the same time, that would not work.
+        assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
+
+        if let Some(delta_layer) = delta_layer {
+            Self::insert_historic_layer(Arc::new(delta_layer), &mut updates, &mut self.layer_fmgr);
+        }
         updates.flush();
     }
 
