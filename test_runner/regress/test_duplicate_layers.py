@@ -40,3 +40,5 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.stop()
     env.pageserver.start()
     time.sleep(10)  # let compaction to be performed
+
+    assert env.pageserver.log_contains("compact-level0-phase1-return-same")
