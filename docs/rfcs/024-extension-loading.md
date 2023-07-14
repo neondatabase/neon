@@ -166,7 +166,7 @@ extensions enabled for specific tenant-ids. Here is an example `ext_index.json`:
     "anon": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
   }
 }
-
+```
 
 ### How to add new extension to the Extension Storage?
 
