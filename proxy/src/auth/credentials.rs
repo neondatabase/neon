@@ -48,6 +48,14 @@ impl ClientCredentials<'_> {
 }
 
 impl<'a> ClientCredentials<'a> {
+    #[cfg(test)]
+    pub fn new_noop() -> Self {
+        ClientCredentials {
+            user: "",
+            project: None,
+        }
+    }
+
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,

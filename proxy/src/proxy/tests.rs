@@ -1,5 +1,9 @@
 //! A group of high-level tests for connection establishing logic and auth.
+use std::borrow::Cow;
+
 use super::*;
+use crate::auth::ClientCredentials;
+use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::{auth, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -303,4 +307,79 @@ fn connect_compute_total_wait() {
     }
     assert!(total_wait < tokio::time::Duration::from_secs(12));
     assert!(total_wait > tokio::time::Duration::from_secs(10));
+}
+
+struct TestConnectMechanism {
+    counter: Arc<std::sync::Mutex<usize>>,
+}
+
+impl TestConnectMechanism {
+    fn new() -> Self {
+        Self {
+            counter: Arc::new(std::sync::Mutex::new(0)),
+        }
+    }
+}
+
+struct TestConnection;
+
+#[derive(Debug)]
+struct TestConnectError(());
+
+impl std::fmt::Display for TestConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "()")
+    }
+}
+
+impl std::error::Error for TestConnectError {}
+
+impl ShouldRetry for TestConnectError {
+    fn could_retry(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait]
+impl ConnectMechanism for TestConnectMechanism {
+    type Connection = TestConnection;
+    type ConnectError = TestConnectError;
+    type Error = anyhow::Error;
+
+    async fn connect_once(
+        &self,
+        _node_info: &console::CachedNodeInfo,
+        _timeout: time::Duration,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        let mut counter = self.counter.lock().unwrap();
+        *counter += 1;
+        if *counter < 3 {
+            Err(TestConnectError(()))
+        } else {
+            Ok(TestConnection)
+        }
+    }
+
+    fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
+}
+
+#[tokio::test]
+async fn connect_to_compute_retry() {
+    let mechanism = TestConnectMechanism::new();
+    let node = NodeInfo {
+        config: compute::ConnCfg::new(),
+        aux: Default::default(),
+        allow_self_signed_compute: false,
+    };
+    let cache = CachedNodeInfo::new_uncached(node);
+    let extra = console::ConsoleReqExtra {
+        session_id: uuid::Uuid::new_v4(),
+        application_name: Some("TEST"),
+    };
+    let url = "https://TEST_URL".parse().unwrap();
+    let api = console::provider::mock::Api::new(url);
+    let creds = auth::BackendType::Postgres(Cow::Owned(api), ClientCredentials::new_noop());
+    connect_to_compute(&mechanism, cache, &extra, &creds)
+        .await
+        .unwrap();
 }
