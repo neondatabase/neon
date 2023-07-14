@@ -2723,8 +2723,6 @@ impl Timeline {
                 )
             };
 
-        pausable_failpoint!("flush-frozen-before-sync");
-
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
@@ -2750,6 +2748,10 @@ impl Timeline {
             // release lock on 'layers'
         }
 
+        // originally, this pausable failpoint is before the above code block, but we move it here
+        // because it requires the updated data is inside the layer map, after PR#4270 refactor.
+        // probably we can merge these two failpoints.
+        pausable_failpoint!("flush-frozen-before-sync");
         fail_point!("checkpoint-after-sync");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
