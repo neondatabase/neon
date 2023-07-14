@@ -3588,7 +3588,9 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(Arc::new(writer.take().unwrap().finish(prev_key.unwrap().next())?));
+                        new_layers.push(Arc::new(
+                            writer.take().unwrap().finish(prev_key.unwrap().next())?,
+                        ));
                         writer = None;
 
                         if contains_hole {
