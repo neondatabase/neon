@@ -314,6 +314,8 @@ pub struct Timeline {
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
     /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
+    ///
+    /// [`Tenant::delete_timeline`]: super::Tenant::delete_timeline
     pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
@@ -3492,6 +3494,8 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
+    ///
+    /// [`compact_inner`]: Self::compact_inner
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,

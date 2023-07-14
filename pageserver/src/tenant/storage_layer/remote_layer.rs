@@ -50,6 +50,8 @@ pub struct RemoteLayer {
     /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
     /// a possible fast loop between `Timeline::get_reconstruct_data` and
     /// `Timeline::download_remote_layer`, which also logs.
+    ///
+    /// [`ongoing_download`]: Self::ongoing_download
     pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 

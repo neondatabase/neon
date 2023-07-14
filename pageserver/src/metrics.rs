@@ -385,7 +385,7 @@ pub static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-/// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
+/// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {
     data_source: &'static str,
@@ -818,7 +818,7 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Similar to [`prometheus::HistogramTimer`] but does not record on drop.
+/// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
@@ -876,7 +876,7 @@ impl StorageTimeMetrics {
 
     /// Starts timing a new operation.
     ///
-    /// Note: unlike [`prometheus::HistogramTimer`] the returned timer does not record on drop.
+    /// Note: unlike `prometheus::HistogramTimer` the returned timer does not record on drop.
     pub fn start_timer(&self) -> StorageTimeMetricsTimer {
         StorageTimeMetricsTimer::new(self.clone())
     }
@@ -1256,7 +1256,7 @@ impl RemoteTimelineClientMetrics {
     /// Update the metrics that change when a call to the remote timeline client instance starts.
     ///
     /// Drop the returned guard object once the operation is finished to updates corresponding metrics that track completions.
-    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`] if that
+    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`](Self::call_end) if that
     /// is more suitable.
     /// Never do both.
     pub(crate) fn call_begin(
@@ -1289,7 +1289,7 @@ impl RemoteTimelineClientMetrics {
 
     /// Manually udpate the metrics that track completions, instead of using the guard object.
     /// Using the guard object is generally preferable.
-    /// See [`call_begin`] for more context.
+    /// See [`call_begin`](Self::call_begin) for more context.
     pub(crate) fn call_end(
         &self,
         file_kind: &RemoteOpFileKind,
