@@ -19,12 +19,6 @@ use tokio::io;
 use tokio::io::AsyncWrite;
 use tracing::*;
 
-/// NB: This relies on a modified version of tokio_tar that does *not* write the
-/// end-of-archive marker (1024 zero bytes), when the Builder struct is dropped
-/// without explicitly calling 'finish' or 'into_inner'!
-///
-/// See https://github.com/neondatabase/tokio-tar/pull/1
-///
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
