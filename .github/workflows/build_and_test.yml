@@ -128,7 +128,7 @@ jobs:
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --document-private-items
         env:
             RUSTDOCFLAGS: "-Dwarnings"
 
