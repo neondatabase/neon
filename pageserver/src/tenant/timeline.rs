@@ -3124,7 +3124,7 @@ impl Timeline {
 
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
-    new_layers: Vec<DeltaLayer>,
+    new_layers: Vec<Arc<DeltaLayer>>,
     deltas_to_compact: Vec<Arc<PersistentLayerDesc>>,
 }
 
@@ -3299,6 +3299,36 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        // This failpoint is used together with `test_duplicate_layers` integration test.
+        // It returns the compaction result exactly the same layers as input to compaction.
+        // We want to ensure that this will not cause any problem when updating the layer map
+        // after the compaction is finished.
+        //
+        // Currently, there are two rare edge cases that will cause duplicated layers being
+        // inserted.
+        // 1. The compaction job is inturrupted / did not finish successfully. Assume we have file 1, 2, 3, 4, which
+        //    is compacted to 5, but the page server is shut down, next time we start page server we will get a layer
+        //    map containing 1, 2, 3, 4, and 5, whereas 5 has the same content as 4. If we trigger L0 compation at this
+        //    point again, it is likely that we will get a file 6 which has the same content and the key range as 5,
+        //    and this causes an overwrite. This is acceptable because the content is the same, and we should do a
+        //    layer replace instead of the normal remove / upload process.
+        // 2. The input workload pattern creates exactly n files that are sorted, non-overlapping and is of target file
+        //    size length. Compaction will likely create the same set of n files afterwards.
+        //
+        // This failpoint is a superset of both of the cases.
+        fail_point!("compact-level0-phase1-return-same", |_| {
+            Ok(CompactLevel0Phase1Result {
+                new_layers: level0_deltas
+                    .iter()
+                    .map(|x| x.clone().downcast_delta_layer().unwrap())
+                    .collect(),
+                deltas_to_compact: level0_deltas
+                    .iter()
+                    .map(|x| x.layer_desc().clone().into())
+                    .collect(),
+            })
+        });
 
         // Gather the files to compact in this iteration.
         //
@@ -3558,7 +3588,7 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
+                        new_layers.push(Arc::new(writer.take().unwrap().finish(prev_key.unwrap().next())?));
                         writer = None;
 
                         if contains_hole {
@@ -3596,7 +3626,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next())?);
+            new_layers.push(Arc::new(writer.finish(prev_key.unwrap().next())?));
         }
 
         // Sync layers
@@ -3618,10 +3648,6 @@ impl Timeline {
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
-
-        fail_point!("compact-level0-phase1-finish", |_| {
-            Err(anyhow::anyhow!("failpoint compact-level0-phase1-finish").into())
-        });
 
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
             .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
@@ -3740,17 +3766,17 @@ impl Timeline {
                 .add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            x.access_stats().record_residence_event(
+            l.access_stats().record_residence_event(
                 &guard,
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            if guard.contains(&x) {
-                duplicated_layers.insert(x.layer_desc().key());
-                warn!("duplicated layers generated in compaction: {x}",);
+            let l = l as Arc<dyn PersistentLayer>;
+            if guard.contains(&l) {
+                duplicated_layers.insert(l.layer_desc().key());
+                warn!("duplicated layers generated in compaction: {l}",);
             } else {
-                insert_layers.push(x);
+                insert_layers.push(l);
             }
         }
 

@@ -16,7 +16,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # These warnings are expected, when the pageserver is restarted abruptly
     env.pageserver.allowed_errors.append(".*found future image layer.*")
     env.pageserver.allowed_errors.append(".*found future delta layer.*")
-    env.pageserver.allowed_errors.append(".*duplicate layer.*")
+    env.pageserver.allowed_errors.append(".*duplicate layers.*")
 
     pageserver_http = env.pageserver.http_client()
 
@@ -33,7 +33,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
 
-    pageserver_http.configure_failpoints(("compact-level0-phase1-finish", "exit"))
+    pageserver_http.configure_failpoints(("compact-level0-phase1-return-same", "exit"))
 
     with pytest.raises(Exception):
         pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
