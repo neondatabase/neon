@@ -34,11 +34,9 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
-    pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
+    pg_bin.run_capture(["pgbench", "-i", "-s5", connstr])
 
     time.sleep(10)  # let compaction to be performed
     assert env.pageserver.log_contains("compact-level0-phase1-return-same")
 
-    with pytest.raises(Exception):
-        pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
-
+    pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
