@@ -3318,6 +3318,7 @@ impl Timeline {
         //
         // This failpoint is a superset of both of the cases.
         fail_point!("compact-level0-phase1-return-same", |_| {
+            println!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
             Ok(CompactLevel0Phase1Result {
                 new_layers: level0_deltas
                     .iter()
@@ -3776,7 +3777,6 @@ impl Timeline {
             let l = l as Arc<dyn PersistentLayer>;
             if guard.contains(&l) {
                 duplicated_layers.insert(l.layer_desc().key());
-                warn!("duplicated layers generated in compaction: {l}",);
             } else {
                 insert_layers.push(l);
             }
