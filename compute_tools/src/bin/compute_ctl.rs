@@ -75,8 +75,13 @@ fn main() -> Result<()> {
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
     // TODO NOTE: until control-plane changes, we can use the following line to forcibly enable remote extensions
     let remote_ext_config = remote_ext_config.map(|x| x.to_owned());
-    let remote_ext_config =
-        Some(remote_ext_config.unwrap_or(DEFAULT_REMOTE_EXT_CONFIG.to_string()));
+    // let remote_ext_config =
+    //     Some(remote_ext_config.unwrap_or(DEFAULT_REMOTE_EXT_CONFIG.to_string()));
+    if remote_ext_config == Some("ALEKTESTREMOTECONFIG".to_string()) {
+        return Ok(());
+    }
+
+    let remote_ext_config: Option<String> = None;
     let ext_remote_storage = remote_ext_config.map(|x| {
         init_remote_storage(&x, build_tag)
             .expect("cannot initialize remote extension storage from config")
