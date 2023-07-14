@@ -139,29 +139,33 @@ popular extensions.
 
 ## Extension Storage implementation
 
-Extension Storage in our case is an S3 bucket with a "directory" per build and postgres version,
-where extension files are stored as plain files in the bucket following the same directory structure as in the postgres.
-
-i.e.
-
-`s3://<the-bucket>/<build-version>/<postgres-version>/lib/postgis-3.1.so`
-`s3://<the-bucket>/<build-version>/<postgres-version>/share/extension/postgis.control`
-`s3://<the-bucket>/<build-version>/<postgres-version>/share/extension/postgis--3.1.sql`
-
-To handle custom extensions, that available only to specific users, we use per-extension subdirectories:
-
-i.e.
-`s3://<the-bucket>/<build-version>/<postgres-version>/<custom-ext-prefix>/lib/ext-name.so`, etc.
-`s3://<the-bucket>/<build-version>/<postgres-version>/<custom-ext-prefix>/share/extension/ext-name.control`, etc.
-
-On compute start, `compute_ctl` accepts a list of custom_ext_prefixes.
-
-To get the list of available extensions,`compute_ctl` downloads control files from all prefixes:
-
-`s3://<the-bucket>/<build-version>/<postgres-version>/share/extension/`
-`s3://<the-bucket>/<build-version>/<postgres-version>/<custom-ext-prefix1>/share/extension/`
-`s3://<the-bucket>/<build-version>/<postgres-version>/<custom-ext-prefix2>/share/extension/`
-
+The layout of the S3 bucket is as follows:
+```
+v14/ext_index.json
+    -- this contains information necessary to create control files
+v14/extensions/test_ext1.tar.gz
+    -- this contains the library files and sql files necessary to create this extension
+v14/extensions/custom_ext1.tar.gz
+```
+The difference between private and public extensions is determined by who can
+load the extension. This is specified in `ext_index.json`.
+Speicially, `ext_index.json` has a list of public extensions, and a list of
+extensions enabled for specific tenant-ids. Here is an example `ext_index.json`:
+```
+{
+  "enabled_extensions": {
+    "123454321": [
+      "anon"
+    ],
+    "public": [
+      "embedding"
+    ]
+  },
+  "control_data": {
+    "embedding": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
+    "anon": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+  }
+}
 
 
 ### How to add new extension to the Extension Storage?
