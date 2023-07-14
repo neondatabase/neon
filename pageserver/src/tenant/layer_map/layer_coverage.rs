@@ -113,8 +113,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     pub fn query(&self, key: i128) -> Option<Value> {
         self.nodes
             .range(..=key)
-            .rev()
-            .next()?
+            .next_back()?
             .1
             .as_ref()
             .map(|(_, v)| v.clone())

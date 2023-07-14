@@ -151,10 +151,7 @@ impl RemoteStorage for LocalFs {
         let mut files = vec![];
         let mut directory_queue = vec![full_path.clone()];
 
-        while !directory_queue.is_empty() {
-            let cur_folder = directory_queue
-                .pop()
-                .expect("queue cannot be empty: we just checked");
+        while let Some(cur_folder) = directory_queue.pop() {
             let mut entries = fs::read_dir(cur_folder.clone()).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let file_name: PathBuf = entry.file_name().into();
