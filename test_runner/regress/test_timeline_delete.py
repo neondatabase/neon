@@ -711,6 +711,7 @@ def test_timeline_delete_works_for_remote_smoke(
     assert tenant_id == env.initial_tenant
     assert main_timeline_id == env.initial_timeline
 
+    assert env.initial_timeline
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
