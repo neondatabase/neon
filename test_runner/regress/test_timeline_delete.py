@@ -248,7 +248,7 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
             iterations=2,  # effectively try immediately and retry once in one second
         )
 
-        timeline_info["state"]["Broken"]["reason"] == failpoint
+        assert timeline_info["state"]["Broken"]["reason"] == failpoint
 
     wait_longer = remote_storage_kind is RemoteStorageKind.REAL_S3
     if check is Check.RETRY_WITH_RESTART:
@@ -459,7 +459,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
