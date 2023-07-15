@@ -130,7 +130,7 @@ jobs:
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
         env:
-            RUSTDOCFLAGS: "-Dwarnings"
+            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
