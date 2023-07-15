@@ -411,12 +411,16 @@ pub struct LayerResidenceEvent {
     pub reason: LayerResidenceEventReason,
 }
 
-/// The reason for recording a given [`ResidenceEvent`].
+/// The reason for recording a given [`LayerResidenceEvent`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceEventReason {
     /// The layer map is being populated, e.g. during timeline load or attach.
     /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
     /// We need to record such events because there is no persistent storage for the events.
+    ///
+    // https://github.com/rust-lang/rust/issues/74481
+    /// [`RemoteLayer`]: ../../tenant/storage_layer/struct.RemoteLayer.html
+    /// [`reconcile_with_remote`]: ../../tenant/struct.Timeline.html#method.reconcile_with_remote
     LayerLoad,
     /// We just created the layer (e.g., freeze_and_flush or compaction).
     /// Such layers are always [`LayerResidenceStatus::Resident`].

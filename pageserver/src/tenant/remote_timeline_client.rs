@@ -135,7 +135,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Timeline::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
+//!   [`Tenant::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
@@ -163,8 +163,8 @@
 //!   - download their remote [`IndexPart`]s
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
 //!   - initialize the client's upload queue with its `IndexPart`
-//!   - create [`RemoteLayer`] instances for layers that are referenced by `IndexPart`
-//!     but not present locally
+//!   - create [`RemoteLayer`](super::storage_layer::RemoteLayer) instances
+//!     for layers that are referenced by `IndexPart` but not present locally
 //!   - schedule uploads for layers that are only present locally.
 //!   - if the remote `IndexPart`'s metadata was newer than the metadata in
 //!     the local filesystem, write the remote metadata to the local filesystem
@@ -198,6 +198,8 @@
 //! in remote storage.
 //! But note that we don't test any of this right now.
 //!
+//! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
+//! [`Timeline::reconcile_with_remote`]: super::Timeline::reconcile_with_remote
 
 mod delete;
 mod download;

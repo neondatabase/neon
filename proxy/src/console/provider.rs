@@ -197,7 +197,7 @@ pub trait Api {
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 
-/// Various caches for [`console`].
+/// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,

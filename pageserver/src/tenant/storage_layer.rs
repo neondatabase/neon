@@ -162,6 +162,9 @@ impl LayerAccessStats {
     /// The caller is responsible for recording a residence event
     /// using [`record_residence_event`] before calling `latest_activity`.
     /// If they don't, [`latest_activity`] will return `None`.
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
+    /// [`latest_activity`]: Self::latest_activity
     pub(crate) fn empty_will_record_residence_event_later() -> Self {
         LayerAccessStats(Mutex::default())
     }
@@ -169,6 +172,9 @@ impl LayerAccessStats {
     /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    ///
+    /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
+    /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn for_loading_layer(
         layer_map_lock_held_witness: &LayerManager,
         status: LayerResidenceStatus,
@@ -187,6 +193,8 @@ impl LayerAccessStats {
     /// The `new_status` is not recorded in `self`.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn clone_for_residence_change(
         &self,
         layer_map_lock_held_witness: &LayerManager,
@@ -294,11 +302,13 @@ impl LayerAccessStats {
     /// implementation error. This function logs a rate-limited warning in that case.
     ///
     /// TODO: use type system to avoid the need for `fallback`.
-    /// The approach in https://github.com/neondatabase/neon/pull/3775
+    /// The approach in <https://github.com/neondatabase/neon/pull/3775>
     /// could be used to enforce that a residence event is recorded
     /// before a layer is added to the layer map. We could also have
     /// a layer wrapper type that holds the LayerAccessStats, and ensure
     /// that that type can only be produced by inserting into the layer map.
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
@@ -323,7 +333,7 @@ impl LayerAccessStats {
 }
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`].
+/// required by [`LayerMap`](super::layer_map::LayerMap).
 ///
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
@@ -370,10 +380,10 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
-/// Returned by [`Layer::iter`]
+/// Returned by [`PersistentLayer::iter`]
 pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
 
-/// Returned by [`Layer::key_iter`]
+/// Returned by [`PersistentLayer::key_iter`]
 pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
 
 /// Get a layer descriptor from a layer.

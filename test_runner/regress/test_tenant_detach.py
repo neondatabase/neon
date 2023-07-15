@@ -791,7 +791,7 @@ def test_ignore_while_attaching(
     pageserver_http.tenant_attach(tenant_id)
     # Run ignore on the task, thereby cancelling the attach.
     # XXX This should take priority over attach, i.e., it should cancel the attach task.
-    # But neither the failpoint, nor the proper storage_sync download functions,
+    # But neither the failpoint, nor the proper remote_timeline_client download functions,
     # are sensitive to task_mgr::shutdown.
     # This problem is tracked in https://github.com/neondatabase/neon/issues/2996 .
     # So, for now, effectively, this ignore here will block until attach task completes.

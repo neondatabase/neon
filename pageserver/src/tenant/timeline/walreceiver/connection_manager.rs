@@ -6,7 +6,7 @@
 //! Current connection state is tracked too, to ensure it's not getting stale.
 //!
 //! After every connection or storage broker update fetched, the state gets updated correspondingly and rechecked for the new conneciton leader,
-//! then a [re]connection happens, if necessary.
+//! then a (re)connection happens, if necessary.
 //! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};

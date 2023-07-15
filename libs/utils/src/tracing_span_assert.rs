@@ -35,7 +35,7 @@
 //! # }
 //! ```
 //!
-//! Recommended reading: https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
+//! Recommended reading: <https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering>
 //!
 
 #[derive(Debug)]
