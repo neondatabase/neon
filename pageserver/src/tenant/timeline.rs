@@ -2714,7 +2714,7 @@ impl Timeline {
                     }
                 }
                 // Normal case, write out a L0 delta layer file.
-                // For delta layers, `create_delta_layer` will not modify the layer map.
+                // `create_delta_layer` will not modify the layer map.
                 // We will remove frozen layer and add delta layer in one atomic operation later.
                 let layer = self.create_delta_layer(&frozen_layer).await?;
                 (
