@@ -11,7 +11,7 @@ use crate::{
         errors::{ApiError, WakeComputeError},
         messages::MetricsAuxInfo,
     },
-    stream::{self, PqStream, Stream},
+    stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -151,7 +151,7 @@ impl ClientMode {
         }
     }
 
-    fn hostname<'a, S>(&'a self, s: &'a stream::Stream<S>) -> Option<&'a str> {
+    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
         match self {
             ClientMode::Tcp => s.sni_hostname(),
             ClientMode::Websockets { hostname } => hostname.as_deref(),
