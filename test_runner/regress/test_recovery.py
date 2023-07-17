@@ -38,8 +38,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
                 # Configure failpoints
                 pageserver_http.configure_failpoints(
                     [
-                        ("flush-frozen-before-sync", "sleep(2000)"),
-                        ("checkpoint-after-sync", "exit"),
+                        ("flush-frozen-pausable", "sleep(2000)"),
+                        ("flush-frozen-exit", "exit"),
                     ]
                 )
 

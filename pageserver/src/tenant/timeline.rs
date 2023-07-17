@@ -2748,11 +2748,10 @@ impl Timeline {
             // release lock on 'layers'
         }
 
-        // originally, this pausable failpoint is before the above code block, but we move it here
-        // because it requires the updated data is inside the layer map, after PR#4270 refactor.
-        // probably we can merge these two failpoints.
-        pausable_failpoint!("flush-frozen-before-sync");
-        fail_point!("checkpoint-after-sync");
+        // some test cases require first stopping for some time, and then return an error,
+        // therefore we need two failpoints for that.
+        pausable_failpoint!("flush-frozen-pausable");
+        fail_point!("flush-frozen-exit");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
         //
