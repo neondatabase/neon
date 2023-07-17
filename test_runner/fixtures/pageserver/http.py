@@ -193,8 +193,7 @@ class PageserverHttpClient(requests.Session):
             body = "null"
         else:
             # null-config is prohibited by the API
-            if config is None:
-                config = {}
+            config = config or {}
             body = json.dumps({"config": config})
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach",

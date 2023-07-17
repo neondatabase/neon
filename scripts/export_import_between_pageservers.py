@@ -214,8 +214,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         self.running = True
 
-        if log_path is None:
-            log_path = os.path.join(self.pgdatadir, "pg.log")
+        log_path = log_path or os.path.join(self.pgdatadir, "pg.log")
 
         self.pg_bin.run_capture(
             ["pg_ctl", "-w", "-D", str(self.pgdatadir), "-l", log_path, "start"]

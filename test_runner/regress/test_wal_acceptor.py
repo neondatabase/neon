@@ -48,8 +48,7 @@ def wait_lsn_force_checkpoint(
     ps: NeonPageserver,
     pageserver_conn_options=None,
 ):
-    if pageserver_conn_options is None:
-        pageserver_conn_options = {}
+    pageserver_conn_options = pageserver_conn_options or {}
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
 
@@ -1139,7 +1138,7 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     collect_stats(endpoint, cur)
 
     # generate WAL to simulate normal workload
-    for _i in range(5):
+    for _ in range(5):
         generate_wal(cur)
         collect_stats(endpoint, cur)
 
