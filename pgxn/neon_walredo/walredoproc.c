@@ -62,7 +62,9 @@
 #endif
 
 #ifndef HAVE_GETRUSAGE
+#if PG_VERSION_NUM < 160000
 #include "rusagestub.h"
+#endif
 #endif
 
 #include "access/clog.h"
@@ -116,6 +118,7 @@
 #ifdef HAVE_LIBSECCOMP
 #include "neon_seccomp.h"
 #endif
+
 
 PG_MODULE_MAGIC;
 
@@ -662,18 +665,31 @@ BeginRedoForBlock(StringInfo input_message)
 	 * BlockNumber
 	 */
 	forknum = pq_getmsgbyte(input_message);
+#if PG_VERSION_NUM >= 160000
+	rnode.spcOid = pq_getmsgint(input_message, 4);
+	rnode.dbOid = pq_getmsgint(input_message, 4);
+	rnode.relNumber = pq_getmsgint(input_message, 4);
+#else
 	rnode.spcNode = pq_getmsgint(input_message, 4);
 	rnode.dbNode = pq_getmsgint(input_message, 4);
 	rnode.relNode = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 	wal_redo_buffer = InvalidBuffer;
 
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&target_redo_tag, &rnode, forknum, blknum);
+#else
 	INIT_BUFFERTAG(target_redo_tag, rnode, forknum, blknum);
+#endif
+
 
 	elog(TRACE, "BeginRedoForBlock %u/%u/%u.%d blk %u",
-		 target_redo_tag.rnode.spcNode,
-		 target_redo_tag.rnode.dbNode,
-		 target_redo_tag.rnode.relNode,
+#if PG_VERSION_NUM >= 160000
+			target_redo_tag.spcOid, target_redo_tag.dbOid, target_redo_tag.relNumber,
+#else
+			target_redo_tag.rnode.spcNode, target_redo_tag.rnode.dbNode, target_redo_tag.rnode.relNode,
+#endif	
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
@@ -709,9 +725,15 @@ PushPage(StringInfo input_message)
 	 * 8k page content
 	 */
 	forknum = pq_getmsgbyte(input_message);
+#if PG_VERSION_NUM >= 160000
+	rnode.spcOid = pq_getmsgint(input_message, 4);
+	rnode.dbOid = pq_getmsgint(input_message, 4);
+	rnode.relNumber = pq_getmsgint(input_message, 4);
+#else
 	rnode.spcNode = pq_getmsgint(input_message, 4);
 	rnode.dbNode = pq_getmsgint(input_message, 4);
 	rnode.relNode = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 	content = pq_getmsgbytes(input_message, BLCKSZ);
 
@@ -831,7 +853,12 @@ ApplyRecord(StringInfo input_message)
 	 */
 	if (BufferIsInvalid(wal_redo_buffer))
 	{
-		wal_redo_buffer = NeonRedoReadBuffer(target_redo_tag.rnode,
+		wal_redo_buffer = NeonRedoReadBuffer(
+#if PG_VERSION_NUM >= 160000
+											 BufTagGetRelFileLocator(&target_redo_tag),
+#else
+											 target_redo_tag.rnode,
+#endif
 											 target_redo_tag.forkNum,
 											 target_redo_tag.blockNum,
 											 RBM_NORMAL);
@@ -873,11 +900,42 @@ apply_error_callback(void *arg)
 }
 
 
+#if PG_VERSION_NUM >= 160000
 
 static bool
 redo_block_filter(XLogReaderState *record, uint8 block_id)
 {
 	BufferTag	target_tag;
+
+	RelFileLocator rlocator;
+	XLogRecGetBlockTag(record, block_id,
+					   &rlocator, &target_tag.forkNum, &target_tag.blockNum);
+
+	target_tag.spcOid = rlocator.spcOid;
+	target_tag.dbOid = rlocator.dbOid;
+	target_tag.relNumber = rlocator.relNumber;
+
+	/*
+	 * Can a WAL redo function ever access a relation other than the one that
+	 * it modifies? I don't see why it would.
+	 */
+	if (RelFileLocatorEquals(BufTagGetRelFileLocator(&target_tag), BufTagGetRelFileLocator(&target_redo_tag)))
+		elog(WARNING, "REDO accessing unexpected page: %u/%u/%u.%u blk %u",
+			target_tag.spcOid, target_tag.dbOid, target_tag.relNumber,
+			target_tag.forkNum, target_tag.blockNum);
+
+	/*
+	 * If this block isn't one we are currently restoring, then return 'true'
+	 * so that this gets ignored
+	 */
+	return !BufferTagsEqual(&target_tag, &target_redo_tag);
+}
+#else
+static bool
+redo_block_filter(XLogReaderState *record, uint8 block_id)
+{
+	BufferTag	target_tag;
+
 
 #if PG_VERSION_NUM >= 150000
 	XLogRecGetBlockTag(record, block_id,
@@ -897,14 +955,18 @@ redo_block_filter(XLogReaderState *record, uint8 block_id)
 	 */
 	if (!RelFileNodeEquals(target_tag.rnode, target_redo_tag.rnode))
 		elog(WARNING, "REDO accessing unexpected page: %u/%u/%u.%u blk %u",
-			 target_tag.rnode.spcNode, target_tag.rnode.dbNode, target_tag.rnode.relNode, target_tag.forkNum, target_tag.blockNum);
+			target_tag.rnode.spcNode, target_tag.rnode.dbNode, target_tag.rnode.relNode,
+			target_tag.forkNum, target_tag.blockNum);
 
 	/*
 	 * If this block isn't one we are currently restoring, then return 'true'
 	 * so that this gets ignored
 	 */
+
 	return !BUFFERTAGS_EQUAL(target_tag, target_redo_tag);
 }
+#endif
+
 
 /*
  * Get a page image back from buffer cache.
@@ -931,9 +993,15 @@ GetPage(StringInfo input_message)
 	 * BlockNumber
 	 */
 	forknum = pq_getmsgbyte(input_message);
+#if PG_VERSION_NUM >= 160000
+	rnode.spcOid = pq_getmsgint(input_message, 4);
+	rnode.dbOid = pq_getmsgint(input_message, 4);
+	rnode.relNumber = pq_getmsgint(input_message, 4);
+#else
 	rnode.spcNode = pq_getmsgint(input_message, 4);
 	rnode.dbNode = pq_getmsgint(input_message, 4);
 	rnode.relNode = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 
 	/* FIXME: check that we got a BeginRedoForBlock message or this earlier */
@@ -961,7 +1029,11 @@ GetPage(StringInfo input_message)
 	} while (tot_written < BLCKSZ);
 
 	ReleaseBuffer(buf);
+#if PG_VERSION_NUM >= 160000
+	DropRelationAllLocalBuffers(rnode);
+#else
 	DropRelFileNodeAllLocalBuffers(rnode);
+#endif
 	wal_redo_buffer = InvalidBuffer;
 
 	elog(TRACE, "Page sent back for block %u", blknum);

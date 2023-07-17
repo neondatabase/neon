@@ -15,7 +15,11 @@
 #include "postgres.h"
 
 #include "pagestore_client.h"
+#if PG_VERSION_NUM >= 160000
+#include "storage/relfilelocator.h"
+#else
 #include "storage/relfilenode.h"
+#endif
 #include "storage/smgr.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
@@ -27,6 +31,7 @@
 #if PG_VERSION_NUM >= 150000
 #include "miscadmin.h"
 #endif
+
 
 typedef struct
 {

@@ -25,7 +25,11 @@
 #include "pagestore_client.h"
 #include "access/parallel.h"
 #include "postmaster/bgworker.h"
+#if PG_VERSION_NUM >= 160000
+#include "storage/relfilelocator.h"
+#else
 #include "storage/relfilenode.h"
+#endif
 #include "storage/buf_internals.h"
 #include "storage/latch.h"
 #include "storage/ipc.h"
@@ -38,6 +42,7 @@
 #include "storage/procsignal.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -360,9 +365,12 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
-	tag.rnode = rnode;
-	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#else
+	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#endif
+
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
@@ -387,7 +395,11 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#else
 	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#endif
 
 	hash = get_hash_value(lfc_hash, &tag);
 
@@ -457,10 +469,12 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#else
+	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#endif
 
-	tag.rnode = rnode;
-	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -526,9 +540,12 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
-	tag.rnode = rnode;
-	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#else
+	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+#endif
+
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -722,9 +739,16 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				if (entry->bitmap[i >> 5] & (1 << (i & 31)))
 				{
 					fctx->record[n_pages].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
+
+#if PG_VERSION_NUM >= 160000
+					fctx->record[n_pages].relfilenode =  entry->key.relNumber;
+					fctx->record[n_pages].reltablespace = entry->key.spcOid;
+					fctx->record[n_pages].reldatabase = entry->key.dbOid;
+#else
 					fctx->record[n_pages].relfilenode = entry->key.rnode.relNode;
 					fctx->record[n_pages].reltablespace = entry->key.rnode.spcNode;
 					fctx->record[n_pages].reldatabase = entry->key.rnode.dbNode;
+#endif
 					fctx->record[n_pages].forknum = entry->key.forkNum;
 					fctx->record[n_pages].blocknum = entry->key.blockNum + i;
 					fctx->record[n_pages].accesscount = entry->access_count;

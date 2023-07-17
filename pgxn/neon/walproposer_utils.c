@@ -26,6 +26,10 @@
 #include "access/xlogrecovery.h"
 #endif
 
+#if PG_VERSION_NUM >= 160000
+#include "utils/guc.h"
+#endif
+
 /*
  * These variables are used similarly to openLogFile/SegNo,
  * but for walproposer to write the XLOG during recovery. walpropFileTLI is the TimeLineID

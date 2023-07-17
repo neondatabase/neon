@@ -16,7 +16,11 @@
 #include "postgres.h"
 
 #include "access/xlogdefs.h"
+#if PG_VERSION_NUM >= 160000
+#include "storage/relfilelocator.h"
+#else
 #include "storage/relfilenode.h"
+#endif
 #include "storage/block.h"
 #include "storage/smgr.h"
 #include "lib/stringinfo.h"
@@ -24,6 +28,34 @@
 #include "utils/memutils.h"
 
 #include "pg_config.h"
+
+// This is a hack to avoid too many ifdefs in the function definitions.
+#if PG_VERSION_NUM >= 160000
+typedef RelFileLocator RelFileNode;
+typedef RelFileLocatorBackend RelFileNodeBackend;
+#define RelFileNodeBackendIsTemp RelFileLocatorBackendIsTemp
+#endif
+
+#if PG_VERSION_NUM >= 160000
+#define RelnGetRnode(reln) (reln->smgr_rlocator.locator)
+#define RnodeGetSpcOid(rnode) (rnode.spcOid)
+#define RnodeGetDbOid(rnode) (rnode.dbOid)
+#define RnodeGetRelNumber(rnode) (rnode.relNumber)
+
+#define BufTagGetRnode(tag) (BufTagGetRelFileLocator(&tag))
+#else
+#define RelnGetRnode(reln) (reln->smgr_rnode.node)
+#define RnodeGetSpcOid(rnode) (rnode.spcNode)
+#define RnodeGetDbOid(rnode) (rnode.dbNode)
+#define RnodeGetRelNumber(rnode) (rnode.relNode)
+
+#define BufTagGetRnode(tag) (tag.rnode)
+
+#endif
+
+#define RelnGetSpcOid(reln) (RnodeGetRelNumber(RelnGetRnode(reln)))
+#define RelnGetDbOid(reln) (RnodeGetDbOid(RelnGetRnode(reln)))
+#define RelnGetRelNumber(reln) (RnodeGetRelNumber(RelnGetRnode(reln)))
 
 typedef enum
 {
@@ -85,7 +117,7 @@ typedef struct
 typedef struct
 {
 	NeonRequest req;
-	Oid			dbNode;
+	Oid			dbOid;
 }			NeonDbSizeRequest;
 
 typedef struct

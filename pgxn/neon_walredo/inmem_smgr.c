@@ -21,7 +21,6 @@
 #include "access/xlog.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
-#include "storage/relfilenode.h"
 #include "storage/smgr.h"
 
 #if PG_VERSION_NUM >= 150000
@@ -29,6 +28,7 @@
 #endif
 
 #include "inmem_smgr.h"
+
 
 /* Size of the in-memory smgr */
 #define MAX_PAGES 64
@@ -46,12 +46,22 @@ locate_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno)
 	/* We only hold a small number of pages, so linear search */
 	for (int i = 0; i < used_pages; i++)
 	{
-		if (RelFileNodeEquals(reln->smgr_rnode.node, page_tag[i].rnode)
+
+#if PG_VERSION_NUM >= 160000
+		if (BufTagMatchesRelFileLocator(&page_tag[i], &reln->smgr_rlocator.locator)
 			&& forknum == page_tag[i].forkNum
 			&& blkno == page_tag[i].blockNum)
 		{
 			return i;
 		}
+#else
+		if (RelFileNodeEquals(RelnGetRnode(reln), page_tag[i].rnode)
+			&& forknum == page_tag[i].forkNum
+			&& blkno == page_tag[i].blockNum)
+		{
+			return i;
+		}
+#endif
 	}
 	return -1;
 }
@@ -97,8 +107,12 @@ inmem_exists(SMgrRelation reln, ForkNumber forknum)
 {
 	for (int i = 0; i < used_pages; i++)
 	{
-		if (RelFileNodeEquals(reln->smgr_rnode.node, page_tag[i].rnode)
-			&& forknum == page_tag[i].forkNum)
+#if PG_VERSION_NUM >= 160000
+		if (BufTagMatchesRelFileLocator(&page_tag[i], &reln->smgr_rlocator.locator)
+#else
+		if (RelFileNodeEquals(RelnGetRnode(reln), page_tag[i].rnode)
+#endif			
+		&& forknum == page_tag[i].forkNum)
 		{
 			return true;
 		}
@@ -216,9 +230,9 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 */
 		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
 			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
-			 reln->smgr_rnode.node.spcNode,
-			 reln->smgr_rnode.node.dbNode,
-			 reln->smgr_rnode.node.relNode,
+			 RelnGetSpcOid(reln),
+			 RelnGetDbOid(reln),
+			 RelnGetRelNumber(reln),
 			 forknum,
 			 blocknum,
 			 used_pages);
@@ -227,14 +241,19 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		pg = used_pages;
 		used_pages++;
-		INIT_BUFFERTAG(page_tag[pg], reln->smgr_rnode.node, forknum, blocknum);
+
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&page_tag[pg], &RelnGetRnode(reln), forknum, blocknum);
+#else
+	INIT_BUFFERTAG(page_tag[pg], RelnGetRnode(reln), forknum, blocknum);
+#endif
 	}
 	else
 	{
 		elog(DEBUG1, "inmem_write() called for %u/%u/%u.%u blk %u: found at %u",
-			 reln->smgr_rnode.node.spcNode,
-			 reln->smgr_rnode.node.dbNode,
-			 reln->smgr_rnode.node.relNode,
+			 RelnGetSpcOid(reln),
+			 RelnGetDbOid(reln),
+			 RelnGetRelNumber(reln),
 			 forknum,
 			 blocknum,
 			 used_pages);

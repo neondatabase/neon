@@ -58,7 +58,11 @@
 #include "postmaster/autovacuum.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
+#if PG_VERSION_NUM >= 160000
+#include "storage/relfilelocator.h"
+#else
 #include "storage/relfilenode.h"
+#endif
 #include "storage/buf_internals.h"
 #include "storage/smgr.h"
 #include "storage/md.h"
@@ -69,6 +73,8 @@
 #include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
+
+
 
 /*
  * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
@@ -86,7 +92,10 @@
 static char *hexdump_page(char *page);
 #endif
 
-#define IS_LOCAL_REL(reln) (reln->smgr_rnode.node.dbNode != 0 && reln->smgr_rnode.node.relNode > FirstNormalObjectId)
+
+#define IS_LOCAL_REL(reln) (RelnGetDbOid(reln) != 0 && RelnGetRelNumber(reln) > FirstNormalObjectId)
+
+
 
 const int	SmgrTrace = DEBUG5;
 
@@ -184,7 +193,13 @@ typedef struct PrfHashEntry {
 	sizeof(BufferTag) \
 )
 
+
+#if PG_VERSION_NUM >= 160000
+#define SH_EQUAL(tb, a, b)	(BufferTagsEqual(&((a)->buftag),&((b)->buftag)))
+#else
 #define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
+#endif
+
 #define SH_SCOPE			static inline
 #define SH_DEFINE
 #define SH_DECLARE
@@ -634,7 +649,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		.req.tag = T_NeonGetPageRequest,
 		.req.latest = false,
 		.req.lsn = 0,
-		.rnode = slot->buftag.rnode,
+		.rnode = BufTagGetRnode(slot->buftag),
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
 	};
@@ -649,7 +664,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	{
 		XLogRecPtr lsn = neon_get_request_lsn(
 			&request.req.latest,
-			slot->buftag.rnode,
+			BufTagGetRnode(slot->buftag),
 			slot->buftag.forkNum,
 			slot->buftag.blockNum
 		);
@@ -729,8 +744,11 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		Assert(slot->status != PRFS_UNUSED);
 		Assert(MyPState->ring_last <= ring_index &&
 			   ring_index < MyPState->ring_unused);
+#if PG_VERSION_NUM >= 160000
+		Assert(BufferTagsEqual(&slot->buftag, &tag));
+#else
 		Assert(BUFFERTAGS_EQUAL(slot->buftag, tag));
-
+#endif
 		/*
 		 * If we want a specific lsn, we do not accept requests that were made
 		 * with a potentially different LSN.
@@ -893,9 +911,9 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
-				pq_sendint32(&s, msg_req->rnode.spcNode);
-				pq_sendint32(&s, msg_req->rnode.dbNode);
-				pq_sendint32(&s, msg_req->rnode.relNode);
+				pq_sendint32(&s, RnodeGetSpcOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetDbOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetRelNumber(msg_req->rnode));
 				pq_sendbyte(&s, msg_req->forknum);
 
 				break;
@@ -906,9 +924,9 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
-				pq_sendint32(&s, msg_req->rnode.spcNode);
-				pq_sendint32(&s, msg_req->rnode.dbNode);
-				pq_sendint32(&s, msg_req->rnode.relNode);
+				pq_sendint32(&s, RnodeGetSpcOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetDbOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetRelNumber(msg_req->rnode));
 				pq_sendbyte(&s, msg_req->forknum);
 
 				break;
@@ -919,7 +937,7 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
-				pq_sendint32(&s, msg_req->dbNode);
+				pq_sendint32(&s, msg_req->dbOid);
 
 				break;
 			}
@@ -929,9 +947,9 @@ nm_pack_request(NeonRequest * msg)
 
 				pq_sendbyte(&s, msg_req->req.latest);
 				pq_sendint64(&s, msg_req->req.lsn);
-				pq_sendint32(&s, msg_req->rnode.spcNode);
-				pq_sendint32(&s, msg_req->rnode.dbNode);
-				pq_sendint32(&s, msg_req->rnode.relNode);
+				pq_sendint32(&s, RnodeGetSpcOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetDbOid(msg_req->rnode));
+				pq_sendint32(&s, RnodeGetRelNumber(msg_req->rnode));
 				pq_sendbyte(&s, msg_req->forknum);
 				pq_sendint32(&s, msg_req->blkno);
 
@@ -1064,9 +1082,9 @@ nm_to_string(NeonMessage * msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonExistsRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
-								 msg_req->rnode.spcNode,
-								 msg_req->rnode.dbNode,
-								 msg_req->rnode.relNode);
+								 RnodeGetSpcOid(msg_req->rnode),
+								 RnodeGetDbOid(msg_req->rnode),
+								 RnodeGetRelNumber(msg_req->rnode));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
@@ -1080,9 +1098,9 @@ nm_to_string(NeonMessage * msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonNblocksRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
-								 msg_req->rnode.spcNode,
-								 msg_req->rnode.dbNode,
-								 msg_req->rnode.relNode);
+								 RnodeGetSpcOid(msg_req->rnode),
+								 RnodeGetDbOid(msg_req->rnode),
+								 RnodeGetRelNumber(msg_req->rnode));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
@@ -1096,9 +1114,9 @@ nm_to_string(NeonMessage * msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageRequest\"");
 				appendStringInfo(&s, ", \"rnode\": \"%u/%u/%u\"",
-								 msg_req->rnode.spcNode,
-								 msg_req->rnode.dbNode,
-								 msg_req->rnode.relNode);
+								 RnodeGetSpcOid(msg_req->rnode),
+								 RnodeGetDbOid(msg_req->rnode),
+								 RnodeGetRelNumber(msg_req->rnode));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
@@ -1111,7 +1129,7 @@ nm_to_string(NeonMessage * msg)
 				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
 
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeRequest\"");
-				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbNode);
+				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbOid);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
 				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
 				appendStringInfoChar(&s, '}');
@@ -1213,6 +1231,7 @@ static void
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 {
 	XLogRecPtr	lsn = PageGetLSN(buffer);
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	if (ShutdownRequestPending)
 		return;
@@ -1232,15 +1251,16 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 		/* FSM is never WAL-logged and we don't care. */
 		XLogRecPtr	recptr;
 
-		recptr = log_newpage_copy(&reln->smgr_rnode.node, forknum, blocknum, buffer, false);
+
+		recptr = log_newpage_copy(&rnode, forknum, blocknum, buffer, false);
 		XLogFlush(recptr);
 		lsn = recptr;
 		ereport(SmgrTrace,
 				(errmsg("Page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
 						blocknum,
-						reln->smgr_rnode.node.spcNode,
-						reln->smgr_rnode.node.dbNode,
-						reln->smgr_rnode.node.relNode,
+						RelnGetSpcOid(reln),
+						RelnGetDbOid(reln),
+						RelnGetRelNumber(reln),
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
 	else if (lsn == InvalidXLogRecPtr)
@@ -1268,9 +1288,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 			ereport(SmgrTrace,
 					(errmsg("Page %u of relation %u/%u/%u.%u is all-zeros",
 							blocknum,
-							reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
-							reln->smgr_rnode.node.relNode,
+							RelnGetSpcOid(reln),
+							RelnGetDbOid(reln),
+							RelnGetRelNumber(reln),
 							forknum)));
 		}
 		else if (PageIsEmptyHeapPage(buffer))
@@ -1278,9 +1298,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 			ereport(SmgrTrace,
 					(errmsg("Page %u of relation %u/%u/%u.%u is an empty heap page with no LSN",
 							blocknum,
-							reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
-							reln->smgr_rnode.node.relNode,
+							RelnGetSpcOid(reln),
+							RelnGetDbOid(reln),
+							RelnGetRelNumber(reln),
 							forknum)));
 		}
 		else
@@ -1288,9 +1308,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 			ereport(PANIC,
 					(errmsg("Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 							blocknum,
-							reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
-							reln->smgr_rnode.node.relNode,
+							RelnGetSpcOid(reln),
+							RelnGetDbOid(reln),
+							RelnGetRelNumber(reln),
 							forknum)));
 		}
 	}
@@ -1299,9 +1319,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 		ereport(SmgrTrace,
 				(errmsg("Page %u of relation %u/%u/%u.%u is already wal logged at lsn=%X/%X",
 						blocknum,
-						reln->smgr_rnode.node.spcNode,
-						reln->smgr_rnode.node.dbNode,
-						reln->smgr_rnode.node.relNode,
+						RelnGetSpcOid(reln),
+						RelnGetDbOid(reln),
+						RelnGetRelNumber(reln),
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
 
@@ -1309,7 +1329,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forknum, blocknum);
+	SetLastWrittenLSNForBlock(lsn, rnode, forknum, blocknum);
 }
 
 /*
@@ -1459,6 +1479,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1485,7 +1506,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (get_cached_relsize(reln->smgr_rnode.node, forkNum, &n_blocks))
+	if (get_cached_relsize(RelnGetRnode(reln), forkNum, &n_blocks))
 	{
 		return true;
 	}
@@ -1500,20 +1521,20 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	 *
 	 * For now, handle that special case here.
 	 */
-	if (reln->smgr_rnode.node.spcNode == 0 &&
-		reln->smgr_rnode.node.dbNode == 0 &&
-		reln->smgr_rnode.node.relNode == 0)
+	if (RelnGetSpcOid(reln) == 0 &&
+		RelnGetDbOid(reln) == 0 &&
+		RelnGetRelNumber(reln) == 0)
 	{
 		return false;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, rnode, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
-			.rnode = reln->smgr_rnode.node,
+			.rnode = rnode,
 		.forknum = forkNum};
 
 		resp = page_server_request(&request);
@@ -1529,9 +1550,9 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
-							reln->smgr_rnode.node.relNode,
+							RelnGetSpcOid(reln),
+							RelnGetDbOid(reln),
+							RelnGetRelNumber(reln),
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
@@ -1553,6 +1574,8 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 void
 neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 {
+	RelFileNode rnode = RelnGetRnode(reln);
+
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -1571,9 +1594,8 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	}
 
 	elog(SmgrTrace, "Create relation %u/%u/%u.%u",
-		 reln->smgr_rnode.node.spcNode,
-		 reln->smgr_rnode.node.dbNode,
-		 reln->smgr_rnode.node.relNode,
+		 RelnGetSpcOid(reln),
+		 RelnGetDbOid(reln), RelnGetRelNumber(reln),
 		 forkNum);
 
 	/*
@@ -1597,12 +1619,12 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	 */
 	if (isRedo)
 	{
-		update_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
-		get_cached_relsize(reln->smgr_rnode.node, forkNum,
+		update_cached_relsize(rnode, forkNum, 0);
+		get_cached_relsize(rnode, forkNum,
 						   &reln->smgr_cached_nblocks[forkNum]);
 	}
 	else
-		set_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
+		set_cached_relsize(rnode, forkNum, 0);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1639,7 +1661,12 @@ neon_unlink(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 	mdunlink(rnode, forkNum, isRedo);
 	if (!RelFileNodeBackendIsTemp(rnode))
 	{
+
+#if PG_VERSION_NUM >= 160000
+		forget_cached_relsize(rnode.locator, forkNum);
+#else
 		forget_cached_relsize(rnode.node, forkNum);
+#endif
 	}
 }
 
@@ -1658,6 +1685,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 {
 	XLogRecPtr	lsn;
 	BlockNumber	n_blocks = 0;
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1707,17 +1735,16 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
-	set_cached_relsize(reln->smgr_rnode.node, forkNum, blkno + 1);
+	set_cached_relsize(rnode, forkNum, blkno + 1);
 
 	lsn = PageGetLSN(buffer);
 	elog(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
-		 reln->smgr_rnode.node.spcNode,
-		 reln->smgr_rnode.node.dbNode,
-		 reln->smgr_rnode.node.relNode,
+		 RelnGetSpcOid(reln),
+		 RelnGetDbOid(reln), RelnGetRelNumber(reln),
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(reln->smgr_rnode.node, forkNum, blkno, buffer);
+	lfc_write(rnode, forkNum, blkno, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1732,9 +1759,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (lsn == InvalidXLogRecPtr)
 	{
 		lsn = GetXLogInsertRecPtr();
-		SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forkNum, blkno);
+		SetLastWrittenLSNForBlock(lsn, rnode, forkNum, blkno);
 	}
-	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
+	SetLastWrittenLSNForRelation(lsn, rnode, forkNum);
 }
 
 /*
@@ -1778,6 +1805,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	BufferTag	tag;
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 
+	RelFileNode rnode = RelnGetRnode(reln);
+
 	switch (reln->smgr_relpersistence)
 	{
 		case 0: /* probably shouldn't happen, but ignore it */
@@ -1792,15 +1821,18 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (lfc_cache_contains(reln->smgr_rnode.node, forknum, blocknum))
+	if (lfc_cache_contains(rnode, forknum, blocknum))
 		return false;
 
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forknum, blocknum);
+#else
 	tag = (BufferTag) {
-		.rnode = reln->smgr_rnode.node,
+		.rnode = rnode,
 		.forkNum = forknum,
 		.blockNum = blocknum
 	};
-
+#endif
 	ring_index = prefetch_register_buffer(tag, NULL, NULL);
 
 	Assert(ring_index < MyPState->ring_unused &&
@@ -1861,11 +1893,15 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	PrfHashEntry *entry;
 	PrefetchRequest *slot;
 
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&buftag, &rnode, forkNum, blkno);
+#else
 	buftag = (BufferTag) {
 		.rnode = rnode,
 		.forkNum = forkNum,
-		.blockNum = blkno,
+		.blockNum = blkno
 	};
+#endif
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are
@@ -1965,9 +2001,9 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
 							blkno,
-							rnode.spcNode,
-							rnode.dbNode,
-							rnode.relNode,
+							RnodeGetSpcOid(rnode),
+							RnodeGetDbOid(rnode),
+							RnodeGetRelNumber(rnode),
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
@@ -1991,6 +2027,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 {
 	bool		latest;
 	XLogRecPtr	request_lsn;
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2010,13 +2047,13 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	/* Try to read from local file cache */
-	if (lfc_read(reln->smgr_rnode.node, forkNum, blkno, buffer))
+	if (lfc_read(RelnGetRnode(reln), forkNum, blkno, buffer))
 	{
 		return;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
-	neon_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
+	request_lsn = neon_get_request_lsn(&latest, rnode, forkNum, blkno);
+	neon_read_at_lsn(rnode, forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
@@ -2036,9 +2073,9 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			{
 				elog(PANIC, "page is new in MD but not in Page Server at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 					 blkno,
-					 reln->smgr_rnode.node.spcNode,
-					 reln->smgr_rnode.node.dbNode,
-					 reln->smgr_rnode.node.relNode,
+					 RelnGetSpcOid(reln),
+					 RelnGetDbOid(reln),
+					 RelnGetRelNumber(reln),
 					 forkNum,
 					 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 					 hexdump_page(buffer));
@@ -2048,9 +2085,9 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		{
 			elog(PANIC, "page is new in Page Server but not in MD at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 				 blkno,
-				 reln->smgr_rnode.node.spcNode,
-				 reln->smgr_rnode.node.dbNode,
-				 reln->smgr_rnode.node.relNode,
+				 RelnGetSpcOid(reln),
+				 RelnGetDbOid(reln),
+				 RelnGetRelNumber(reln),
 				 forkNum,
 				 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 				 hexdump_page(mdbuf));
@@ -2065,9 +2102,9 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			{
 				elog(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 					 blkno,
-					 reln->smgr_rnode.node.spcNode,
-					 reln->smgr_rnode.node.dbNode,
-					 reln->smgr_rnode.node.relNode,
+					 RelnGetSpcOid(reln),
+					 RelnGetDbOid(reln),
+					 RelnGetRelNumber(reln),
 					 forkNum,
 					 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 					 hexdump_page(mdbuf_masked),
@@ -2086,9 +2123,9 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 				{
 					elog(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 						 blkno,
-						 reln->smgr_rnode.node.spcNode,
-						 reln->smgr_rnode.node.dbNode,
-						 reln->smgr_rnode.node.relNode,
+						 RelnGetSpcOid(reln),
+						 RelnGetDbOid(reln),
+						 RelnGetRelNumber(reln),
 						 forkNum,
 						 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 						 hexdump_page(mdbuf_masked),
@@ -2133,7 +2170,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		   char *buffer, bool skipFsync)
 {
 	XLogRecPtr	lsn;
-
+	RelFileNode rnode = RelnGetRnode(reln);
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -2170,13 +2207,12 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	lsn = PageGetLSN(buffer);
 	elog(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
-		 reln->smgr_rnode.node.spcNode,
-		 reln->smgr_rnode.node.dbNode,
-		 reln->smgr_rnode.node.relNode,
+		 RelnGetSpcOid(reln),
+		 RelnGetDbOid(reln), RelnGetRelNumber(reln),
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(reln->smgr_rnode.node, forknum, blocknum, buffer);
+	lfc_write(rnode, forknum, blocknum, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2194,6 +2230,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2212,23 +2249,23 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (get_cached_relsize(reln->smgr_rnode.node, forknum, &n_blocks))
+	if (get_cached_relsize(RelnGetRnode(reln), forknum, &n_blocks))
 	{
 		elog(SmgrTrace, "cached nblocks for %u/%u/%u.%u: %u blocks",
-			 reln->smgr_rnode.node.spcNode,
-			 reln->smgr_rnode.node.dbNode,
-			 reln->smgr_rnode.node.relNode,
+			 RelnGetSpcOid(reln),
+			 RelnGetDbOid(reln),
+			 RelnGetRelNumber(reln),
 			 forknum, n_blocks);
 		return n_blocks;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_request_lsn(&latest, rnode, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
-			.rnode = reln->smgr_rnode.node,
+			.rnode = rnode,
 			.forknum = forknum,
 		};
 
@@ -2245,9 +2282,9 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
-							reln->smgr_rnode.node.relNode,
+							RelnGetSpcOid(reln),
+							RelnGetDbOid(reln),
+							RelnGetRelNumber(reln),
 							forknum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
@@ -2257,12 +2294,11 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		default:
 			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
-	update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
+	update_cached_relsize(rnode, forknum, n_blocks);
 
 	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
-		 reln->smgr_rnode.node.spcNode,
-		 reln->smgr_rnode.node.dbNode,
-		 reln->smgr_rnode.node.relNode,
+		 RelnGetSpcOid(reln),
+		 RelnGetDbOid(reln), RelnGetRelNumber(reln),
 		 forknum,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 		 n_blocks);
@@ -2275,7 +2311,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
  *	neon_db_size() -- Get the size of the database in bytes.
  */
 int64
-neon_dbsize(Oid dbNode)
+neon_dbsize(Oid dbOid)
 {
 	NeonResponse *resp;
 	int64		db_size;
@@ -2289,7 +2325,7 @@ neon_dbsize(Oid dbNode)
 			.req.tag = T_NeonDbSizeRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
-			.dbNode = dbNode,
+			.dbOid = dbOid,
 		};
 
 		resp = page_server_request(&request);
@@ -2305,7 +2341,7 @@ neon_dbsize(Oid dbNode)
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read db size of db %u from page server at lsn %X/%08X",
-							dbNode,
+							dbOid,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
@@ -2316,7 +2352,7 @@ neon_dbsize(Oid dbNode)
 	}
 
 	elog(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
-		 dbNode,
+		 dbOid,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 		 db_size);
 
@@ -2331,6 +2367,7 @@ void
 neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
+	RelFileNode rnode = RelnGetRnode(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2350,7 +2387,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	set_cached_relsize(reln->smgr_rnode.node, forknum, nblocks);
+	set_cached_relsize(rnode, forknum, nblocks);
 
 	/*
 	 * Truncating a relation drops all its buffers from the buffer cache
@@ -2378,7 +2415,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 * for the extended pages, so there's no harm in leaving behind obsolete
 	 * entries for the truncated chunks.
 	 */
-	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forknum);
+	SetLastWrittenLSNForRelation(lsn, rnode, forknum);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2448,9 +2485,9 @@ neon_start_unlogged_build(SMgrRelation reln)
 
 	ereport(SmgrTrace,
 			(errmsg("starting unlogged build of relation %u/%u/%u",
-					reln->smgr_rnode.node.spcNode,
-					reln->smgr_rnode.node.dbNode,
-					reln->smgr_rnode.node.relNode)));
+					RelnGetSpcOid(reln),
+					RelnGetDbOid(reln),
+					RelnGetRelNumber(reln))));
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2500,9 +2537,9 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 
 	ereport(SmgrTrace,
 			(errmsg("finishing phase 1 of unlogged build of relation %u/%u/%u",
-					reln->smgr_rnode.node.spcNode,
-					reln->smgr_rnode.node.dbNode,
-					reln->smgr_rnode.node.relNode)));
+					RelnGetSpcOid(reln),
+					RelnGetDbOid(reln),
+					RelnGetRelNumber(reln))));
 
 	if (unlogged_build_phase == UNLOGGED_BUILD_NOT_PERMANENT)
 		return;
@@ -2529,9 +2566,9 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 	ereport(SmgrTrace,
 			(errmsg("ending unlogged build of relation %u/%u/%u",
-					reln->smgr_rnode.node.spcNode,
-					reln->smgr_rnode.node.dbNode,
-					reln->smgr_rnode.node.relNode)));
+					RelnGetSpcOid(reln),
+					RelnGetDbOid(reln),
+					RelnGetRelNumber(reln))));
 
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_PERMANENT)
 	{
@@ -2544,16 +2581,24 @@ neon_end_unlogged_build(SMgrRelation reln)
 		reln->smgr_relpersistence = RELPERSISTENCE_PERMANENT;
 
 		/* Remove local copy */
-		rnode = reln->smgr_rnode;
+#if PG_VERSION_NUM >= 160000
+		rnode.locator = RelnGetRnode(reln);
+#else
+		rnode.node = RelnGetRnode(reln);
+#endif
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
 			elog(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
-				 rnode.node.spcNode,
-				 rnode.node.dbNode,
-				 rnode.node.relNode,
+				 RelnGetSpcOid(reln),
+				 RelnGetDbOid(reln),
+				 RelnGetRelNumber(reln),
 				 forknum);
 
+#if PG_VERSION_NUM >= 160000
+			forget_cached_relsize(rnode.locator, forknum);
+#else
 			forget_cached_relsize(rnode.node, forknum);
+#endif
 			mdclose(reln, forknum);
 			/* use isRedo == true, so that we drop it immediately */
 			mdunlink(rnode, forknum, true);
@@ -2706,10 +2751,16 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	 * regardless of whether the block is stored in shared buffers.
 	 * See also this function's top comment.
 	 */
-	if (!OidIsValid(rnode.dbNode))
+
+	if (!OidIsValid(RnodeGetDbOid(rnode)))
 		return false;
 
+#if PG_VERSION_NUM >= 160000
+	InitBufferTag(&tag, &rnode, forknum, blkno);
+#else
 	INIT_BUFFERTAG(tag, rnode, forknum, blkno);
+#endif
+
 	hash = BufTableHashCode(&tag);
 	partitionLock = BufMappingPartitionLock(hash);
 

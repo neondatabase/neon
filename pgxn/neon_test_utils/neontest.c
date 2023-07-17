@@ -128,7 +128,11 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			else
 				isvalid = false;
 			bufferid = BufferDescriptorGetBuffer(bufHdr);
+#if PG_VERSION_NUM >= 160000
+			rnode = BufTagGetRelFileLocator(&bufHdr->tag);
+#else
 			rnode = bufHdr->tag.rnode;
+#endif
 			forknum = bufHdr->tag.forkNum;
 			blocknum = bufHdr->tag.blockNum;
 
@@ -238,7 +242,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(rel->rd_node, forknum, blkno, read_lsn, request_latest, raw_page_data);
+	neon_read_at_lsn(RelnGetRnode(RelationGetSmgr(rel)), forknum, blkno, read_lsn, request_latest, raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -267,11 +271,17 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	{
+#if PG_VERSION_NUM >= 160000
+		RelFileLocator rnode = {
+			.spcOid = PG_GETARG_OID(0),
+			.dbOid = PG_GETARG_OID(1),
+		.relNumber = PG_GETARG_OID(2)};
+#else
 		RelFileNode rnode = {
 			.spcNode = PG_GETARG_OID(0),
 			.dbNode = PG_GETARG_OID(1),
 		.relNode = PG_GETARG_OID(2)};
-
+#endif
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
 
 		uint32		blkno = PG_GETARG_UINT32(4);
