@@ -60,7 +60,6 @@ use compute_tools::params::*;
 use compute_tools::spec::*;
 
 const BUILD_TAG_DEFAULT: &str = "local";
-const DEFAULT_REMOTE_EXT_CONFIG: &str = r#"{"bucket": "neon-dev-extensions", "region": "eu-central-1", "endpoint": null, "prefix": "5555"}"#;
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -73,19 +72,24 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    // TODO NOTE: until control-plane changes, we can use the following line to forcibly enable remote extensions
-    let remote_ext_config = remote_ext_config.map(|x| x.to_owned());
-    // let remote_ext_config =
-    //     Some(remote_ext_config.unwrap_or(DEFAULT_REMOTE_EXT_CONFIG.to_string()));
-    if remote_ext_config == Some("ALEKTESTREMOTECONFIG".to_string()) {
-        return Ok(());
-    }
-
-    let remote_ext_config: Option<String> = None;
     let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(&x, build_tag)
+        init_remote_storage(x, build_tag)
             .expect("cannot initialize remote extension storage from config")
     });
+    // creds used to connect to remote extensions bucket
+    let aws_creds = matches.get_one::<String>("awscreds");
+    if let Some(aws_creds) = aws_creds {
+        // not sure if this is a bad idea?
+        let aws_creds_dict: serde_json::Value = serde_json::from_str(aws_creds)?;
+        std::env::set_var(
+            "AWS_ACCESS_KEY_ID",
+            aws_creds_dict["ID"].as_str().expect("config parse error"),
+        );
+        std::env::set_var(
+            "AWS_SECRET_ACCESS_KEY",
+            aws_creds_dict["key"].as_str().expect("config parse error"),
+        );
+    }
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -392,6 +396,12 @@ fn cli() -> clap::Command {
                 .short('r')
                 .long("remote-ext-config")
                 .value_name("REMOTE_EXT_CONFIG"),
+        )
+        .arg(
+            Arg::new("awscreds")
+                .short('k')
+                .long("awscreds")
+                .value_name("AWS_CREDENTIALS"),
         )
 }
 
