@@ -442,6 +442,10 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
         None
     }
 
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        None
+    }
+
     fn is_remote_layer(&self) -> bool {
         false
     }

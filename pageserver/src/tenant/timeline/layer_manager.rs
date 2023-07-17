@@ -295,6 +295,10 @@ impl LayerManager {
 
         Ok(())
     }
+
+    pub(crate) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
+        self.layer_fmgr.contains(layer)
+    }
 }
 
 pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
@@ -317,6 +321,10 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
+    }
+
+    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
+        self.0.contains_key(&layer.layer_desc().key())
     }
 
     pub(crate) fn new() -> Self {

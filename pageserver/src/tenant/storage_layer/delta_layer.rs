@@ -51,6 +51,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::*;
 
 use utils::{
@@ -414,6 +415,10 @@ impl AsLayerDesc for DeltaLayer {
 }
 
 impl PersistentLayer for DeltaLayer {
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        Some(self)
+    }
+
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
