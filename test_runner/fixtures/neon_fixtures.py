@@ -2641,7 +2641,7 @@ class Safekeeper:
                 if elapsed > 3:
                     raise RuntimeError(
                         f"timed out waiting {elapsed:.0f}s for wal acceptor start: {e}"
-                    )
+                    ) from e
                 time.sleep(0.5)
             else:
                 break  # success
@@ -2863,7 +2863,7 @@ class NeonBroker:
                 if elapsed > 5:
                     raise RuntimeError(
                         f"timed out waiting {elapsed:.0f}s for storage_broker start: {e}"
-                    )
+                    ) from e
                 time.sleep(0.5)
             else:
                 break  # success

@@ -143,11 +143,11 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
                     check_thread.join()
                     raise AssertionError(
                         f"Exception {e} while inserting rows, but WAL lag is within configured threshold. That means backpressure is not tuned properly"
-                    )
+                    ) from e
                 else:
                     raise AssertionError(
                         f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
-                    )
+                    ) from e
 
         log.info(f"inserted {rows_inserted} rows")
 

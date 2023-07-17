@@ -946,7 +946,7 @@ class SafekeeperEnv:
         except Exception as e:
             log.error(e)
             safekeeper_process.kill()
-            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
+            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}") from e
 
     def get_safekeeper_connstrs(self):
         assert self.safekeepers is not None, "safekeepers are not initialized"
