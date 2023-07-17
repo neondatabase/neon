@@ -185,11 +185,6 @@ tonic-build = "0.9"
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
 
-# Changes the MAX_THREADS limit from 4096 to 32768.
-# This is a temporary workaround for using tracing from many threads in safekeepers code,
-# until async safekeepers patch is merged to the main.
-sharded-slab = { git = "https://github.com/neondatabase/sharded-slab.git", rev="98d16753ab01c61f0a028de44167307a00efea00" }
-
 ################# Binary contents sections
 
 [profile.release]
