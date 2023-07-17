@@ -121,7 +121,7 @@ pub mod mgr;
 pub mod tasks;
 pub mod upload_queue;
 
-mod timeline;
+pub(crate) mod timeline;
 
 pub mod size;
 

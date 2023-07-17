@@ -1011,11 +1011,11 @@ impl Timeline {
             .evict_layer_batch(remote_client, &[local_layer], cancel)
             .await?;
         assert_eq!(results.len(), 1);
-        let result: Option<anyhow::Result<bool>> = results.into_iter().next().unwrap();
+        let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
         match result {
             None => anyhow::bail!("task_mgr shutdown requested"),
-            Some(Ok(b)) => Ok(Some(b)),
-            Some(Err(e)) => Err(e),
+            Some(Ok(())) => Ok(Some(true)),
+            Some(Err(e)) => Err(anyhow::Error::new(e)),
         }
     }
 
@@ -1024,12 +1024,12 @@ impl Timeline {
     /// GenericRemoteStorage reference is required as a (witness)[witness_article] for "remote storage is configured."
     ///
     /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
-    pub async fn evict_layers(
+    pub(crate) async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
         layers_to_evict: &[Arc<dyn PersistentLayer>],
         cancel: CancellationToken,
-    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let remote_client = self.remote_client.clone().expect(
             "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
         );
@@ -1064,7 +1064,7 @@ impl Timeline {
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Arc<dyn PersistentLayer>],
         cancel: CancellationToken,
-    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
         remote_client
@@ -1110,11 +1110,11 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         layer_mgr: &mut LayerManager,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<(), EvictionError> {
         if local_layer.is_remote_layer() {
             // TODO(issue #3851): consider returning an err here instead of false,
             // which is the same out the match later
-            return Ok(false);
+            return Err(EvictionError::CannotEvictRemoteLayer);
         }
 
         let layer_file_size = local_layer.file_size();
@@ -1123,13 +1123,22 @@ impl Timeline {
             .local_path()
             .expect("local layer should have a local path")
             .metadata()
-            .context("get local layer file stat")?
+            // when the eviction fails because we have already deleted the layer in compaction for
+            // example, a NotFound error bubbles up from here.
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    EvictionError::FileNotFound
+                } else {
+                    EvictionError::StatFailed(e)
+                }
+            })?
             .modified()
-            .context("get mtime of layer file")?;
+            .map_err(EvictionError::StatFailed)?;
+
         let local_layer_residence_duration =
             match SystemTime::now().duration_since(local_layer_mtime) {
                 Err(e) => {
-                    warn!("layer mtime is in the future: {}", e);
+                    warn!(layer = %local_layer, "layer mtime is in the future: {}", e);
                     None
                 }
                 Ok(delta) => Some(delta),
@@ -1160,9 +1169,11 @@ impl Timeline {
 
         assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
 
-        let succeed = match layer_mgr.replace_and_verify(local_layer.clone(), new_remote_layer) {
+        match layer_mgr.replace_and_verify(local_layer.clone(), new_remote_layer) {
             Ok(()) => {
                 if let Err(e) = local_layer.delete_resident_layer_file() {
+                    // this should never happen, because of layer_removal_cs usage and above stat
+                    // access for mtime
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
                 // Always decrement the physical size gauge, even if we failed to delete the file.
@@ -1192,20 +1203,36 @@ impl Timeline {
                     info!(layer=%local_layer, "evicted layer after unknown residence period");
                 }
 
-                true
+                Ok(())
             }
             Err(err) => {
                 if cfg!(debug_assertions) {
+                    // FIXME: this must go, flakyness
                     panic!("failed to replace: {err}, evicted: {local_layer:?}");
-                } else {
-                    error!(evicted=?local_layer, "failed to replace: {err}");
                 }
-                false
+                Err(EvictionError::LayerNotFound(err))
             }
-        };
-
-        Ok(succeed)
+        }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EvictionError {
+    #[error("cannot evict a remote layer")]
+    CannotEvictRemoteLayer,
+    /// Most likely the to-be evicted layer has been deleted by compaction or gc which use the same
+    /// locks, so they got to execute before the eviction.
+    #[error("file backing the layer has been removed already")]
+    FileNotFound,
+    #[error("stat failed")]
+    StatFailed(#[source] std::io::Error),
+    /// In practice, this can be a number of things, but lets assume it means only this.
+    ///
+    /// This case includes situations such as the Layer was evicted and redownloaded in between,
+    /// because the file existed before an replacement attempt was made but now the Layers are
+    /// different objects in memory.
+    #[error("layer was no longer part of LayerMap")]
+    LayerNotFound(#[source] anyhow::Error),
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
@@ -4821,16 +4848,13 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
+        use super::EvictionError;
+
         match (first, second) {
-            (Ok(true), Err(e)) | (Err(e), Ok(true)) => {
-                if e.root_cause()
-                    .downcast_ref::<std::io::Error>()
-                    .filter(|e| e.kind() == std::io::ErrorKind::NotFound)
-                    .is_some()
-                {
-                    // one of the evictions gets to do it,
-                    // other one gets FileNotFound. all is good.
-                }
+            (Ok(()), Err(EvictionError::FileNotFound))
+            | (Err(EvictionError::FileNotFound), Ok(())) => {
+                // one of the evictions gets to do it,
+                // other one gets FileNotFound. all is good.
             }
             other => unreachable!("unexpected {:?}", other),
         }

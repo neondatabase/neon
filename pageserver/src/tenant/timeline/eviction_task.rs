@@ -30,6 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
 };
@@ -270,20 +271,23 @@ impl Timeline {
                 None => {
                     stats.skipped_for_shutdown += 1;
                 }
-                Some(Ok(true)) => {
+                Some(Ok(())) => {
                     debug!("evicted layer {l}");
                     stats.evicted += 1;
                 }
-                Some(Ok(false)) => {
-                    debug!("layer is not evictable: {l}");
+                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
                     stats.not_evictable += 1;
                 }
-                Some(Err(e)) => {
-                    // This variant is the case where an unexpected error happened during eviction.
-                    // Expected errors that result in non-eviction are `Some(Ok(false))`.
-                    // So, dump Debug here to gather as much info as possible in this rare case.
-                    warn!("failed to evict layer {l}: {e:?}");
-                    stats.errors += 1;
+                Some(Err(EvictionError::FileNotFound)) => {
+                    // compaction/gc removed the file while we were waiting on layer_removal_cs
+                    stats.not_evictable += 1;
+                }
+                Some(Err(
+                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
+                )) => {
+                    let e = utils::error::report_compact_sources(&e);
+                    warn!(layer = %l, "failed to evict layer: {e}");
+                    stats.not_evictable += 1;
                 }
             }
         }
