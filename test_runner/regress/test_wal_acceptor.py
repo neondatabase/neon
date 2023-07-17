@@ -46,7 +46,7 @@ def wait_lsn_force_checkpoint(
     timeline_id: TimelineId,
     endpoint: Endpoint,
     ps: NeonPageserver,
-    pageserver_conn_options = None,
+    pageserver_conn_options=None,
 ):
     if pageserver_conn_options is None:
         pageserver_conn_options = {}
