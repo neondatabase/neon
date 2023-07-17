@@ -31,7 +31,8 @@ use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 /// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
-const NUM_RETRIES_WAKE_COMPUTE: u32 = 10;
+const NUM_RETRIES_CONNECT: u32 = 10;
+const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
@@ -418,7 +419,7 @@ where
                 }
             }
             ConnectionState::Cached(node_info) => {
-                match mechanism.connect_once(&node_info, time::Duration::from_secs(2)).await {
+                match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
                     Ok(res) => return Ok(res),
                     Err(e) => {
                         error!(error = ?e, "could not connect to compute node");
@@ -478,7 +479,7 @@ pub trait ShouldRetry {
         match self {
             // retry all errors at least once
             _ if num_retries == 0 => true,
-            _ if num_retries >= NUM_RETRIES_WAKE_COMPUTE => false,
+            _ if num_retries >= NUM_RETRIES_CONNECT => false,
             err => err.could_retry(),
         }
     }
