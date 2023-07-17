@@ -459,6 +459,7 @@ class AuthKeys:
     def generate_safekeeper_token(self) -> str:
         return self.generate_token(scope="safekeeperdata")
 
+    # generate token giving access to only one tenant
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
         return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
 
@@ -965,6 +966,7 @@ class NeonEnv:
         for i in range(1, config.num_safekeepers + 1):
             port = SafekeeperPort(
                 pg=self.port_distributor.get_port(),
+                pg_tenant_only=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
             id = config.safekeepers_id_start + i  # assign ids sequentially
@@ -973,6 +975,7 @@ class NeonEnv:
                 [[safekeepers]]
                 id = {id}
                 pg_port = {port.pg}
+                pg_tenant_only_port = {port.pg_tenant_only}
                 http_port = {port.http}
                 sync = {'true' if config.safekeepers_enable_fsync else 'false'}"""
             )
@@ -2608,6 +2611,7 @@ class EndpointFactory:
 @dataclass
 class SafekeeperPort:
     pg: int
+    pg_tenant_only: int
     http: int
 
 

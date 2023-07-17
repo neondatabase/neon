@@ -289,7 +289,7 @@ impl Endpoint {
                         .env
                         .safekeepers
                         .iter()
-                        .map(|sk| format!("localhost:{}", sk.pg_port))
+                        .map(|sk| format!("localhost:{}", sk.get_compute_port()))
                         .collect::<Vec<String>>()
                         .join(",");
                     conf.append("neon.safekeepers", &safekeepers);
@@ -318,7 +318,7 @@ impl Endpoint {
                     .env
                     .safekeepers
                     .iter()
-                    .map(|x| x.pg_port.to_string())
+                    .map(|x| x.get_compute_port().to_string())
                     .collect::<Vec<_>>()
                     .join(",");
                 let sk_hosts = vec!["localhost"; self.env.safekeepers.len()].join(",");
@@ -463,7 +463,7 @@ impl Endpoint {
                     .iter()
                     .find(|node| node.id == sk_id)
                     .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.pg_port));
+                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
             }
         }
 
