@@ -271,18 +271,18 @@ impl Timeline {
                     stats.skipped_for_shutdown += 1;
                 }
                 Some(Ok(true)) => {
-                    debug!("evicted layer {l:?}");
+                    debug!("evicted layer {l}");
                     stats.evicted += 1;
                 }
                 Some(Ok(false)) => {
-                    debug!("layer is not evictable: {l:?}");
+                    debug!("layer is not evictable: {l}");
                     stats.not_evictable += 1;
                 }
                 Some(Err(e)) => {
                     // This variant is the case where an unexpected error happened during eviction.
                     // Expected errors that result in non-eviction are `Some(Ok(false))`.
                     // So, dump Debug here to gather as much info as possible in this rare case.
-                    warn!("failed to evict layer {l:?}: {e:?}");
+                    warn!("failed to evict layer {l}: {e:?}");
                     stats.errors += 1;
                 }
             }
