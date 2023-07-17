@@ -1,5 +1,8 @@
 use crate::{
-    cancellation::CancelMap, config::ProxyConfig, error::io_error, proxy::handle_ws_client,
+    cancellation::CancelMap,
+    config::ProxyConfig,
+    error::io_error,
+    proxy::{handle_client, ClientMode},
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
@@ -150,12 +153,12 @@ async fn serve_websocket(
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_ws_client(
+    handle_client(
         config,
         cancel_map,
         session_id,
         WebSocketRw::new(websocket),
-        hostname,
+        ClientMode::Websockets { hostname },
     )
     .await?;
     Ok(())
