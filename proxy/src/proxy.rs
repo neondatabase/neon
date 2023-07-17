@@ -11,7 +11,7 @@ use crate::{
         errors::{ApiError, WakeComputeError},
         messages::MetricsAuxInfo,
     },
-    stream::{PqStream, Stream},
+    stream::{self, PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -20,7 +20,7 @@ use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::{error::Error, io, ops::ControlFlow, sync::Arc};
+use std::{borrow::Cow, error::Error, io, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -104,7 +104,10 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket).await
+                        handle_client(config, &cancel_map, session_id, socket, true, |s| {
+                            s.sni_hostname().map(Cow::Borrowed)
+                        })
+                        .await
                     }
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
@@ -129,14 +132,14 @@ pub async fn task_main(
     Ok(())
 }
 
-// TODO(tech debt): unite this with its twin below.
 #[tracing::instrument(fields(session_id = ?session_id), skip_all)]
-pub async fn handle_ws_client(
+pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
-    hostname: Option<String>,
+    stream: S,
+    tcp: bool,
+    get_hostname: impl for<'a> FnOnce(&'a stream::Stream<S>) -> Option<Cow<'a, str>>,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -145,10 +148,9 @@ pub async fn handle_ws_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let hostname = hostname.as_deref();
 
-    // TLS is None here, because the connection is already encrypted.
-    let do_handshake = handshake(stream, None, cancel_map);
+    // TLS is None here if using websockets, because the connection is already encrypted.
+    let do_handshake = handshake(stream, tcp.then_some(tls).flatten(), cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -156,11 +158,12 @@ pub async fn handle_ws_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
+        let hostname = get_hostname(stream.get_ref());
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname.as_deref(), common_names))
             .transpose();
 
         match result {
@@ -169,50 +172,10 @@ pub async fn handle_ws_client(
         }
     };
 
-    let client = Client::new(stream, creds, &params, session_id, false);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session, true))
-        .await
-}
-
-#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
-async fn handle_client(
-    config: &'static ProxyConfig,
-    cancel_map: &CancelMap,
-    session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
-) -> anyhow::Result<()> {
-    // The `closed` counter will increase when this future is destroyed.
-    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
-    scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
-    }
-
-    let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map);
-    let (mut stream, params) = match do_handshake.await? {
-        Some(x) => x,
-        None => return Ok(()), // it's a cancellation request
-    };
-
-    // Extract credentials which we're going to use for auth.
-    let creds = {
-        let sni = stream.get_ref().sni_hostname();
-        let common_names = tls.and_then(|tls| tls.common_names.clone());
-        let result = config
-            .auth_backend
-            .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_names))
-            .transpose();
-
-        match result {
-            Ok(creds) => creds,
-            Err(e) => stream.throw_error(e).await?,
-        }
-    };
-
-    let allow_self_signed_compute = config.allow_self_signed_compute;
-
+    // TCP does not allow cleartext, WS does allow cleartext
+    let allow_cleartext = !tcp;
+    // TCP can allow self signed compute certifications, WS does not need to.
+    let allow_self_signed_compute = tcp && config.allow_self_signed_compute;
     let client = Client::new(
         stream,
         creds,
@@ -221,7 +184,7 @@ async fn handle_client(
         allow_self_signed_compute,
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, false))
+        .with_session(|session| client.connect_to_db(session, allow_cleartext))
         .await
 }
 
