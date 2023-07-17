@@ -541,6 +541,17 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// keep in sync with control plane Go code so that we can validate
+// compute's basebackup_ms metric with our perspective in the context of SLI/SLO.
+static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
+    // Go code uses milliseconds. Variable is called `computeStartupBuckets`
+    [
+        5, 10, 20, 30, 50, 70, 100, 120, 150, 200, 250, 300, 350, 400, 450, 500, 600, 800, 1000,
+        1500, 2000, 2500, 3000, 5000, 10000, 20000, 40000, 60000,
+    ]
+    .map(|ms| (ms as f64) / 1000.0)
+});
+
 pub struct BasebackupQueryTime(HistogramVec);
 pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
     BasebackupQueryTime({
@@ -548,7 +559,7 @@ pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
             "pageserver_basebackup_query_seconds",
             "Histogram of basebackup queries durations, by result type",
             &["result"],
-            CRITICAL_OP_BUCKETS.into(),
+            COMPUTE_STARTUP_BUCKETS.to_vec(),
         )
         .expect("failed to define a metric")
     })
