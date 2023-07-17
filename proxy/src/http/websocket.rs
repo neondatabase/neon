@@ -1,4 +1,9 @@
-use crate::{cancellation::CancelMap, config::ProxyConfig, error::io_error, proxy::handle_client};
+use crate::{
+    cancellation::CancelMap,
+    config::ProxyConfig,
+    error::io_error,
+    proxy::{handle_client, ClientMode},
+};
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
 use hyper::{
@@ -14,7 +19,6 @@ use pin_project_lite::pin_project;
 use serde_json::{json, Value};
 
 use std::{
-    borrow::Cow,
     convert::Infallible,
     future::ready,
     pin::Pin,
@@ -154,8 +158,7 @@ async fn serve_websocket(
         cancel_map,
         session_id,
         WebSocketRw::new(websocket),
-        false,
-        |_| hostname.map(Cow::Owned),
+        ClientMode::Websockets { hostname },
     )
     .await?;
     Ok(())

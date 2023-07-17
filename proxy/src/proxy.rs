@@ -20,7 +20,7 @@ use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::{borrow::Cow, error::Error, io, ops::ControlFlow, sync::Arc};
+use std::{error::Error, io, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -104,9 +104,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, true, |s| {
-                            s.sni_hostname().map(Cow::Borrowed)
-                        })
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp)
                         .await
                     }
                     .unwrap_or_else(move |e| {
@@ -132,14 +130,50 @@ pub async fn task_main(
     Ok(())
 }
 
+pub enum ClientMode {
+    Tcp,
+    Websockets { hostname: Option<String> },
+}
+
+/// Abstracts the logic of handling TCP vs WS clients
+impl ClientMode {
+    fn allow_cleartext(&self) -> bool {
+        match self {
+            ClientMode::Tcp => false,
+            ClientMode::Websockets { .. } => true,
+        }
+    }
+
+    fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
+        match self {
+            ClientMode::Tcp => config.allow_self_signed_compute,
+            ClientMode::Websockets { .. } => false,
+        }
+    }
+
+    fn hostname<'a, S>(&'a self, s: &'a stream::Stream<S>) -> Option<&'a str> {
+        match self {
+            ClientMode::Tcp => s.sni_hostname(),
+            ClientMode::Websockets { hostname } => hostname.as_deref(),
+        }
+    }
+
+    fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
+        match self {
+            ClientMode::Tcp => tls,
+            // TLS is None here if using websockets, because the connection is already encrypted.
+            ClientMode::Websockets { .. } => None,
+        }
+    }
+}
+
 #[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
     stream: S,
-    tcp: bool,
-    get_hostname: impl for<'a> FnOnce(&'a stream::Stream<S>) -> Option<Cow<'a, str>>,
+    mode: ClientMode,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -149,8 +183,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let tls = config.tls_config.as_ref();
 
-    // TLS is None here if using websockets, because the connection is already encrypted.
-    let do_handshake = handshake(stream, tcp.then_some(tls).flatten(), cancel_map);
+    let do_handshake = handshake(stream, mode.handshake_tls(tls), cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -158,12 +191,12 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let hostname = get_hostname(stream.get_ref());
+        let hostname = mode.hostname(stream.get_ref());
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname.as_deref(), common_names))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
         match result {
@@ -172,19 +205,15 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    // TCP does not allow cleartext, WS does allow cleartext
-    let allow_cleartext = !tcp;
-    // TCP can allow self signed compute certifications, WS does not need to.
-    let allow_self_signed_compute = tcp && config.allow_self_signed_compute;
     let client = Client::new(
         stream,
         creds,
         &params,
         session_id,
-        allow_self_signed_compute,
+        mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, allow_cleartext))
+        .with_session(|session| client.connect_to_db(session, mode.allow_cleartext()))
         .await
 }
 
