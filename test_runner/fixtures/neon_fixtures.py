@@ -1231,7 +1231,7 @@ class AbstractNeonCli(abc.ABC):
               stderr: {res.stderr}
             """
             log.info(msg)
-            raise Exception(msg) from subprocess.CalledProcessError(
+            raise RuntimeError(msg) from subprocess.CalledProcessError(
                 res.returncode, res.args, res.stdout, res.stderr
             )
         return res

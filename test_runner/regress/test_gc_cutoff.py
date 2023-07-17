@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 
@@ -38,7 +40,7 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
     for _ in range(5):
-        with pytest.raises(Exception):
+        with pytest.raises(subprocess.SubprocessError):
             pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
         env.pageserver.stop()
         env.pageserver.start()
