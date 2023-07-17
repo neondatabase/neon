@@ -392,7 +392,7 @@ async def run_concurrent_computes(
             break
         await asyncio.sleep(0.1)
     else:
-        assert False, "Timed out while waiting for another query by computes[0]"
+        raise AssertionError("Timed out while waiting for another query by computes[0]")
     computes[0].stopped = True
 
     await asyncio.gather(background_tasks[0])
