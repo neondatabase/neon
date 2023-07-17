@@ -3747,6 +3747,9 @@ impl Timeline {
         let mut remove_layers = Vec::new();
 
         for l in new_layers {
+            if LayerMap::is_l0(&l.layer_desc()) {
+                return Err(CompactionError::Other(anyhow!("compaction generates a L0 level as output, which will cause infinite compaction.")));
+            }
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata().with_context(|| {
