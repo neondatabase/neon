@@ -8,7 +8,7 @@ use std::{future, time::Duration};
 use tokio::net::TcpStream;
 use tokio_io_timeout::TimeoutReader;
 use tracing::*;
-use utils::measured_stream::MeasuredStream;
+use utils::{auth::Scope, measured_stream::MeasuredStream};
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::TrafficMetrics;
@@ -19,6 +19,7 @@ use postgres_backend::{AuthType, PostgresBackend};
 pub async fn task_main(
     conf: SafeKeeperConf,
     pg_listener: std::net::TcpListener,
+    allowed_auth_scope: Option<Scope>,
 ) -> anyhow::Result<()> {
     // Tokio's from_std won't do this for us, per its comment.
     pg_listener.set_nonblocking(true)?;
@@ -33,7 +34,7 @@ pub async fn task_main(
         let conn_id = issue_connection_id(&mut connection_count);
 
         tokio::spawn(async move {
-            if let Err(err) = handle_socket(socket, conf, conn_id)
+            if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope)
                 .instrument(info_span!("", cid = %conn_id))
                 .await
             {
@@ -49,6 +50,7 @@ async fn handle_socket(
     socket: TcpStream,
     conf: SafeKeeperConf,
     conn_id: ConnectionId,
+    allowed_auth_scope: Option<Scope>,
 ) -> Result<(), QueryError> {
     socket.set_nodelay(true)?;
     let peer_addr = socket.peer_addr()?;
@@ -84,8 +86,12 @@ async fn handle_socket(
         None => AuthType::Trust,
         Some(_) => AuthType::NeonJWT,
     };
-    let mut conn_handler =
-        SafekeeperPostgresHandler::new(conf, conn_id, Some(traffic_metrics.clone()));
+    let mut conn_handler = SafekeeperPostgresHandler::new(
+        conf,
+        conn_id,
+        Some(traffic_metrics.clone()),
+        allowed_auth_scope,
+    );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
