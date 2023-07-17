@@ -1,4 +1,9 @@
-use crate::{auth::parse_endpoint_param, cancellation::CancelClosure, error::UserFacingError};
+use crate::{
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::errors::WakeComputeError,
+    error::{io_error, UserFacingError},
+};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -22,6 +27,12 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] native_tls::Error),
+}
+
+impl From<WakeComputeError> for ConnectionError {
+    fn from(value: WakeComputeError) -> Self {
+        io_error(value).into()
+    }
 }
 
 impl UserFacingError for ConnectionError {
