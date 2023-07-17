@@ -396,7 +396,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar, port: int):
 
                 query = "select relname, pg_relation_filepath(oid) from pg_class"
                 result = vanilla_pg.safe_psql(query, user="cloud_admin", dbname=database)
-                for relname, filepath in result:
+                for _relname, filepath in result:
                     if filepath is not None:
                         if database == "template0copy":
                             # Add all template0copy paths to template0

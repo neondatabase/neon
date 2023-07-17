@@ -1139,7 +1139,7 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     collect_stats(endpoint, cur)
 
     # generate WAL to simulate normal workload
-    for i in range(5):
+    for _i in range(5):
         generate_wal(cur)
         collect_stats(endpoint, cur)
 

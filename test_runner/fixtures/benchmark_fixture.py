@@ -385,7 +385,7 @@ class NeonBenchmarker:
         path = f"{repo_dir}/tenants/{tenant_id}/timelines/{timeline_id}"
 
         totalbytes = 0
-        for root, dirs, files in os.walk(path):
+        for root, _dirs, files in os.walk(path):
             for name in files:
                 totalbytes += os.path.getsize(os.path.join(root, name))
 
