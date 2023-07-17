@@ -2724,6 +2724,12 @@ impl Timeline {
                 HashMap::from([(delta_path, metadata)])
             };
 
+        // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
+        // a compaction can delete the file and then it won't be available for uploads any more.
+        // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
+        // race situation.
+        // See https://github.com/neondatabase/neon/issues/4526
+
         pausable_failpoint!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
