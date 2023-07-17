@@ -3747,9 +3747,6 @@ impl Timeline {
         let mut remove_layers = Vec::new();
 
         for l in new_layers {
-            if LayerMap::is_l0(&l.layer_desc()) {
-                return Err(CompactionError::Other(anyhow!("compaction generates a L0 level as output, which will cause infinite compaction.")));
-            }
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata().with_context(|| {
@@ -3781,6 +3778,9 @@ impl Timeline {
             if guard.contains(&l) {
                 duplicated_layers.insert(l.layer_desc().key());
             } else {
+                if LayerMap::is_l0(l.layer_desc()) {
+                    return Err(CompactionError::Other(anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
+                }
                 insert_layers.push(l);
             }
         }
