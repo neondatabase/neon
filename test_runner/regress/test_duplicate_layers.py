@@ -7,8 +7,8 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 # Test duplicate layer detection
 #
 # This test sets fail point at the end of first compaction phase:
-# after flushing new L1 layers but before deletion of L0 layes
-# It should cause generation of duplicate L1 layer by compaction after restart
+# after flushing new L1 layers but before deletion of L0 layers
+# it should cause generation of duplicate L1 layer by compaction after restart.
 @pytest.mark.timeout(600)
 def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
