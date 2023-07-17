@@ -7,11 +7,15 @@
 //! timelines/<timeline_id> directory.  Currently, there are no
 //! subdirectories, and each image layer file is named like this:
 //!
+//! ```text
 //!    <key start>-<key end>__<LSN>
+//! ```
 //!
 //! For example:
 //!
+//! ```text
 //!    000000067F000032BE0000400000000070B6-000000067F000032BE0000400000000080B6__00000000346BC568
+//! ```
 //!
 //! Every image layer file consists of three parts: "summary",
 //! "index", and "values".  The summary is a fixed size header at the
@@ -660,7 +664,7 @@ impl ImageLayerWriterInner {
 ///
 /// # Note
 ///
-/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// As described in <https://github.com/neondatabase/neon/issues/2650>, it's
 /// possible for the writer to drop before `finish` is actually called. So this
 /// could lead to odd temporary files in the directory, exhausting file system.
 /// This structure wraps `ImageLayerWriterInner` and also contains `Drop`

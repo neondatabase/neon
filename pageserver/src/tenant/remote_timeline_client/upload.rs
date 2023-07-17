@@ -62,12 +62,11 @@ pub(super) async fn upload_timeline_layer<'a>(
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            // In some situations we might run into the underlying file being deleted by
-            // e.g. compaction before the uploader gets to it. In that instance, we don't
-            // want to retry the error: a deleted file won't come back. In theory, the
-            // file might not have been written in the first place, which also indicates
-            // a bug. Still log the situation so that we can keep an eye on it.
-            // See https://github.com/neondatabase/neon/issues/4526
+            // If we encounter this arm, it wasn't intended, but it's also not
+            // a big problem, if it's because the file was deleted before an
+            // upload. However, a nonexistent file can also be indicative of
+            // something worse, like when a file is scheduled for upload before
+            // it has been written to disk yet.
             info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }

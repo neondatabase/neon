@@ -133,7 +133,7 @@ pub use timeline::{
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
-// re-export for use in storage_sync.rs
+// re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
@@ -1459,7 +1459,7 @@ impl Tenant {
             let layer_removal_guard = timeline.layer_removal_cs.lock().await;
             info!("got layer_removal_cs.lock(), deleting layer files");
 
-            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            // NB: remote_timeline_client upload tasks that reference these layers have been cancelled
             //     by the caller.
 
             let local_timeline_directory = self
@@ -4335,13 +4335,13 @@ mod tests {
         // assert freeze_and_flush exercised the initdb optimization
         {
             let state = tline.flush_loop_state.lock().unwrap();
-            let
-                timeline::FlushLoopState::Running {
-                    expect_initdb_optimization,
-                    initdb_optimization_count,
-                } = *state else {
-                    panic!("unexpected state: {:?}", *state);
-                };
+            let timeline::FlushLoopState::Running {
+                expect_initdb_optimization,
+                initdb_optimization_count,
+            } = *state
+            else {
+                panic!("unexpected state: {:?}", *state);
+            };
             assert!(expect_initdb_optimization);
             assert!(initdb_optimization_count > 0);
         }

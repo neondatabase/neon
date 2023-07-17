@@ -24,7 +24,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -183,7 +183,7 @@ pub struct Timeline {
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
     /// Remote storage client.
-    /// See [`storage_sync`] module comment for details.
+    /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
@@ -240,6 +240,8 @@ pub struct Timeline {
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
     /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
+    ///
+    /// [`Tenant::delete_timeline`]: super::Tenant::delete_timeline
     pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
@@ -979,8 +981,12 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
-        let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
+        let Some(layer) = self.find_layer(layer_file_name).await else {
+            return Ok(None);
+        };
+        let Some(remote_layer) = layer.downcast_remote_layer() else {
+            return Ok(Some(false));
+        };
         if self.remote_client.is_none() {
             return Ok(Some(false));
         }
@@ -989,10 +995,12 @@ impl Timeline {
         Ok(Some(true))
     }
 
-    /// Like [`evict_layer_batch`], but for just one layer.
+    /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(local_layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
+        let Some(local_layer) = self.find_layer(layer_file_name).await else {
+            return Ok(None);
+        };
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1013,9 +1021,9 @@ impl Timeline {
 
     /// Evict a batch of layers.
     ///
-    /// GenericRemoteStorage reference is required as a witness[^witness_article] for "remote storage is configured."
+    /// GenericRemoteStorage reference is required as a (witness)[witness_article] for "remote storage is configured."
     ///
-    /// [^witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
+    /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
     pub async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
@@ -1769,7 +1777,7 @@ impl Timeline {
     /// 3. Schedule upload of local-only layer files (which will then also update the remote
     ///    IndexPart to include the new layer files).
     ///
-    /// Refer to the `storage_sync` module comment for more context.
+    /// Refer to the [`remote_timeline_client`] module comment for more context.
     ///
     /// # TODO
     /// May be a bit cleaner to do things based on populated remote client,
@@ -2602,7 +2610,9 @@ impl Timeline {
                     guard.layer_map().frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
-                let Some(layer_to_flush) = layer_to_flush else { break Ok(()) };
+                let Some(layer_to_flush) = layer_to_flush else {
+                    break Ok(());
+                };
                 if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
                     error!("could not flush frozen layer: {err:?}");
                     break Err(err);
@@ -2748,9 +2758,13 @@ impl Timeline {
             // release lock on 'layers'
         }
 
-        // some test cases require first stopping for some time, and then return an error,
-        // therefore we need two failpoints for that.
-        pausable_failpoint!("flush-frozen-pausable");
+        
+        // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
+        // a compaction can delete the file and then it won't be available for uploads any more.
+        // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
+        // race situation.
+        // See https://github.com/neondatabase/neon/issues/4526
+        pausable_failpoint!(""flush-frozen-before-sync");
         fail_point!("flush-frozen-exit");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
@@ -3128,7 +3142,7 @@ impl Timeline {
 
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
-    new_layers: Vec<DeltaLayer>,
+    new_layers: Vec<Arc<DeltaLayer>>,
     deltas_to_compact: Vec<Arc<PersistentLayerDesc>>,
 }
 
@@ -3277,6 +3291,8 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
+    ///
+    /// [`compact_inner`]: Self::compact_inner
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
@@ -3303,6 +3319,37 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        // This failpoint is used together with `test_duplicate_layers` integration test.
+        // It returns the compaction result exactly the same layers as input to compaction.
+        // We want to ensure that this will not cause any problem when updating the layer map
+        // after the compaction is finished.
+        //
+        // Currently, there are two rare edge cases that will cause duplicated layers being
+        // inserted.
+        // 1. The compaction job is inturrupted / did not finish successfully. Assume we have file 1, 2, 3, 4, which
+        //    is compacted to 5, but the page server is shut down, next time we start page server we will get a layer
+        //    map containing 1, 2, 3, 4, and 5, whereas 5 has the same content as 4. If we trigger L0 compation at this
+        //    point again, it is likely that we will get a file 6 which has the same content and the key range as 5,
+        //    and this causes an overwrite. This is acceptable because the content is the same, and we should do a
+        //    layer replace instead of the normal remove / upload process.
+        // 2. The input workload pattern creates exactly n files that are sorted, non-overlapping and is of target file
+        //    size length. Compaction will likely create the same set of n files afterwards.
+        //
+        // This failpoint is a superset of both of the cases.
+        fail_point!("compact-level0-phase1-return-same", |_| {
+            println!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
+            Ok(CompactLevel0Phase1Result {
+                new_layers: level0_deltas
+                    .iter()
+                    .map(|x| x.clone().downcast_delta_layer().unwrap())
+                    .collect(),
+                deltas_to_compact: level0_deltas
+                    .iter()
+                    .map(|x| x.layer_desc().clone().into())
+                    .collect(),
+            })
+        });
 
         // Gather the files to compact in this iteration.
         //
@@ -3562,7 +3609,9 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
+                        new_layers.push(Arc::new(
+                            writer.take().unwrap().finish(prev_key.unwrap().next())?,
+                        ));
                         writer = None;
 
                         if contains_hole {
@@ -3600,7 +3649,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next())?);
+            new_layers.push(Arc::new(writer.finish(prev_key.unwrap().next())?));
         }
 
         // Sync layers
@@ -3696,7 +3745,7 @@ impl Timeline {
         }
 
         // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
+        // See remote_timeline_client module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
         if let Some(remote_client) = &self.remote_client {
             debug!("waiting for upload ops to complete");
@@ -3708,6 +3757,11 @@ impl Timeline {
 
         let mut guard = self.layers.write().await;
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
+
+        // In some rare cases, we may generate a file with exactly the same key range / LSN as before the compaction.
+        // We should move to numbering the layer files instead of naming them using key range / LSN some day. But for
+        // now, we just skip the file to avoid unintentional modification to files on the disk and in the layer map.
+        let mut duplicated_layers = HashSet::new();
 
         let mut insert_layers = Vec::new();
         let mut remove_layers = Vec::new();
@@ -3735,21 +3789,33 @@ impl Timeline {
                 .add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            x.access_stats().record_residence_event(
+            l.access_stats().record_residence_event(
                 &guard,
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            insert_layers.push(x);
+            let l = l as Arc<dyn PersistentLayer>;
+            if guard.contains(&l) {
+                duplicated_layers.insert(l.layer_desc().key());
+            } else {
+                if LayerMap::is_l0(l.layer_desc()) {
+                    return Err(CompactionError::Other(anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
+                }
+                insert_layers.push(l);
+            }
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
-            layer_names_to_delete.push(l.filename());
-            remove_layers.push(guard.get_from_desc(&l));
+        for ldesc in deltas_to_compact {
+            if duplicated_layers.contains(&ldesc.key()) {
+                // skip duplicated layers, they will not be removed; we have already overwritten them
+                // with new layers in the compaction phase 1.
+                continue;
+            }
+            layer_names_to_delete.push(ldesc.filename());
+            remove_layers.push(guard.get_from_desc(&ldesc));
         }
 
         guard.finish_compact_l0(

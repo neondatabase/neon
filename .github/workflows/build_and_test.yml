@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - release
+      - ci-run/pr-*
   pull_request:
 
 defaults:
@@ -126,6 +127,11 @@ jobs:
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
       - name: Run cargo clippy (release)
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
+
+      - name: Check documentation generation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
@@ -390,13 +396,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -405,9 +409,11 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
+          extra_params: --splits ${{ strategy.job-total }} --group ${{ matrix.pytest_split_group }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -788,7 +794,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.12.1
+      VM_BUILDER_VERSION: v0.13.1
 
     steps:
       - name: Checkout

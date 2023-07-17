@@ -2,7 +2,9 @@
 //!
 //! In the local test environment, the data for each endpoint is stored in
 //!
+//! ```text
 //!   .neon/endpoints/<endpoint id>
+//! ```
 //!
 //! Some basic information about the endpoint, like the tenant and timeline IDs,
 //! are stored in the `endpoint.json` file. The `endpoint.json` file is created
@@ -22,7 +24,7 @@
 //!
 //! Directory contents:
 //!
-//! ```ignore
+//! ```text
 //! .neon/endpoints/main/
 //!     compute.log               - log output of `compute_ctl` and `postgres`
 //!     endpoint.json             - serialized `EndpointConf` struct

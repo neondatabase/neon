@@ -171,11 +171,13 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
+    /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
     /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
     /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
     /// See the comment in `eviction_task` for details.
+    ///
+    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
     pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
@@ -993,6 +995,8 @@ impl ConfigurableSemaphore {
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
     /// feature such as [`Tenant::gather_size_inputs`]. Otherwise any semaphore using future will
     /// behave like [`futures::future::pending`], just waiting until new permits are added.
+    ///
+    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
     pub fn new(initial_permits: NonZeroUsize) -> Self {
         ConfigurableSemaphore {
             initial_permits,

@@ -163,8 +163,9 @@ impl Deref for FileStorage {
 
 #[async_trait::async_trait]
 impl Storage for FileStorage {
-    /// persists state durably to underlying storage
-    /// for description see https://lwn.net/Articles/457667/
+    /// Persists state durably to the underlying storage.
+    ///
+    /// For a description, see <https://lwn.net/Articles/457667/>.
     async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
         let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
 

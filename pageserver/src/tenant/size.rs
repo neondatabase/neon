@@ -110,11 +110,11 @@ pub struct TimelineInputs {
 ///
 /// Tenant size does not consider the latest state, but only the state until next_gc_cutoff, which
 /// is updated on-demand, during the start of this calculation and separate from the
-/// [`Timeline::latest_gc_cutoff`].
+/// [`TimelineInputs::latest_gc_cutoff`].
 ///
 /// For timelines in general:
 ///
-/// ```ignore
+/// ```text
 /// 0-----|---------|----|------------| · · · · · |·> lsn
 ///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
 /// ```

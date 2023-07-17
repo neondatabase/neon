@@ -12,7 +12,7 @@ mod messages;
 mod secret;
 mod signature;
 
-#[cfg(test)]
+#[cfg(any(test, doc))]
 mod password;
 
 pub use exchange::Exchange;

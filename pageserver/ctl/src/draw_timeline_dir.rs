@@ -7,10 +7,10 @@
 //! - The y axis represents LSN, growing upwards.
 //!
 //! Coordinates in both axis are compressed for better readability.
-//! (see https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb)
+//! (see <https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb>)
 //!
 //! Example use:
-//! ```
+//! ```bash
 //! $ ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
 //! $   grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
 //! $ firefox out.svg
@@ -20,7 +20,7 @@
 //! or from pageserver log files.
 //!
 //! TODO Consider shipping this as a grafana panel plugin:
-//!      https://grafana.com/tutorials/build-a-panel-plugin/
+//!      <https://grafana.com/tutorials/build-a-panel-plugin/>
 use anyhow::Result;
 use pageserver::repository::Key;
 use std::cmp::Ordering;

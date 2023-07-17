@@ -411,7 +411,7 @@ fn test_persistent_overlapping() {
 /// still be more critical.
 ///
 /// See this for more on persistent and retroactive techniques:
-/// https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
+/// <https://www.youtube.com/watch?v=WqCWghETNDc&t=581s>
 pub struct BufferedHistoricLayerCoverage<Value> {
     /// A persistent layer map that we rebuild when we need to retroactively update
     historic_coverage: HistoricLayerCoverage<Value>,

@@ -49,14 +49,16 @@ pub fn forknumber_to_name(forknum: u8) -> Option<&'static str> {
     }
 }
 
-///
 /// Parse a filename of a relation file. Returns (relfilenode, forknum, segno) tuple.
 ///
 /// Formats:
+///
+/// ```text
 /// <oid>
 /// <oid>_<fork name>
 /// <oid>.<segment number>
 /// <oid>_<fork name>.<segment number>
+/// ```
 ///
 /// See functions relpath() and _mdfd_segpath() in PostgreSQL sources.
 ///

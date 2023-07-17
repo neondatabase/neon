@@ -123,7 +123,7 @@ impl super::Api for Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
         self.do_get_auth_info(extra, creds).await
     }
@@ -132,7 +132,7 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = creds.project().expect("impossible");
 

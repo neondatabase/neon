@@ -57,8 +57,9 @@ impl Ord for DeltaFileName {
 
 /// Represents the filename of a DeltaLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN start>-<LSN end>
-///
+/// ```
 impl DeltaFileName {
     ///
     /// Parse a string as a delta file name. Returns None if the filename does not
@@ -162,7 +163,9 @@ impl ImageFileName {
 ///
 /// Represents the filename of an ImageLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN>
+/// ```
 impl ImageFileName {
     ///
     /// Parse a string as an image file name. Returns None if the filename does not
