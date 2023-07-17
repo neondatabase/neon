@@ -231,7 +231,9 @@ def test_sql_over_http(static_proxy: NeonProxy):
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
 
-    def q(sql: str, raw_text: bool, array_mode: bool, params: List[Any] = []) -> Any:
+    def q(sql: str, raw_text: bool, array_mode: bool, params: Optional[List[Any]] = None) -> Any:
+        if params is None:
+            params = []
         connstr = (
             f"postgresql://http2:http2@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         )

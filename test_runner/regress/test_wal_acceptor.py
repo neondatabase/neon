@@ -46,8 +46,10 @@ def wait_lsn_force_checkpoint(
     timeline_id: TimelineId,
     endpoint: Endpoint,
     ps: NeonPageserver,
-    pageserver_conn_options={},
+    pageserver_conn_options = None,
 ):
+    if pageserver_conn_options is None:
+        pageserver_conn_options = {}
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
 
