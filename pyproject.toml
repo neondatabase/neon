@@ -79,7 +79,7 @@ ignore_missing_imports = true
 
 [tool.ruff]
 extend-exclude = ["vendor/"]
-ignore = ["E501", "B904", "B905"]
+ignore = ["E501"]
 select = [
     "E", # pycodestyle
     "F", # Pyflakes
