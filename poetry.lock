@@ -1869,6 +1869,20 @@ packaging = ">=17.1"
 pytest = ">=5.3"
 
 [[package]]
+name = "pytest-split"
+version = "0.8.1"
+description = "Pytest plugin which splits the test suite to equally sized sub suites based on test execution time."
+optional = false
+python-versions = ">=3.7.1,<4.0"
+files = [
+    {file = "pytest_split-0.8.1-py3-none-any.whl", hash = "sha256:74b110ea091bd147cc1c5f9665a59506e5cedfa66f96a89fb03e4ab447c2c168"},
+    {file = "pytest_split-0.8.1.tar.gz", hash = "sha256:2d88bd3dc528689a7a3f58fc12ea165c3aa62e90795e420dfad920afe5612d6d"},
+]
+
+[package.dependencies]
+pytest = ">=5,<8"
+
+[[package]]
 name = "pytest-timeout"
 version = "2.1.0"
 description = "pytest plugin to abort hanging tests"
@@ -2513,4 +2527,4 @@ testing = ["func-timeout", "jaraco.itertools", "pytest (>=6)", "pytest-black (>=
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "fe771b153ef7e308d6d04421d0eb3f97d00780882277d2b4fc1f296054d8db79"
+content-hash = "e16a65d8fdff4e2173610e552e0e7306e301de2c640ae6082ef6cc5755f566d2"
