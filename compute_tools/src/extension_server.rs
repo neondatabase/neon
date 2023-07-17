@@ -157,7 +157,7 @@ pub async fn download_extension(
         .read_to_end(&mut write_data_buffer)
         .await?;
     let unzip_dest = pgbin.strip_suffix("/bin/postgres").expect("bad pgbin");
-    let tar = GzDecoder::new(std::io::Cursor::new(write_data_buffer));
+    let tar = GzDecoder::new(write_data_buffer.as_slice());
     let mut archive = Archive::new(tar);
     archive.unpack(unzip_dest)?;
     info!("Download + unzip {:?} completed successfully", &ext_path);
