@@ -2758,13 +2758,14 @@ impl Timeline {
             // release lock on 'layers'
         }
 
-        
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
         // race situation.
         // See https://github.com/neondatabase/neon/issues/4526
-        pausable_failpoint!(""flush-frozen-before-sync");
+        pausable_failpoint!("flush-frozen-before-sync");
+        // The `test_compaction_delete_before_upload` test case will need to wait for several seconds
+        // before exiting the function, so we need to have two failpoints here.
         fail_point!("flush-frozen-exit");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
