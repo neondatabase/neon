@@ -120,45 +120,55 @@ impl SafekeeperNode {
         let availability_zone = format!("sk-{}", id_string);
 
         let mut args = vec![
-            "-D",
-            datadir.to_str().with_context(|| {
-                format!("Datadir path {datadir:?} cannot be represented as a unicode string")
-            })?,
-            "--id",
-            &id_string,
-            "--listen-pg",
-            &listen_pg,
-            "--listen-http",
-            &listen_http,
-            "--availability-zone",
-            &availability_zone,
+            "-D".to_owned(),
+            datadir
+                .to_str()
+                .with_context(|| {
+                    format!("Datadir path {datadir:?} cannot be represented as a unicode string")
+                })?
+                .to_owned(),
+            "--id".to_owned(),
+            id_string,
+            "--listen-pg".to_owned(),
+            listen_pg,
+            "--listen-http".to_owned(),
+            listen_http,
+            "--availability-zone".to_owned(),
+            availability_zone,
         ];
+        if let Some(pg_tenant_only_port) = self.conf.pg_tenant_only_port {
+            let listen_pg_tenant_only = format!("127.0.0.1:{}", pg_tenant_only_port);
+            args.extend(["--listen-pg-tenant-only".to_owned(), listen_pg_tenant_only]);
+        }
         if !self.conf.sync {
-            args.push("--no-sync");
+            args.push("--no-sync".to_owned());
         }
 
         let broker_endpoint = format!("{}", self.env.broker.client_url());
-        args.extend(["--broker-endpoint", &broker_endpoint]);
+        args.extend(["--broker-endpoint".to_owned(), broker_endpoint]);
 
         let mut backup_threads = String::new();
         if let Some(threads) = self.conf.backup_threads {
             backup_threads = threads.to_string();
-            args.extend(["--backup-threads", &backup_threads]);
+            args.extend(["--backup-threads".to_owned(), backup_threads]);
         } else {
             drop(backup_threads);
         }
 
         if let Some(ref remote_storage) = self.conf.remote_storage {
-            args.extend(["--remote-storage", remote_storage]);
+            args.extend(["--remote-storage".to_owned(), remote_storage.clone()]);
         }
 
         let key_path = self.env.base_data_dir.join("auth_public_key.pem");
         if self.conf.auth_enabled {
             args.extend([
-                "--auth-validation-public-key-path",
-                key_path.to_str().with_context(|| {
-                    format!("Key path {key_path:?} cannot be represented as a unicode string")
-                })?,
+                "--auth-validation-public-key-path".to_owned(),
+                key_path
+                    .to_str()
+                    .with_context(|| {
+                        format!("Key path {key_path:?} cannot be represented as a unicode string")
+                    })?
+                    .to_owned(),
             ]);
         }
 
