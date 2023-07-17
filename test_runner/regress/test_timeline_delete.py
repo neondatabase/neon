@@ -152,7 +152,8 @@ def test_delete_timeline_post_rm_failure(
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    # FIXME: #4719
+    # timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
     env.pageserver.allowed_errors.append(at_failpoint_log_message)
@@ -334,7 +335,8 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    # FIXME: #4719
+    # timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
