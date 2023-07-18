@@ -3060,6 +3060,7 @@ dependencies = [
  "pbkdf2",
  "pin-project-lite",
  "postgres-native-tls",
+ "postgres-protocol",
  "postgres_backend",
  "pq_proto",
  "prometheus",

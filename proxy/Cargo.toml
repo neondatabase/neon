@@ -32,6 +32,7 @@ parking_lot.workspace = true
 pbkdf2.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
+postgres-protocol.workspace = true
 pq_proto.workspace = true
 prometheus.workspace = true
 rand.workspace = true

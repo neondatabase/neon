@@ -58,21 +58,10 @@ impl ServerSecret {
     /// Build a new server secret from the prerequisites.
     /// XXX: We only use this function in tests.
     #[cfg(test)]
-    pub fn build(password: &str, salt: &[u8], iterations: u32) -> Option<Self> {
-        // TODO: implement proper password normalization required by the RFC
-        if !password.is_ascii() {
-            return None;
-        }
-
-        let password = super::password::SaltedPassword::new(password.as_bytes(), salt, iterations);
-
-        Some(Self {
-            iterations,
-            salt_base64: base64::encode(salt),
-            stored_key: password.client_key().sha256(),
-            server_key: password.server_key(),
-            doomed: false,
-        })
+    pub fn build(password: &str) -> Option<Self> {
+        Self::parse(&postgres_protocol::password::scram_sha_256(
+            password.as_bytes(),
+        ))
     }
 }
 
@@ -101,21 +90,5 @@ mod tests {
 
         assert_eq!(base64::encode(parsed.stored_key), stored_key);
         assert_eq!(base64::encode(parsed.server_key), server_key);
-    }
-
-    #[test]
-    fn build_scram_secret() {
-        let salt = b"salt";
-        let secret = ServerSecret::build("password", salt, 4096).unwrap();
-        assert_eq!(secret.iterations, 4096);
-        assert_eq!(secret.salt_base64, base64::encode(salt));
-        assert_eq!(
-            base64::encode(secret.stored_key.as_ref()),
-            "lF4cRm/Jky763CN4HtxdHnjV4Q8AWTNlKvGmEFFU8IQ="
-        );
-        assert_eq!(
-            base64::encode(secret.server_key.as_ref()),
-            "ub8OgRsftnk2ccDMOt7ffHXNcikRkQkq1lh4xaAqrSw="
-        );
     }
 }

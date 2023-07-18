@@ -99,9 +99,8 @@ struct Scram(scram::ServerSecret);
 
 impl Scram {
     fn new(password: &str) -> anyhow::Result<Self> {
-        let salt = rand::random::<[u8; 16]>();
-        let secret = scram::ServerSecret::build(password, &salt, 256)
-            .context("failed to generate scram secret")?;
+        let secret =
+            scram::ServerSecret::build(password).context("failed to generate scram secret")?;
         Ok(Scram(secret))
     }
 
