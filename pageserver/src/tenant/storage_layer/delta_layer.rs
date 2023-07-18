@@ -7,14 +7,18 @@
 //! must be page images or WAL records with the 'will_init' flag set, so that
 //! they can be replayed without referring to an older page version.
 //!
-//! The delta files are stored in timelines/<timeline_id> directory.  Currently,
+//! The delta files are stored in `timelines/<timeline_id>` directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
+//! ```text
 //!    <key start>-<key end>__<start LSN>-<end LSN>
+//! ```
 //!
 //! For example:
 //!
+//! ```text
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
+//! ```
 //!
 //! Every delta file consists of three parts: "summary", "index", and
 //! "values". The summary is a fixed size header at the beginning of the file,
@@ -47,6 +51,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::*;
 
 use utils::{
@@ -56,8 +61,8 @@ use utils::{
 };
 
 use super::{
-    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    PathOrConf, PersistentLayerDesc,
+    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, PathOrConf, PersistentLayerDesc,
 };
 
 ///
@@ -403,9 +408,15 @@ impl std::fmt::Display for DeltaLayer {
     }
 }
 
-impl PersistentLayer for DeltaLayer {
+impl AsLayerDesc for DeltaLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
+    }
+}
+
+impl PersistentLayer for DeltaLayer {
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        Some(self)
     }
 
     fn local_path(&self) -> Option<PathBuf> {
@@ -798,7 +809,7 @@ impl DeltaLayerWriterInner {
 ///
 /// # Note
 ///
-/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// As described in <https://github.com/neondatabase/neon/issues/2650>, it's
 /// possible for the writer to drop before `finish` is actually called. So this
 /// could lead to odd temporary files in the directory, exhausting file system.
 /// This structure wraps `DeltaLayerWriterInner` and also contains `Drop`

@@ -1131,7 +1131,7 @@ impl<'a> DatadirModification<'a> {
     /// context, breaking the atomicity is OK. If the import is interrupted, the
     /// whole import fails and the timeline will be deleted anyway.
     /// (Or to be precise, it will be left behind for debugging purposes and
-    /// ignored, see https://github.com/neondatabase/neon/pull/1809)
+    /// ignored, see <https://github.com/neondatabase/neon/pull/1809>)
     ///
     /// Note: A consequence of flushing the pending operations is that they
     /// won't be visible to subsequent operations until `commit`. The function

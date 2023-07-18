@@ -54,7 +54,7 @@ async def gc(env: NeonEnv, timeline: TimelineId):
 # At the same time, run UPDATEs and GC
 async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
     workers = []
-    for worker_id in range(num_connections):
+    for _ in range(num_connections):
         workers.append(asyncio.create_task(update_table(endpoint)))
     workers.append(asyncio.create_task(gc(env, timeline)))
 

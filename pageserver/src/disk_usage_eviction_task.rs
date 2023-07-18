@@ -305,7 +305,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
         debug!(
-            "cand {}/{}: size={}, no_access_for={}us, parition={:?}, tenant={} timeline={} layer={}",
+            "cand {}/{}: size={}, no_access_for={}us, partition={:?}, {}/{}/{}",
             i + 1,
             candidates.len(),
             candidate.layer.file_size(),

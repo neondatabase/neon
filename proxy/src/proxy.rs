@@ -11,17 +11,20 @@ use crate::{
         errors::{ApiError, WakeComputeError},
         messages::MetricsAuxInfo,
     },
-    error::io_error,
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use hashbrown::HashMap;
+use async_trait::async_trait;
 use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::{
+    error::Error,
+    io,
+    ops::ControlFlow,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -35,8 +38,9 @@ use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 /// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
-pub const NUM_RETRIES_WAKE_COMPUTE: u32 = 10;
-pub const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
+const NUM_RETRIES_CONNECT: u32 = 10;
+const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
+const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -131,7 +135,8 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp)
+                        .await
                     }
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
@@ -156,14 +161,50 @@ pub async fn task_main(
     Ok(())
 }
 
-// TODO(tech debt): unite this with its twin below.
+pub enum ClientMode {
+    Tcp,
+    Websockets { hostname: Option<String> },
+}
+
+/// Abstracts the logic of handling TCP vs WS clients
+impl ClientMode {
+    fn allow_cleartext(&self) -> bool {
+        match self {
+            ClientMode::Tcp => false,
+            ClientMode::Websockets { .. } => true,
+        }
+    }
+
+    fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
+        match self {
+            ClientMode::Tcp => config.allow_self_signed_compute,
+            ClientMode::Websockets { .. } => false,
+        }
+    }
+
+    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
+        match self {
+            ClientMode::Tcp => s.sni_hostname(),
+            ClientMode::Websockets { hostname } => hostname.as_deref(),
+        }
+    }
+
+    fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
+        match self {
+            ClientMode::Tcp => tls,
+            // TLS is None here if using websockets, because the connection is already encrypted.
+            ClientMode::Websockets { .. } => None,
+        }
+    }
+}
+
 #[tracing::instrument(fields(session_id = ?session_id), skip_all)]
-pub async fn handle_ws_client(
+pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
-    hostname: Option<String>,
+    stream: S,
+    mode: ClientMode,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -172,10 +213,8 @@ pub async fn handle_ws_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let hostname = hostname.as_deref();
 
-    // TLS is None here, because the connection is already encrypted.
-    let do_handshake = handshake(stream, None, cancel_map);
+    let do_handshake = handshake(stream, mode.handshake_tls(tls), cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -183,6 +222,7 @@ pub async fn handle_ws_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
+        let hostname = mode.hostname(stream.get_ref());
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
@@ -190,59 +230,21 @@ pub async fn handle_ws_client(
             .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
-        async { result }.or_else(|e| stream.throw_error(e)).await?
+        match result {
+            Ok(creds) => creds,
+            Err(e) => stream.throw_error(e).await?,
+        }
     };
-
-    let client = Client::new(stream, creds, &params, session_id, false);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session, true))
-        .await
-}
-
-#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
-async fn handle_client(
-    config: &'static ProxyConfig,
-    cancel_map: &CancelMap,
-    session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
-) -> anyhow::Result<()> {
-    // The `closed` counter will increase when this future is destroyed.
-    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
-    scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
-    }
-
-    let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map);
-    let (mut stream, params) = match do_handshake.await? {
-        Some(x) => x,
-        None => return Ok(()), // it's a cancellation request
-    };
-
-    // Extract credentials which we're going to use for auth.
-    let creds = {
-        let sni = stream.get_ref().sni_hostname();
-        let common_names = tls.and_then(|tls| tls.common_names.clone());
-        let result = config
-            .auth_backend
-            .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_names))
-            .transpose();
-
-        async { result }.or_else(|e| stream.throw_error(e)).await?
-    };
-
-    let allow_self_signed_compute = config.allow_self_signed_compute;
 
     let client = Client::new(
         stream,
         creds,
         &params,
         session_id,
-        allow_self_signed_compute,
+        mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, false))
+        .with_session(|session| client.connect_to_db(session, mode.allow_cleartext()))
         .await
 }
 
@@ -325,18 +327,18 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub fn invalidate_cache(node_info: &console::CachedNodeInfo) {
+pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
-        node_info.invalidate();
     }
-
     let label = match is_cached {
         true => "compute_cached",
         false => "compute_uncached",
     };
     NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+
+    node_info.invalidate().config
 }
 
 /// Try to connect to the compute node once.
@@ -353,65 +355,118 @@ async fn connect_to_compute_once(
         .await
 }
 
+enum ConnectionState<E> {
+    Cached(console::CachedNodeInfo),
+    Invalid(compute::ConnCfg, E),
+}
+
+#[async_trait]
+pub trait ConnectMechanism {
+    type Connection;
+    type ConnectError;
+    type Error: From<Self::ConnectError>;
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<Self::Connection, Self::ConnectError>;
+
+    fn update_connect_config(&self, conf: &mut compute::ConnCfg);
+}
+
+pub struct TcpMechanism<'a> {
+    /// KV-dictionary with PostgreSQL connection params.
+    pub params: &'a StartupMessageParams,
+}
+
+#[async_trait]
+impl ConnectMechanism for TcpMechanism<'_> {
+    type Connection = PostgresConnection;
+    type ConnectError = compute::ConnectionError;
+    type Error = compute::ConnectionError;
+
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<PostgresConnection, Self::Error> {
+        connect_to_compute_once(node_info, timeout).await
+    }
+
+    fn update_connect_config(&self, config: &mut compute::ConnCfg) {
+        config.set_startup_params(self.params);
+    }
+}
+
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
-async fn connect_to_compute(
-    node_info: &mut console::CachedNodeInfo,
-    params: &StartupMessageParams,
+pub async fn connect_to_compute<M: ConnectMechanism>(
+    mechanism: &M,
+    mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-) -> Result<PostgresConnection, compute::ConnectionError> {
+) -> Result<M::Connection, M::Error>
+where
+    M::ConnectError: ShouldRetry + std::fmt::Debug,
+    M::Error: From<WakeComputeError>,
+{
+    mechanism.update_connect_config(&mut node_info.config);
+
     let mut num_retries = 0;
-    let mut should_wake = true;
+    let mut state = ConnectionState::<M::ConnectError>::Cached(node_info);
+
     loop {
-        // Apply startup params to the (possibly, cached) compute node info.
-        node_info.config.set_startup_params(params);
+        match state {
+            ConnectionState::Invalid(config, err) => {
+                match try_wake(&config, extra, creds).await {
+                    // we can't wake up the compute node
+                    Ok(None) => return Err(err.into()),
+                    // there was an error communicating with the control plane
+                    Err(e) => return Err(e.into()),
+                    // failed to wake up but we can continue to retry
+                    Ok(Some(ControlFlow::Continue(()))) => {
+                        state = ConnectionState::Invalid(config, err);
+                        let wait_duration = retry_after(num_retries);
+                        num_retries += 1;
 
-        // Set a shorter timeout for the initial connection attempt.
-        //
-        // In case we try to connect to an outdated address that is no longer valid, the
-        // default behavior of Kubernetes is to drop the packets, causing us to wait for
-        // the entire timeout period. We want to fail fast in such cases.
-        //
-        // A specific case to consider is when we have cached compute node information
-        // with a 4-minute TTL (Time To Live), but the user has executed a `/suspend` API
-        // call, resulting in the nonexistence of the compute node.
-        //
-        // We only use caching in case of scram proxy backed by the console, so reduce
-        // the timeout only in that case.
-        let is_scram_proxy = matches!(creds, auth::BackendType::Console(_, _));
-        let timeout = if is_scram_proxy && num_retries == 0 {
-            time::Duration::from_secs(2)
-        } else {
-            time::Duration::from_secs(10)
-        };
-
-        match connect_to_compute_once(node_info, timeout).await {
-            Err(e) if num_retries < NUM_RETRIES_WAKE_COMPUTE => {
-                if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
-                    error!(error = ?e, "could not connect to compute node");
-                    if should_wake {
-                        match try_wake(node_info, extra, creds).await {
-                            Ok(Some(x)) => {
-                                should_wake = x;
-                            }
-                            Ok(None) => return Err(e),
-                            Err(e) => return Err(io_error(e).into()),
-                        }
-                    }
-                    if !wait_duration.is_zero() {
+                        info!(num_retries, "retrying wake compute");
                         time::sleep(wait_duration).await;
+                        continue;
                     }
-                } else {
-                    return Err(e);
+                    // successfully woke up a compute node and can break the wakeup loop
+                    Ok(Some(ControlFlow::Break(mut node_info))) => {
+                        mechanism.update_connect_config(&mut node_info.config);
+                        state = ConnectionState::Cached(node_info)
+                    }
                 }
             }
-            other => return other,
-        }
+            ConnectionState::Cached(node_info) => {
+                match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
+                    Ok(res) => return Ok(res),
+                    Err(e) => {
+                        error!(error = ?e, "could not connect to compute node");
+                        if !e.should_retry(num_retries) {
+                            return Err(e.into());
+                        }
 
-        num_retries += 1;
-        info!(retries_left = num_retries, "retrying connect");
+                        // after the first connect failure,
+                        // we should invalidate the cache and wake up a new compute node
+                        if num_retries == 0 {
+                            state = ConnectionState::Invalid(invalidate_cache(node_info), e);
+                        } else {
+                            state = ConnectionState::Cached(node_info);
+                        }
+
+                        let wait_duration = retry_after(num_retries);
+                        num_retries += 1;
+
+                        info!(num_retries, "retrying wake compute");
+                        time::sleep(wait_duration).await;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -419,45 +474,92 @@ async fn connect_to_compute(
 /// * Returns Ok(Some(true)) if there was an error waking but retries are acceptable
 /// * Returns Ok(Some(false)) if the wakeup succeeded
 /// * Returns Ok(None) or Err(e) if there was an error
-pub async fn try_wake(
-    node_info: &mut console::CachedNodeInfo,
+async fn try_wake(
+    config: &compute::ConnCfg,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-) -> Result<Option<bool>, WakeComputeError> {
+) -> Result<Option<ControlFlow<console::CachedNodeInfo>>, WakeComputeError> {
     info!("compute node's state has likely changed; requesting a wake-up");
-    invalidate_cache(node_info);
     match creds.wake_compute(extra).await {
         // retry wake if the compute was in an invalid state
         Err(WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::BAD_REQUEST,
             ..
-        })) => Ok(Some(true)),
+        })) => Ok(Some(ControlFlow::Continue(()))),
         // Update `node_info` and try again.
         Ok(Some(mut new)) => {
-            new.config.reuse_password(&node_info.config);
-            *node_info = new;
-            Ok(Some(false))
+            new.config.reuse_password(config);
+            Ok(Some(ControlFlow::Break(new)))
         }
         Err(e) => Err(e),
         Ok(None) => Ok(None),
     }
 }
 
-fn retry_connect_in(err: &compute::ConnectionError, num_retries: u32) -> Option<time::Duration> {
-    use std::io::ErrorKind;
-    match err {
-        // retry all errors at least once immediately
-        _ if num_retries == 0 => Some(time::Duration::ZERO),
-        // keep retrying connection errors every 100ms
-        compute::ConnectionError::CouldNotConnect(io_err) => match io_err.kind() {
-            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable => {
-                // 3/2 = 1.5 which seems to be an ok growth factor heuristic
-                Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
-            }
-            _ => None,
-        },
-        // otherwise, don't retry
-        _ => None,
+pub trait ShouldRetry {
+    fn could_retry(&self) -> bool;
+    fn should_retry(&self, num_retries: u32) -> bool {
+        match self {
+            // retry all errors at least once
+            _ if num_retries == 0 => true,
+            _ if num_retries >= NUM_RETRIES_CONNECT => false,
+            err => err.could_retry(),
+        }
+    }
+}
+
+impl ShouldRetry for io::Error {
+    fn could_retry(&self) -> bool {
+        use std::io::ErrorKind;
+        matches!(
+            self.kind(),
+            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable | ErrorKind::TimedOut
+        )
+    }
+}
+
+impl ShouldRetry for tokio_postgres::error::DbError {
+    fn could_retry(&self) -> bool {
+        use tokio_postgres::error::SqlState;
+        matches!(
+            self.code(),
+            &SqlState::CONNECTION_FAILURE
+                | &SqlState::CONNECTION_EXCEPTION
+                | &SqlState::CONNECTION_DOES_NOT_EXIST
+                | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+        )
+    }
+}
+
+impl ShouldRetry for tokio_postgres::Error {
+    fn could_retry(&self) -> bool {
+        if let Some(io_err) = self.source().and_then(|x| x.downcast_ref()) {
+            io::Error::could_retry(io_err)
+        } else if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
+            tokio_postgres::error::DbError::could_retry(db_err)
+        } else {
+            false
+        }
+    }
+}
+
+impl ShouldRetry for compute::ConnectionError {
+    fn could_retry(&self) -> bool {
+        match self {
+            compute::ConnectionError::Postgres(err) => err.could_retry(),
+            compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            _ => false,
+        }
+    }
+}
+
+pub fn retry_after(num_retries: u32) -> time::Duration {
+    match num_retries {
+        0 => time::Duration::ZERO,
+        _ => {
+            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
+            BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries)
+        }
     }
 }
 
@@ -604,15 +706,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
-        let auth_result = async {
-            // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds
-                .authenticate(&extra, &mut stream, allow_cleartext)
-                .await;
-
-            async { res }.or_else(|e| stream.throw_error(e)).await
-        }
-        .await?;
+        let auth_result = match creds
+            .authenticate(&extra, &mut stream, allow_cleartext)
+            .await
+        {
+            Ok(auth_result) => auth_result,
+            Err(e) => return stream.throw_error(e).await,
+        };
 
         let AuthSuccess {
             reported_auth_ok,
@@ -621,7 +721,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
-        let mut node = connect_to_compute(&mut node_info, params, &extra, &creds)
+        let aux = node_info.aux.clone();
+        let mut node = connect_to_compute(&TcpMechanism { params }, node_info, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
@@ -632,6 +733,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &node_info.aux).await
+        proxy_pass(stream, node.stream, &aux).await
     }
 }

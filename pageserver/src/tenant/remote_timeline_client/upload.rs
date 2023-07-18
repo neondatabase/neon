@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context};
 use fail::fail_point;
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 use tokio::fs;
 
 use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
@@ -10,6 +10,8 @@ use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
+
+use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
@@ -56,9 +58,21 @@ pub(super) async fn upload_timeline_layer<'a>(
     });
     let storage_path = conf.remote_path(source_path)?;
 
-    let source_file = fs::File::open(&source_path)
-        .await
-        .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?;
+    let source_file_res = fs::File::open(&source_path).await;
+    let source_file = match source_file_res {
+        Ok(source_file) => source_file,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            // If we encounter this arm, it wasn't intended, but it's also not
+            // a big problem, if it's because the file was deleted before an
+            // upload. However, a nonexistent file can also be indicative of
+            // something worse, like when a file is scheduled for upload before
+            // it has been written to disk yet.
+            info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
+            return Ok(());
+        }
+        Err(e) => Err(e)
+            .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?,
+    };
 
     let fs_size = source_file
         .metadata()

@@ -32,6 +32,8 @@ license = "Apache-2.0"
 ## All dependency versions, used in the project
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
+async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
+flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
 aws-config = { version = "0.55", default-features = false, features=["rustls"] }
@@ -82,9 +84,9 @@ notify = "5.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
-opentelemetry = "0.18.0"
-opentelemetry-otlp = { version = "0.11.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.10.0"
+opentelemetry = "0.19.0"
+opentelemetry-otlp = { version = "0.12.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.11.0"
 parking_lot = "0.12"
 pbkdf2 = "0.12.1"
 pin-project-lite = "0.2"
@@ -93,7 +95,7 @@ prost = "0.11"
 rand = "0.8"
 regex = "1.4"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_18"] }
+reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_19"] }
 reqwest-middleware = "0.2.0"
 reqwest-retry = "0.2.2"
 routerify = "3"
@@ -122,13 +124,14 @@ tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.9.0"
 tokio-rustls = "0.23"
 tokio-stream = "0.1"
+tokio-tar = "0.3"
 tokio-util = { version = "0.7", features = ["io", "time"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tracing = "0.1"
 tracing-error = "0.2.0"
-tracing-opentelemetry = "0.18.0"
+tracing-opentelemetry = "0.19.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter"] }
 url = "2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
@@ -146,7 +149,6 @@ postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
-tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df61437de0feef49ba2ccdbdd94eb8ad6e142" }
 
 ## Other git libraries
 heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
@@ -182,11 +184,6 @@ tonic-build = "0.9"
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
-
-# Changes the MAX_THREADS limit from 4096 to 32768.
-# This is a temporary workaround for using tracing from many threads in safekeepers code,
-# until async safekeepers patch is merged to the main.
-sharded-slab = { git = "https://github.com/neondatabase/sharded-slab.git", rev="98d16753ab01c61f0a028de44167307a00efea00" }
 
 ################# Binary contents sections
 

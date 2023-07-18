@@ -6,7 +6,7 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
-use std::future;
+use std::{convert::Infallible, future};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, info_span, Instrument};
 
@@ -31,7 +31,7 @@ pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::N
 
 /// Console management API listener task.
 /// It spawns console response handlers needed for the link auth.
-pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("mgmt has shut down");
     }

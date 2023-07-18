@@ -32,7 +32,7 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     cur.execute("create table t1(x integer)")
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")
     cur.execute("vacuum t1")
-    for i in range(n_iter):
+    for _ in range(n_iter):
         cur.execute(f"delete from t1 where x>{n_records//2}")
         cur.execute("vacuum t1")
         time.sleep(1)  # let pageserver a chance to create image layers

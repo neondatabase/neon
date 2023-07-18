@@ -1,5 +1,6 @@
+use std::convert::Infallible;
+
 use anyhow::{bail, Context};
-use futures::{Future, FutureExt};
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -23,7 +24,7 @@ pub mod url;
 pub mod waiters;
 
 /// Handle unix signals appropriately.
-pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<()> {
+pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallible> {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut hangup = signal(SignalKind::hangup())?;
@@ -50,8 +51,6 @@ pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<()> {
 }
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
-pub async fn flatten_err(
-    f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
-) -> anyhow::Result<()> {
-    f.map(|r| r.context("join error").and_then(|x| x)).await
+pub fn flatten_err<T>(r: Result<anyhow::Result<T>, JoinError>) -> anyhow::Result<T> {
+    r.context("join error").and_then(|x| x)
 }

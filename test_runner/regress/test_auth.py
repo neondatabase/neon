@@ -1,5 +1,6 @@
 from contextlib import closing
 
+import psycopg2
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgProtocol
 from fixtures.pageserver.http import PageserverApiException
@@ -106,7 +107,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         if expect_success:
             op()
         else:
-            with pytest.raises(Exception):
+            with pytest.raises(psycopg2.Error):
                 op()
 
     def check_pageserver(expect_success: bool, **conn_kwargs):

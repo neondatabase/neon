@@ -46,8 +46,9 @@ def wait_lsn_force_checkpoint(
     timeline_id: TimelineId,
     endpoint: Endpoint,
     ps: NeonPageserver,
-    pageserver_conn_options={},
+    pageserver_conn_options=None,
 ):
+    pageserver_conn_options = pageserver_conn_options or {}
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
 
@@ -944,7 +945,7 @@ class SafekeeperEnv:
         except Exception as e:
             log.error(e)
             safekeeper_process.kill()
-            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}")
+            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}") from e
 
     def get_safekeeper_connstrs(self):
         assert self.safekeepers is not None, "safekeepers are not initialized"
@@ -1137,7 +1138,7 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     collect_stats(endpoint, cur)
 
     # generate WAL to simulate normal workload
-    for i in range(5):
+    for _ in range(5):
         generate_wal(cur)
         collect_stats(endpoint, cur)
 

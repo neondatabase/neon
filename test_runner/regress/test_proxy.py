@@ -1,6 +1,6 @@
 import json
 import subprocess
-from typing import Any, List
+from typing import Any, List, Optional
 
 import psycopg2
 import pytest
@@ -179,7 +179,8 @@ def test_close_on_connections_exit(static_proxy: NeonProxy):
 def test_sql_over_http(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def q(sql: str, params: List[Any] = []) -> Any:
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
@@ -229,7 +230,8 @@ def test_sql_over_http(static_proxy: NeonProxy):
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
 
-    def q(sql: str, raw_text: bool, array_mode: bool, params: List[Any] = []) -> Any:
+    def q(sql: str, raw_text: bool, array_mode: bool, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
         connstr = (
             f"postgresql://http2:http2@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         )

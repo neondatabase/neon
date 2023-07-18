@@ -4,7 +4,7 @@ use crate::{config::MetricCollectionConfig, http, proxy::proxy_metrics_sweep};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, convert::Infallible, time::Duration};
 use tracing::{error, info, instrument, trace, warn};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
@@ -26,7 +26,7 @@ pub struct Ids {
     pub branch_id: String,
 }
 
-pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
+pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
     scopeguard::defer! {
         info!("metrics collector has shut down");

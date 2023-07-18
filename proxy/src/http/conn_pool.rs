@@ -1,16 +1,17 @@
+use anyhow::Context;
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use pq_proto::StartupMessageParams;
 use std::fmt;
 use std::{collections::HashMap, sync::Arc};
 use tokio::time;
 
-use crate::config;
 use crate::{auth, console};
+use crate::{compute, config};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
 
-use crate::proxy::try_wake;
-use crate::proxy::{BASE_RETRY_WAIT_DURATION, NUM_RETRIES_WAKE_COMPUTE};
+use crate::proxy::ConnectMechanism;
 
 use tracing::error;
 use tracing::info;
@@ -184,11 +185,31 @@ impl GlobalConnPool {
     }
 }
 
-//
+struct TokioMechanism<'a> {
+    conn_info: &'a ConnInfo,
+}
+
+#[async_trait]
+impl ConnectMechanism for TokioMechanism<'_> {
+    type Connection = tokio_postgres::Client;
+    type ConnectError = tokio_postgres::Error;
+    type Error = anyhow::Error;
+
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        connect_to_compute_once(node_info, self.conn_info, timeout).await
+    }
+
+    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
 // Wake up the destination if needed. Code here is a bit involved because
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
-//
+#[tracing::instrument(skip_all)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
@@ -218,62 +239,18 @@ async fn connect_to_compute(
         application_name: Some(APP_NAME),
     };
 
-    let node_info = &mut creds.wake_compute(&extra).await?.expect("msg");
+    let node_info = creds
+        .wake_compute(&extra)
+        .await?
+        .context("missing cache entry from wake_compute")?;
 
-    // This code is a copy of `connect_to_compute` from `src/proxy.rs` with
-    // the difference that it uses `tokio_postgres` for the connection.
-    let mut num_retries = 0;
-    let mut should_wake = true;
-    loop {
-        match connect_to_compute_once(node_info, conn_info).await {
-            Err(e) if num_retries == NUM_RETRIES_WAKE_COMPUTE => {
-                if let Some(wait_duration) = retry_connect_in(&e, num_retries) {
-                    error!(error = ?e, "could not connect to compute node");
-                    if should_wake {
-                        match try_wake(node_info, &extra, &creds).await {
-                            Ok(Some(x)) => should_wake = x,
-                            Ok(None) => return Err(e.into()),
-                            Err(e) => return Err(e.into()),
-                        }
-                    }
-                    if !wait_duration.is_zero() {
-                        time::sleep(wait_duration).await;
-                    }
-                } else {
-                    return Err(e.into());
-                }
-            }
-            other => return Ok(other?),
-        }
-
-        num_retries += 1;
-        info!(retries_left = num_retries, "retrying connect");
-    }
-}
-
-fn retry_connect_in(err: &tokio_postgres::Error, num_retries: u32) -> Option<time::Duration> {
-    use tokio_postgres::error::SqlState;
-    match err.code() {
-        // retry all errors at least once immediately
-        _ if num_retries == 0 => Some(time::Duration::ZERO),
-        // keep retrying connection errors every 100ms
-        Some(
-            &SqlState::CONNECTION_FAILURE
-            | &SqlState::CONNECTION_EXCEPTION
-            | &SqlState::CONNECTION_DOES_NOT_EXIST
-            | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        ) => {
-            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
-            Some(BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries))
-        }
-        // otherwise, don't retry
-        _ => None,
-    }
+    crate::proxy::connect_to_compute(&TokioMechanism { conn_info }, node_info, &extra, &creds).await
 }
 
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
+    timeout: time::Duration,
 ) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
@@ -282,6 +259,7 @@ async fn connect_to_compute_once(
         .password(&conn_info.password)
         .dbname(&conn_info.dbname)
         .max_backend_message_size(MAX_RESPONSE_SIZE)
+        .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
 

@@ -12,6 +12,7 @@ testing = ["fail/failpoints"]
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
@@ -24,6 +25,7 @@ consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
 either.workspace = true
+flate2.workspace = true
 fail.workspace = true
 futures.workspace = true
 git-version.workspace = true

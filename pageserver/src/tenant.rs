@@ -84,6 +84,25 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
+/// Declare a failpoint that can use the `pause` failpoint action.
+/// We don't want to block the executor thread, hence, spawn_blocking + await.
+macro_rules! pausable_failpoint {
+    ($name:literal) => {
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint {}", $name);
+                    fail::fail_point!($name);
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+    };
+}
+
 pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
@@ -114,7 +133,7 @@ pub use timeline::{
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
-// re-export for use in storage_sync.rs
+// re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
@@ -410,7 +429,7 @@ impl Tenant {
                     .layers
                     .read()
                     .await
-                    .0
+                    .layer_map()
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -560,7 +579,7 @@ impl Tenant {
                 .map(move |res| {
                     res.with_context(|| format!("download index part for timeline {timeline_id}"))
                 })
-                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+                .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
         // Wait for all the download tasks to complete & collect results.
@@ -1349,7 +1368,7 @@ impl Tenant {
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
                 .compact(ctx)
-                .instrument(info_span!("compact_timeline", timeline = %timeline_id))
+                .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
 
@@ -1440,7 +1459,7 @@ impl Tenant {
             let layer_removal_guard = timeline.layer_removal_cs.lock().await;
             info!("got layer_removal_cs.lock(), deleting layer files");
 
-            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            // NB: remote_timeline_client upload tasks that reference these layers have been cancelled
             //     by the caller.
 
             let local_timeline_directory = self
@@ -1498,20 +1517,7 @@ impl Tenant {
             remote_client.delete_all().await.context("delete_all")?
         };
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint in_progress_delete");
-                    fail::fail_point!("in_progress_delete");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("in_progress_delete");
 
         {
             // Remove the timeline from the map.
@@ -4329,13 +4335,13 @@ mod tests {
         // assert freeze_and_flush exercised the initdb optimization
         {
             let state = tline.flush_loop_state.lock().unwrap();
-            let
-                timeline::FlushLoopState::Running {
-                    expect_initdb_optimization,
-                    initdb_optimization_count,
-                } = *state else {
-                    panic!("unexpected state: {:?}", *state);
-                };
+            let timeline::FlushLoopState::Running {
+                expect_initdb_optimization,
+                initdb_optimization_count,
+            } = *state
+            else {
+                panic!("unexpected state: {:?}", *state);
+            };
             assert!(expect_initdb_optimization);
             assert!(initdb_optimization_count > 0);
         }

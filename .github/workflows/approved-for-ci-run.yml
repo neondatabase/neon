@@ -1,0 +1,55 @@
+name: Handle `approved-for-ci-run` label
+# This workflow helps to run CI pipeline for PRs made by external contributors (from forks).
+
+on:
+  pull_request:
+    types:
+      # Default types that triggers a workflow ([1]):
+      # - [1] https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+      - opened
+      - synchronize
+      - reopened
+      # Types that we wand to handle in addition to keep labels tidy:
+      - closed
+      # Actual magic happens here:
+      - labeled
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  remove-label:
+    # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
+    # The PR should be reviewed and labelled manually again.
+
+    runs-on: [ ubuntu-latest ]
+
+    if: |
+      contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    steps:
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+  create-branch:
+    # Create a local branch for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
+
+    runs-on: [ ubuntu-latest ]
+
+    if: |
+      github.event.action == 'labeled' &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    steps:
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+      - uses: actions/checkout@v3
+        with:
+          ref: main
+
+      - run: gh pr checkout "${PR_NUMBER}"
+
+      - run: git checkout -b "ci-run/pr-${PR_NUMBER}"
+
+      - run: git push --force origin "ci-run/pr-${PR_NUMBER}"

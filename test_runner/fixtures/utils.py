@@ -95,7 +95,7 @@ def query_scalar(cur: cursor, query: str) -> Any:
 def get_dir_size(path: str) -> int:
     """Return size in bytes."""
     totalbytes = 0
-    for root, dirs, files in os.walk(path):
+    for root, _dirs, files in os.walk(path):
         for name in files:
             try:
                 totalbytes += os.path.getsize(os.path.join(root, name))

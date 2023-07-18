@@ -1,10 +1,12 @@
 //! Every image of a certain timeline from [`crate::tenant::Tenant`]
 //! has a metadata that needs to be stored persistently.
 //!
-//! Later, the file gets is used in [`crate::remote_storage::storage_sync`] as a part of
+//! Later, the file gets used in [`remote_timeline_client`] as a part of
 //! external storage import and export operations.
 //!
 //! The module contains all structs and related helper methods related to timeline metadata.
+//!
+//! [`remote_timeline_client`]: super::remote_timeline_client
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

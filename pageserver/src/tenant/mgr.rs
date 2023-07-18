@@ -690,7 +690,7 @@ pub async fn immediate_gc(
             fail::fail_point!("immediate_gc_task_pre");
             let result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &ctx)
-                .instrument(info_span!("manual_gc", tenant = %tenant_id, timeline = %timeline_id))
+                .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
@@ -740,9 +740,7 @@ pub async fn immediate_compact(
         async move {
             let result = timeline
                 .compact(&ctx)
-                .instrument(
-                    info_span!("manual_compact", tenant = %tenant_id, timeline = %timeline_id),
-                )
+                .instrument(info_span!("manual_compact", %tenant_id, %timeline_id))
                 .await;
 
             match task_done.send(result) {

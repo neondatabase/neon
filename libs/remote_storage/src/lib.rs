@@ -34,12 +34,12 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS: usize = 50;
 pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
-/// https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html
+/// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
-/// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
+/// <https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/>
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
-/// https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax
+/// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
@@ -49,6 +49,12 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 /// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemotePath(PathBuf);
+
+impl std::fmt::Display for RemotePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
 
 impl RemotePath {
     pub fn new(relative_path: &Path) -> anyhow::Result<Self> {

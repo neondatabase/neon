@@ -12,6 +12,11 @@ opt-level = 3
 # Turn on a small amount of optimization in Development mode.
 opt-level = 1
 
+[build]
+# This is only present for local builds, as it will be overridden
+# by the RUSTDOCFLAGS env var in CI.
+rustdocflags = ["-Arustdoc::private_intra_doc_links"]
+
 [alias]
 build_testing = ["build", "--features", "testing"]
 neon = ["run", "--bin", "neon_local"]

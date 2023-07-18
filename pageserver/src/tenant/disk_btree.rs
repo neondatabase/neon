@@ -442,7 +442,7 @@ where
     writer: W,
 
     ///
-    /// stack[0] is the current root page, stack.last() is the leaf.
+    /// `stack[0]` is the current root page, `stack.last()` is the leaf.
     ///
     /// We maintain the length of the stack to be always greater than zero.
     /// Two exceptions are:
