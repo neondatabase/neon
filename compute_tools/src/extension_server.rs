@@ -205,9 +205,11 @@ pub fn init_remote_storage(
     // control plane passes the aws creds via CLI ARGS to compute_ctl
     let aws_key = remote_ext_config["key"].as_str();
     let aws_id = remote_ext_config["id"].as_str();
-    if aws_key.is_some() && aws_id.is_some() {
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", aws_key.expect("is_some"));
-        std::env::set_var("AWS_ACCESS_KEY_ID", aws_id.expect("is_some"));
+    if let Some(aws_key) = aws_key {
+        if let Some(aws_id) = aws_id {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", aws_key);
+            std::env::set_var("AWS_ACCESS_KEY_ID", aws_id);
+        }
     }
 
     // If needed, it is easy to allow modification of other parameters
