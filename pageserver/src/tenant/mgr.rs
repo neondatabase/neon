@@ -835,21 +835,24 @@ mod tests {
         let (until_cleanup_started, cleanup_started) = utils::completion::channel();
 
         // start a "detaching operation", which will take a while, until can_complete_cleanup
-        let cleanup_task = tokio::spawn({
-            let tenants = tenants.clone();
-            async move {
-                let cleanup = async move {
-                    drop(until_cleanup_started);
-                    can_complete_cleanup.wait().await;
-                    anyhow::Ok(())
-                };
-                super::remove_tenant_from_memory(&tenants, id, cleanup).await
-            }
-            .instrument(info_span!("foobar", tenant_id = %id))
-        });
+        let cleanup_task = {
+            let jh = tokio::spawn({
+                let tenants = tenants.clone();
+                async move {
+                    let cleanup = async move {
+                        drop(until_cleanup_started);
+                        can_complete_cleanup.wait().await;
+                        anyhow::Ok(())
+                    };
+                    super::remove_tenant_from_memory(&tenants, id, cleanup).await
+                }
+                .instrument(info_span!("foobar", tenant_id = %id))
+            });
 
-        // now the long cleanup should be in place, with the stopping state
-        cleanup_started.wait().await;
+            // now the long cleanup should be in place, with the stopping state
+            cleanup_started.wait().await;
+            jh
+        };
 
         let mut cleanup_progress = std::pin::pin!(t
             .shutdown(utils::completion::Barrier::default(), false)
@@ -857,14 +860,17 @@ mod tests {
             .unwrap_err()
             .wait());
 
-        let (until_shutdown_started, shutdown_started) = utils::completion::channel();
+        let mut shutdown_task = {
+            let (until_shutdown_started, shutdown_started) = utils::completion::channel();
 
-        let mut shutdown_task = tokio::spawn(async move {
-            drop(until_shutdown_started);
-            super::shutdown_all_tenants0(&tenants).await;
-        });
+            let shutdown_task = tokio::spawn(async move {
+                drop(until_shutdown_started);
+                super::shutdown_all_tenants0(&tenants).await;
+            });
 
-        shutdown_started.wait().await;
+            shutdown_started.wait().await;
+            shutdown_task
+        };
 
         // if the joining in is removed from shutdown_all_tenants0, the shutdown_task should always
         // get to complete within timeout and fail the test. it is expected to continue awaiting
@@ -888,7 +894,7 @@ mod tests {
         cleanup_task
             .await
             .expect("no panicking")
-            .expect("remove_tenant_from_memory");
+            .expect("remove_tenant_from_memory failed");
 
         futures::future::poll_immediate(
             t.shutdown(utils::completion::Barrier::default(), false)
