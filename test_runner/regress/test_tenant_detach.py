@@ -167,7 +167,7 @@ async def reattach_while_busy(
     env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
 ):
     workers = []
-    for worker_id in range(num_connections):
+    for _ in range(num_connections):
         pg_conn = await endpoint.connect_async()
         workers.append(asyncio.create_task(update_table(pg_conn)))
 

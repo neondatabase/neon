@@ -189,7 +189,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
                 # If we get here, the timeline size limit failed
                 log.error("Query unexpectedly succeeded")
-                assert False
+                raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
                 log.info(f"Query expectedly failed with: {err}")
@@ -284,9 +284,9 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     # give it some time to settle in the state where it waits for size computation task
     time.sleep(5)
     if not delete_timeline_success.empty():
-        assert (
-            False
-        ), f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        raise AssertionError(
+            f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        )
 
     log.info(
         "resume the size calculation. The failpoint checks that the timeline directory still exists."

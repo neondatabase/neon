@@ -144,7 +144,7 @@ def test_delete_timeline_post_rm_failure(
     ps_http.configure_failpoints((failpoint_name, "return"))
 
     ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
-    timeline_info = wait_until_timeline_state(
+    wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
         timeline_id=env.initial_timeline,
@@ -152,7 +152,8 @@ def test_delete_timeline_post_rm_failure(
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    # FIXME: #4719
+    # timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
     env.pageserver.allowed_errors.append(at_failpoint_log_message)
@@ -326,7 +327,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
-    timeline_info = wait_until_timeline_state(
+    wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
         timeline_id=leaf_timeline_id,
@@ -334,7 +335,8 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    # FIXME: #4719
+    # timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
