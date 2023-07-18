@@ -164,9 +164,7 @@ fn tracing_subscriber_configured() -> bool {
     tracing::dispatcher::get_default(|d| {
         // it is possible that this closure will not be invoked, but the current implementation
         // always invokes it
-        noop_configured = d
-            .downcast_ref::<tracing::subscriber::NoSubscriber>()
-            .is_some();
+        noop_configured = d.is::<tracing::subscriber::NoSubscriber>();
     });
 
     !noop_configured
