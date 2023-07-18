@@ -268,24 +268,41 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
     for (tenant_id, tenant) in tenants_to_shut_down {
         join_set.spawn(
             async move {
-                let (_guard, shutdown_progress) = completion::channel();
-                let freeze_and_flush = true;
-                if let Err(progress) = tenant.shutdown(shutdown_progress, freeze_and_flush).await {
-                    drop(_guard);
+                // ordering shouldn't matter for this, either we store true right away or never
+                let ordering = std::sync::atomic::Ordering::Relaxed;
+                let joined_other = std::sync::atomic::AtomicBool::new(false);
 
-                    // there is already something else shutting down the tenant (detach, ignore), lets wait for it
-                    let mut remaining = std::pin::pin!(progress.wait());
-                    tokio::select! {
-                        _ = &mut remaining => {},
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                            // in practice we might not have a lot to go, since systemd is going to
-                            // SIGKILL us at 10s, but we can try. delete tenant might take a while,
-                            // so put out a warning.
-                            warn!("waiting for the other shutdown to complete");
-                            remaining.await;
-                        }
+                let mut shutdown = std::pin::pin!(async {
+                    let freeze_and_flush = true;
+
+                    let res = {
+                        let (_guard, shutdown_progress) = completion::channel();
+                        tenant.shutdown(shutdown_progress, freeze_and_flush).await
                     };
-                }
+
+                    if let Err(other_progress) = res {
+                        // join the another shutdown in progress
+                        joined_other.store(true, ordering);
+                        other_progress.wait().await;
+                    }
+                });
+
+                // in practice we might not have a lot time to go, since systemd is going to
+                // SIGKILL us at 10s, but we can try. delete tenant might take a while, so put out
+                // a warning.
+                let warning = std::time::Duration::from_secs(5);
+                let mut warning = std::pin::pin!(tokio::time::sleep(warning));
+
+                tokio::select! {
+                    _ = &mut shutdown => {},
+                    _ = &mut warning => {
+                        // this could also be ignore, deletion
+                        let joined_other = joined_other.load(ordering);
+                        warn!(%joined_other, "waiting for the shutdown to complete");
+                        shutdown.await;
+                    }
+                };
+
                 debug!("tenant successfully stopped");
             }
             .instrument(info_span!("shutdown", %tenant_id)),
