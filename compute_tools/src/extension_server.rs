@@ -183,7 +183,7 @@ pub async fn download_extension(
     Ok(())
 }
 
-// This function initializes the necessary structs to use remmote storage (should be fairly cheap)
+// This function initializes the necessary structs to use remote storage (should be fairly cheap)
 pub fn init_remote_storage(
     remote_ext_config: &str,
     default_prefix: &str,
@@ -202,7 +202,15 @@ pub fn init_remote_storage(
         .unwrap_or(default_prefix)
         .to_string();
 
-    // TODO: potentially allow modification of other parameters
+    // control plane passes the aws creds via CLI ARGS to compute_ctl
+    let aws_key = remote_ext_config["key"].as_str();
+    let aws_id = remote_ext_config["id"].as_str();
+    if aws_key.is_some() && aws_id.is_some() {
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", aws_key.expect("is_some"));
+        std::env::set_var("AWS_ACCESS_KEY_ID", aws_id.expect("is_some"));
+    }
+
+    // If needed, it is easy to allow modification of other parameters
     // however, default values should be fine for now
     let config = S3Config {
         bucket_name: remote_ext_bucket.to_string(),
