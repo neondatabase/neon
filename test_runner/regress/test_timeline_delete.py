@@ -248,7 +248,11 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
             iterations=2,  # effectively try immediately and retry once in one second
         )
 
-        timeline_info["state"]["Broken"]["reason"] == failpoint
+        reason = timeline_info["state"]["Broken"]["reason"]
+        log.info(f"timeline broken: {reason}")
+
+        # this does not always hold for the ones where reason == delete_all
+        # assert reason == f"failpoint: {failpoint}"
 
     wait_longer = remote_storage_kind is RemoteStorageKind.REAL_S3
     if check is Check.RETRY_WITH_RESTART:
@@ -459,7 +463,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-before-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
@@ -711,6 +715,7 @@ def test_timeline_delete_works_for_remote_smoke(
     assert tenant_id == env.initial_tenant
     assert main_timeline_id == env.initial_timeline
 
+    assert env.initial_timeline is not None
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
