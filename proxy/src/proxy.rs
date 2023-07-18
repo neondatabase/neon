@@ -14,9 +14,9 @@ use crate::{
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
+use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use hashbrown::HashMap;
-use async_trait::async_trait;
 use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
