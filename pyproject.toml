@@ -86,5 +86,5 @@ select = [
     "F", # Pyflakes
     "I", # isort
     "W", # pycodestyle
-    "B", # bugbear derived, useless expression
+    "B", # bugbear
 ]
