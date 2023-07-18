@@ -809,7 +809,7 @@ mod tests {
 
     use super::{super::harness::TenantHarness, TenantsMap};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_joins_remove_tenant_from_memory() {
         // the test is a bit ugly with the lockstep together with spawned tasks. the aim is to make
         // sure `shutdown_all_tenants0` per-tenant processing joins in any active
@@ -824,6 +824,10 @@ mod tests {
         // harness loads it to active, which is forced and nothing is running on the tenant
 
         let id = t.tenant_id();
+
+        // tenant harness configures the logging and we cannot escape it
+        let _e = info_span!("testing", tenant_id = %id).entered();
+
         let tenants = HashMap::from([(id, t.clone())]);
         let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
 
@@ -863,11 +867,17 @@ mod tests {
         shutdown_started.wait().await;
 
         // if the joining in is removed from shutdown_all_tenants0, the shutdown_task should always
-        // get to complete within 100ms and fail the test.
+        // get to complete within timeout and fail the test. it is expected to continue awaiting
+        // until completion or SIGKILL during normal shutdown.
+        //
+        // the timeout is long to cover anything that shutdown_task could be doing, but it is
+        // handled instantly because we use tokio's time pausing in this test. 100s is much more than
+        // what we get from systemd on shutdown (10s).
+        let long_time = std::time::Duration::from_secs(100);
         tokio::select! {
             _ = &mut shutdown_task => unreachable!("shutdown must continue, until_cleanup_completed is not dropped"),
             _ = &mut cleanup_progress => unreachable!("cleanup progress must continue, until_cleanup_completed is not dropped"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+            _ = tokio::time::sleep(long_time) => {},
         }
 
         // allow the remove_tenant_from_memory and thus eventually the shutdown to continue

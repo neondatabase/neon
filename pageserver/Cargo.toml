@@ -82,6 +82,7 @@ strum_macros.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 
 [[bench]]
 name = "bench_layer_map"
