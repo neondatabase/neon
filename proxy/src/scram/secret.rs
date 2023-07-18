@@ -3,7 +3,7 @@
 use super::base64_decode_array;
 use super::key::ScramKey;
 
-/// Server secret is produced from [password](super::password::SaltedPassword)
+/// Server secret is produced from user's password,
 /// and is used throughout the authentication process.
 pub struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.

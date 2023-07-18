@@ -3,7 +3,7 @@
 /// Faithfully taken from PostgreSQL.
 pub const SCRAM_KEY_LEN: usize = 32;
 
-/// One of the keys derived from the [password](super::password::SaltedPassword).
+/// One of the keys derived from the user's password.
 /// We use the same structure for all keys, i.e.
 /// `ClientKey`, `StoredKey`, and `ServerKey`.
 #[derive(Default, PartialEq, Eq)]
