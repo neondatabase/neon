@@ -1,4 +1,4 @@
-//! This module contains global (tenant_id, timeline_id) -> Arc<Timeline> mapping.
+//! This module contains global `(tenant_id, timeline_id)` -> `Arc<Timeline>` mapping.
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 

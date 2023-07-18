@@ -1,9 +1,9 @@
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
-    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    UIntGauge, UIntGaugeVec,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge,
+    register_uint_gauge_vec, Counter, CounterVec, Histogram, HistogramVec, IntCounter,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
@@ -203,6 +203,49 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     },
 });
 
+pub struct PageCacheSizeMetrics {
+    pub max_bytes: UIntGauge,
+
+    pub current_bytes_ephemeral: UIntGauge,
+    pub current_bytes_immutable: UIntGauge,
+    pub current_bytes_materialized_page: UIntGauge,
+}
+
+static PAGE_CACHE_SIZE_CURRENT_BYTES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_page_cache_size_current_bytes",
+        "Current size of the page cache in bytes, by key kind",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheSizeMetrics {
+    max_bytes: {
+        register_uint_gauge!(
+            "pageserver_page_cache_size_max_bytes",
+            "Maximum size of the page cache in bytes"
+        )
+        .expect("failed to define a metric")
+    },
+
+    current_bytes_ephemeral: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["ephemeral"])
+            .unwrap()
+    },
+    current_bytes_immutable: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["immutable"])
+            .unwrap()
+    },
+    current_bytes_materialized_page: {
+        PAGE_CACHE_SIZE_CURRENT_BYTES
+            .get_metric_with_label_values(&["materialized_page"])
+            .unwrap()
+    },
+});
+
 static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_wait_lsn_seconds",
@@ -342,7 +385,7 @@ pub static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-/// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
+/// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {
     data_source: &'static str,
@@ -498,6 +541,17 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// keep in sync with control plane Go code so that we can validate
+// compute's basebackup_ms metric with our perspective in the context of SLI/SLO.
+static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
+    // Go code uses milliseconds. Variable is called `computeStartupBuckets`
+    [
+        5, 10, 20, 30, 50, 70, 100, 120, 150, 200, 250, 300, 350, 400, 450, 500, 600, 800, 1000,
+        1500, 2000, 2500, 3000, 5000, 10000, 20000, 40000, 60000,
+    ]
+    .map(|ms| (ms as f64) / 1000.0)
+});
+
 pub struct BasebackupQueryTime(HistogramVec);
 pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
     BasebackupQueryTime({
@@ -505,7 +559,7 @@ pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
             "pageserver_basebackup_query_seconds",
             "Histogram of basebackup queries durations, by result type",
             &["result"],
-            CRITICAL_OP_BUCKETS.into(),
+            COMPUTE_STARTUP_BUCKETS.to_vec(),
         )
         .expect("failed to define a metric")
     })
@@ -775,7 +829,7 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Similar to [`prometheus::HistogramTimer`] but does not record on drop.
+/// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
@@ -833,7 +887,7 @@ impl StorageTimeMetrics {
 
     /// Starts timing a new operation.
     ///
-    /// Note: unlike [`prometheus::HistogramTimer`] the returned timer does not record on drop.
+    /// Note: unlike `prometheus::HistogramTimer` the returned timer does not record on drop.
     pub fn start_timer(&self) -> StorageTimeMetricsTimer {
         StorageTimeMetricsTimer::new(self.clone())
     }
@@ -1213,7 +1267,7 @@ impl RemoteTimelineClientMetrics {
     /// Update the metrics that change when a call to the remote timeline client instance starts.
     ///
     /// Drop the returned guard object once the operation is finished to updates corresponding metrics that track completions.
-    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`] if that
+    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`](Self::call_end) if that
     /// is more suitable.
     /// Never do both.
     pub(crate) fn call_begin(
@@ -1246,7 +1300,7 @@ impl RemoteTimelineClientMetrics {
 
     /// Manually udpate the metrics that track completions, instead of using the guard object.
     /// Using the guard object is generally preferable.
-    /// See [`call_begin`] for more context.
+    /// See [`call_begin`](Self::call_begin) for more context.
     pub(crate) fn call_end(
         &self,
         file_kind: &RemoteOpFileKind,

@@ -16,7 +16,7 @@
 //! Other read methods are less critical but still impact performance of background tasks.
 //!
 //! This data structure relies on a persistent/immutable binary search tree. See the
-//! following lecture for an introduction https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
+//! following lecture for an introduction <https://www.youtube.com/watch?v=WqCWghETNDc&t=581s>
 //! Summary: A persistent/immutable BST (and persistent data structures in general) allows
 //! you to modify the tree in such a way that each modification creates a new "version"
 //! of the tree. When you modify it, you get a new version, but all previous versions are
@@ -40,7 +40,7 @@
 //! afterwards. We can add layers as long as they have larger LSNs than any previous layer in
 //! the map, but if we need to remove a layer, or insert anything with an older LSN, we need
 //! to throw away most of the persistent BST and build a new one, starting from the oldest
-//! LSN. See `LayerMap::flush_updates()`.
+//! LSN. See [`LayerMap::flush_updates()`].
 //!
 
 mod historic_layer_coverage;
@@ -60,7 +60,6 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
-use super::storage_layer::range_eq;
 use super::storage_layer::PersistentLayerDesc;
 
 ///
@@ -365,7 +364,7 @@ impl LayerMap {
     }
 
     pub fn is_l0(layer: &PersistentLayerDesc) -> bool {
-        range_eq(&layer.get_key_range(), &(Key::MIN..Key::MAX))
+        layer.get_key_range() == (Key::MIN..Key::MAX)
     }
 
     /// This function determines which layers are counted in `count_deltas`:
@@ -397,7 +396,7 @@ impl LayerMap {
         }
 
         // Case 2
-        if range_eq(partition_range, &(Key::MIN..Key::MAX)) {
+        if partition_range == &(Key::MIN..Key::MAX) {
             return true;
         }
 
@@ -652,18 +651,34 @@ impl LayerMap {
 #[cfg(test)]
 mod tests {
     use super::LayerMap;
-    use crate::tenant::storage_layer::{tests::LayerDescriptor, LayerFileName};
+    use crate::tenant::storage_layer::LayerFileName;
     use std::str::FromStr;
     use std::sync::Arc;
 
     mod l0_delta_layers_updated {
 
         use crate::tenant::{
-            storage_layer::{PersistentLayer, PersistentLayerDesc},
-            timeline::LayerFileManager,
+            storage_layer::{AsLayerDesc, PersistentLayerDesc},
+            timeline::layer_manager::LayerFileManager,
         };
 
         use super::*;
+
+        struct LayerObject(PersistentLayerDesc);
+
+        impl AsLayerDesc for LayerObject {
+            fn layer_desc(&self) -> &PersistentLayerDesc {
+                &self.0
+            }
+        }
+
+        impl LayerObject {
+            fn new(desc: PersistentLayerDesc) -> Self {
+                LayerObject(desc)
+            }
+        }
+
+        type TestLayerFileManager = LayerFileManager<LayerObject>;
 
         #[test]
         fn for_full_range_delta() {
@@ -701,18 +716,18 @@ mod tests {
 
             let layer = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69";
             let layer = LayerFileName::from_str(layer).unwrap();
-            let layer = LayerDescriptor::from(layer);
+            let layer = PersistentLayerDesc::from(layer);
 
             // same skeletan construction; see scenario below
-            let not_found = Arc::new(layer.clone());
-            let new_version = Arc::new(layer);
+            let not_found = Arc::new(LayerObject::new(layer.clone()));
+            let new_version = Arc::new(LayerObject::new(layer));
 
             // after the immutable storage state refactor, the replace operation
             // will not use layer map any more. We keep it here for consistency in test cases
             // and can remove it in the future.
             let _map = LayerMap::default();
 
-            let mut mapping = LayerFileManager::new();
+            let mut mapping = TestLayerFileManager::new();
 
             mapping
                 .replace_and_verify(not_found, new_version)
@@ -721,10 +736,10 @@ mod tests {
 
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let name = LayerFileName::from_str(layer_name).unwrap();
-            let skeleton = LayerDescriptor::from(name);
+            let skeleton = PersistentLayerDesc::from(name);
 
-            let remote = Arc::new(skeleton.clone());
-            let downloaded = Arc::new(skeleton);
+            let remote = Arc::new(LayerObject::new(skeleton.clone()));
+            let downloaded = Arc::new(LayerObject::new(skeleton));
 
             let mut map = LayerMap::default();
             let mut mapping = LayerFileManager::new();

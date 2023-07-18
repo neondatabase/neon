@@ -57,8 +57,9 @@ impl Ord for DeltaFileName {
 
 /// Represents the filename of a DeltaLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN start>-<LSN end>
-///
+/// ```
 impl DeltaFileName {
     ///
     /// Parse a string as a delta file name. Returns None if the filename does not
@@ -162,7 +163,9 @@ impl ImageFileName {
 ///
 /// Represents the filename of an ImageLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN>
+/// ```
 impl ImageFileName {
     ///
     /// Parse a string as an image file name. Returns None if the filename does not
@@ -210,9 +213,15 @@ pub enum LayerFileName {
 
 impl LayerFileName {
     pub fn file_name(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for LayerFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Image(fname) => fname.to_string(),
-            Self::Delta(fname) => fname.to_string(),
+            Self::Image(fname) => write!(f, "{fname}"),
+            Self::Delta(fname) => write!(f, "{fname}"),
         }
     }
 }

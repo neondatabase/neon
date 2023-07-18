@@ -1,5 +1,8 @@
 use crate::{
-    cancellation::CancelMap, config::ProxyConfig, error::io_error, proxy::handle_ws_client,
+    cancellation::CancelMap,
+    config::ProxyConfig,
+    error::io_error,
+    proxy::{handle_client, ClientMode},
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
@@ -150,12 +153,12 @@ async fn serve_websocket(
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_ws_client(
+    handle_client(
         config,
         cancel_map,
         session_id,
         WebSocketRw::new(websocket),
-        hostname,
+        ClientMode::Websockets { hostname },
     )
     .await?;
     Ok(())
@@ -221,6 +224,18 @@ async fn ws_handler(
             );
             r
         })
+    } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
+        Response::builder()
+            .header("Allow", "OPTIONS, POST")
+            .header("Access-Control-Allow-Origin", "*")
+            .header(
+                "Access-Control-Allow-Headers",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+            )
+            .header("Access-Control-Max-Age", "86400" /* 24 hours */)
+            .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
+            .body(Body::empty())
+            .map_err(|e| ApiError::BadRequest(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }

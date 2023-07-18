@@ -94,7 +94,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
 
     # Wait for the remote storage uploads to finish
     pageserver_http = env.pageserver.http_client()
-    for tenant, endpoint in tenants_endpoints:
+    for _tenant, endpoint in tenants_endpoints:
         res = endpoint.safe_psql_many(
             ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"]
         )

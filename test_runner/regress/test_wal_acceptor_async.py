@@ -392,7 +392,7 @@ async def run_concurrent_computes(
             break
         await asyncio.sleep(0.1)
     else:
-        assert False, "Timed out while waiting for another query by computes[0]"
+        raise AssertionError("Timed out while waiting for another query by computes[0]")
     computes[0].stopped = True
 
     await asyncio.gather(background_tasks[0])
@@ -545,7 +545,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
         # invalid, to make them unavailable to the endpoint.  We use
         # ports 10, 11 and 12 to simulate unavailable safekeepers.
         config = toml.load(test_output_dir / "repo" / "config")
-        for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk)):
+        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk)):
             if active:
                 config["safekeepers"][i]["pg_port"] = env.safekeepers[i].port.pg
             else:

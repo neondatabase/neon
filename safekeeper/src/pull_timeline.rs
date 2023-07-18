@@ -188,6 +188,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
         let mut response = client.get(&http_url).send().await?;
         while let Some(chunk) = response.chunk().await? {
             file.write_all(&chunk).await?;
+            file.flush().await?;
         }
     }
 

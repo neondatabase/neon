@@ -1,16 +1,17 @@
+use anyhow::Context;
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use pq_proto::StartupMessageParams;
 use std::fmt;
-use std::ops::ControlFlow;
 use std::{collections::HashMap, sync::Arc};
 use tokio::time;
 
-use crate::config;
 use crate::{auth, console};
+use crate::{compute, config};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
 
-use crate::proxy::{invalidate_cache, retry_after, try_wake, NUM_RETRIES_WAKE_COMPUTE};
+use crate::proxy::ConnectMechanism;
 
 use tracing::error;
 use tracing::info;
@@ -184,6 +185,27 @@ impl GlobalConnPool {
     }
 }
 
+struct TokioMechanism<'a> {
+    conn_info: &'a ConnInfo,
+}
+
+#[async_trait]
+impl ConnectMechanism for TokioMechanism<'_> {
+    type Connection = tokio_postgres::Client;
+    type ConnectError = tokio_postgres::Error;
+    type Error = anyhow::Error;
+
+    async fn connect_once(
+        &self,
+        node_info: &console::CachedNodeInfo,
+        timeout: time::Duration,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        connect_to_compute_once(node_info, self.conn_info, timeout).await
+    }
+
+    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
 // Wake up the destination if needed. Code here is a bit involved because
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
@@ -217,80 +239,18 @@ async fn connect_to_compute(
         application_name: Some(APP_NAME),
     };
 
-    let node_info = &mut creds.wake_compute(&extra).await?.expect("msg");
+    let node_info = creds
+        .wake_compute(&extra)
+        .await?
+        .context("missing cache entry from wake_compute")?;
 
-    let mut num_retries = 0;
-    let mut wait_duration = time::Duration::ZERO;
-    let mut should_wake_with_error = None;
-    loop {
-        if !wait_duration.is_zero() {
-            time::sleep(wait_duration).await;
-        }
-
-        // try wake the compute node if we have determined it's sensible to do so
-        if let Some(err) = should_wake_with_error.take() {
-            match try_wake(node_info, &extra, &creds).await {
-                // we can't wake up the compute node
-                Ok(None) => return Err(err),
-                // there was an error communicating with the control plane
-                Err(e) => return Err(e.into()),
-                // failed to wake up but we can continue to retry
-                Ok(Some(ControlFlow::Continue(()))) => {
-                    wait_duration = retry_after(num_retries);
-                    should_wake_with_error = Some(err);
-
-                    num_retries += 1;
-                    info!(num_retries, "retrying wake compute");
-                    continue;
-                }
-                // successfully woke up a compute node and can break the wakeup loop
-                Ok(Some(ControlFlow::Break(()))) => {}
-            }
-        }
-
-        match connect_to_compute_once(node_info, conn_info).await {
-            Ok(res) => return Ok(res),
-            Err(e) => {
-                error!(error = ?e, "could not connect to compute node");
-                if !can_retry_error(&e, num_retries) {
-                    return Err(e.into());
-                }
-                wait_duration = retry_after(num_retries);
-
-                // after the first connect failure,
-                // we should invalidate the cache and wake up a new compute node
-                if num_retries == 0 {
-                    invalidate_cache(node_info);
-                    should_wake_with_error = Some(e.into());
-                }
-            }
-        }
-
-        num_retries += 1;
-        info!(num_retries, "retrying connect");
-    }
-}
-
-fn can_retry_error(err: &tokio_postgres::Error, num_retries: u32) -> bool {
-    use tokio_postgres::error::SqlState;
-    match err.code() {
-        // retry all errors at least once
-        _ if num_retries == 0 => true,
-        // keep retrying connection errors
-        Some(
-            &SqlState::CONNECTION_FAILURE
-            | &SqlState::CONNECTION_EXCEPTION
-            | &SqlState::CONNECTION_DOES_NOT_EXIST
-            | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        ) if num_retries < NUM_RETRIES_WAKE_COMPUTE => true,
-        // otherwise, don't retry
-        _ => false,
-    }
+    crate::proxy::connect_to_compute(&TokioMechanism { conn_info }, node_info, &extra, &creds).await
 }
 
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
+    timeout: time::Duration,
 ) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
@@ -299,6 +259,7 @@ async fn connect_to_compute_once(
         .password(&conn_info.password)
         .dbname(&conn_info.dbname)
         .max_backend_message_size(MAX_RESPONSE_SIZE)
+        .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
 

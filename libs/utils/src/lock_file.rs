@@ -1,9 +1,10 @@
 //! A module to create and read lock files.
 //!
 //! File locking is done using [`fcntl::flock`] exclusive locks.
-//! The only consumer of this module is currently [`pid_file`].
-//! See the module-level comment there for potential pitfalls
-//! with lock files that are used to store PIDs (pidfiles).
+//! The only consumer of this module is currently
+//! [`pid_file`](crate::pid_file). See the module-level comment
+//! there for potential pitfalls with lock files that are used
+//! to store PIDs (pidfiles).
 
 use std::{
     fs,
@@ -81,7 +82,7 @@ pub fn create_exclusive(lock_file_path: &Path) -> anyhow::Result<UnwrittenLockFi
 }
 
 /// Returned by [`read_and_hold_lock_file`].
-/// Check out the [`pid_file`] module for what the variants mean
+/// Check out the [`pid_file`](crate::pid_file) module for what the variants mean
 /// and potential caveats if the lock files that are used to store PIDs.
 pub enum LockFileRead {
     /// No file exists at the given path.

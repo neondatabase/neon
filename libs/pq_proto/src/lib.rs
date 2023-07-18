@@ -934,6 +934,15 @@ impl<'a> BeMessage<'a> {
     }
 }
 
+fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
+    let mut terminated = [0; 6];
+    for (i, &elem) in code.iter().enumerate() {
+        terminated[i] = elem;
+    }
+
+    terminated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,13 +973,4 @@ mod tests {
         let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
         assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
     }
-}
-
-fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
-    let mut terminated = [0; 6];
-    for (i, &elem) in code.iter().enumerate() {
-        terminated[i] = elem;
-    }
-
-    terminated
 }

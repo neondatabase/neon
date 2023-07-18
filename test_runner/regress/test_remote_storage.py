@@ -598,9 +598,6 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
 
-    env.pageserver.allowed_errors.append(
-        ".*files not bound to index_file.json, proceeding with their deletion.*"
-    )
     timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
@@ -775,6 +772,95 @@ def test_empty_branch_remote_storage_upload_on_restart(
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
         create_thread.join()
+
+
+# Regression test for a race condition where files are compactified before the upload,
+# resulting in the uploading complaining about the file not being found
+# https://github.com/neondatabase/neon/issues/4526
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_compaction_delete_before_upload(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_compaction_delete_before_upload",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and disables gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # Set a small compaction threshold
+            "compaction_threshold": "3",
+            # Disable GC
+            "gc_period": "0s",
+            # disable PITR
+            "pitr_interval": "0s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        # Build two tables with some data inside
+        endpoint.safe_psql("CREATE TABLE foo AS SELECT x FROM generate_series(1, 10000) g(x)")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+        client.timeline_checkpoint(tenant_id, timeline_id)
+
+        endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+        # Now make the flushing hang and update one small piece of data
+        client.configure_failpoints(("flush-frozen-before-sync", "pause"))
+
+        endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
+
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    barrier = threading.Barrier(2)
+
+    def checkpoint_in_background():
+        barrier.wait()
+        try:
+            client.timeline_checkpoint(tenant_id, timeline_id)
+            q.put(None)
+        except PageserverApiException as e:
+            q.put(e)
+
+    create_thread = threading.Thread(target=checkpoint_in_background)
+    create_thread.start()
+
+    try:
+        barrier.wait()
+
+        time.sleep(4)
+        client.timeline_compact(tenant_id, timeline_id)
+
+        client.configure_failpoints(("flush-frozen-before-sync", "off"))
+
+        conflict = q.get()
+
+        assert conflict is None
+    finally:
+        create_thread.join()
+
+    # Add a delay for the uploads to run into either the file not found or the
+    time.sleep(4)
+
+    # Ensure that this actually terminates
+    wait_upload_queue_empty(client, tenant_id, timeline_id)
+
+    # For now we are hitting this message.
+    # Maybe in the future the underlying race condition will be fixed,
+    # but until then, ensure that this message is hit instead.
+    assert env.pageserver.log_contains(
+        "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
+    )
 
 
 def wait_upload_queue_empty(

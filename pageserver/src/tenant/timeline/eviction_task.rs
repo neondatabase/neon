@@ -70,7 +70,6 @@ impl Timeline {
                 };
 
                 self_clone.eviction_task(cancel).await;
-                info!("eviction task finishing");
                 Ok(())
             },
         );
@@ -78,6 +77,9 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+        scopeguard::defer! {
+            info!("eviction task finishing");
+        }
         use crate::tenant::tasks::random_init_delay;
         {
             let policy = self.get_eviction_policy();
@@ -86,7 +88,6 @@ impl Timeline {
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
-                info!("shutting down");
                 return;
             }
         }
@@ -101,7 +102,6 @@ impl Timeline {
                 ControlFlow::Continue(sleep_until) => {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            info!("shutting down");
                             break;
                         }
                         _ = tokio::time::sleep_until(sleep_until) => { }
@@ -198,10 +198,10 @@ impl Timeline {
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
             let guard = self.layers.read().await;
-            let (layers, mapping) = &*guard;
+            let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
-                let hist_layer = mapping.get_from_desc(&hist_layer);
+                let hist_layer = guard.get_from_desc(&hist_layer);
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
@@ -209,7 +209,7 @@ impl Timeline {
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
                     // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%hist_layer.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    debug!(layer=%hist_layer, "last_activity returns None, using SystemTime::now");
                     SystemTime::now()
                 });
 

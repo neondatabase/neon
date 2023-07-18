@@ -80,7 +80,7 @@ def new_pageserver_service(
     except Exception as e:
         log.error(e)
         pageserver_process.kill()
-        raise Exception(f"Failed to start pageserver as {cmd}, reason: {e}")
+        raise Exception(f"Failed to start pageserver as {cmd}, reason: {e}") from e
 
     log.info("new pageserver started")
     try:

@@ -109,10 +109,16 @@ pub use failpoint_macro_helpers::failpoint_sleep_helper;
 /// * building in docker (either in CI or locally)
 ///
 /// One thing to note is that .git is not available in docker (and it is bad to include it there).
-/// So everything becides docker build is covered by git_version crate, and docker uses a `GIT_VERSION` argument to get the value required.
-/// It takes variable from build process env and puts it to the rustc env. And then we can retrieve it here by using env! macro.
-/// Git version received from environment variable used as a fallback in git_version invocation.
-/// And to avoid running buildscript every recompilation, we use rerun-if-env-changed option.
+/// When building locally, the `git_version` is used to query .git. When building on CI and docker,
+/// we don't build the actual PR branch commits, but always a "phantom" would be merge commit to
+/// the target branch -- the actual PR commit from which we build from is supplied as GIT_VERSION
+/// environment variable.
+///
+/// We ended up with this compromise between phantom would be merge commits vs. pull request branch
+/// heads due to old logs becoming more reliable (github could gc the phantom merge commit
+/// anytime) in #4641.
+///
+/// To avoid running buildscript every recompilation, we use rerun-if-env-changed option.
 /// So the build script will be run only when GIT_VERSION envvar has changed.
 ///
 /// Why not to use buildscript to get git commit sha directly without procmacro from different crate?
@@ -124,24 +130,35 @@ pub use failpoint_macro_helpers::failpoint_sleep_helper;
 /// Note that with git_version prefix is `git:` and in case of git version from env its `git-env:`.
 ///
 /// #############################################################################################
-/// TODO this macro is not the way the library is intended to be used, see https://github.com/neondatabase/neon/issues/1565 for details.
-/// We use `cachepot` to reduce our current CI build times: https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036
+/// TODO this macro is not the way the library is intended to be used, see <https://github.com/neondatabase/neon/issues/1565> for details.
+/// We use `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
 /// Yet, it seems to ignore the GIT_VERSION env variable, passed to Docker build, even with build.rs that contains
 /// `println!("cargo:rerun-if-env-changed=GIT_VERSION");` code for cachepot cache invalidation.
 /// The problem needs further investigation and regular `const` declaration instead of a macro.
 #[macro_export]
 macro_rules! project_git_version {
     ($const_identifier:ident) => {
-        const $const_identifier: &str = git_version::git_version!(
-            prefix = "git:",
-            fallback = concat!(
-                "git-env:",
-                env!("GIT_VERSION", "Missing GIT_VERSION envvar")
-            ),
-            args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha
-        );
+        // this should try GIT_VERSION first only then git_version::git_version!
+        const $const_identifier: &::core::primitive::str = {
+            const __COMMIT_FROM_GIT: &::core::primitive::str = git_version::git_version! {
+                prefix = "",
+                fallback = "unknown",
+                args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha
+            };
+
+            const __ARG: &[&::core::primitive::str; 2] = &match ::core::option_env!("GIT_VERSION") {
+                ::core::option::Option::Some(x) => ["git-env:", x],
+                ::core::option::Option::None => ["git:", __COMMIT_FROM_GIT],
+            };
+
+            $crate::__const_format::concatcp!(__ARG[0], __ARG[1])
+        };
     };
 }
+
+/// Re-export for `project_git_version` macro
+#[doc(hidden)]
+pub use const_format as __const_format;
 
 /// Same as `assert!`, but evaluated during compilation and gets optimized out in runtime.
 #[macro_export]

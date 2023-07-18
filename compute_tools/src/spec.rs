@@ -397,10 +397,44 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // We do not check either DB exists or not,
                 // Postgres will take care of it for us
                 "delete_db" => {
-                    let query: String = format!("DROP DATABASE IF EXISTS {}", &op.name.pg_quote());
+                    // In Postgres we can't drop a database if it is a template.
+                    // So we need to unset the template flag first, but it could
+                    // be a retry, so we could've already dropped the database.
+                    // Check that database exists first to make it idempotent.
+                    let unset_template_query: String = format!(
+                        "
+                        DO $$
+                        BEGIN
+                            IF EXISTS(
+                                SELECT 1
+                                FROM pg_catalog.pg_database
+                                WHERE datname = {}
+                            )
+                            THEN
+                            ALTER DATABASE {} is_template false;
+                            END IF;
+                        END
+                        $$;",
+                        escape_literal(&op.name),
+                        &op.name.pg_quote()
+                    );
+                    // Use FORCE to drop database even if there are active connections.
+                    // We run this from `cloud_admin`, so it should have enough privileges.
+                    // NB: there could be other db states, which prevent us from dropping
+                    // the database. For example, if db is used by any active subscription
+                    // or replication slot.
+                    // TODO: deal with it once we allow logical replication. Proper fix should
+                    // involve returning an error code to the control plane, so it could
+                    // figure out that this is a non-retryable error, return it to the user
+                    // and fail operation permanently.
+                    let drop_db_query: String = format!(
+                        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                        &op.name.pg_quote()
+                    );
 
                     warn!("deleting database '{}'", &op.name);
-                    client.execute(query.as_str(), &[])?;
+                    client.execute(unset_template_query.as_str(), &[])?;
+                    client.execute(drop_db_query.as_str(), &[])?;
                 }
                 "rename_db" => {
                     let new_name = op.new_name.as_ref().unwrap();

@@ -5,6 +5,7 @@
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
+use futures::future::Either;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -109,20 +110,25 @@ async fn main() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let main = proxy::flatten_err(tokio::spawn(task_main(
+    let main = tokio::spawn(task_main(
         Arc::new(destination),
         tls_config,
         proxy_listener,
         cancellation_token.clone(),
-    )));
-    let signals_task = proxy::flatten_err(tokio::spawn(proxy::handle_signals(cancellation_token)));
+    ));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
 
-    tokio::select! {
-        res = main => { res?; },
-        res = signals_task => { res?; },
-    }
+    // the signal task cant ever succeed.
+    // the main task can error, or can succeed on cancellation.
+    // we want to immediately exit on either of these cases
+    let signal = match futures::future::select(signals_task, main).await {
+        Either::Left((res, _)) => proxy::flatten_err(res)?,
+        Either::Right((res, _)) => return proxy::flatten_err(res),
+    };
 
-    Ok(())
+    // maintenance tasks return `Infallible` success values, this is an impossible value
+    // so this match statically ensures that there are no possibilities for that value
+    match signal {}
 }
 
 async fn task_main(
