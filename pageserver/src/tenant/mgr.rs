@@ -831,7 +831,7 @@ mod tests {
         // the test is a bit ugly with the lockstep together with spawned tasks. the aim is to make
         // sure `shutdown_all_tenants0` per-tenant processing joins in any active
         // remove_tenant_from_memory calls, which is enforced by making the operation last until
-        // we've ran `shutdown_all_tenants0` for 100ms.
+        // we've ran `shutdown_all_tenants0` for a long time.
 
         let (t, _ctx) = TenantHarness::create("shutdown_joins_detach")
             .unwrap()
