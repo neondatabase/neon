@@ -3,9 +3,9 @@
 //!
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]

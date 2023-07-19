@@ -3,7 +3,7 @@
 use crate::{config::MetricCollectionConfig, http};
 use chrono::{TimeZone, Utc};
 use consumption_metrics::{idempotency_key_into, Event, EventChunk, EventType, CHUNK_SIZE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     convert::Infallible,
@@ -29,7 +29,7 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 ///
-#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Ids {
     pub endpoint_id: String,
     pub branch_id: String,
@@ -90,7 +90,9 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
     loop {
         ticker.tick().await;
 
-        while let Ok(counter) = proxy_counters_rx.try_recv() {
+        // acquire some new counters
+        for _ in 0..256 {
+            let Ok(counter) = proxy_counters_rx.try_recv() else { break };
             proxy_counter_queue.push_back(counter);
         }
 
@@ -245,4 +247,88 @@ async fn collect_metrics_iteration(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic;
+    use std::time::Duration;
+
+    use super::{task_main, Ids, ProxyCounter};
+    use crate::config::MetricCollectionConfig;
+    use crate::metrics::PROXY_IO_BYTES_PER_CLIENT;
+
+    use consumption_metrics::EventType;
+    use tokio::sync::mpsc;
+    use tokio::task::yield_now;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    // Just a wrapper around a slice of events
+    // to deserialize it as `{"events" : [ ] }
+    #[derive(serde::Deserialize)]
+    pub struct EventChunkOwned {
+        pub events: Vec<EventOwned>,
+    }
+
+    #[derive(serde::Deserialize, Debug)]
+    pub struct EventOwned {
+        #[serde(flatten)]
+        #[serde(rename = "type")]
+        pub kind: EventType,
+
+        pub metric: String,
+        pub idempotency_key: String,
+        pub value: u64,
+
+        #[serde(flatten)]
+        pub extra: Ids,
+    }
+
+    #[tokio::test]
+    async fn metrics_test() {
+        let mock_server = MockServer::start().await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let _mock_guard = Mock::given(method("POST"))
+            .respond_with(move |req: &Request| {
+                let events: EventChunkOwned = serde_json::from_slice(&req.body).unwrap();
+                for event in events.events {
+                    tx.send(event).unwrap();
+                }
+
+                ResponseTemplate::new(200)
+            })
+            .mount_as_scoped(&mock_server)
+            .await;
+
+        let config = MetricCollectionConfig {
+            endpoint: mock_server.uri().parse().unwrap(),
+            interval: Duration::from_secs(1),
+        };
+        tokio::spawn(async move { task_main(&config).await });
+
+        // let the main task do it's setup
+        yield_now().await;
+
+        let mut counters = vec![];
+        for i in 0..20 {
+            let i = i + 1;
+            let counter = ProxyCounter::new(format!("endpoint{i}"), format!("branch{i}")).await;
+            counter.tx.fetch_add(20 * i, atomic::Ordering::Relaxed);
+            counters.push(counter);
+        }
+
+        // check all events arrived
+        for _ in 0..20 {
+            let event = rx.recv().await.unwrap();
+            assert_eq!(event.metric, PROXY_IO_BYTES_PER_CLIENT);
+            assert!(event.value > 0);
+        }
+
+        for counter in counters {
+            assert_eq!(counter.tx.load(atomic::Ordering::Relaxed), 0);
+        }
+    }
 }
