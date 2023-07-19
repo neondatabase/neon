@@ -1169,50 +1169,43 @@ impl Timeline {
 
         assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
 
-        match layer_mgr.replace_and_verify(local_layer.clone(), new_remote_layer) {
-            Ok(()) => {
-                if let Err(e) = local_layer.delete_resident_layer_file() {
-                    // this should never happen, because of layer_removal_cs usage and above stat
-                    // access for mtime
-                    error!("failed to remove layer file on evict after replacement: {e:#?}");
-                }
-                // Always decrement the physical size gauge, even if we failed to delete the file.
-                // Rationale: we already replaced the layer with a remote layer in the layer map,
-                // and any subsequent download_remote_layer will
-                // 1. overwrite the file on disk and
-                // 2. add the downloaded size to the resident size gauge.
-                //
-                // If there is no re-download, and we restart the pageserver, then load_layer_map
-                // will treat the file as a local layer again, count it towards resident size,
-                // and it'll be like the layer removal never happened.
-                // The bump in resident size is perhaps unexpected but overall a robust behavior.
-                self.metrics
-                    .resident_physical_size_gauge
-                    .sub(layer_file_size);
+        layer_mgr
+            .replace_and_verify(local_layer.clone(), new_remote_layer)
+            .map_err(EvictionError::LayerNotFound)?;
 
-                self.metrics.evictions.inc();
-
-                if let Some(delta) = local_layer_residence_duration {
-                    self.metrics
-                        .evictions_with_low_residence_duration
-                        .read()
-                        .unwrap()
-                        .observe(delta);
-                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
-                } else {
-                    info!(layer=%local_layer, "evicted layer after unknown residence period");
-                }
-
-                Ok(())
-            }
-            Err(err) => {
-                if cfg!(debug_assertions) {
-                    // FIXME: this must go, flakyness
-                    panic!("failed to replace: {err}, evicted: {local_layer:?}");
-                }
-                Err(EvictionError::LayerNotFound(err))
-            }
+        if let Err(e) = local_layer.delete_resident_layer_file() {
+            // this should never happen, because of layer_removal_cs usage and above stat
+            // access for mtime
+            error!("failed to remove layer file on evict after replacement: {e:#?}");
         }
+        // Always decrement the physical size gauge, even if we failed to delete the file.
+        // Rationale: we already replaced the layer with a remote layer in the layer map,
+        // and any subsequent download_remote_layer will
+        // 1. overwrite the file on disk and
+        // 2. add the downloaded size to the resident size gauge.
+        //
+        // If there is no re-download, and we restart the pageserver, then load_layer_map
+        // will treat the file as a local layer again, count it towards resident size,
+        // and it'll be like the layer removal never happened.
+        // The bump in resident size is perhaps unexpected but overall a robust behavior.
+        self.metrics
+            .resident_physical_size_gauge
+            .sub(layer_file_size);
+
+        self.metrics.evictions.inc();
+
+        if let Some(delta) = local_layer_residence_duration {
+            self.metrics
+                .evictions_with_low_residence_duration
+                .read()
+                .unwrap()
+                .observe(delta);
+            info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
+        } else {
+            info!(layer=%local_layer, "evicted layer after unknown residence period");
+        }
+
+        Ok(())
     }
 }
 
@@ -4912,7 +4905,6 @@ mod tests {
         let layer = layer.downcast_remote_layer().unwrap();
         timeline.download_remote_layer(layer).await.unwrap();
 
-        // diverges because there is a #[cfg(debug_assertions)] panic!
         let res = only_one(second.await);
 
         assert!(
