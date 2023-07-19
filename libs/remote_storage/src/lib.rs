@@ -59,6 +59,10 @@ impl RemotePath {
         Ok(Self(relative_path.to_path_buf()))
     }
 
+    pub fn from_string(relative_path: &str) -> anyhow::Result<Self> {
+        Self::new(Path::new(relative_path))
+    }
+
     pub fn with_base(&self, base_path: &Path) -> PathBuf {
         base_path.join(&self.0)
     }

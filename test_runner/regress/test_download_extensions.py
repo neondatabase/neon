@@ -36,29 +36,26 @@ def test_remote_extensions(
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_remote_extensions", tenant_id=tenant_id)
 
+    assert env.ext_remote_storage is not None  # satisfy mypy
+    assert env.remote_storage_client is not None  # satisfy mypy
+
     # For MOCK_S3 we upload test files.
     # For REAL_S3 we use the files already in the bucket
     if remote_storage_kind == RemoteStorageKind.MOCK_S3:
         log.info("Uploading test files to mock bucket")
+        os.chdir("test_runner/regress/data/extension_test")
+        for path in os.walk("."):
+            prefix, _, files = path
+            for file in files:
+                # the [2:] is to remove the leading "./"
+                full_path = os.path.join(prefix, file)[2:]
 
-        def upload_test_file(from_path, to_path):
-            assert env.ext_remote_storage is not None  # satisfy mypy
-            assert env.remote_storage_client is not None  # satisfy mypy
-            with open(
-                f"test_runner/regress/data/extension_test/v{pg_version}/{from_path}", "rb"
-            ) as f:
-                env.remote_storage_client.upload_fileobj(
-                    f,
-                    env.ext_remote_storage.bucket_name,
-                    f"ext/v{pg_version}/{to_path}",
-                )
-
-        upload_test_file("ext_index.json", "ext_index.json")
-        upload_test_file("anon.tar.gz", "extensions/anon.tar.gz")
-        upload_test_file("embedding.tar.gz", "extensions/embedding.tar.gz")
-
-    assert env.ext_remote_storage is not None  # satisfy mypy
-    assert env.remote_storage_client is not None  # satisfy mypy
+                with open(full_path, "rb") as f:
+                    env.remote_storage_client.upload_fileobj(
+                        f,
+                        env.ext_remote_storage.bucket_name,
+                        f"ext/{full_path}",
+                    )
     try:
         # Start a compute node and check that it can download the extensions
         # and use them to CREATE EXTENSION and LOAD

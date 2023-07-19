@@ -1,0 +1,10 @@
+{
+  "embedding": {
+    "control_file_content": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
+    "extension_archive": "111/v14/extensions/embedding.tar.zst"
+  },
+  "anon": {
+    "control_file_content": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n",
+    "extension_archive": "112/v14/extensions/anon.tar.zst"
+  }
+}
