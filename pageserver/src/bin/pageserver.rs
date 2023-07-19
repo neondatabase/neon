@@ -396,8 +396,8 @@ fn start_pageserver(
 
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
 
-            let init_sizes_done = tokio::select! {
-                _ = &mut init_sizes_done => {
+            let init_sizes_done = match tokio::time::timeout(timeout, &mut init_sizes_done).await {
+                Ok(_) => {
                     let now = std::time::Instant::now();
                     tracing::info!(
                         from_init_done_millis = (now - init_done).as_millis(),
@@ -406,7 +406,7 @@ fn start_pageserver(
                     );
                     None
                 }
-                _ = tokio::time::sleep(timeout) => {
+                Err(_) => {
                     tracing::info!(
                         timeout_millis = timeout.as_millis(),
                         "Initial logical size timeout elapsed; starting background jobs"

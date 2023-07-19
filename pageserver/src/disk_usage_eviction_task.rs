@@ -166,11 +166,11 @@ async fn disk_usage_eviction_task(
         .await;
 
         let sleep_until = start + task_config.period;
-        tokio::select! {
-            _ = tokio::time::sleep_until(sleep_until) => {},
-            _ = cancel.cancelled() => {
-                break
-            }
+        if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+            .await
+            .is_ok()
+        {
+            break;
         }
     }
 }
