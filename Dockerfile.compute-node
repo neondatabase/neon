@@ -535,10 +535,10 @@ FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
-# 2465f831ea1f8d49c1d74f8959adb7fc277d70cd made on 05/07/2023
+# eeb3ba7c3a60c95b2604dd543c64b2f1bb4a3703 made on 15/07/2023
 # There is no release tag yet
-RUN wget https://github.com/neondatabase/pg_embedding/archive/2465f831ea1f8d49c1d74f8959adb7fc277d70cd.tar.gz -O pg_embedding.tar.gz && \
-    echo "047af2b1f664a1e6e37867bd4eeaf5934fa27d6ba3d6c4461efa388ddf7cd1d5 pg_embedding.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_embedding/archive/eeb3ba7c3a60c95b2604dd543c64b2f1bb4a3703.tar.gz -O pg_embedding.tar.gz && \
+    echo "030846df723652f99a8689ce63b66fa0c23477a7fd723533ab8a6b28ab70730f pg_embedding.tar.gz" | sha256sum --check && \
     mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
