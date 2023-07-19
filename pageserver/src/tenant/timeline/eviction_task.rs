@@ -272,7 +272,6 @@ impl Timeline {
                     stats.skipped_for_shutdown += 1;
                 }
                 Some(Ok(())) => {
-                    debug!("evicted layer {l}");
                     stats.evicted += 1;
                 }
                 Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
