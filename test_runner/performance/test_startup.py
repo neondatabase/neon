@@ -43,7 +43,13 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
             if endpoint:
                 endpoint.start()
             else:
-                endpoint = env.endpoints.create_start("test_startup")
+                endpoint = env.endpoints.create_start(
+                    "test_startup",
+                    # Shared buffers need to be allocated during startup, so they
+                    # impact startup time. This is the default value we use for
+                    # 1CPU pods (maybe different for VMs).
+                    config_lines=["shared_buffers=262144"],
+                )
             endpoint.safe_psql("select 1;")
 
         # Get metrics
