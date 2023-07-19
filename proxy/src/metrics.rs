@@ -164,6 +164,8 @@ async fn collect_metrics_iteration(
     // since we re-insert into this queue.
     let mut counters = counter_queue.len();
 
+    info!(counters, "metrics sweep");
+
     while counters > 0 {
         let mut i = 0;
         while i < events.len() && i < counters {
