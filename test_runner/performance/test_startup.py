@@ -48,6 +48,10 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
                     # Shared buffers need to be allocated during startup, so they
                     # impact startup time. This is the default value we use for
                     # 1CPU pods (maybe different for VMs).
+                    #
+                    # TODO extensions also contribute to shared memory allocation,
+                    #      and this test doesn't include all default extensions we
+                    #      load.
                     config_lines=["shared_buffers=262144"],
                 )
             endpoint.safe_psql("select 1;")
