@@ -30,7 +30,8 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000"} \
+//!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000",
+//!             (optionally) "key": "AWS_SECRET_ACCESS_KEY", "id": "AWS_ACCESS_KEY_ID"}
 //! ```
 //!
 use std::collections::HashMap;
@@ -72,10 +73,6 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    // NOTE TODO: until control-plane changes, we can use the following line to forcibly enable remote extensions
-    // let remote_ext_config = Some(
-    //     r#"{"bucket": "neon-dev-extensions", "region": "eu-central-1", "endpoint": null, "prefix": "5555"}"#.to_string(),
-    // );
     let ext_remote_storage = remote_ext_config.map(|x| {
         init_remote_storage(x, build_tag)
             .expect("cannot initialize remote extension storage from config")
