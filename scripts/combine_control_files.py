@@ -1,6 +1,9 @@
 import json
 import os
 
+with open("SOMETHING", "w") as f:
+    f.write("SOMETHING")
+
 # enable custom extensions for specific tenants
 enabled_extensions = {"123454321": ["anon"], "public": ["embedding"]}
 
