@@ -4741,3 +4741,104 @@ pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
 
     left == right
 }
+
+#[cfg(test)]
+mod tests {
+    use utils::{id::TimelineId, lsn::Lsn};
+
+    use crate::tenant::harness::TenantHarness;
+
+    #[tokio::test]
+    async fn two_layer_eviction_attempts_at_the_same_time() {
+        let harness =
+            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+
+        let remote_storage = {
+            // this is never used for anything, because of how the create_test_timeline works, but
+            // it is with us in spirit and a Some.
+            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
+            let path = harness.conf.workdir.join("localfs");
+            std::fs::create_dir_all(&path).unwrap();
+            let config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(path),
+            };
+            GenericRemoteStorage::from_config(&config).unwrap()
+        };
+
+        let ctx = any_context();
+        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let timeline = tenant
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .await
+            .unwrap();
+
+        let rc = timeline
+            .remote_client
+            .clone()
+            .expect("just configured this");
+
+        let layer = {
+            let layers = timeline.layers.read().await;
+            let desc = layers
+                .layer_map()
+                .iter_historic_layers()
+                .next()
+                .expect("must find one layer to evict");
+
+            layers.get_from_desc(&desc)
+        };
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let batch = [layer];
+
+        let first = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+        let second = async {
+            timeline
+                .evict_layer_batch(&rc, &batch, cancel)
+                .await
+                .unwrap()
+        };
+
+        let (first, second) = tokio::join!(first, second);
+
+        fn only_one<T>(mut input: Vec<Option<T>>) -> T {
+            assert_eq!(1, input.len());
+            input
+                .pop()
+                .expect("length just checked")
+                .expect("no cancellation")
+        }
+
+        let (first, second) = (only_one(first), only_one(second));
+
+        match (first, second) {
+            (Ok(true), Err(e)) | (Err(e), Ok(true)) => {
+                if e.root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .filter(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    .is_some()
+                {
+                    // one of the evictions gets to do it,
+                    // other one gets FileNotFound. all is good.
+                }
+            }
+            other => unreachable!("unexpected {:?}", other),
+        }
+    }
+
+    fn any_context() -> crate::context::RequestContext {
+        use crate::context::*;
+        use crate::task_mgr::*;
+        RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+    }
+}
