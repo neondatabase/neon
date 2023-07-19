@@ -32,12 +32,21 @@ pub struct Event<Extra> {
 }
 
 pub fn idempotency_key(node_id: String) -> String {
-    format!(
+    let mut output = String::with_capacity(64);
+    idempotency_key_into(&node_id, &mut output);
+    output
+}
+
+pub fn idempotency_key_into(node_id: &dyn std::fmt::Display, out: &mut String) {
+    use std::fmt::Write;
+    write!(
+        out,
         "{}-{}-{:04}",
         Utc::now(),
         node_id,
         rand::thread_rng().gen_range(0..=9999)
     )
+    .expect("writing into a string should never fail")
 }
 
 pub const CHUNK_SIZE: usize = 1000;

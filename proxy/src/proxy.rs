@@ -11,12 +11,12 @@ use crate::{
         errors::{ApiError, WakeComputeError},
         messages::MetricsAuxInfo,
     },
+    metrics::ProxyCounter,
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use futures::{FutureExt, StreamExt, TryFutureExt};
-use hashbrown::HashMap;
+use futures::TryFutureExt;
 use hyper::StatusCode;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
@@ -25,14 +25,13 @@ use std::{
     error::Error,
     io,
     ops::ControlFlow,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{atomic, Arc},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
 };
-use tokio_util::{sync::CancellationToken, time::DelayQueue};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
@@ -69,39 +68,6 @@ static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .unwrap()
 });
-
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "proxy_io_bytes_per_client",
-        "Number of bytes sent/received between client and backend.",
-        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
-    )
-    .unwrap()
-});
-
-#[derive(Default)]
-struct ProxyState {
-    /// if we resume proxying, we should cancel the cleanup
-    gc_cancel:
-        HashMap<crate::console::messages::MetricsAuxInfo, tokio_util::time::delay_queue::Key>,
-    /// after we finish proxying, we should clean up the metrics
-    gc: DelayQueue<crate::console::messages::MetricsAuxInfo>,
-}
-
-static ACTIVE_PROXIES: Lazy<Mutex<ProxyState>> = Lazy::new(Default::default);
-
-pub fn proxy_metrics_sweep() {
-    let mut active = ACTIVE_PROXIES.lock().unwrap();
-    while let Some(expired) = active.gc.next().now_or_never().flatten() {
-        active.gc_cancel.remove(expired.get_ref());
-        NUM_BYTES_PROXIED_COUNTER
-            .remove_label_values(&expired.get_ref().traffic_labels("tx"))
-            .unwrap();
-        NUM_BYTES_PROXIED_COUNTER
-            .remove_label_values(&expired.get_ref().traffic_labels("rx"))
-            .unwrap();
-    }
-}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -608,45 +574,33 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
-    {
-        let mut active = ACTIVE_PROXIES.lock().unwrap();
-        if let Some(key) = active.gc_cancel.remove(aux) {
-            active.gc.remove(&key);
-        }
-    }
+    let counter = ProxyCounter::new(aux.endpoint_id.to_string(), aux.branch_id.to_string()).await;
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
-            m_sent.inc_by(cnt as u64);
+            counter
+                .transmitted
+                .fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
-            // Number of bytes the client sent to the compute node (inbound).
-            m_recv.inc_by(cnt as u64);
+            // Number of bytes we sent to the client (outbound).
+            counter
+                .received
+                .fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let res = tokio::io::copy_bidirectional(&mut client, &mut compute).await;
-
-    {
-        // schedule a metrics cleanup
-        let mut active = ACTIVE_PROXIES.lock().unwrap();
-        let key = active.gc.insert(aux.clone(), Duration::from_secs(15 * 60));
-        active.gc_cancel.insert(aux.clone(), key);
-    }
-
-    res?;
+    tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
     Ok(())
 }
 
