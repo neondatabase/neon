@@ -584,8 +584,8 @@ pub async fn proxy_pass(
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let counter = ProxyCounter::new(aux.endpoint_id.to_string(), aux.branch_id.to_string()).await;
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
 
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
     let mut client = MeasuredStream::new(
         client,
         |_| {},
@@ -609,7 +609,7 @@ pub async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
     Ok(())
 }
 
