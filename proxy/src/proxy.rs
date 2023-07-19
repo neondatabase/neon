@@ -581,9 +581,7 @@ pub async fn proxy_pass(
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
-            counter
-                .transmitted
-                .fetch_add(cnt as u64, atomic::Ordering::Relaxed);
+            counter.tx.fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
@@ -592,9 +590,7 @@ pub async fn proxy_pass(
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
-            counter
-                .received
-                .fetch_add(cnt as u64, atomic::Ordering::Relaxed);
+            counter.rx.fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
