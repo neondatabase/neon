@@ -69,6 +69,15 @@ static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes_per_client",
+        "Number of bytes sent/received between client and backend.",
+        &["direction"],
+    )
+    .unwrap()
+});
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -575,21 +584,25 @@ pub async fn proxy_pass(
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let counter = ProxyCounter::new(aux.endpoint_id.to_string(), aux.branch_id.to_string()).await;
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
 
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
+            m_sent.inc_by(cnt as u64);
             counter.tx.fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
-            // Number of bytes we sent to the client (outbound).
+            // Number of bytes the client sent to the compute node (inbound).
+            m_recv.inc_by(cnt as u64);
             counter.rx.fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
