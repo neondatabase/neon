@@ -4771,9 +4771,16 @@ pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::harness::TenantHarness;
+    use crate::tenant::{
+        harness::TenantHarness, remote_timeline_client::index::LayerFileMetadata,
+        storage_layer::PersistentLayer,
+    };
+
+    use super::{EvictionError, Timeline};
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
@@ -4806,16 +4813,7 @@ mod tests {
             .clone()
             .expect("just configured this");
 
-        let layer = {
-            let layers = timeline.layers.read().await;
-            let desc = layers
-                .layer_map()
-                .iter_historic_layers()
-                .next()
-                .expect("must find one layer to evict");
-
-            layers.get_from_desc(&desc)
-        };
+        let layer = find_some_layer(&timeline).await;
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
@@ -4838,17 +4836,7 @@ mod tests {
 
         let (first, second) = tokio::join!(first, second);
 
-        fn only_one<T>(mut input: Vec<Option<T>>) -> T {
-            assert_eq!(1, input.len());
-            input
-                .pop()
-                .expect("length just checked")
-                .expect("no cancellation")
-        }
-
         let (first, second) = (only_one(first), only_one(second));
-
-        use super::EvictionError;
 
         match (first, second) {
             (Ok(()), Err(EvictionError::FileNotFound))
@@ -4860,9 +4848,104 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn layer_eviction_aba_fails() {
+        let harness =
+            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+
+        let remote_storage = {
+            // this is never used for anything, because of how the create_test_timeline works, but
+            // it is with us in spirit and a Some.
+            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
+            let path = harness.conf.workdir.join("localfs");
+            std::fs::create_dir_all(&path).unwrap();
+            let config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(path),
+            };
+            GenericRemoteStorage::from_config(&config).unwrap()
+        };
+
+        let ctx = any_context();
+        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let timeline = tenant
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .await
+            .unwrap();
+
+        let _e = tracing::info_span!("foobar", tenant_id = %tenant.tenant_id, timeline_id = %timeline.timeline_id).entered();
+
+        let rc = timeline.remote_client.clone().unwrap();
+
+        // TenantHarness allows uploads to happen given GenericRemoteStorage is configured
+        let layer = find_some_layer(&timeline).await;
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let batch = [layer];
+
+        let first = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // lets imagine this is stuck somehow, still referencing the original `Arc<dyn PersistentLayer>`
+        let second = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // while it's stuck, we evict and end up redownloading it
+        only_one(first.await).expect("eviction succeeded");
+
+        let layer = find_some_layer(&timeline).await;
+        let layer = layer.downcast_remote_layer().unwrap();
+        timeline.download_remote_layer(layer).await.unwrap();
+
+        // diverges because there is a #[cfg(debug_assertions)] panic!
+        let res = only_one(second.await);
+
+        assert!(
+            matches!(res, Err(EvictionError::LayerNotFound(_))),
+            "{res:?}"
+        );
+
+        // no more specific asserting, outside of preconds this is the only valid replacement
+        // failure
+    }
+
     fn any_context() -> crate::context::RequestContext {
         use crate::context::*;
         use crate::task_mgr::*;
         RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+    }
+
+    fn only_one<T>(mut input: Vec<Option<T>>) -> T {
+        assert_eq!(1, input.len());
+        input
+            .pop()
+            .expect("length just checked")
+            .expect("no cancellation")
+    }
+
+    async fn find_some_layer(timeline: &Timeline) -> Arc<dyn PersistentLayer> {
+        let layers = timeline.layers.read().await;
+        let desc = layers
+            .layer_map()
+            .iter_historic_layers()
+            .next()
+            .expect("must find one layer to evict");
+
+        layers.get_from_desc(&desc)
     }
 }
