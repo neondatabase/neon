@@ -87,7 +87,7 @@ impl fmt::Debug for DatabaseInfo {
 
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
-#[derive(Debug, Deserialize, Default, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Default)]
 pub struct MetricsAuxInfo {
     pub endpoint_id: Box<str>,
     pub project_id: Box<str>,

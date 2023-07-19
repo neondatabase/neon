@@ -161,7 +161,7 @@ async fn collect_metrics_iteration(
 
     while counters > 0 {
         let mut i = 0;
-        while i < CHUNK_SIZE && i < counters {
+        while i < events.len() && i < counters {
             let Some(counter) = counter_queue.pop_front() else { break };
 
             // update metrics eagerly. If there's a failure, there is a chance that this metric won't get recorded.
@@ -202,17 +202,18 @@ async fn collect_metrics_iteration(
                 counter_queue.push_back(counter);
             }
         }
+        counters -= i;
 
         if i == 0 {
             trace!("no new metrics to send");
             return Ok(());
         }
 
+        let chunk = &events[..i];
+
         let res = client
             .post(metric_collection_endpoint.clone())
-            .json(&EventChunk {
-                events: &events[..i],
-            })
+            .json(&EventChunk { events: chunk })
             .send()
             .await;
 
@@ -226,16 +227,11 @@ async fn collect_metrics_iteration(
 
         if !res.status().is_success() {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in events[..i]
-                .iter()
-                .filter(|metric| metric.value > (1u64 << 40))
-            {
+            for metric in chunk.iter().filter(|metric| metric.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
                 error!("potentially abnormal metric value: {:?}", metric);
             }
         }
-
-        counters -= i;
     }
 
     Ok(())
