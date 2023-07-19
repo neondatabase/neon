@@ -1172,7 +1172,7 @@ impl Tenant {
         )
     }
 
-    /// Helper for unit tests to create an emtpy timeline.
+    /// Helper for unit tests to create an empty timeline.
     ///
     /// The timeline is has state value `Active` but its background loops are not running.
     // This makes the various functions which anyhow::ensure! for Active state work in tests.
