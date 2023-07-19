@@ -769,6 +769,11 @@ COPY --from=pg-anon-pg-build /control_files/anon.control /control_files/anon.con
 COPY --from=pg-embedding-pg-build /extensions/embedding.tar.gz /extensions/embedding.tar.gz
 COPY --from=pg-embedding-pg-build /control_files/embedding.control /control_files/embedding.control
 
+# FROM python:3.11-slim-bookworm
+RUN apt install python3
+COPY ./combine_control_files.py combine_control_files.py
+CMD [ "python3", "./scripts/combine_control_files.py"]
+
 #########################################################################################
 #
 # Final layer
