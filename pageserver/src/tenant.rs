@@ -3350,14 +3350,18 @@ pub mod harness {
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
-                self.try_load(&ctx)
+                self.try_load(&ctx, None)
                     .await
                     .expect("failed to load test tenant"),
                 ctx,
             )
         }
 
-        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+        pub async fn try_load(
+            &self,
+            ctx: &RequestContext,
+            remote_storage: Option<remote_storage::GenericRemoteStorage>,
+        ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Arc::new(Tenant::new(
@@ -3366,7 +3370,7 @@ pub mod harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
-                None,
+                remote_storage,
             ));
             tenant
                 .load(None, ctx)
@@ -3904,7 +3908,11 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness.try_load(&ctx).await.err().expect("should fail");
+        let err = harness
+            .try_load(&ctx, None)
+            .await
+            .err()
+            .expect("should fail");
         // get all the stack with all .context, not tonly the last one
         let message = format!("{err:#}");
         let expected = "Failed to parse metadata bytes from path";
