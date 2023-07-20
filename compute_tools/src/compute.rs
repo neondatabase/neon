@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io::BufRead;
@@ -21,7 +22,7 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemotePath};
 
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -55,8 +56,10 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     ///  the S3 bucket that we search for extensions in
     pub ext_remote_storage: Option<GenericRemoteStorage>,
-    // cached lists of available extensions and libraries
-    pub available_extensions: OnceLock<HashSet<String>>,
+    // (key: extension name, value: path to extension archive in remote storage)
+    pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
+    pub already_downloaded_extensions: Mutex<HashSet<String>>,
+    pub build_tag: String,
 }
 
 #[derive(Clone, Debug)]
@@ -735,23 +738,23 @@ LIMIT 100",
 
     // If remote extension storage is configured,
     // download extension control files
-    #[tokio::main]
     pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
         if let Some(ref ext_remote_storage) = self.ext_remote_storage {
             let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             let spec = &pspec.spec;
-            let custom_ext_prefixes = spec.custom_extensions.clone().unwrap_or(Vec::new());
-            info!("custom_ext_prefixes: {:?}", &custom_ext_prefixes);
-            let available_extensions = extension_server::get_available_extensions(
+            let custom_ext = spec.custom_extensions.clone().unwrap_or(Vec::new());
+            info!("custom extensions: {:?}", &custom_ext);
+            let ext_remote_paths = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
-                &custom_ext_prefixes,
+                &custom_ext,
+                &self.build_tag,
             )
             .await?;
-            self.available_extensions
-                .set(available_extensions)
-                .expect("available_extensions.set error");
+            self.ext_remote_paths
+                .set(ext_remote_paths)
+                .expect("ext_remote_paths.set error");
         }
         Ok(())
     }
@@ -760,11 +763,31 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
+                // TODO: eliminate useless LOAD Library calls to this function (if possible)
+                // not clear that we can distinguish between useful and useless
+                // library calls better than the below code
+                let ext_name = ext_name.replace(".so", "");
+                {
+                    let mut already_downloaded_extensions =
+                        self.already_downloaded_extensions.lock().expect("bad lock");
+                    if already_downloaded_extensions.contains(&ext_name) {
+                        info!(
+                            "extension {:?} already exists, skipping download",
+                            &ext_name
+                        );
+                        return Ok(());
+                    } else {
+                        already_downloaded_extensions.insert(ext_name.clone());
+                    }
+                }
                 extension_server::download_extension(
-                    ext_name,
+                    &ext_name,
+                    &self
+                        .ext_remote_paths
+                        .get()
+                        .expect("error accessing ext_remote_paths")[&ext_name],
                     remote_storage,
                     &self.pgbin,
-                    &self.pgversion,
                 )
                 .await
             }
@@ -808,6 +831,9 @@ LIMIT 100",
             }
             libs_vec.extend(preload_libs_vec);
         }
+
+        info!("Download ext_index.json, find the extension paths");
+        self.prepare_external_extensions(compute_state).await?;
 
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
         let mut download_tasks = Vec::new();

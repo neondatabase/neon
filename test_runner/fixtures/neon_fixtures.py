@@ -721,7 +721,10 @@ class NeonEnvBuilder:
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
     def enable_mock_s3_remote_storage(
-        self, bucket_name: str, force_enable: bool = True, enable_remote_extensions: bool = False
+        self,
+        bucket_name: str,
+        force_enable: bool = True,
+        enable_remote_extensions: bool = False,
     ):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
@@ -763,7 +766,10 @@ class NeonEnvBuilder:
             )
 
     def enable_real_s3_remote_storage(
-        self, test_name: str, force_enable: bool = True, enable_remote_extensions: bool = False
+        self,
+        test_name: str,
+        force_enable: bool = True,
+        enable_remote_extensions: bool = False,
     ):
         """
         Sets up configuration to use real s3 endpoint without mock server
@@ -810,7 +816,7 @@ class NeonEnvBuilder:
                 bucket_region="eu-central-1",
                 access_key=access_key,
                 secret_key=secret_key,
-                prefix_in_bucket="5555",
+                prefix_in_bucket="",
             )
 
     def cleanup_local_storage(self):

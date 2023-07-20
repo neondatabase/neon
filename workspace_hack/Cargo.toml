@@ -60,6 +60,7 @@ url = { version = "2", features = ["serde"] }
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
+cc = { version = "1", default-features = false, features = ["parallel"] }
 either = { version = "1" }
 itertools = { version = "0.10" }
 libc = { version = "0.2", features = ["extra_traits"] }

@@ -30,11 +30,10 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000",
-//!             (optionally) "key": "AWS_SECRET_ACCESS_KEY", "id": "AWS_ACCESS_KEY_ID"}
+//!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000"}
 //! ```
 //!
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::panic;
 use std::path::Path;
@@ -52,7 +51,6 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::launch_download_extensions;
 use compute_tools::extension_server::{get_pg_version, init_remote_storage};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
@@ -60,12 +58,14 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
-const BUILD_TAG_DEFAULT: &str = "local";
+const BUILD_TAG_DEFAULT: &str = "111"; // TODO: change back to local; I need 111 for my test
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
+    let build_tag = option_env!("BUILD_TAG")
+        .unwrap_or(BUILD_TAG_DEFAULT)
+        .to_string();
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
@@ -74,8 +74,7 @@ fn main() -> Result<()> {
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
     let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(x, build_tag)
-            .expect("cannot initialize remote extension storage from config")
+        init_remote_storage(x).expect("cannot initialize remote extension storage from config")
     });
 
     let http_port = *matches
@@ -195,7 +194,9 @@ fn main() -> Result<()> {
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
         ext_remote_storage,
-        available_extensions: OnceLock::new(),
+        ext_remote_paths: OnceLock::new(),
+        already_downloaded_extensions: Mutex::new(HashSet::new()),
+        build_tag,
     };
     let compute = Arc::new(compute_node);
 
@@ -242,9 +243,6 @@ fn main() -> Result<()> {
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
     let _configurator_handle =
         launch_configurator(&compute).expect("cannot launch configurator thread");
-
-    let _download_extensions_handle =
-        launch_download_extensions(&compute).expect("cannot launch download extensions thread");
 
     // Start Postgres
     let mut delay_exit = false;
