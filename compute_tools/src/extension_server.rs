@@ -112,7 +112,7 @@ pub async fn get_available_extensions(
     build_tag: &str,
 ) -> Result<HashMap<String, RemotePath>> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let index_path = format!("{pg_version}/{build_tag}/ext_index.json");
+    let index_path = format!("{build_tag}/{pg_version}/ext_index.json");
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download ext_index.json from: {:?}", &index_path);
 
@@ -174,17 +174,21 @@ pub async fn download_extension(
     let mut decompress_buffer = Vec::new();
     decoder.read_to_end(&mut decompress_buffer)?;
     let mut archive = Archive::new(decompress_buffer.as_slice());
-    let unzip_dest = pgbin.strip_suffix("/bin/postgres").expect("bad pgbin");
-    archive.unpack(unzip_dest)?;
+    let unzip_dest = pgbin
+        .strip_suffix("/bin/postgres")
+        .expect("bad pgbin")
+        .to_string()
+        + "/download_extensions";
+    archive.unpack(&unzip_dest)?;
     info!("Download + unzip {:?} completed successfully", &ext_path);
 
     let sharedir_paths = (
+        format!("{unzip_dest}/{ext_name}/share/extension"),
         Path::new(&get_pg_config("--sharedir", pgbin)).join("extension"),
-        format!("{unzip_dest}/extensions/{ext_name}/share/extension"),
     );
     let libdir_paths = (
+        format!("{unzip_dest}/{ext_name}/lib"),
         Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql"),
-        format!("{unzip_dest}/extensions/{ext_name}/lib"),
     );
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
     for paths in [sharedir_paths, libdir_paths] {

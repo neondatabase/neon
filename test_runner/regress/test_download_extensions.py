@@ -46,6 +46,7 @@ def test_remote_extensions(
                 full_path = os.path.join(prefix, file)[2:]
 
                 with open(full_path, "rb") as f:
+                    log.info(f"UPLOAD {full_path} to ext/{full_path}")
                     env.remote_storage_client.upload_fileobj(
                         f,
                         env.ext_remote_storage.bucket_name,
