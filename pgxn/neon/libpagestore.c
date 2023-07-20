@@ -442,7 +442,7 @@ pg_init_libpagestore(void)
 							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
 							NULL,
 							&max_reconnect_attempts,
-							10, 0, INT_MAX,
+							60, 0, INT_MAX,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

@@ -626,11 +626,11 @@ pub fn decode_wal_record(
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = if pg_version == 14 {
-                        (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0
-                    } else {
-                        assert_eq!(pg_version, 15);
-                        (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0
+                    blk.apply_image = match pg_version {
+                        14 => (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0,
+                        15 => (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0,
+                        16 => (blk.bimg_info & postgres_ffi::v16::bindings::BKPIMAGE_APPLY) != 0,
+                        _ => unreachable!(),
                     };
 
                     let blk_img_is_compressed =

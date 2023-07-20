@@ -73,10 +73,10 @@
 
 static bool syncSafekeepers = false;
 
-char	   *wal_acceptors_list;
-int			wal_acceptor_reconnect_timeout;
-int			wal_acceptor_connection_timeout;
-bool		am_wal_proposer;
+char	   *wal_acceptors_list = "";
+int			wal_acceptor_reconnect_timeout = 1000;
+int			wal_acceptor_connection_timeout = 10000;
+bool		am_wal_proposer = false;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 

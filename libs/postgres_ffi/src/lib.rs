@@ -51,6 +51,7 @@ macro_rules! for_all_postgres_versions {
     ($macro:tt) => {
         $macro!(v14);
         $macro!(v15);
+        $macro!(v16);
     };
 }
 
@@ -95,6 +96,9 @@ pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> anyhow::Result<boo
         15 => Ok(bimg_info & v15::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
             || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_LZ4 != 0
             || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_ZSTD != 0),
+        16 => Ok(bimg_info & v16::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
+            || bimg_info & v16::bindings::BKPIMAGE_COMPRESS_LZ4 != 0
+            || bimg_info & v16::bindings::BKPIMAGE_COMPRESS_ZSTD != 0),
         _ => anyhow::bail!("Unknown version {}", version),
     }
 }
@@ -110,6 +114,7 @@ pub fn generate_wal_segment(
     match pg_version {
         14 => v14::xlog_utils::generate_wal_segment(segno, system_id, lsn),
         15 => v15::xlog_utils::generate_wal_segment(segno, system_id, lsn),
+        16 => v16::xlog_utils::generate_wal_segment(segno, system_id, lsn),
         _ => Err(SerializeError::BadInput),
     }
 }
@@ -123,6 +128,7 @@ pub fn generate_pg_control(
     match pg_version {
         14 => v14::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
         15 => v15::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
+        16 => v16::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
         _ => anyhow::bail!("Unknown version {}", pg_version),
     }
 }
@@ -197,7 +203,7 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 
 pub mod waldecoder {
 
-    use crate::{v14, v15};
+    use crate::{v14, v15, v16};
     use bytes::{Buf, Bytes, BytesMut};
     use std::num::NonZeroU32;
     use thiserror::Error;
@@ -257,6 +263,10 @@ pub mod waldecoder {
                 }
                 15 => {
                     use self::v15::waldecoder_handler::WalStreamDecoderHandler;
+                    self.poll_decode_internal()
+                }
+                16 => {
+                    use self::v16::waldecoder_handler::WalStreamDecoderHandler;
                     self.poll_decode_internal()
                 }
                 _ => Err(WalDecodeError {

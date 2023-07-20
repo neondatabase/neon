@@ -50,8 +50,7 @@ impl Conf {
         let path = self.pg_distrib_dir.clone();
 
         match self.pg_version {
-            14 => Ok(path.join(format!("v{}", self.pg_version))),
-            15 => Ok(path.join(format!("v{}", self.pg_version))),
+            14 | 15 | 16 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }

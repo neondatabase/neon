@@ -149,6 +149,11 @@ impl PhysicalStorage {
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
+                16 => postgres_ffi::v16::xlog_utils::find_end_of_wal(
+                    &timeline_dir,
+                    wal_seg_size,
+                    state.commit_lsn,
+                )?,
                 _ => bail!("unsupported postgres version: {}", state.server.pg_version),
             }
         };

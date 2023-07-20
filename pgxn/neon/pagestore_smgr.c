@@ -1734,6 +1734,38 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
 }
 
+#if PG_MAJORVERSION_NUM >= 16
+void
+neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
+				int nblocks, bool skipFsync)
+{
+	const PGAlignedBlock buffer = {0};
+	BlockNumber curblocknum = blocknum;
+	int			remblocks = nblocks;
+
+	/*
+	 * If a relation manages to grow to 2^32-1 blocks, refuse to extend it any
+	 * more --- we mustn't create a block whose number actually is
+	 * InvalidBlockNumber or larger.
+	 */
+	if ((uint64) blocknum + nblocks >= (uint64) InvalidBlockNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					errmsg("cannot extend file \"%s\" beyond %u blocks",
+						   relpath(reln->smgr_rlocator, forkNum),
+						   InvalidBlockNumber)));
+
+	while (remblocks > 0)
+	{
+		neon_wallog_page(reln, forkNum, curblocknum, buffer.data, true);
+		lfc_write(InfoFromSMgrRel(reln), forkNum, curblocknum, buffer.data);
+
+		remblocks--;
+		curblocknum++;
+	}
+}
+#endif
+
 /*
  *  neon_open() -- Initialize newly-opened relation.
  */
@@ -1848,7 +1880,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
  * While function is defined in the neon extension it's used within neon_test_utils directly.
  * To avoid breaking tests in the runtime please keep function signature in sync.
  */
-void
+void PGDLLEXPORT
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 #if PG_MAJORVERSION_NUM < 16
 				 XLogRecPtr request_lsn, bool request_latest, char *buffer)

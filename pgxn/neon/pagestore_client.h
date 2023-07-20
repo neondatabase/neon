@@ -193,14 +193,14 @@ extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 #if PG_MAJORVERSION_NUM < 16
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
-extern void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
+extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 							 XLogRecPtr request_lsn, bool request_latest, char *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, char *buffer, bool skipFsync);
 #else
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  void *buffer);
-extern void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
+extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 							 XLogRecPtr request_lsn, bool request_latest, void *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, const void *buffer, bool skipFsync);

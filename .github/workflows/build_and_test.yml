@@ -209,6 +209,10 @@ jobs:
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
 
+      - name: Set pg 16 revision for caching
+        id: pg_v16_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
+
       # Set some environment variables used by all the steps.
       #
       # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
@@ -267,6 +271,13 @@ jobs:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
+      - name: Cache postgres v16 build
+        id: cache_pg_16
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
@@ -274,6 +285,10 @@ jobs:
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: mold -run make postgres-v15 -j$(nproc)
+
+      - name: Build postgres v16
+        if: steps.cache_pg_16.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v16 -j$(nproc)
 
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
@@ -358,7 +373,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        pg_version: [ v14, v15 ]
+        pg_version: [ v14, v15, v16 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -693,7 +708,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15 ]
+        version: [ v14, v15, v16 ]
     defaults:
       run:
         shell: sh -eu {0}
@@ -747,7 +762,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15 ]
+        version: [ v14, v15, v16 ]
     defaults:
       run:
         shell: sh -eu {0}
@@ -848,6 +863,7 @@ jobs:
         run: |
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
 
       - name: Add latest tag to images
         if: |
@@ -860,6 +876,8 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
@@ -872,6 +890,8 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -883,6 +903,7 @@ jobs:
         run: |
           crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
           crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
+          crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
 
       - name: Push latest tags to Docker Hub
         if: |
@@ -895,6 +916,8 @@ jobs:
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
@@ -1044,7 +1067,7 @@ jobs:
           PREFIX: artifacts/latest
         run: |
           # Update compatibility snapshot for the release
-          for pg_version in v14 v15; do
+          for pg_version in v14 v15 v16; do
             for build_type in debug release; do
               OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
               NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
