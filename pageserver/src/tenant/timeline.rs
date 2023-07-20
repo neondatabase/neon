@@ -4766,10 +4766,7 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{
-        harness::TenantHarness,
-        storage_layer::PersistentLayer,
-    };
+    use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
 
     use super::{EvictionError, Timeline};
 
