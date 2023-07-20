@@ -296,7 +296,6 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
                 tokio::select! {
                     _ = &mut shutdown => {},
                     _ = &mut warning => {
-                        // this could also be ignore, deletion
                         let joined_other = joined_other.load(ordering);
                         warn!(%joined_other, "waiting for the shutdown to complete");
                         shutdown.await;

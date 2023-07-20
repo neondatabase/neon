@@ -1782,9 +1782,10 @@ impl Tenant {
     ///
     /// This will attempt to shutdown even if tenant is broken.
     ///
-    /// `shutdown_progress` is a [`completion::Barrier`] which later shutdown attempts can join to
-    /// await tenant's shutdown, returned as an error if caller was not the first caller to
-    /// initiate shutdown.
+    /// `shutdown_progress` is a [`completion::Barrier`] for the shutdown initiated by this call.
+    /// If the tenant is already shutting down, we return a clone of the first shutdown call's
+    /// `Barrier` as an `Err`. This not-first caller can use the returned barrier to join with
+    /// the ongoing shutdown.
     async fn shutdown(
         &self,
         shutdown_progress: completion::Barrier,
