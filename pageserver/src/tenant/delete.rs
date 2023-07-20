@@ -528,20 +528,7 @@ impl DeleteTimelineFlow {
 
         delete_remote_layers_and_index(timeline).await?;
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint in_progress_delete");
-                    fail::fail_point!("in_progress_delete");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("in_progress_delete");
 
         cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_id, timeline.timeline_id).await?;
 

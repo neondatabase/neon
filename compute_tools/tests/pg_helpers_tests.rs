@@ -89,4 +89,12 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
         assert_eq!(none_generic_options.find("missed_value"), None);
         assert_eq!(none_generic_options.find("invalid_value"), None);
     }
+
+    #[test]
+    fn test_escape_literal() {
+        assert_eq!(escape_literal("test"), "'test'");
+        assert_eq!(escape_literal("test'"), "'test'''");
+        assert_eq!(escape_literal("test\\'"), "E'test\\\\'''");
+        assert_eq!(escape_literal("test\\'\\'"), "E'test\\\\''\\\\'''");
+    }
 }

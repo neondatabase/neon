@@ -346,7 +346,7 @@ async fn timeline_create_handler(
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .instrument(info_span!("timeline_create", %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
 
@@ -381,7 +381,7 @@ async fn timeline_list_handler(
         }
         Ok::<Vec<TimelineInfo>, ApiError>(response_data)
     }
-    .instrument(info_span!("timeline_list", tenant = %tenant_id))
+    .instrument(info_span!("timeline_list", %tenant_id))
     .await?;
 
     json_response(StatusCode::OK, response_data)
@@ -418,7 +418,7 @@ async fn timeline_detail_handler(
 
         Ok::<_, ApiError>(timeline_info)
     }
-    .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
+    .instrument(info_span!("timeline_detail", %tenant_id, %timeline_id))
     .await?;
 
     json_response(StatusCode::OK, timeline_info)
@@ -479,7 +479,7 @@ async fn tenant_attach_handler(
             remote_storage.clone(),
             &ctx,
         )
-        .instrument(info_span!("tenant_attach", tenant = %tenant_id))
+        .instrument(info_span!("tenant_attach", %tenant_id))
         .await?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
@@ -501,7 +501,7 @@ async fn timeline_delete_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     mgr::delete_timeline(tenant_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
+        .instrument(info_span!("timeline_delete", %tenant_id, %timeline_id))
         .await?;
 
     // FIXME: needs to be an error for console to retry it. Ideally Accepted should be used and retried until 404.
@@ -519,7 +519,7 @@ async fn tenant_detach_handler(
     let state = get_state(&request);
     let conf = state.conf;
     mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", tenant = %tenant_id))
+        .instrument(info_span!("tenant_detach", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -542,7 +542,7 @@ async fn tenant_load_handler(
         state.remote_storage.clone(),
         &ctx,
     )
-    .instrument(info_span!("load", tenant = %tenant_id))
+    .instrument(info_span!("load", %tenant_id))
     .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -558,7 +558,7 @@ async fn tenant_ignore_handler(
     let state = get_state(&request);
     let conf = state.conf;
     mgr::ignore_tenant(conf, tenant_id)
-        .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
+        .instrument(info_span!("ignore_tenant", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -611,7 +611,7 @@ async fn tenant_status(
             attachment_status: state.attachment_status(),
         })
     }
-    .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
+    .instrument(info_span!("tenant_status_handler", %tenant_id))
     .await?;
 
     json_response(StatusCode::OK, tenant_info)
@@ -850,7 +850,7 @@ async fn tenant_create_handler(
         state.remote_storage.clone(),
         &ctx,
     )
-    .instrument(info_span!("tenant_create", tenant = ?target_tenant_id))
+    .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
     .await?;
 
     // We created the tenant. Existing API semantics are that the tenant
@@ -912,7 +912,7 @@ async fn update_tenant_config_handler(
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
-        .instrument(info_span!("tenant_config", tenant = ?tenant_id))
+        .instrument(info_span!("tenant_config", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -1143,7 +1143,7 @@ async fn disk_usage_eviction_run(
     let Some(storage) = state.remote_storage.clone() else {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
-        )))
+        )));
     };
 
     let state = state.disk_usage_eviction_state.clone();

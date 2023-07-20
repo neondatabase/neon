@@ -135,7 +135,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Timeline::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
+//!   [`Tenant::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
@@ -163,8 +163,8 @@
 //!   - download their remote [`IndexPart`]s
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
 //!   - initialize the client's upload queue with its `IndexPart`
-//!   - create [`RemoteLayer`] instances for layers that are referenced by `IndexPart`
-//!     but not present locally
+//!   - create [`RemoteLayer`](super::storage_layer::RemoteLayer) instances
+//!     for layers that are referenced by `IndexPart` but not present locally
 //!   - schedule uploads for layers that are only present locally.
 //!   - if the remote `IndexPart`'s metadata was newer than the metadata in
 //!     the local filesystem, write the remote metadata to the local filesystem
@@ -198,6 +198,8 @@
 //! in remote storage.
 //! But note that we don't test any of this right now.
 //!
+//! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
+//! [`Timeline::reconcile_with_remote`]: super::Timeline::reconcile_with_remote
 
 mod delete;
 mod download;
@@ -748,20 +750,8 @@ impl RemoteTimelineClient {
             stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint persist_deleted_index_part");
-                    fail::fail_point!("persist_deleted_index_part");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("persist_deleted_index_part");
+
         upload::upload_index_part(
             self.conf,
             &self.storage_impl,
@@ -852,14 +842,16 @@ impl RemoteTimelineClient {
         let remaining: Vec<RemotePath> = remaining
             .into_iter()
             .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
+            .inspect(|path| {
+                if let Some(name) = path.object_name() {
+                    info!(%name, "deleting a file not referenced from index_part.json");
+                } else {
+                    warn!(%path, "deleting a nameless or non-utf8 object not referenced from index_part.json");
+                }
+            })
             .collect();
 
         if !remaining.is_empty() {
-            warn!(
-                "Found {} files not bound to index_file.json, proceeding with their deletion",
-                remaining.len()
-            );
-            warn!("About to remove {} files", remaining.len());
             self.storage_impl.delete_objects(&remaining).await?;
         }
 
@@ -880,7 +872,7 @@ impl RemoteTimelineClient {
             ))?
         });
 
-        info!(deletions_queued, "done deleting, including index_part.json");
+        info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
 
         Ok(())
     }
@@ -945,11 +937,11 @@ impl RemoteTimelineClient {
 
             // Assign unique ID to this task
             upload_queue.task_counter += 1;
-            let task_id = upload_queue.task_counter;
+            let upload_task_id = upload_queue.task_counter;
 
             // Add it to the in-progress map
             let task = Arc::new(UploadTask {
-                task_id,
+                task_id: upload_task_id,
                 op: next_op,
                 retries: AtomicU32::new(0),
             });
@@ -959,6 +951,8 @@ impl RemoteTimelineClient {
 
             // Spawn task to perform the task
             let self_rc = Arc::clone(self);
+            let tenant_id = self.tenant_id;
+            let timeline_id = self.timeline_id;
             task_mgr::spawn(
                 self.runtime.handle(),
                 TaskKind::RemoteUploadTask,
@@ -970,7 +964,7 @@ impl RemoteTimelineClient {
                     self_rc.perform_upload_task(task).await;
                     Ok(())
                 }
-                .instrument(info_span!(parent: None, "remote_upload", tenant = %self.tenant_id, timeline = %self.timeline_id, upload_task_id = %task_id)),
+                .instrument(info_span!(parent: None, "remote_upload", %tenant_id, %timeline_id, %upload_task_id)),
             );
 
             // Loop back to process next task

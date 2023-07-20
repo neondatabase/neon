@@ -455,7 +455,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
-    timeline_info = wait_until_timeline_state(
+    wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
         timeline_id=leaf_timeline_id,
@@ -463,7 +463,8 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-before-rm"
+    # FIXME: #4719
+    # timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 

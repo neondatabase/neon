@@ -112,7 +112,7 @@ pub fn init(
 ///
 /// When the return value is dropped, the hook is reverted to std default hook (prints to stderr).
 /// If the assumptions about the initialization order are not held, use
-/// [`TracingPanicHookGuard::disarm`] but keep in mind, if tracing is stopped, then panics will be
+/// [`TracingPanicHookGuard::forget`] but keep in mind, if tracing is stopped, then panics will be
 /// lost.
 #[must_use]
 pub fn replace_panic_hook_with_tracing_panic_hook() -> TracingPanicHookGuard {

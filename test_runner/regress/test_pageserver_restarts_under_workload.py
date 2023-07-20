@@ -25,7 +25,7 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
     thread.start()
 
-    for i in range(n_restarts):
+    for _ in range(n_restarts):
         # Stop the pageserver gracefully and restart it.
         time.sleep(1)
         env.pageserver.stop()

@@ -30,7 +30,7 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     # Lock entries using parallel connections in a round-robin fashion.
     nclients = 20
     connections = []
-    for i in range(nclients):
+    for _ in range(nclients):
         # Do not turn on autocommit. We want to hold the key-share locks.
         conn = endpoint.connect(autocommit=False)
         connections.append(conn)

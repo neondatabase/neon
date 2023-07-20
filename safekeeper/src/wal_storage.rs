@@ -106,13 +106,15 @@ pub struct PhysicalStorage {
     /// Imagine the following:
     /// - 000000010000000000000001
     ///   - it was fully written, but the last record is split between 2 segments
-    ///   - after restart, find_end_of_wal() returned 0/1FFFFF0, which is in the end of this segment
-    ///   - write_lsn, write_record_lsn and flush_record_lsn were initialized to 0/1FFFFF0
+    ///   - after restart, `find_end_of_wal()` returned 0/1FFFFF0, which is in the end of this segment
+    ///   - `write_lsn`, `write_record_lsn` and `flush_record_lsn` were initialized to 0/1FFFFF0
     /// - 000000010000000000000002.partial
     ///   - it has only 1 byte written, which is not enough to make a full WAL record
     ///
     /// Partial segment 002 has no WAL records, and it will be removed by the next truncate_wal().
     /// This flag will be set to true after the first truncate_wal() call.
+    ///
+    /// [`write_lsn`]: Self::write_lsn
     is_truncated_after_restart: bool,
 }
 

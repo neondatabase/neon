@@ -213,7 +213,7 @@ def worker_base_port(worker_seq_no: int) -> int:
 def get_dir_size(path: str) -> int:
     """Return size in bytes."""
     totalbytes = 0
-    for root, dirs, files in os.walk(path):
+    for root, _dirs, files in os.walk(path):
         for name in files:
             totalbytes += os.path.getsize(os.path.join(root, name))
 
@@ -459,6 +459,7 @@ class AuthKeys:
     def generate_safekeeper_token(self) -> str:
         return self.generate_token(scope="safekeeperdata")
 
+    # generate token giving access to only one tenant
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
         return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
 
@@ -965,6 +966,7 @@ class NeonEnv:
         for i in range(1, config.num_safekeepers + 1):
             port = SafekeeperPort(
                 pg=self.port_distributor.get_port(),
+                pg_tenant_only=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
             id = config.safekeepers_id_start + i  # assign ids sequentially
@@ -973,6 +975,7 @@ class NeonEnv:
                 [[safekeepers]]
                 id = {id}
                 pg_port = {port.pg}
+                pg_tenant_only_port = {port.pg_tenant_only}
                 http_port = {port.http}
                 sync = {'true' if config.safekeepers_enable_fsync else 'false'}"""
             )
@@ -1231,7 +1234,7 @@ class AbstractNeonCli(abc.ABC):
               stderr: {res.stderr}
             """
             log.info(msg)
-            raise Exception(msg) from subprocess.CalledProcessError(
+            raise RuntimeError(msg) from subprocess.CalledProcessError(
                 res.returncode, res.args, res.stdout, res.stderr
             )
         return res
@@ -1255,10 +1258,8 @@ class NeonCli(AbstractNeonCli):
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
-        if tenant_id is None:
-            tenant_id = TenantId.generate()
-        if timeline_id is None:
-            timeline_id = TimelineId.generate()
+        tenant_id = tenant_id or TenantId.generate()
+        timeline_id = timeline_id or TimelineId.generate()
 
         args = [
             "tenant",
@@ -1885,8 +1886,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         self.running = True
 
-        if log_path is None:
-            log_path = os.path.join(self.pgdatadir, "pg.log")
+        log_path = log_path or os.path.join(self.pgdatadir, "pg.log")
 
         self.pg_bin.run_capture(
             ["pg_ctl", "-w", "-D", str(self.pgdatadir), "-l", log_path, "start"]
@@ -2346,8 +2346,7 @@ class Endpoint(PgProtocol):
         if not config_lines:
             config_lines = []
 
-        if endpoint_id is None:
-            endpoint_id = self.env.generate_endpoint_id()
+        endpoint_id = endpoint_id or self.env.generate_endpoint_id()
         self.endpoint_id = endpoint_id
         self.branch_name = branch_name
 
@@ -2363,8 +2362,7 @@ class Endpoint(PgProtocol):
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
-        if config_lines is None:
-            config_lines = []
+        config_lines = config_lines or []
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
@@ -2560,8 +2558,7 @@ class EndpointFactory:
             http_port=self.env.port_distributor.get_port(),
         )
 
-        if endpoint_id is None:
-            endpoint_id = self.env.generate_endpoint_id()
+        endpoint_id = endpoint_id or self.env.generate_endpoint_id()
 
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -2614,6 +2611,7 @@ class EndpointFactory:
 @dataclass
 class SafekeeperPort:
     pg: int
+    pg_tenant_only: int
     http: int
 
 
@@ -2641,7 +2639,7 @@ class Safekeeper:
                 if elapsed > 3:
                     raise RuntimeError(
                         f"timed out waiting {elapsed:.0f}s for wal acceptor start: {e}"
-                    )
+                    ) from e
                 time.sleep(0.5)
             else:
                 break  # success
@@ -2721,7 +2719,8 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def debug_dump(self, params: Dict[str, str] = {}) -> Dict[str, Any]:
+    def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
         res_json = res.json()
@@ -2861,7 +2860,7 @@ class NeonBroker:
                 if elapsed > 5:
                     raise RuntimeError(
                         f"timed out waiting {elapsed:.0f}s for storage_broker start: {e}"
-                    )
+                    ) from e
                 time.sleep(0.5)
             else:
                 break  # success
@@ -2977,7 +2976,7 @@ def should_skip_file(filename: str) -> bool:
 #
 def list_files_to_compare(pgdata_dir: Path) -> List[str]:
     pgdata_files = []
-    for root, _file, filenames in os.walk(pgdata_dir):
+    for root, _dirs, filenames in os.walk(pgdata_dir):
         for filename in filenames:
             rel_dir = os.path.relpath(root, pgdata_dir)
             # Skip some dirs and files we don't want to compare

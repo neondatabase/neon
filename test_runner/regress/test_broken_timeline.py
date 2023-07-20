@@ -26,7 +26,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     tenant_timelines: List[Tuple[TenantId, TimelineId, Endpoint]] = []
 
-    for n in range(4):
+    for _ in range(4):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
 
         endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)

@@ -10,7 +10,7 @@
 //! (non-Neon binaries don't necessarily follow our pidfile conventions).
 //! The pid stored in the file is later used to stop the service.
 //!
-//! See [`lock_file`] module for more info.
+//! See the [`lock_file`](utils::lock_file) module for more info.
 
 use std::ffi::OsStr;
 use std::io::Write;

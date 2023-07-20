@@ -37,7 +37,7 @@ use safekeeper::{http, WAL_REMOVER_RUNTIME};
 use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
-use utils::auth::JwtAuth;
+use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
@@ -72,6 +72,10 @@ struct Args {
     /// Listen endpoint for receiving/sending WAL in the form host:port.
     #[arg(short, long, default_value = DEFAULT_PG_LISTEN_ADDR)]
     listen_pg: String,
+    /// Listen endpoint for receiving/sending WAL in the form host:port allowing
+    /// only tenant scoped auth tokens. Pointless if auth is disabled.
+    #[arg(long, default_value = None, verbatim_doc_comment)]
+    listen_pg_tenant_only: Option<String>,
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
@@ -94,7 +98,7 @@ struct Args {
     broker_keepalive_interval: Duration,
     /// Peer safekeeper is considered dead after not receiving heartbeats from
     /// it during this period passed as a human readable duration.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT)]
+    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT, verbatim_doc_comment)]
     heartbeat_timeout: Duration,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
@@ -179,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
         workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
+        listen_pg_addr_tenant_only: args.listen_pg_tenant_only,
         listen_http_addr: args.listen_http,
         availability_zone: args.availability_zone,
         no_sync: args.no_sync,
@@ -222,6 +227,21 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
+    let pg_listener_tenant_only =
+        if let Some(listen_pg_addr_tenant_only) = &conf.listen_pg_addr_tenant_only {
+            info!(
+                "starting safekeeper tenant scoped WAL service on {}",
+                listen_pg_addr_tenant_only
+            );
+            let listener = tcp_listener::bind(listen_pg_addr_tenant_only.clone()).map_err(|e| {
+                error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+                e
+            })?;
+            Some(listener)
+        } else {
+            None
+        };
+
     info!(
         "starting safekeeper HTTP service on {}",
         conf.listen_http_addr
@@ -253,13 +273,33 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let current_thread_rt = conf
         .current_thread_runtime
         .then(|| Handle::try_current().expect("no runtime in main"));
+
     let wal_service_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
-        .spawn(wal_service::task_main(conf_, pg_listener))
+        .spawn(wal_service::task_main(
+            conf_,
+            pg_listener,
+            Some(Scope::SafekeeperData),
+        ))
         // wrap with task name for error reporting
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
+
+    if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
+        let conf_ = conf.clone();
+        let wal_service_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
+            .spawn(wal_service::task_main(
+                conf_,
+                pg_listener_tenant_only,
+                Some(Scope::Tenant),
+            ))
+            // wrap with task name for error reporting
+            .map(|res| ("WAL service tenant only main".to_owned(), res));
+        tasks_handles.push(Box::pin(wal_service_handle));
+    }
 
     let conf_ = conf.clone();
     let http_handle = current_thread_rt

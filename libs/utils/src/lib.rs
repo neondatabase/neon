@@ -130,8 +130,8 @@ pub use failpoint_macro_helpers::failpoint_sleep_helper;
 /// Note that with git_version prefix is `git:` and in case of git version from env its `git-env:`.
 ///
 /// #############################################################################################
-/// TODO this macro is not the way the library is intended to be used, see https://github.com/neondatabase/neon/issues/1565 for details.
-/// We use `cachepot` to reduce our current CI build times: https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036
+/// TODO this macro is not the way the library is intended to be used, see <https://github.com/neondatabase/neon/issues/1565> for details.
+/// We use `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
 /// Yet, it seems to ignore the GIT_VERSION env variable, passed to Docker build, even with build.rs that contains
 /// `println!("cargo:rerun-if-env-changed=GIT_VERSION");` code for cachepot cache invalidation.
 /// The problem needs further investigation and regular `const` declaration instead of a macro.

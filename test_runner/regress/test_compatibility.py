@@ -73,9 +73,9 @@ def test_create_snapshot(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg_bin.run(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
-    pg_bin.run(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
-    pg_bin.run(
+    pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
 
@@ -405,7 +405,9 @@ def check_neon_works(
     request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
-    pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
+    pg_bin.run_capture(
+        ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
     initial_dump_differs = dump_differs(
         repo_dir.parent / "dump.sql",
         test_output_dir / "dump.sql",
@@ -425,7 +427,7 @@ def check_neon_works(
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
     pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
-    pg_bin.run(
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
     # The assert itself deferred to the end of the test
@@ -437,7 +439,7 @@ def check_neon_works(
     )
 
     # Check that we can interract with the data
-    pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
+    pg_bin.run_capture(["pgbench", "--time=10", "--progress=2", connstr])
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"

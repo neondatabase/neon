@@ -1,5 +1,6 @@
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserver
+from fixtures.pageserver.http import PageserverApiException
 
 
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2703")
@@ -77,7 +78,7 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     pageserver_http.configure_failpoints(("delta-layer-writer-fail-before-finish", "return"))
     # Note: we cannot test whether the exception is exactly 'delta-layer-writer-fail-before-finish'
     # since our code does it in loop, we cannot get this exact error for our request.
-    with pytest.raises(Exception):
+    with pytest.raises(PageserverApiException):
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     new_temp_layer_files = list(
