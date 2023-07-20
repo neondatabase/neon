@@ -150,23 +150,21 @@ impl Drop for RequestCancelled {
 async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
-    let mut buffer = vec![];
-    let encoder = TextEncoder::new();
-
-    let metrics = tokio::task::spawn_blocking(move || {
+    let response = tokio::task::spawn_blocking(move || {
         // Currently we take a lot of mutexes while collecting metrics, so it's
         // better to spawn a blocking task to avoid blocking the event loop.
-        metrics::gather()
+        let metrics = metrics::gather();
+        let mut buffer = vec![];
+        let encoder = TextEncoder::new();
+        encoder.encode(&metrics, &mut buffer).unwrap();
+        Response::builder()
+            .status(200)
+            .header(CONTENT_TYPE, encoder.format_type())
+            .body(Body::from(buffer))
+            .unwrap()
     })
     .await
     .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
-    encoder.encode(&metrics, &mut buffer).unwrap();
-
-    let response = Response::builder()
-        .status(200)
-        .header(CONTENT_TYPE, encoder.format_type())
-        .body(Body::from(buffer))
-        .unwrap();
 
     Ok(response)
 }
