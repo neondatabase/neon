@@ -233,11 +233,17 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
-#[instrument]
+#[instrument(skip_all)]
 pub async fn shutdown_all_tenants() {
+    shutdown_all_tenants0(&TENANTS).await
+}
+
+async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
+    use utils::completion;
+
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
-        let mut m = TENANTS.write().await;
+        let mut m = tenants.write().await;
         match &mut *m {
             TenantsMap::Initializing => {
                 *m = TenantsMap::ShuttingDown(HashMap::default());
@@ -262,14 +268,41 @@ pub async fn shutdown_all_tenants() {
     for (tenant_id, tenant) in tenants_to_shut_down {
         join_set.spawn(
             async move {
-                let freeze_and_flush = true;
+                // ordering shouldn't matter for this, either we store true right away or never
+                let ordering = std::sync::atomic::Ordering::Relaxed;
+                let joined_other = std::sync::atomic::AtomicBool::new(false);
 
-                match tenant.shutdown(freeze_and_flush).await {
-                    Ok(()) => debug!("tenant successfully stopped"),
-                    Err(super::ShutdownError::AlreadyStopping) => {
-                        warn!("tenant was already shutting down")
+                let mut shutdown = std::pin::pin!(async {
+                    let freeze_and_flush = true;
+
+                    let res = {
+                        let (_guard, shutdown_progress) = completion::channel();
+                        tenant.shutdown(shutdown_progress, freeze_and_flush).await
+                    };
+
+                    if let Err(other_progress) = res {
+                        // join the another shutdown in progress
+                        joined_other.store(true, ordering);
+                        other_progress.wait().await;
                     }
-                }
+                });
+
+                // in practice we might not have a lot time to go, since systemd is going to
+                // SIGKILL us at 10s, but we can try. delete tenant might take a while, so put out
+                // a warning.
+                let warning = std::time::Duration::from_secs(5);
+                let mut warning = std::pin::pin!(tokio::time::sleep(warning));
+
+                tokio::select! {
+                    _ = &mut shutdown => {},
+                    _ = &mut warning => {
+                        let joined_other = joined_other.load(ordering);
+                        warn!(%joined_other, "waiting for the shutdown to complete");
+                        shutdown.await;
+                    }
+                };
+
+                debug!("tenant successfully stopped");
             }
             .instrument(info_span!("shutdown", %tenant_id)),
         );
@@ -414,6 +447,15 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
+    detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await
+}
+
+async fn detach_tenant0(
+    conf: &'static PageServerConf,
+    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenant_id: TenantId,
+    detach_ignored: bool,
+) -> Result<(), TenantStateError> {
     let local_files_cleanup_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
         fs::remove_dir_all(&local_tenant_directory)
@@ -425,7 +467,8 @@ pub async fn detach_tenant(
     };
 
     let removal_result =
-        remove_tenant_from_memory(tenant_id, local_files_cleanup_operation(tenant_id)).await;
+        remove_tenant_from_memory(tenants, tenant_id, local_files_cleanup_operation(tenant_id))
+            .await;
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
@@ -472,7 +515,15 @@ pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
-    remove_tenant_from_memory(tenant_id, async {
+    ignore_tenant0(conf, &TENANTS, tenant_id).await
+}
+
+async fn ignore_tenant0(
+    conf: &'static PageServerConf,
+    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenant_id: TenantId,
+) -> Result<(), TenantStateError> {
+    remove_tenant_from_memory(tenants, tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_id);
         fs::File::create(&ignore_mark_file)
             .await
@@ -597,18 +648,21 @@ where
 /// If the cleanup fails, tenant will stay in memory in [`TenantState::Broken`] state, and another removal
 /// operation would be needed to remove it.
 async fn remove_tenant_from_memory<V, F>(
+    tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     tenant_cleanup: F,
 ) -> Result<V, TenantStateError>
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
+    use utils::completion;
+
     // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
     let tenant = {
-        TENANTS
+        tenants
             .write()
             .await
             .get(&tenant_id)
@@ -616,14 +670,20 @@ where
             .ok_or(TenantStateError::NotFound(tenant_id))?
     };
 
+    // allow pageserver shutdown to await for our completion
+    let (_guard, progress) = completion::channel();
+
+    // whenever we remove a tenant from memory, we don't want to flush and wait for upload
     let freeze_and_flush = false;
 
     // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
     // that we can continue safely to cleanup.
-    match tenant.shutdown(freeze_and_flush).await {
+    match tenant.shutdown(progress, freeze_and_flush).await {
         Ok(()) => {}
-        Err(super::ShutdownError::AlreadyStopping) => {
-            return Err(TenantStateError::IsStopping(tenant_id))
+        Err(_other) => {
+            // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
+            // wait for it but return an error right away because these are distinct requests.
+            return Err(TenantStateError::IsStopping(tenant_id));
         }
     }
 
@@ -632,14 +692,14 @@ where
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))
     {
         Ok(hook_value) => {
-            let mut tenants_accessor = TENANTS.write().await;
+            let mut tenants_accessor = tenants.write().await;
             if tenants_accessor.remove(&tenant_id).is_none() {
                 warn!("Tenant {tenant_id} got removed from memory before operation finished");
             }
             Ok(hook_value)
         }
         Err(e) => {
-            let tenants_accessor = TENANTS.read().await;
+            let tenants_accessor = tenants.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
                     tenant.set_broken(e.to_string()).await;
@@ -755,4 +815,110 @@ pub async fn immediate_compact(
     drop(guard);
 
     Ok(wait_task_done)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tracing::{info_span, Instrument};
+
+    use super::{super::harness::TenantHarness, TenantsMap};
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_joins_remove_tenant_from_memory() {
+        // the test is a bit ugly with the lockstep together with spawned tasks. the aim is to make
+        // sure `shutdown_all_tenants0` per-tenant processing joins in any active
+        // remove_tenant_from_memory calls, which is enforced by making the operation last until
+        // we've ran `shutdown_all_tenants0` for a long time.
+
+        let (t, _ctx) = TenantHarness::create("shutdown_joins_detach")
+            .unwrap()
+            .load()
+            .await;
+
+        // harness loads it to active, which is forced and nothing is running on the tenant
+
+        let id = t.tenant_id();
+
+        // tenant harness configures the logging and we cannot escape it
+        let _e = info_span!("testing", tenant_id = %id).entered();
+
+        let tenants = HashMap::from([(id, t.clone())]);
+        let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
+
+        let (until_cleanup_completed, can_complete_cleanup) = utils::completion::channel();
+        let (until_cleanup_started, cleanup_started) = utils::completion::channel();
+
+        // start a "detaching operation", which will take a while, until can_complete_cleanup
+        let cleanup_task = {
+            let jh = tokio::spawn({
+                let tenants = tenants.clone();
+                async move {
+                    let cleanup = async move {
+                        drop(until_cleanup_started);
+                        can_complete_cleanup.wait().await;
+                        anyhow::Ok(())
+                    };
+                    super::remove_tenant_from_memory(&tenants, id, cleanup).await
+                }
+                .instrument(info_span!("foobar", tenant_id = %id))
+            });
+
+            // now the long cleanup should be in place, with the stopping state
+            cleanup_started.wait().await;
+            jh
+        };
+
+        let mut cleanup_progress = std::pin::pin!(t
+            .shutdown(utils::completion::Barrier::default(), false)
+            .await
+            .unwrap_err()
+            .wait());
+
+        let mut shutdown_task = {
+            let (until_shutdown_started, shutdown_started) = utils::completion::channel();
+
+            let shutdown_task = tokio::spawn(async move {
+                drop(until_shutdown_started);
+                super::shutdown_all_tenants0(&tenants).await;
+            });
+
+            shutdown_started.wait().await;
+            shutdown_task
+        };
+
+        // if the joining in is removed from shutdown_all_tenants0, the shutdown_task should always
+        // get to complete within timeout and fail the test. it is expected to continue awaiting
+        // until completion or SIGKILL during normal shutdown.
+        //
+        // the timeout is long to cover anything that shutdown_task could be doing, but it is
+        // handled instantly because we use tokio's time pausing in this test. 100s is much more than
+        // what we get from systemd on shutdown (10s).
+        let long_time = std::time::Duration::from_secs(100);
+        tokio::select! {
+            _ = &mut shutdown_task => unreachable!("shutdown must continue, until_cleanup_completed is not dropped"),
+            _ = &mut cleanup_progress => unreachable!("cleanup progress must continue, until_cleanup_completed is not dropped"),
+            _ = tokio::time::sleep(long_time) => {},
+        }
+
+        // allow the remove_tenant_from_memory and thus eventually the shutdown to continue
+        drop(until_cleanup_completed);
+
+        let (je, ()) = tokio::join!(shutdown_task, cleanup_progress);
+        je.expect("Tenant::shutdown shutdown not have panicked");
+        cleanup_task
+            .await
+            .expect("no panicking")
+            .expect("remove_tenant_from_memory failed");
+
+        futures::future::poll_immediate(
+            t.shutdown(utils::completion::Barrier::default(), false)
+                .await
+                .unwrap_err()
+                .wait(),
+        )
+        .await
+        .expect("the stopping progress must still be complete");
+    }
 }
