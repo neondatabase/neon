@@ -87,20 +87,29 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
 
     let mut ticker = tokio::time::interval(config.interval);
     loop {
-        ticker.tick().await;
-
-        // acquire some new counters
-        for _ in 0..256 {
-            let Ok(counter) = proxy_counters_rx.try_recv() else { break };
-            proxy_counter_queue.push_back(counter);
+        // while waiting for the timer to tick, try acquire some new counters
+        loop {
+            tokio::select! {
+                // time to do metrics
+                _ = ticker.tick() => { break }
+                // new counter registration
+                Some(counter) = proxy_counters_rx.recv() => {
+                    proxy_counter_queue.push_back(counter);
+                }
+            }
         }
 
+        // currently we only report the metrics deltas.
+        // in future, we should occasionally report absolute metrics to account
+        // for missed metrics.
+        let report_delta = true;
         let res = collect_metrics_iteration(
             &http_client,
             &mut proxy_counter_queue,
             &mut events,
             &config.endpoint,
             &hostname,
+            report_delta,
         )
         .await;
 
@@ -135,9 +144,6 @@ impl CounterState {
     fn get_tx_delta(&mut self, now: DateTime<Utc>) -> (DateTime<Utc>, u64) {
         let old = std::mem::replace(&mut self.last_seen, now);
 
-        // update metrics eagerly. If there's a failure, there is a chance that this metric won't get recorded.
-        // We don't want to send metrics twice as it might cause double billing which is worse than not billing enough.
-        // see the relevant discussion: https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
         let tx_delta = self.counter.tx.swap(0, Ordering::Relaxed);
         self.total_tx += tx_delta;
 
@@ -182,6 +188,7 @@ async fn collect_metrics_iteration(
     events: &mut [Event<Ids>],
     metric_collection_endpoint: &reqwest::Url,
     hostname: &str,
+    report_delta: bool,
 ) -> anyhow::Result<()> {
     // each iteration, we want to process every entry once and only once.
     // we re-insert back into the queue during this loop, so we keep a counter
@@ -198,22 +205,30 @@ async fn collect_metrics_iteration(
             counters_remaining -= 1;
 
             let now = Utc::now();
-            let (last_seen, tx) = counter.get_tx_delta(now);
+            let (last_seen, delta_tx) = counter.get_tx_delta(now);
 
-            // only record the metric event if it's not 0
-            if tx > 0 {
+            let event = &mut events[event_slot];
+            event.idempotency_key.clear();
+
+            // only report this metric event if we are reporting absolute values
+            // or we have a delta_tx greater than 0
+            let should_report = delta_tx > 0 || !report_delta;
+            if should_report {
                 // try to use minimal allocations, re-using buffers
-                let event = &mut events[event_slot];
                 event.extra.clone_from(&counter.counter.ids);
-                event.idempotency_key.clear();
                 idempotency_key_into(&hostname, &mut event.idempotency_key);
-
-                event.value = tx;
                 event.metric = PROXY_IO_BYTES_PER_CLIENT;
-                event.kind = EventType::Incremental {
-                    start_time: last_seen,
-                    stop_time: now,
-                };
+
+                if report_delta {
+                    event.value = delta_tx;
+                    event.kind = EventType::Incremental {
+                        start_time: last_seen,
+                        stop_time: now,
+                    };
+                } else {
+                    event.value = counter.total_tx;
+                    event.kind = EventType::Absolute { time: now };
+                }
 
                 event_slot += 1;
             }
