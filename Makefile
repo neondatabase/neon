@@ -83,6 +83,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # I'm not sure why it wouldn't work, but this is the only place (apart from
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
+.PHONY: postgres-configure-v16
+postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
 .PHONY: postgres-configure-v15
 postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
 .PHONY: postgres-configure-v14
@@ -117,6 +119,10 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
+
+.PHONY: postgres-check-%
+postgres-check-%: postgres-%
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
@@ -167,28 +173,39 @@ neon-pg-ext-clean-%:
 .PHONY: neon-pg-ext
 neon-pg-ext: \
 	neon-pg-ext-v14 \
-	neon-pg-ext-v15
+	neon-pg-ext-v15 \
+	neon-pg-ext-v16
 
 .PHONY: neon-pg-ext-clean
 neon-pg-ext-clean: \
 	neon-pg-ext-clean-v14 \
-	neon-pg-ext-clean-v15
+	neon-pg-ext-clean-v15 \
+	neon-pg-ext-clean-v16
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
 postgres: \
 	postgres-v14 \
-	postgres-v15
+	postgres-v15 \
+	postgres-v16
 
 .PHONY: postgres-headers
 postgres-headers: \
 	postgres-headers-v14 \
-	postgres-headers-v15
+	postgres-headers-v15 \
+	postgres-headers-v16
 
 .PHONY: postgres-clean
 postgres-clean: \
 	postgres-clean-v14 \
-	postgres-clean-v15
+	postgres-clean-v15 \
+	postgres-clean-v16
+
+.PHONY: postgres-check
+postgres-check: \
+	postgres-check-v14 \
+	postgres-check-v15 \
+	postgres-check-v16
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean

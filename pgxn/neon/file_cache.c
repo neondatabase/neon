@@ -19,13 +19,16 @@
 #include <fcntl.h>
 
 #include "postgres.h"
+
+#include "neon_pgversioncompat.h"
+
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "pagestore_client.h"
 #include "access/parallel.h"
 #include "postmaster/bgworker.h"
-#include "storage/relfilenode.h"
+#include RELFILEINFO_HDR
 #include "storage/buf_internals.h"
 #include "storage/latch.h"
 #include "storage/ipc.h"
@@ -349,7 +352,7 @@ lfc_init(void)
  * Returns true if page is found in local cache.
  */
 bool
-lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
+lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
@@ -360,7 +363,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
-	tag.rnode = rnode;
+	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
@@ -376,7 +379,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
  * Evict a page (if present) from the local file cache
  */
 void
-lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
+lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
@@ -387,7 +390,9 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
-	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+	CopyNRelFileInfoToBufTag(tag, rinfo);
+	tag.forkNum = forkNum;
+	tag.blockNum = (blkno & ~(BLOCKS_PER_CHUNK - 1));
 
 	hash = get_hash_value(lfc_hash, &tag);
 
@@ -445,7 +450,7 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
  * In case of error lfc_size_limit is set to zero to disable any further opera-tins with cache.
  */
 bool
-lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 char *buffer)
 {
 	BufferTag tag;
@@ -458,7 +463,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
-	tag.rnode = rnode;
+	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	hash = get_hash_value(lfc_hash, &tag);
@@ -513,8 +518,12 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
  * If cache is full then evict some other page.
  */
 void
-lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+#if PG_MAJORVERSION_NUM < 16
 		  char *buffer)
+#else
+		  const void *buffer)
+#endif
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
@@ -526,9 +535,11 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
-	tag.rnode = rnode;
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
+	
+	CopyNRelFileInfoToBufTag(tag, rinfo);
+	
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -671,8 +682,13 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
 		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "pageoffs",
 						   INT8OID, -1, 0);
+#if PG_MAJORVERSION_NUM < 16
 		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "relfilenode",
 						   OIDOID, -1, 0);
+#else
+		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "relfilenumber",
+						   OIDOID, -1, 0);
+#endif
 		TupleDescInitEntry(tupledesc, (AttrNumber) 3, "reltablespace",
 						   OIDOID, -1, 0);
 		TupleDescInitEntry(tupledesc, (AttrNumber) 4, "reldatabase",
@@ -722,9 +738,9 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				if (entry->bitmap[i >> 5] & (1 << (i & 31)))
 				{
 					fctx->record[n_pages].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
-					fctx->record[n_pages].relfilenode = entry->key.rnode.relNode;
-					fctx->record[n_pages].reltablespace = entry->key.rnode.spcNode;
-					fctx->record[n_pages].reldatabase = entry->key.rnode.dbNode;
+					fctx->record[n_pages].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+					fctx->record[n_pages].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+					fctx->record[n_pages].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
 					fctx->record[n_pages].forknum = entry->key.forkNum;
 					fctx->record[n_pages].blocknum = entry->key.blockNum + i;
 					fctx->record[n_pages].accesscount = entry->access_count;

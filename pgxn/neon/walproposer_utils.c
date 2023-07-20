@@ -25,6 +25,9 @@
 #include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
+#if PG_MAJORVERSION_NUM >= 16
+#include "utils/guc.h"
+#endif
 
 /*
  * These variables are used similarly to openLogFile/SegNo,

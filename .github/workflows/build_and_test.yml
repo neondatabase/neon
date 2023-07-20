@@ -187,7 +187,7 @@ jobs:
           # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
 
           FAILED=false
-          for postgres in postgres-v14 postgres-v15; do
+          for postgres in postgres-v14 postgres-v15 postgres-v16; do
             expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
             actual=$(git rev-parse "HEAD:vendor/${postgres}")
             if [ "${expected}" != "${actual}" ]; then
