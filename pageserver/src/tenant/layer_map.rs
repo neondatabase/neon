@@ -727,7 +727,7 @@ mod tests {
             // and can remove it in the future.
             let _map = LayerMap::default();
 
-            let mut mapping = TestLayerFileManager::new();
+            let mapping = TestLayerFileManager::new();
 
             mapping
                 .replace_and_verify(not_found, new_version)
@@ -742,7 +742,7 @@ mod tests {
             let downloaded = Arc::new(LayerObject::new(skeleton));
 
             let mut map = LayerMap::default();
-            let mut mapping = LayerFileManager::new();
+            let mapping = LayerFileManager::new();
 
             // two disjoint Arcs in different lifecycle phases. even if it seems they must be the
             // same layer, we use LayerMap::compare_arced_layers as the identity of layers.

@@ -509,7 +509,7 @@ pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
 );
 
 impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
+    pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
@@ -519,22 +519,22 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             .clone()
     }
 
-    fn insert(&self, layer: Arc<T>) {
+    pub(crate) fn insert(&self, layer: Arc<T>) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
     }
 
-    fn contains(&self, layer: &Arc<T>) -> bool {
+    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(DashMap::new())
     }
 
-    fn remove(&self, layer: Arc<T>) {
+    pub(crate) fn remove(&self, layer: Arc<T>) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
@@ -544,7 +544,7 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         }
     }
 
-    fn replace_and_verify(&self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
+    pub(crate) fn replace_and_verify(&self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
         let key = expected.layer_desc().key();
         let other = new.layer_desc().key();
 

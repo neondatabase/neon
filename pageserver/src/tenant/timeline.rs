@@ -2602,7 +2602,9 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
         let mut guard = self.layers.write().await;
-        guard.try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at).await;
+        guard
+            .try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at)
+            .await;
     }
 
     /// Layer flusher task's main loop.
@@ -2774,7 +2776,9 @@ impl Timeline {
                 self.metrics.persistent_bytes_written.inc_by(sz);
             }
 
-            guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer).await;
+            guard
+                .finish_flush_l0_layer(delta_layer_to_add, &frozen_layer)
+                .await;
             // release lock on 'layers'
         }
 
