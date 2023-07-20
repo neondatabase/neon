@@ -110,6 +110,7 @@ impl InMemoryLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX

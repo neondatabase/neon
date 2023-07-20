@@ -65,6 +65,7 @@ impl std::fmt::Debug for RemoteLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for RemoteLayer {
     fn get_value_reconstruct_data(
         &self,

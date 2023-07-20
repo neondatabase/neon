@@ -223,6 +223,7 @@ impl std::fmt::Debug for DeltaLayerInner {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
