@@ -44,12 +44,16 @@ We only upload a new one if it is updated.
 More specifically, here is an example ext_index.json
 {
   "embedding": {
-    "control_file_content": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
-    "extension_archive": "111/v14/extensions/embedding.tar.zst"
+    "control_data": {
+      "embedding.control": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true"
+    },
+    "archive_path": "111/v15/extensions/embedding.tar.zst"
   },
   "anon": {
-    "control_file_content": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n",
-    "extension_archive": "111/v14/extensions/anon.tar.zst"
+    "control_data": {
+      "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+    },
+    "archive_path": "111/v15/extensions/anon.tar.zst"
   }
 }
 */
@@ -131,14 +135,18 @@ pub async fn get_available_extensions(
         let ext_data = ext_index_full[extension]
             .as_object()
             .context("error parsing json")?;
-        let control_contents = ext_data["control_file_content"]
-            .as_str()
-            .context("error parsing json")?;
-        let control_path = local_sharedir.join(extension.to_owned() + ".control");
-        info!("writing file {:?}{:?}", control_path, control_contents);
-        file_create_tasks.push(tokio::fs::write(control_path, control_contents));
 
-        let ext_archive_path = ext_data["extension_archive"]
+        let control_files = ext_data["control_data"]
+            .as_object()
+            .context("error parsing json")?;
+        for (control_file, control_contents) in control_files {
+            let control_path = local_sharedir.join(control_file);
+            let control_contents_str = control_contents.as_str().context("error parsing json")?;
+            info!("writing file {:?}{:?}", control_path, control_contents);
+            file_create_tasks.push(tokio::fs::write(control_path, control_contents_str));
+        }
+
+        let ext_archive_path = ext_data["archive_path"]
             .as_str()
             .context("error parsing json")?;
         ext_remote_paths.insert(
