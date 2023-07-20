@@ -394,7 +394,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                                 usage_assumed.add_available_bytes(layer.file_size());
                             }
                             Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                                unreachable!("checked already")
+                                unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
                             }
                             Some(Err(EvictionError::FileNotFound)) => {
                                 evictions_failed.file_sizes += layer.file_size();

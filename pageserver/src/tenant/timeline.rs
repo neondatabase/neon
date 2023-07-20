@@ -4590,6 +4590,7 @@ impl LocalLayerInfoForDiskUsageEviction {
 }
 
 impl Timeline {
+    /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
         let guard = self.layers.read().await;
         let layers = guard.layer_map();
