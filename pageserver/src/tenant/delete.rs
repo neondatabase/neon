@@ -125,7 +125,7 @@ async fn create_delete_mark(
 ///
 /// Note that there are still other race conditions between
 /// GC, compaction and timeline deletion. See
-/// https://github.com/neondatabase/neon/issues/2671
+/// <https://github.com/neondatabase/neon/issues/2671>
 ///
 /// No timeout here, GC & Compaction should be responsive to the
 /// `TimelineState::Stopping` change.

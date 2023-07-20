@@ -238,11 +238,10 @@ pub struct Timeline {
 
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
-    /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
+    /// This lock is acquired in [`Timeline::gc`] and [`Timeline::compact`].
+    /// This is an `Arc<Mutex>` lock because we need an owned
     /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
-    ///
-    /// [`Tenant::delete_timeline`]: super::Tenant::delete_timeline
+    /// Note that [`DeleteTimelineFlow`] uses `delete_progress` field.
     pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
