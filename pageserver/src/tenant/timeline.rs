@@ -4769,7 +4769,7 @@ mod tests {
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{
-        harness::TenantHarness, remote_timeline_client::index::LayerFileMetadata,
+        harness::TenantHarness,
         storage_layer::PersistentLayer,
     };
 
