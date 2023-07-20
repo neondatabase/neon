@@ -4839,8 +4839,7 @@ mod tests {
 
     #[tokio::test]
     async fn layer_eviction_aba_fails() {
-        let harness =
-            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+        let harness = TenantHarness::create("layer_eviction_aba_fails").unwrap();
 
         let remote_storage = {
             // this is never used for anything, because of how the create_test_timeline works, but
