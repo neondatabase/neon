@@ -190,7 +190,7 @@ impl Layer for ImageLayer {
     }
 
     /// Look up given page in the file
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,

@@ -369,7 +369,7 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,

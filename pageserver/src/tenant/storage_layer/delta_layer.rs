@@ -301,7 +301,7 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
