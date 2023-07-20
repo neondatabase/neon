@@ -276,6 +276,7 @@ async fn collect_metrics_iteration(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::sync::atomic;
     use std::time::Duration;
 
@@ -284,10 +285,12 @@ mod tests {
     use crate::metrics::PROXY_IO_BYTES_PER_CLIENT;
 
     use consumption_metrics::EventType;
+    use hyper::body::to_bytes;
+    use hyper::service::{make_service_fn, service_fn};
+    use hyper::{Body, Request, Response};
+    use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::task::yield_now;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     // Just a wrapper around a slice of events
     // to deserialize it as `{"events" : [ ] }
@@ -312,24 +315,38 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_test() {
-        let mock_server = MockServer::start().await;
-
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let _mock_guard = Mock::given(method("POST"))
-            .respond_with(move |req: &Request| {
-                let events: EventChunkOwned = serde_json::from_slice(&req.body).unwrap();
-                for event in events.events {
-                    tx.send(event).unwrap();
-                }
+        let make_svc = make_service_fn(move |_| {
+            let tx = tx.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+                    let tx = tx.clone();
+                    async move {
+                        let body = to_bytes(req.into_body()).await.unwrap();
+                        let events: EventChunkOwned = serde_json::from_slice(&body).unwrap();
+                        for event in events.events {
+                            tx.send(event).unwrap();
+                        }
 
-                ResponseTemplate::new(200)
-            })
-            .mount_as_scoped(&mock_server)
-            .await;
+                        Ok::<_, Infallible>(Response::new(Body::empty()))
+                    }
+                }))
+            }
+        });
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            hyper::Server::from_tcp(tcp.into_std().unwrap())
+                .unwrap()
+                .serve(make_svc)
+                .await
+        });
 
         let config = MetricCollectionConfig {
-            endpoint: mock_server.uri().parse().unwrap(),
+            endpoint: format!("http://{addr}/").parse().unwrap(),
             interval: Duration::from_secs(1),
         };
         tokio::spawn(async move { task_main(&config).await });

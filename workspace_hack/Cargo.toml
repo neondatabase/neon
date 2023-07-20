@@ -25,7 +25,6 @@ futures = { version = "0.3" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
-futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 itertools = { version = "0.10" }
