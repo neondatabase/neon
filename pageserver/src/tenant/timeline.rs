@@ -87,7 +87,6 @@ use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
 use super::delete::DeleteTimelineFlow;
-use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{

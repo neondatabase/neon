@@ -505,7 +505,7 @@ impl DeleteTimelineFlow {
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline).await {
                     error!("Error: {err:#}");
-                    timeline.set_broken(err.to_string())
+                    timeline.set_broken(format!("{err:#}"))
                 };
                 Ok(())
             }
