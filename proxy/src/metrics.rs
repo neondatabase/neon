@@ -1,14 +1,14 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
 use crate::{config::MetricCollectionConfig, http};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use consumption_metrics::{idempotency_key_into, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     convert::Infallible,
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, OnceLock,
     },
     time::Duration,
@@ -48,8 +48,7 @@ impl Clone for Ids {
     }
 }
 
-static STARTED_PROXY_COUNTERS: OnceLock<tokio::sync::mpsc::Sender<Arc<ProxyCounter>>> =
-    OnceLock::new();
+static STARTED_PROXY_COUNTERS: OnceLock<tokio::sync::mpsc::Sender<CounterState>> = OnceLock::new();
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
@@ -63,7 +62,7 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         .map_err(|_| anyhow::anyhow!("invalid proxy metrics state"))?;
 
     let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
-    let mut proxy_counter_queue: VecDeque<Arc<ProxyCounter>> = VecDeque::new();
+    let mut proxy_counter_queue: VecDeque<CounterState> = VecDeque::new();
 
     // fill with dummy data.
     let mut events: Vec<Event<Ids>> = vec![
@@ -119,11 +118,31 @@ pub struct ProxyCounter {
     ids: Ids,
     /// Outbound bytes from neon compute to client
     pub tx: AtomicU64,
-    /// Inbound bytes from client to neon compute
-    pub rx: AtomicU64,
-    // unix epoch nanoseconds. only valid up to year 2262-04-11.
-    // maybe we can use microseconds, or maybe we don't care.
-    last_seen: AtomicI64,
+}
+
+pub struct CounterState {
+    counter: Arc<ProxyCounter>,
+    last_seen: DateTime<Utc>,
+    total_tx: u64,
+}
+
+impl CounterState {
+    fn is_closed(&self) -> bool {
+        // we are the only holders of this counter
+        Arc::strong_count(&self.counter) == 1
+    }
+
+    fn get_tx_delta(&mut self, now: DateTime<Utc>) -> (DateTime<Utc>, u64) {
+        let old = std::mem::replace(&mut self.last_seen, now);
+
+        // update metrics eagerly. If there's a failure, there is a chance that this metric won't get recorded.
+        // We don't want to send metrics twice as it might cause double billing which is worse than not billing enough.
+        // see the relevant discussion: https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
+        let tx_delta = self.counter.tx.swap(0, Ordering::Relaxed);
+        self.total_tx += tx_delta;
+
+        (old, tx_delta)
+    }
 }
 
 impl ProxyCounter {
@@ -135,8 +154,6 @@ impl ProxyCounter {
                 branch_id,
             },
             tx: AtomicU64::new(0),
-            rx: AtomicU64::new(0),
-            last_seen: AtomicI64::new(Utc::now().timestamp_nanos()),
         });
         this.clone().submit().await;
         this
@@ -144,7 +161,12 @@ impl ProxyCounter {
 
     async fn submit(self: Arc<ProxyCounter>) {
         if let Some(counters) = STARTED_PROXY_COUNTERS.get() {
-            if counters.send(self).await.is_err() {
+            let state = CounterState {
+                counter: self,
+                last_seen: Utc::now(),
+                total_tx: 0,
+            };
+            if counters.send(state).await.is_err() {
                 error!("new proxy job started but metrics task has shut down");
             }
         } else {
@@ -156,44 +178,36 @@ impl ProxyCounter {
 #[instrument(skip_all, fields(metrics_collection_endpoints))]
 async fn collect_metrics_iteration(
     client: &http::ClientWithMiddleware,
-    counter_queue: &mut VecDeque<Arc<ProxyCounter>>,
+    counter_queue: &mut VecDeque<CounterState>,
     events: &mut [Event<Ids>],
     metric_collection_endpoint: &reqwest::Url,
     hostname: &str,
 ) -> anyhow::Result<()> {
-    // only call counter_queue once.
-    // if we call this repeatedly, we might never exit the while loop below
-    // since we re-insert into this queue.
-    let mut counters = counter_queue.len();
+    // each iteration, we want to process every entry once and only once.
+    // we re-insert back into the queue during this loop, so we keep a counter
+    // for how many we want to process
+    let mut counters_remaining = counter_queue.len();
 
-    info!(counters, "metrics sweep");
+    info!(counters_remaining, "metrics sweep");
 
-    while counters > 0 {
-        let mut i = 0;
-        while i < events.len() && i < counters {
-            let Some(counter) = counter_queue.pop_front() else { break };
+    while counters_remaining > 0 {
+        // index of the currently unused event slot
+        let mut event_slot = 0;
+        while event_slot < events.len() && counters_remaining > 0 {
+            let Some(mut counter) = counter_queue.pop_front() else { break };
+            counters_remaining -= 1;
 
-            // update metrics eagerly. If there's a failure, there is a chance that this metric won't get recorded.
-            // We don't want to send metrics twice as it might cause double billing which is worse than not billing enough.
-            // see the relevant discussion: https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
-            let tx = counter.tx.swap(0, Ordering::Relaxed);
-            let _rx = counter.rx.swap(0, Ordering::Relaxed);
+            let now = Utc::now();
+            let (last_seen, tx) = counter.get_tx_delta(now);
 
             // only record the metric event if it's not 0
             if tx > 0 {
-                let now = Utc::now();
-                let last_seen = Utc.timestamp_nanos(
-                    counter
-                        .last_seen
-                        .swap(now.timestamp_nanos(), Ordering::Relaxed),
-                );
-
-                // try to use minimal allocations
-                let event = &mut events[i];
-                event.extra.clone_from(&counter.ids);
+                // try to use minimal allocations, re-using buffers
+                let event = &mut events[event_slot];
+                event.extra.clone_from(&counter.counter.ids);
+                event.idempotency_key.clear();
                 idempotency_key_into(&hostname, &mut event.idempotency_key);
 
-                // Only collect metric for outbound traffic
                 event.value = tx;
                 event.metric = PROXY_IO_BYTES_PER_CLIENT;
                 event.kind = EventType::Incremental {
@@ -201,27 +215,23 @@ async fn collect_metrics_iteration(
                     stop_time: now,
                 };
 
-                i += 1;
-            } else {
-                counters -= 1;
+                event_slot += 1;
             }
 
-            // if there is another owner of this counter, then the proxy task is still running.
-            // add it back to the queue
-            if Arc::strong_count(&counter) > 1 {
+            // if the counter is closed, don't push back to queue
+            if !counter.is_closed() {
                 counter_queue.push_back(counter);
             }
         }
-        counters -= i;
 
-        if i == 0 {
+        let chunk = &events[..event_slot];
+
+        if chunk.is_empty() {
             trace!("no new metrics to send");
             return Ok(());
         }
 
-        info!(n = i, "uploading metrics");
-
-        let chunk = &events[..i];
+        info!(n = chunk.len(), "uploading metrics");
 
         let res = client
             .post(metric_collection_endpoint.clone())

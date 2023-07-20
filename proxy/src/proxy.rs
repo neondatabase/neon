@@ -603,7 +603,6 @@ pub async fn proxy_pass(
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);
-            counter.rx.fetch_add(cnt as u64, atomic::Ordering::Relaxed);
         },
     );
 
