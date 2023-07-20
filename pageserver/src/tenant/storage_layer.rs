@@ -338,7 +338,7 @@ impl LayerAccessStats {
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
-pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
+pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
