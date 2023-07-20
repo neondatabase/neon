@@ -297,9 +297,12 @@ async fn cleanup_remaining_timeline_fs_traces(
         .context("remove delete mark")
 }
 
+/// It is important that this gets called when DeletionGuard is being held.
+/// For more context see comments in [`DeleteTimelineFlow::prepare`]
 async fn remove_timeline_from_tenant(
     tenant: &Tenant,
     timeline_id: TimelineId,
+    _: &DeletionGuard, // using it as a witness
 ) -> anyhow::Result<()> {
     // Remove the timeline from the map.
     let mut timelines = tenant.timelines.lock().unwrap();
@@ -451,6 +454,16 @@ impl DeleteTimelineFlow {
         tenant: &Tenant,
         timeline_id: TimelineId,
     ) -> Result<(Arc<Timeline>, DeletionGuard), DeleteTimelineError> {
+        // Note the interaction between this guard and deletion guard.
+        // Here we attempt to lock deletion guard when we're holding a lock on timelines.
+        // This is important because when you take into account `remove_timeline_from_tenant`
+        // we remove timeline from memory when we still hold the deletion guard.
+        // So here when timeline deletion is finished timeline wont be present in timelines map at all
+        // which makes the following sequence impossible:
+        // T1: get preempted right before the try_lock on `Timeline::delete_progress`
+        // T2: do a full deletion, acquire and drop `Timeline::delete_progress`
+        // T1: acquire deletion lock, do another `DeleteTimelineFlow::run`
+        // For more context see this discussion: `https://github.com/neondatabase/neon/pull/4552#discussion_r1253437346`
         let timelines = tenant.timelines.lock().unwrap();
 
         let timeline = match timelines.get(&timeline_id) {
@@ -475,6 +488,11 @@ impl DeleteTimelineFlow {
             return Err(DeleteTimelineError::HasChildren(children));
         }
 
+        // Note that using try_lock here is important to avoid a deadlock.
+        // Here we take lock on timelines and then the deletion guard.
+        // At the end of the operation we're holding the guard and need to lock timelines map
+        // to remove the timeline from it.
+        // Always if you have two locks that are taken in different order this can result in a deadlock.
         let delete_lock_guard = DeletionGuard(
             Arc::clone(&timeline.delete_progress)
                 .try_lock_owned()
@@ -532,7 +550,7 @@ impl DeleteTimelineFlow {
 
         cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_id, timeline.timeline_id).await?;
 
-        remove_timeline_from_tenant(tenant, timeline.timeline_id).await?;
+        remove_timeline_from_tenant(tenant, timeline.timeline_id, &guard).await?;
 
         *guard.0 = Self::Finished;
 
