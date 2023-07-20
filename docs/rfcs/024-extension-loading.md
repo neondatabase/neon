@@ -180,16 +180,20 @@ We do not duplicate `extension.tar.zst` files.
 We only upload a new one if it is updated.
 **access** is controlled by spec
 
-More specifically, here is an example `ext_index.json`
+More specifically, here is an example `ext_index.json` that could be found in `111/v14`
 ```
 {
   "embedding": {
-    "control_file_content": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
-    "extension_archive": "111/v14/extensions/embedding.tar.zst"
+    "control_data": {
+      "embedding.control": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true"
+    },
+    "archive_path": "111/v15/extensions/embedding.tar.zst"
   },
   "anon": {
-    "control_file_content": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n",
-    "extension_archive": "111/v14/extensions/anon.tar.zst"
+    "control_data": {
+      "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+    },
+    "archive_path": "111/v15/extensions/anon.tar.zst"
   }
 }
 ```
