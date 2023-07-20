@@ -81,7 +81,7 @@ use crate::{is_temporary, task_mgr};
 
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
-use self::layer_manager::LayerManager;
+use self::layer_manager::{LayerManager, LayerManagerReadGuard, LayerManagerWriteGuard};
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
@@ -125,13 +125,13 @@ impl PartialOrd for Hole {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
+fn drop_rlock(rlock: LayerManagerReadGuard) {
     drop(rlock)
 }
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+fn drop_wlock(rlock: LayerManagerWriteGuard) {
     drop(rlock)
 }
 pub struct Timeline {
@@ -162,7 +162,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
+    pub(crate) layers: Arc<LayerManager>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1109,7 +1109,7 @@ impl Timeline {
         &self,
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
-        layer_mgr: &mut LayerManager,
+        layer_mgr: &mut LayerManagerWriteGuard,
     ) -> Result<(), EvictionError> {
         if local_layer.is_remote_layer() {
             return Err(EvictionError::CannotEvictRemoteLayer);
@@ -1349,7 +1349,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
+                layers: Arc::new(LayerManager::create()),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -2561,13 +2561,15 @@ impl Timeline {
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let layer = guard.get_layer_for_write(
-            lsn,
-            self.get_last_record_lsn(),
-            self.conf,
-            self.timeline_id,
-            self.tenant_id,
-        )?;
+        let layer = guard
+            .get_layer_for_write(
+                lsn,
+                self.get_last_record_lsn(),
+                self.conf,
+                self.timeline_id,
+                self.tenant_id,
+            )
+            .await?;
         Ok(layer)
     }
 
@@ -2600,7 +2602,7 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
         let mut guard = self.layers.write().await;
-        guard.try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at);
+        guard.try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at).await;
     }
 
     /// Layer flusher task's main loop.
@@ -2772,7 +2774,7 @@ impl Timeline {
                 self.metrics.persistent_bytes_written.inc_by(sz);
             }
 
-            guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
+            guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer).await;
             // release lock on 'layers'
         }
 
@@ -3151,7 +3153,7 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
         }
-        guard.track_new_image_layers(image_layers);
+        guard.track_new_image_layers(image_layers).await;
         drop_wlock(guard);
         timer.stop_and_record();
 
@@ -3315,7 +3317,7 @@ impl Timeline {
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
+        guard: LayerManagerReadGuard,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
@@ -3739,7 +3741,7 @@ impl Timeline {
             };
 
             let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
+            let phase1_layers_locked = self.layers.read().await;
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
@@ -3837,12 +3839,14 @@ impl Timeline {
             remove_layers.push(guard.get_from_desc(&ldesc));
         }
 
-        guard.finish_compact_l0(
-            layer_removal_cs,
-            remove_layers,
-            insert_layers,
-            &self.metrics,
-        )?;
+        guard
+            .finish_compact_l0(
+                layer_removal_cs,
+                remove_layers,
+                insert_layers,
+                &self.metrics,
+            )
+            .await?;
 
         drop_wlock(guard);
 
@@ -4175,7 +4179,9 @@ impl Timeline {
                 layer_names_to_delete.push(doomed_layer.filename());
                 result.layers_removed += 1;
             }
-            let apply = guard.finish_gc_timeline(layer_removal_cs, gc_layers, &self.metrics)?;
+            guard
+                .finish_gc_timeline(layer_removal_cs, gc_layers, &self.metrics)
+                .await?;
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");
@@ -4184,8 +4190,6 @@ impl Timeline {
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
             }
-
-            apply.flush();
         }
 
         info!(

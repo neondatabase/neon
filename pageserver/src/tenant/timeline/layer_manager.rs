@@ -1,5 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
-use std::{collections::HashMap, sync::Arc};
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
+use std::sync::Arc;
 use tracing::trace;
 use utils::{
     id::{TenantId, TimelineId},
@@ -21,94 +23,229 @@ use crate::{
 
 /// Provides semantic APIs to manipulate the layer map.
 pub struct LayerManager {
-    layer_map: LayerMap,
-    layer_fmgr: LayerFileManager,
+    /// The layer map that tracks all layers in the timeline at the current time.
+    layer_map: ArcSwap<LayerMap>,
+    /// Ensure there is only one thread that can modify the layer map at a time.
+    state_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Layer file manager that manages the layer files in the local / remote file system.
+    layer_fmgr: Arc<LayerFileManager>,
+    /// The lock to mock the original behavior of `RwLock<LayerMap>`. Can be removed if
+    /// #4509 is implemented.
+    pseudo_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
-/// After GC, the layer map changes will not be applied immediately. Users should manually apply the changes after
-/// scheduling deletes in remote client.
-pub struct ApplyGcResultGuard<'a>(BatchedUpdates<'a>);
+struct LayerSnapshot {
+    /// The current snapshot of the layer map. Immutable.
+    layer_map: Arc<LayerMap>,
+    /// Reference to the file manager. This is mutable and the content might change when
+    /// the snapshot is held.
+    layer_fmgr: Arc<LayerFileManager>,
+}
 
-impl ApplyGcResultGuard<'_> {
-    pub fn flush(self) {
-        self.0.flush();
-    }
+pub struct LayerManagerReadGuard {
+    snapshot: LayerSnapshot,
+    /// Mock the behavior of the layer map lock.
+    #[allow(dead_code)]
+    pseudo_lock: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+pub struct LayerManagerWriteGuard {
+    snapshot: LayerSnapshot,
+    /// Semantic layer operations will need to modify the layer content.
+    layer_manager: Arc<LayerManager>,
+    /// Mock the behavior of the layer map lock.
+    #[allow(dead_code)]
+    pseudo_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
 }
 
 impl LayerManager {
     pub fn create() -> Self {
         Self {
-            layer_map: LayerMap::default(),
-            layer_fmgr: LayerFileManager::new(),
+            layer_map: ArcSwap::from(Arc::new(LayerMap::default())),
+            state_lock: Arc::new(tokio::sync::Mutex::new(())),
+            layer_fmgr: Arc::new(LayerFileManager::new()),
+            pseudo_lock: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
-    pub fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+    pub async fn read(&self) -> LayerManagerReadGuard {
+        LayerManagerReadGuard {
+            snapshot: LayerSnapshot {
+                layer_map: self.layer_map.load_full(),
+                layer_fmgr: Arc::clone(&self.layer_fmgr),
+            },
+            pseudo_lock: self.pseudo_lock.clone().read_owned().await,
+        }
+    }
+
+    pub async fn write(self: &Arc<Self>) -> LayerManagerWriteGuard {
+        LayerManagerWriteGuard {
+            snapshot: LayerSnapshot {
+                layer_map: self.layer_map.load_full(),
+                layer_fmgr: Arc::clone(&self.layer_fmgr),
+            },
+            pseudo_lock: self.pseudo_lock.clone().write_owned().await,
+            layer_manager: self.clone(),
+        }
+    }
+
+    pub fn try_write(
+        self: &Arc<Self>,
+    ) -> Result<LayerManagerWriteGuard, tokio::sync::TryLockError> {
+        self.pseudo_lock
+            .clone()
+            .try_write_owned()
+            .map(|pseudo_lock| LayerManagerWriteGuard {
+                snapshot: LayerSnapshot {
+                    layer_map: self.layer_map.load_full(),
+                    layer_fmgr: Arc::clone(&self.layer_fmgr),
+                },
+                pseudo_lock,
+                layer_manager: self.clone(),
+            })
+    }
+
+    /// Make an update to the layer map. This function will NOT take the state lock and should ONLY
+    /// be used when there is not known concurrency when initializing the layer map. Error will be returned only when
+    /// the update function fails.
+    fn initialize_update(&self, f: impl FnOnce(LayerMap) -> Result<LayerMap>) -> Result<()> {
+        let snapshot = self.layer_map.load_full();
+        let new_layer_map = f(LayerMap::clone(&*snapshot))?;
+        let old_layer_map = self.layer_map.swap(Arc::new(new_layer_map));
+        debug_assert_eq!(
+            Arc::as_ptr(&snapshot) as usize,
+            Arc::as_ptr(&old_layer_map) as usize,
+            "race detected when modifying layer map, use `update` instead of `initialize_update`."
+        );
+        Ok(())
+    }
+
+    /// Make an update to the layer map. Error will be returned only when the update function fails.
+    async fn update<T>(&self, f: impl FnOnce(LayerMap) -> Result<(LayerMap, T)>) -> Result<T> {
+        let _guard = self.state_lock.lock().await;
+        let snapshot = self.layer_map.load_full();
+        let (new_layer_map, data) = f(LayerMap::clone(&*snapshot))?;
+        let old_layer_map = self.layer_map.swap(Arc::new(new_layer_map));
+        debug_assert_eq!(
+            Arc::as_ptr(&snapshot) as usize,
+            Arc::as_ptr(&old_layer_map) as usize,
+            "race detected when modifying layer map, please check if `initialize_update` is used on the `update` code path."
+        );
+        Ok(data)
+    }
+}
+
+impl LayerSnapshot {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
         self.layer_fmgr.get_from_desc(desc)
     }
 
     /// Get an immutable reference to the layer map.
     ///
-    /// We expect users only to be able to get an immutable layer map. If users want to make modifications,
-    /// they should use the below semantic APIs. This design makes us step closer to immutable storage state.
-    pub fn layer_map(&self) -> &LayerMap {
+    /// If a user needs to modify the layer map, they should get a write guard and use the semantic
+    /// functions.
+    fn layer_map(&self) -> &LayerMap {
         &self.layer_map
     }
 
-    /// Get a mutable reference to the layer map. This function will be removed once `flush_frozen_layer`
-    /// gets a refactor.
-    pub fn layer_map_mut(&mut self) -> &mut LayerMap {
-        &mut self.layer_map
+    fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
+        self.layer_fmgr.contains(layer)
+    }
+}
+
+impl LayerManagerReadGuard {
+    pub fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+        self.snapshot.get_from_desc(desc)
+    }
+
+    /// Get an immutable reference to the layer map.
+    pub fn layer_map(&self) -> &LayerMap {
+        self.snapshot.layer_map()
+    }
+}
+
+impl LayerManagerWriteGuard {
+    /// Check if the layer file manager contains a layer. This should ONLY be used in the compaction
+    /// code path where we need to check if a layer already exists on disk. With the immutable layer
+    /// map design, it is possible that the layer map snapshot does not contain the layer, but the layer file
+    /// manager does. Therefore, use this function with caution.
+    pub(crate) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
+        self.snapshot.contains(layer)
+    }
+
+    pub fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+        self.snapshot.get_from_desc(desc)
+    }
+
+    /// Get an immutable reference to the layer map.
+    pub fn layer_map(&self) -> &LayerMap {
+        self.snapshot.layer_map()
     }
 
     /// Replace layers in the layer file manager, used in evictions and layer downloads.
-    pub fn replace_and_verify(
+    pub(crate) fn replace_and_verify(
         &mut self,
         expected: Arc<dyn PersistentLayer>,
         new: Arc<dyn PersistentLayer>,
     ) -> Result<()> {
-        self.layer_fmgr.replace_and_verify(expected, new)
+        self.snapshot.layer_fmgr.replace_and_verify(expected, new)
     }
 
     /// Called from `load_layer_map`. Initialize the layer manager with:
     /// 1. all on-disk layers
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
-    pub fn initialize_local_layers(
+    pub(crate) fn initialize_local_layers(
         &mut self,
         on_disk_layers: Vec<Arc<dyn PersistentLayer>>,
         next_open_layer_at: Lsn,
     ) {
-        let mut updates = self.layer_map.batch_update();
-        for layer in on_disk_layers {
-            Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
-        }
-        updates.flush();
-        self.layer_map.next_open_layer_at = Some(next_open_layer_at);
+        self.layer_manager
+            .initialize_update(|mut layer_map| {
+                let mut updates = layer_map.batch_update();
+                for layer in on_disk_layers {
+                    Self::insert_historic_layer(layer, &mut updates, &self.snapshot.layer_fmgr);
+                }
+                updates.flush();
+                layer_map.next_open_layer_at = Some(next_open_layer_at);
+                Ok(layer_map)
+            })
+            .unwrap();
     }
 
     /// Initialize when creating a new timeline, called in `init_empty_layer_map`.
-    pub fn initialize_empty(&mut self, next_open_layer_at: Lsn) {
-        self.layer_map.next_open_layer_at = Some(next_open_layer_at);
+    pub(crate) fn initialize_empty(&mut self, next_open_layer_at: Lsn) {
+        self.layer_manager
+            .initialize_update(|mut layer_map| {
+                layer_map.next_open_layer_at = Some(next_open_layer_at);
+                Ok(layer_map)
+            })
+            .unwrap();
     }
 
-    pub fn initialize_remote_layers(
+    pub(crate) fn initialize_remote_layers(
         &mut self,
         corrupted_local_layers: Vec<Arc<dyn PersistentLayer>>,
         remote_layers: Vec<Arc<RemoteLayer>>,
     ) {
-        let mut updates = self.layer_map.batch_update();
-        for layer in corrupted_local_layers {
-            Self::remove_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
-        }
-        for layer in remote_layers {
-            Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
-        }
-        updates.flush();
+        self.layer_manager
+            .initialize_update(|mut layer_map| {
+                let mut updates = layer_map.batch_update();
+                for layer in corrupted_local_layers {
+                    Self::remove_historic_layer(layer, &mut updates, &self.snapshot.layer_fmgr);
+                }
+                for layer in remote_layers {
+                    Self::insert_historic_layer(layer, &mut updates, &self.snapshot.layer_fmgr);
+                }
+                updates.flush();
+                Ok(layer_map)
+            })
+            .unwrap();
     }
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
-    /// called within `get_layer_for_write`.
-    pub fn get_layer_for_write(
+    /// called within `get_layer_for_write`. Only ONE thread can call this function, which is guaranteed by `write_lock`
+    /// in `Timeline`.
+    pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
         last_record_lsn: Lsn,
@@ -127,7 +264,7 @@ impl LayerManager {
         );
 
         // Do we have a layer open for writing already?
-        let layer = if let Some(open_layer) = &self.layer_map.open_layer {
+        let layer = if let Some(open_layer) = &self.snapshot.layer_map.open_layer {
             if open_layer.get_lsn_range().start > lsn {
                 bail!(
                     "unexpected open layer in the future: open layers starts at {}, write lsn {}",
@@ -138,135 +275,188 @@ impl LayerManager {
 
             Arc::clone(open_layer)
         } else {
-            // No writeable layer yet. Create one.
-            let start_lsn = self
-                .layer_map
-                .next_open_layer_at
-                .context("No next open layer found")?;
+            self.layer_manager
+                .update(|mut layer_map| {
+                    // No writeable layer yet. Create one.
+                    let start_lsn = layer_map
+                        .next_open_layer_at
+                        .context("No next open layer found")?;
 
-            trace!(
-                "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
-            );
+                    trace!(
+                        "creating in-memory layer at {}/{} for record at {}",
+                        timeline_id,
+                        start_lsn,
+                        lsn
+                    );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
-            let layer = Arc::new(new_layer);
+                    let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+                    let layer = Arc::new(new_layer);
 
-            self.layer_map.open_layer = Some(layer.clone());
-            self.layer_map.next_open_layer_at = None;
+                    layer_map.open_layer = Some(layer.clone());
+                    layer_map.next_open_layer_at = None;
 
-            layer
+                    Ok((layer_map, layer))
+                })
+                .await?
         };
 
         Ok(layer)
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    pub fn try_freeze_in_memory_layer(
+    pub(crate) async fn try_freeze_in_memory_layer(
         &mut self,
         Lsn(last_record_lsn): Lsn,
         last_freeze_at: &AtomicLsn,
     ) {
         let end_lsn = Lsn(last_record_lsn + 1);
 
-        if let Some(open_layer) = &self.layer_map.open_layer {
+        if let Some(open_layer) = &self.snapshot.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
             open_layer.freeze(end_lsn);
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
-            self.layer_map.frozen_layers.push_back(open_layer_rc);
-            self.layer_map.open_layer = None;
-            self.layer_map.next_open_layer_at = Some(end_lsn);
+            self.layer_manager
+                .update(|mut layer_map| {
+                    layer_map.frozen_layers.push_back(open_layer_rc);
+                    layer_map.open_layer = None;
+                    layer_map.next_open_layer_at = Some(end_lsn);
+                    Ok((layer_map, ()))
+                })
+                .await
+                .unwrap();
+
             last_freeze_at.store(end_lsn);
         }
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
-        let mut updates = self.layer_map.batch_update();
-        for layer in image_layers {
-            Self::insert_historic_layer(Arc::new(layer), &mut updates, &mut self.layer_fmgr);
-        }
-        updates.flush();
+    pub(crate) async fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
+        self.layer_manager
+            .update(|mut layer_map| {
+                let mut updates: BatchedUpdates<'_> = layer_map.batch_update();
+                for layer in image_layers {
+                    Self::insert_historic_layer(
+                        Arc::new(layer),
+                        &mut updates,
+                        &self.snapshot.layer_fmgr,
+                    );
+                }
+                updates.flush();
+                Ok((layer_map, ()))
+            })
+            .await
+            .unwrap();
     }
 
     /// Flush a frozen layer and add the written delta layer to the layer map.
-    pub fn finish_flush_l0_layer(
+    pub(crate) async fn finish_flush_l0_layer(
         &mut self,
         delta_layer: Option<DeltaLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
     ) {
-        let l = self.layer_map.frozen_layers.pop_front();
-        let mut updates = self.layer_map.batch_update();
+        self.layer_manager
+            .update(|mut layer_map| {
+                let l = layer_map.frozen_layers.pop_front();
+                let mut updates = layer_map.batch_update();
 
-        // Only one thread may call this function at a time (for this
-        // timeline). If two threads tried to flush the same frozen
-        // layer to disk at the same time, that would not work.
-        assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
+                // Only one thread may call this function at a time (for this
+                // timeline). If two threads tried to flush the same frozen
+                // layer to disk at the same time, that would not work.
+                assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
 
-        if let Some(delta_layer) = delta_layer {
-            Self::insert_historic_layer(Arc::new(delta_layer), &mut updates, &mut self.layer_fmgr);
-        }
-        updates.flush();
+                if let Some(delta_layer) = delta_layer {
+                    Self::insert_historic_layer(
+                        Arc::new(delta_layer),
+                        &mut updates,
+                        &self.snapshot.layer_fmgr,
+                    );
+                }
+                updates.flush();
+                Ok((layer_map, ()))
+            })
+            .await
+            .unwrap();
     }
 
     /// Called when compaction is completed.
-    pub fn finish_compact_l0(
+    pub(crate) async fn finish_compact_l0(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<dyn PersistentLayer>>,
         compact_to: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
     ) -> Result<()> {
-        let mut updates = self.layer_map.batch_update();
-        for l in compact_to {
-            Self::insert_historic_layer(l, &mut updates, &mut self.layer_fmgr);
-        }
-        for l in compact_from {
-            // NB: the layer file identified by descriptor `l` is guaranteed to be present
-            // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
-            // time, even though we dropped `Timeline::layers` inbetween.
-            Self::delete_historic_layer(
-                layer_removal_cs.clone(),
-                l,
-                &mut updates,
-                metrics,
-                &mut self.layer_fmgr,
-            )?;
-        }
-        updates.flush();
-        Ok(())
+        self.layer_manager
+            .update(|mut layer_map| {
+                let mut updates = layer_map.batch_update();
+                for l in compact_to {
+                    Self::insert_historic_layer(l, &mut updates, &self.snapshot.layer_fmgr);
+                }
+                for l in compact_from {
+                    // NB: the layer file identified by descriptor `l` is guaranteed to be present
+                    // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
+                    // time, even though we dropped `Timeline::layers` inbetween.
+                    if let Err(e) = Self::delete_historic_layer(
+                        layer_removal_cs.clone(),
+                        l,
+                        &mut updates,
+                        metrics,
+                        &self.snapshot.layer_fmgr,
+                    ) {
+                        // If this fails, we will need to return the "partially" modified layer map
+                        // now. Eventually, we should decouple file deletion and layer map updates, so
+                        // that this part can be moved out of the `update` section.
+                        updates.flush();
+                        return Ok((layer_map, Err(e)));
+                    }
+                }
+                updates.flush();
+                Ok((layer_map, Ok(())))
+            })
+            .await
+            .unwrap() // unwrap the first level error, which is always Ok.
     }
 
     /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
-    pub fn finish_gc_timeline(
+    pub(crate) async fn finish_gc_timeline(
         &mut self,
         layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         gc_layers: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
-    ) -> Result<ApplyGcResultGuard> {
-        let mut updates = self.layer_map.batch_update();
-        for doomed_layer in gc_layers {
-            Self::delete_historic_layer(
-                layer_removal_cs.clone(),
-                doomed_layer,
-                &mut updates,
-                metrics,
-                &mut self.layer_fmgr,
-            )?; // FIXME: schedule succeeded deletions in timeline.rs `gc_timeline` instead of in batch?
-        }
-        Ok(ApplyGcResultGuard(updates))
+    ) -> Result<()> {
+        self.layer_manager
+            .update(|mut layer_map| {
+                let mut updates = layer_map.batch_update();
+                for doomed_layer in gc_layers {
+                    // TODO: decouple deletion and layer map modification
+                    if let Err(e) = Self::delete_historic_layer(
+                        layer_removal_cs.clone(),
+                        doomed_layer,
+                        &mut updates,
+                        metrics,
+                        &self.snapshot.layer_fmgr,
+                    )
+                    // FIXME: schedule succeeded deletions in timeline.rs `gc_timeline` instead of in batch?
+                    {
+                        updates.flush();
+                        return Ok((layer_map, Err(e)));
+                    }
+                }
+                updates.flush();
+                Ok((layer_map, Ok(())))
+            })
+            .await
+            .unwrap() // unwrap first level error
     }
 
     /// Helper function to insert a layer into the layer map and file manager.
     fn insert_historic_layer(
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &LayerFileManager,
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
@@ -276,7 +466,7 @@ impl LayerManager {
     fn remove_historic_layer(
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &LayerFileManager,
     ) {
         updates.remove_historic(layer.layer_desc().clone());
         mapping.remove(layer);
@@ -290,7 +480,7 @@ impl LayerManager {
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
         metrics: &TimelineMetrics,
-        mapping: &mut LayerFileManager,
+        mapping: &LayerFileManager,
     ) -> anyhow::Result<()> {
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
@@ -308,14 +498,14 @@ impl LayerManager {
 
         Ok(())
     }
-
-    pub(crate) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
-        self.layer_fmgr.contains(layer)
-    }
 }
 
+/// Manages the layer files in the local / remote file system. This is a wrapper around `DashMap`.
+///
+/// Developer notes: dashmap will deadlock in some cases. Please ensure only one reference to the element
+/// in the dashmap is held in each of the functions.
 pub struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
-    HashMap<PersistentLayerKey, Arc<T>>,
+    DashMap<PersistentLayerKey, Arc<T>>,
 );
 
 impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
@@ -329,22 +519,22 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             .clone()
     }
 
-    pub(crate) fn insert(&mut self, layer: Arc<T>) {
+    fn insert(&self, layer: Arc<T>) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
     }
 
-    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
+    fn contains(&self, layer: &Arc<T>) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
     }
 
-    pub(crate) fn new() -> Self {
-        Self(HashMap::new())
+    fn new() -> Self {
+        Self(DashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: Arc<T>) {
+    fn remove(&self, layer: Arc<T>) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
@@ -354,7 +544,7 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         }
     }
 
-    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
+    fn replace_and_verify(&self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
         let key = expected.layer_desc().key();
         let other = new.layer_desc().key();
 
@@ -375,12 +565,12 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
         );
 
-        if let Some(layer) = self.0.get_mut(&key) {
+        if let Some(mut layer) = self.0.get_mut(&key) {
             anyhow::ensure!(
-                compare_arced_layers(&expected, layer),
+                compare_arced_layers(&expected, &*layer),
                 "another layer was found instead of expected, expected={expected:?}, new={new:?}",
                 expected = Arc::as_ptr(&expected),
-                new = Arc::as_ptr(layer),
+                new = Arc::as_ptr(&*layer),
             );
             *layer = new;
             Ok(())

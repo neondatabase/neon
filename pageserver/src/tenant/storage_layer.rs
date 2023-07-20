@@ -41,7 +41,7 @@ pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use remote_layer::RemoteLayer;
 
-use super::timeline::layer_manager::LayerManager;
+use super::timeline::layer_manager::LayerManagerWriteGuard;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -176,7 +176,7 @@ impl LayerAccessStats {
     /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
     /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn for_loading_layer(
-        layer_map_lock_held_witness: &LayerManager,
+        layer_map_lock_held_witness: &LayerManagerWriteGuard,
         status: LayerResidenceStatus,
     ) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
@@ -197,7 +197,7 @@ impl LayerAccessStats {
     /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn clone_for_residence_change(
         &self,
-        layer_map_lock_held_witness: &LayerManager,
+        layer_map_lock_held_witness: &LayerManagerWriteGuard,
         new_status: LayerResidenceStatus,
     ) -> LayerAccessStats {
         let clone = {
@@ -229,7 +229,7 @@ impl LayerAccessStats {
     ///
     pub(crate) fn record_residence_event(
         &self,
-        _layer_map_lock_held_witness: &LayerManager,
+        _layer_map_lock_held_witness: &LayerManagerWriteGuard,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
     ) {
