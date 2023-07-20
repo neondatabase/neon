@@ -109,9 +109,10 @@ pub async fn get_available_extensions(
     pgbin: &str,
     pg_version: &str,
     enabled_extensions: &[String],
+    build_tag: &str,
 ) -> Result<HashMap<String, RemotePath>> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let index_path = pg_version.to_owned() + "/ext_index.json";
+    let index_path = format!("{pg_version}/{build_tag}/ext_index.json");
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download ext_index.json from: {:?}", &index_path);
 
@@ -200,10 +201,7 @@ pub async fn download_extension(
 }
 
 // This function initializes the necessary structs to use remote storage (should be fairly cheap)
-pub fn init_remote_storage(
-    remote_ext_config: &str,
-    default_prefix: &str,
-) -> anyhow::Result<GenericRemoteStorage> {
+pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRemoteStorage> {
     let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
 
     let remote_ext_bucket = remote_ext_config["bucket"]
@@ -215,18 +213,8 @@ pub fn init_remote_storage(
     let remote_ext_endpoint = remote_ext_config["endpoint"].as_str();
     let remote_ext_prefix = remote_ext_config["prefix"]
         .as_str()
-        .unwrap_or(default_prefix)
+        .unwrap_or_default()
         .to_string();
-
-    // control plane passes the aws creds via CLI ARGS to compute_ctl
-    let aws_key = remote_ext_config["key"].as_str();
-    let aws_id = remote_ext_config["id"].as_str();
-    if let Some(aws_key) = aws_key {
-        if let Some(aws_id) = aws_id {
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", aws_key);
-            std::env::set_var("AWS_ACCESS_KEY_ID", aws_id);
-        }
-    }
 
     // If needed, it is easy to allow modification of other parameters
     // however, default values should be fine for now

@@ -59,6 +59,7 @@ pub struct ComputeNode {
     // (key: extension name, value: path to extension archive in remote storage)
     pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
     pub already_downloaded_extensions: Mutex<HashSet<String>>,
+    pub build_tag: String,
 }
 
 #[derive(Clone, Debug)]
@@ -737,7 +738,6 @@ LIMIT 100",
 
     // If remote extension storage is configured,
     // download extension control files
-    #[tokio::main]
     pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
         if let Some(ref ext_remote_storage) = self.ext_remote_storage {
             let pspec = compute_state.pspec.as_ref().expect("spec must be set");
@@ -749,6 +749,7 @@ LIMIT 100",
                 &self.pgbin,
                 &self.pgversion,
                 &custom_ext,
+                &self.build_tag,
             )
             .await?;
             self.ext_remote_paths
@@ -832,7 +833,7 @@ LIMIT 100",
         }
 
         info!("Download ext_index.json, find the extension paths");
-        self.prepare_external_extensions(compute_state)?;
+        self.prepare_external_extensions(compute_state).await?;
 
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
         let mut download_tasks = Vec::new();

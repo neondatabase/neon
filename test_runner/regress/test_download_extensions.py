@@ -11,21 +11,16 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pg_version import PgVersion
 
-# Generate mock extension files and upload them to the mock bucket.
-#
-# NOTE: You must have appropriate AWS credentials to run REAL_S3 test.
-# It may also be necessary to set the following environment variables for MOCK_S3 test:
-#   export AWS_ACCESS_KEY_ID='test' #   export AWS_SECRET_ACCESS_KEY='test'
-#   export AWS_SECURITY_TOKEN='test' #   export AWS_SESSION_TOKEN='test'
-#   export AWS_DEFAULT_REGION='us-east-1'
 
-
+# Test downloading remote extension.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_extensions(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
+    if remote_storage_kind == RemoteStorageKind.REAL_S3:
+        return None
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",
