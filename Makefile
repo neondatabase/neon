@@ -29,6 +29,7 @@ else ifeq ($(UNAME_S),Darwin)
 	# It can be configured with OPENSSL_PREFIX variable
 	OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
 	PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+	PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
 	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
 	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
 	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:

@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install macOS postgres dependencies
-        run: brew install flex bison openssl protobuf
+        run: brew install flex bison openssl protobuf icu4c pkg-config
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev

@@ -55,7 +55,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf openssl flex bison
+brew install protobuf openssl flex bison icu4c pkg-config
 
 # add openssl to PATH, required for ed25519 keys generation in neon_local
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
