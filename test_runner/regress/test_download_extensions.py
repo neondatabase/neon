@@ -19,8 +19,6 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
-    if remote_storage_kind == RemoteStorageKind.REAL_S3:
-        return None
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_extensions",

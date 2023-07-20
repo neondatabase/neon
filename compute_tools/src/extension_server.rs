@@ -1,8 +1,5 @@
-// AT LEAST download_extension / get_available_extensions need large changes
-// refactor custom_extensions to be clear that we have moved the access logic to control plane
-
 // Download extension files from the extension store
-// and put them in the right place in the postgres directory
+// and put them in the right place in the postgres directory (share / lib)
 /*
 The layout of the S3 bucket is as follows:
 ├── 111

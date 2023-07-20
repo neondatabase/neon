@@ -141,37 +141,64 @@ popular extensions.
 
 The layout of the S3 bucket is as follows:
 ```
-v14/ext_index.json
-    -- this contains information necessary to create control files
-v14/extensions/test_ext1.tar.gz
-    -- this contains the library files and sql files necessary to create this extension
-v14/extensions/custom_ext1.tar.gz
+├── 111
+    │   ├── v14
+    │   │   ├── extensions
+    │   │   │   ├── anon.tar.zst
+    │   │   │   └── embedding.tar.zst
+    │   │   └── ext_index.json
+    │   └── v15
+    │       ├── extensions
+    │       │   ├── anon.tar.zst
+    │       │   └── embedding.tar.zst
+    │       └── ext_index.json
+    ├── 112
+    │   ├── v14
+    │   │   ├── extensions
+    │   │   │   └── anon.tar.zst
+    │   │   └── ext_index.json
+    │   └── v15
+    │       ├── extensions
+    │       │   └── anon.tar.zst
+    │       └── ext_index.json
+    └── 113
+        ├── v14
+        │   ├── extensions
+        │   │   └── embedding.tar.zst
+        │   └── ext_index.json
+        └── v15
+            ├── extensions
+            │   └── embedding.tar.zst
+            └── ext_index.json
 ```
-The difference between private and public extensions is determined by who can
-load the extension. This is specified in `ext_index.json`.
-Speicially, `ext_index.json` has a list of public extensions, and a list of
-extensions enabled for specific tenant-ids. Here is an example `ext_index.json`:
+Note that build number cannot be part of prefix because we might need extensions
+from other build numbers.
+
+`ext_index.json` stores the control files and location of extension archives
+
+We do not duplicate `extension.tar.zst` files.
+We only upload a new one if it is updated.
+**access** is controlled by spec
+
+More specifically, here is an example `ext_index.json`
 ```
 {
-  "enabled_extensions": {
-    "123454321": [
-      "anon"
-    ],
-    "public": [
-      "embedding"
-    ]
+  "embedding": {
+    "control_file_content": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
+    "extension_archive": "111/v14/extensions/embedding.tar.zst"
   },
-  "control_data": {
-    "embedding": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true",
-    "anon": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+  "anon": {
+    "control_file_content": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n",
+    "extension_archive": "111/v14/extensions/anon.tar.zst"
   }
 }
 ```
 
+
 ### How to add new extension to the Extension Storage?
 
 Simply upload build artifacts to the S3 bucket.
-Implement a CI step for that. Splitting it from ompute-node-image build.
+Implement a CI step for that. Splitting it from compute-node-image build.
 
 ### How do we deal with extension versions and updates?
 
