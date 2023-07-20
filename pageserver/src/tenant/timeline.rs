@@ -1112,8 +1112,6 @@ impl Timeline {
         layer_mgr: &mut LayerManager,
     ) -> Result<(), EvictionError> {
         if local_layer.is_remote_layer() {
-            // TODO(issue #3851): consider returning an err here instead of false,
-            // which is the same out the match later
             return Err(EvictionError::CannotEvictRemoteLayer);
         }
 
