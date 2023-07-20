@@ -100,11 +100,11 @@ impl Timeline {
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            break;
-                        }
-                        _ = tokio::time::sleep_until(sleep_until) => { }
+                    if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+                        .await
+                        .is_ok()
+                    {
+                        break;
                     }
                 }
             }
