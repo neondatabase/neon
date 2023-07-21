@@ -111,11 +111,10 @@ pub static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static GET_RECONSTRUCT_DATA_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_getpage_get_reconstruct_data_seconds",
         "Time spent in get_reconstruct_value_data",
-        &["tenant_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -896,7 +895,6 @@ impl StorageTimeMetrics {
 pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
-    pub get_reconstruct_data_time_histo: Histogram,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
@@ -923,9 +921,6 @@ impl TimelineMetrics {
     ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
-        let get_reconstruct_data_time_histo = GET_RECONSTRUCT_DATA_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let flush_time_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
         let compact_time_histo =
@@ -970,7 +965,6 @@ impl TimelineMetrics {
         TimelineMetrics {
             tenant_id,
             timeline_id,
-            get_reconstruct_data_time_histo,
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
@@ -996,7 +990,6 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
-        let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
