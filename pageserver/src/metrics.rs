@@ -653,13 +653,13 @@ impl RemoteOpFileKind {
     }
 }
 
-pub static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_remote_operation_seconds",
         "Time spent on remote storage operations. \
         Grouped by tenant, timeline, operation_kind and status. \
         Does not account for time spent waiting in remote timeline client's queues.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind", "status"]
+        &["file_kind", "op_kind", "status"]
     )
     .expect("failed to define a metric")
 });
@@ -1058,20 +1058,10 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        let mut guard = self.remote_operation_time.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str(), status);
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_OPERATION_TIME
-                .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
-                    key.0,
-                    key.1,
-                    key.2,
-                ])
-                .unwrap()
-        });
-        metric.clone()
+        REMOTE_OPERATION_TIME
+            .get_metric_with_label_values(&[key.0, key.1, key.2])
+            .unwrap()
     }
 
     fn calls_unfinished_gauge(

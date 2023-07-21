@@ -27,15 +27,16 @@ from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 
-def get_num_downloaded_layers(client: PageserverHttpClient, tenant_id, timeline_id):
+def get_num_downloaded_layers(client: PageserverHttpClient):
+    """
+    This assumes that the pageserver only has a single tenant.
+    """
     value = client.get_metric_value(
         "pageserver_remote_operation_seconds_count",
         {
             "file_kind": "layer",
             "op_kind": "download",
             "status": "success",
-            "tenant_id": tenant_id,
-            "timeline_id": timeline_id,
         },
     )
     if value is None:
@@ -57,7 +58,8 @@ def test_ondemand_download_large_rel(
         test_name="test_ondemand_download_large_rel",
     )
 
-    ##### First start, insert secret data and upload it to the remote storage
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             # disable background GC
@@ -129,7 +131,7 @@ def test_ondemand_download_large_rel(
     # safekeepers, that have now been shut down.
     endpoint = env.endpoints.create_start("main", lsn=current_lsn)
 
-    before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    before_downloads = get_num_downloaded_layers(client)
     assert before_downloads != 0, "basebackup should on-demand non-zero layers"
 
     # Probe in the middle of the table. There's a high chance that the beginning
@@ -140,7 +142,7 @@ def test_ondemand_download_large_rel(
     with endpoint.cursor() as cur:
         assert query_scalar(cur, "select count(*) from tbl where id = 500000") == 1
 
-    after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    after_downloads = get_num_downloaded_layers(client)
     log.info(f"layers downloaded before {before_downloads} and after {after_downloads}")
     assert after_downloads > before_downloads
 
@@ -159,7 +161,9 @@ def test_ondemand_download_timetravel(
         test_name="test_ondemand_download_timetravel",
     )
 
-    ##### First start, insert data and upload it to the remote storage
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
+
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             # Disable background GC & compaction
@@ -278,7 +282,7 @@ def test_ondemand_download_timetravel(
                 == table_len
             )
 
-        after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+        after_downloads = get_num_downloaded_layers(client)
         num_layers_downloaded.append(after_downloads)
         log.info(f"num_layers_downloaded[-1]={num_layers_downloaded[-1]}")
 
