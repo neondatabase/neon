@@ -463,7 +463,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-before-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
