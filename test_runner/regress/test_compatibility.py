@@ -62,7 +62,6 @@ def test_create_snapshot(
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
-    neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
@@ -354,7 +353,6 @@ def check_neon_works(
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
-    config.preserve_database_files = True
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
