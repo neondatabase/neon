@@ -147,57 +147,52 @@ impl Drop for RequestCancelled {
 }
 
 async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    use bytes::BufMut;
+    use bytes::{Bytes, BytesMut};
+    use std::io::Write as _;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
 
     SERVE_METRICS_COUNT.inc();
 
     let started_at = std::time::Instant::now();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (tx, rx) = mpsc::channel(1);
 
-    let (mut sender, body) = Body::channel();
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
 
     struct ChannelWriter {
         buffer: bytes::BytesMut,
-        tx: tokio::sync::mpsc::Sender<Message>,
-    }
-
-    enum Message {
-        Done,
-        Chunk(bytes::Bytes),
-    }
-
-    impl std::fmt::Debug for Message {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Done => write!(f, "Done"),
-                Self::Chunk(_) => write!(f, "Chunk"),
-            }
-        }
+        tx: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+        written: usize,
     }
 
     impl ChannelWriter {
+        fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
+            ChannelWriter {
+                buffer: BytesMut::with_capacity(buf_len),
+                tx,
+                written: 0,
+            }
+        }
+
         fn flush0(&mut self) -> std::io::Result<usize> {
             let n = self.buffer.len();
             if n > 0 {
                 let ready = self.buffer.split().freeze();
                 tracing::info!(n = ready.len(), "flushing");
-                let ready = Message::Chunk(ready);
 
                 // not ideal to call from blocking code to block_on, but we are sure that this
                 // operation does not spawn_blocking other tasks
-                if self.tx.blocking_send(ready).is_err() {
+                if self.tx.blocking_send(Ok(ready)).is_err() {
                     return Err(std::io::ErrorKind::BrokenPipe.into());
                 }
+                self.written += n;
             }
             Ok(n)
         }
 
-        fn done(mut self) -> std::io::Result<()> {
-            self.flush0()?;
-            self.tx
-                .blocking_send(Message::Done)
-                .map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+        fn flushed_bytes(&self) -> usize {
+            self.written
         }
     }
 
@@ -205,21 +200,16 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             let remaining = self.buffer.capacity() - self.buffer.len();
 
-            // hopefully free up space right away; but these are not expected to happen
             let out_of_space = remaining < buf.len();
 
-            // in the best case, we could prep up the *other* half while we are still busy
-            // shoveling the first half, and BytesMut resizing would work like a charm.
-            //
-            // most of the writes seem really small coming out of TextEncoder.
-            let optimistic_at_half =
-                self.buffer.capacity() == 128 * 1024 && self.buffer.len() >= 64 * 1024;
-
-            if out_of_space || optimistic_at_half {
+            if out_of_space {
                 self.flush0()?;
             }
 
-            self.buffer.put(buf);
+            // assume that this will often under normal operation just move the pointer back to the
+            // beginning of allocation, because previous split off parts are already sent and
+            // dropped.
+            self.buffer.extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -228,8 +218,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
         }
     }
 
-    let buffer = bytes::BytesMut::with_capacity(128 * 1024);
-    let mut writer = ChannelWriter { buffer, tx };
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
 
     let encoder = TextEncoder::new();
 
@@ -239,66 +228,39 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
         .body(body)
         .unwrap();
 
-    let jh: tokio::task::JoinHandle<Result<(), metrics::Error>> =
-        tokio::task::spawn_blocking(move || {
-            // Currently we take a lot of mutexes while collecting metrics, so it's
-            // better to spawn a blocking task to avoid blocking the event loop.
-            let metrics = metrics::gather();
-            encoder.encode(&metrics, &mut writer)?;
-            writer.done().map_err(|e| e.into())
-        });
+    let span = info_span!("blocking");
 
-    tokio::task::spawn(
-        async move {
-            // shoveling task for the chunked body
-            let mut bytes = 0;
-            let mut clean_shutdown = false;
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Message::Chunk(chunk) if !clean_shutdown => {
-                        let n = chunk.len();
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+        // Currently we take a lot of mutexes while collecting metrics, so it's
+        // better to spawn a blocking task to avoid blocking the event loop.
+        let metrics = metrics::gather();
+        let res = encoder
+            .encode(&metrics, &mut writer)
+            .and_then(|_| writer.flush().map_err(|e| e.into()));
 
-                        match sender.send_data(chunk).await {
-                            Ok(()) => {
-                                bytes += n;
-                            }
-                            Err(e) => {
-                                tracing::warn!("failed to write out /metrics response: {e:#}");
-                                break;
-                            }
-                        }
-                    }
-                    Message::Done if !clean_shutdown => {
-                        clean_shutdown = true;
-                    }
-                    msg => unreachable!("unexpected message after Done: {msg:?}"),
-                }
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /metrics"
+                );
             }
-
-            drop(rx);
-
-            let res = jh
-                .await
-                .context("join spawn_blocking")
-                .and_then(|res| res.context("writing out metrics failed"));
-
-            match res {
-                Ok(()) if clean_shutdown => {
-                    tracing::info!(
-                        bytes,
-                        elapsed_ms = started_at.elapsed().as_millis(),
-                        "responded /metrics"
-                    );
-                }
-                Ok(()) => tracing::warn!("BUG: ChannelWriter::Done was not called"),
-                Err(e) => {
-                    tracing::warn!("failed to write out /metrics response: {e:#}");
-                    sender.abort();
-                }
+            Err(e) => {
+                tracing::warn!("failed to write out /metrics response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
             }
         }
-        .instrument(tracing::info_span!("response")),
-    );
+    });
 
     Ok(response)
 }
