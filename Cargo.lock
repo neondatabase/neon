@@ -3030,6 +3030,7 @@ dependencies = [
  "chrono",
  "clap",
  "consumption_metrics",
+ "fallible-iterator",
  "futures",
  "git-version",
  "hashbrown 0.13.2",

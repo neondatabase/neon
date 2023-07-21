@@ -1,6 +1,8 @@
+use std::io::ErrorKind;
 use std::sync::Arc;
 
 use anyhow::bail;
+use fallible_iterator::FallibleIterator;
 use futures::pin_mut;
 use futures::StreamExt;
 use hashbrown::HashMap;
@@ -16,10 +18,19 @@ use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
+use tokio_postgres::RowStream;
+use tokio_postgres::Statement;
 use url::Url;
+
+use crate::http::sql_over_http::codec::FrontendMessage;
+use crate::http::sql_over_http::connection::RequestMessages;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
+
+mod codec;
+mod connection;
+mod error;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -349,6 +360,98 @@ async fn query_to_json<T: GenericClient>(
         "fields": fields,
         "rowAsArray": array_mode,
     }))
+}
+
+/// Pass text directly to the Postgres backend to allow it to sort out typing itself and
+/// to save a roundtrip
+pub async fn query_raw_txt<'a, S, I>(&self, query: S, params: I) -> Result<RowStream, error::Error>
+where
+    S: AsRef<str>,
+    I: IntoIterator<Item = Option<S>>,
+    I::IntoIter: ExactSizeIterator,
+{
+    use postgres_protocol::message::backend::Message;
+    use postgres_protocol::message::frontend;
+
+    let params = params.into_iter();
+    let params_len = params.len();
+
+    let buf = self.inner.with_buf(|buf| {
+        // Parse, anonymous portal
+        frontend::parse("", query.as_ref(), std::iter::empty(), buf)
+            .map_err(error::Error::encode)?;
+        // Bind, pass params as text, retrieve as binary
+        match frontend::bind(
+            "",                 // empty string selects the unnamed portal
+            "",                 // empty string selects the unnamed prepared statement
+            std::iter::empty(), // all parameters use the default format (text)
+            params,
+            |param, buf| match param {
+                Some(param) => {
+                    buf.put_slice(param.as_ref().as_bytes());
+                    Ok(postgres_protocol::IsNull::No)
+                }
+                None => Ok(postgres_protocol::IsNull::Yes),
+            },
+            Some(0), // all text
+            buf,
+        ) {
+            Ok(()) => Ok(()),
+            Err(frontend::BindError::Conversion(e)) => Err(error::Error::encode(
+                std::io::Error::new(ErrorKind::Other, e),
+            )),
+            Err(frontend::BindError::Serialization(e)) => Err(error::Error::encode(e)),
+        }?;
+
+        // Describe portal to typecast results
+        frontend::describe(b'P', "", buf).map_err(error::Error::encode)?;
+        // Execute
+        frontend::execute("", 0, buf).map_err(error::Error::encode)?;
+        // Sync
+        frontend::sync(buf);
+
+        Ok(buf.split().freeze())
+    })?;
+
+    let mut responses = self
+        .inner
+        .send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+
+    // now read the responses
+
+    match responses.next().await? {
+        Message::ParseComplete => {}
+        _ => return Err(error::Error::unexpected_message()),
+    }
+    match responses.next().await? {
+        Message::BindComplete => {}
+        _ => return Err(error::Error::unexpected_message()),
+    }
+    let row_description = match responses.next().await? {
+        Message::RowDescription(body) => Some(body),
+        Message::NoData => None,
+        _ => return Err(error::Error::unexpected_message()),
+    };
+
+    // construct statement object
+
+    let parameters = vec![Type::UNKNOWN; params_len];
+
+    let mut columns = vec![];
+    if let Some(row_description) = row_description {
+        let mut it = row_description.fields();
+        while let Some(field) = it.next().map_err(Error::parse)? {
+            // NB: for some types that function may send a query to the server. At least in
+            // raw text mode we don't need that info and can skip this.
+            let type_ = get_type(&self.inner, field.type_oid()).await?;
+            let column = Column::new(field.name().to_string(), type_, field);
+            columns.push(column);
+        }
+    }
+
+    let statement = Statement::new_text(&self.inner, "".to_owned(), parameters, columns);
+
+    Ok(RowStream::new(statement, responses))
 }
 
 //

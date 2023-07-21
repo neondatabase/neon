@@ -69,6 +69,8 @@ postgres-native-tls.workspace = true
 workspace_hack.workspace = true
 tokio-util.workspace = true
 
+fallible-iterator = "0.2.0"
+
 [dev-dependencies]
 rcgen.workspace = true
 rstest.workspace = true
