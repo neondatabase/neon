@@ -8,6 +8,10 @@ from fixtures.utils import query_scalar
 # Now this test is very minimalistic -
 # it only checks next_multixact_id field in restored pg_control,
 # since we don't have functions to check multixact internals.
+# We do check that the datadir contents exported from the
+# pageserver match what the running PostgreSQL produced. This
+# is enough to verify that the WAL records are handled correctly
+# in the pageserver.
 #
 def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
@@ -18,8 +22,8 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     cur = endpoint.connect().cursor()
     cur.execute(
         """
-        CREATE TABLE t1(i int primary key);
-        INSERT INTO t1 select * from generate_series(1, 100);
+        CREATE TABLE t1(i int primary key, n_updated int);
+        INSERT INTO t1 select g, 0 from generate_series(1, 50) g;
     """
     )
 
@@ -29,6 +33,7 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
 
     # Lock entries using parallel connections in a round-robin fashion.
     nclients = 20
+    update_every = 97
     connections = []
     for _ in range(nclients):
         # Do not turn on autocommit. We want to hold the key-share locks.
@@ -36,14 +41,20 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
         connections.append(conn)
 
     # On each iteration, we commit the previous transaction on a connection,
-    # and issue antoher select. Each SELECT generates a new multixact that
+    # and issue another select. Each SELECT generates a new multixact that
     # includes the new XID, and the XIDs of all the other parallel transactions.
     # This generates enough traffic on both multixact offsets and members SLRUs
     # to cross page boundaries.
-    for i in range(5000):
+    for i in range(20000):
         conn = connections[i % nclients]
         conn.commit()
-        conn.cursor().execute("select * from t1 for key share")
+
+        # Perform some non-key UPDATEs too, to exercise different multixact
+        # member statuses.
+        if i % update_every == 0:
+            conn.cursor().execute(f"update t1 set n_updated = n_updated + 1 where i = {i % 50}")
+        else:
+            conn.cursor().execute("select * from t1 for key share")
 
     # We have multixacts now. We can close the connections.
     for c in connections:
