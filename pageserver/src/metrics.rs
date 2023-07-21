@@ -502,7 +502,8 @@ const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
-pub static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+// Needed for https://neonprod.grafana.net/d/8G011dlnk/timeline-inspector?orgId=1
+pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
         "Time spent in IO operations",
@@ -512,7 +513,8 @@ pub static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+// Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
+pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
