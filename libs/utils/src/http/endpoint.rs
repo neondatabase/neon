@@ -154,153 +154,123 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     SERVE_METRICS_COUNT.inc();
 
-    // we need to first test this out with vmagent on staging, if it works, we can get turn this to
-    // true or maybe get rid of the fully buffering path altogether
-    const CHUNKED_IS_DEFAULT: bool = false;
-
-    let chunked = super::request::parse_query_param::<_, bool>(&_req, "allow_chunked")?
-        .unwrap_or(CHUNKED_IS_DEFAULT);
-
-    let started_at = std::time::Instant::now();
-
-    if !chunked {
-        let span = info_span!("blocking");
-        tokio::task::spawn_blocking(move || {
-            let _span = span.entered();
-            let metrics = metrics::gather();
-            let mut buffer = Vec::new();
-            let encoder = TextEncoder::new();
-            encoder
-                .encode(&metrics, &mut buffer)
-                .map_err(|e| ApiError::InternalServerError(e.into()))?;
-
-            Ok(Response::builder()
-                .status(200)
-                .header(CONTENT_TYPE, encoder.format_type())
-                .body(Body::from(buffer))
-                .unwrap())
-        })
-        .await
-        .map_err(|e| ApiError::InternalServerError(e.into()))
-        .and_then(|e| e)
-    } else {
-        struct ChannelWriter {
-            buffer: bytes::BytesMut,
-            tx: mpsc::Sender<std::io::Result<bytes::Bytes>>,
-            written: usize,
-        }
-
-        impl ChannelWriter {
-            fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
-                ChannelWriter {
-                    buffer: BytesMut::with_capacity(buf_len),
-                    tx,
-                    written: 0,
-                }
-            }
-
-            fn flush0(&mut self) -> std::io::Result<usize> {
-                let n = self.buffer.len();
-                if n == 0 {
-                    return Ok(0);
-                }
-
-                tracing::trace!(n, "flushing");
-                let ready = self.buffer.split().freeze();
-
-                // not ideal to call from blocking code to block_on, but we are sure that this
-                // operation does not spawn_blocking other tasks
-                let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
-                    self.tx.send(Ok(ready)).await.map_err(|_| ())?;
-
-                    // throttle sending to allow reuse of our buffer in `write`.
-                    self.tx.reserve().await.map_err(|_| ())?;
-
-                    // now the response task has picked up the buffer and hopefully started
-                    // sending it to the client.
-                    Ok(())
-                });
-                if res.is_err() {
-                    return Err(std::io::ErrorKind::BrokenPipe.into());
-                }
-                self.written += n;
-                Ok(n)
-            }
-
-            fn flushed_bytes(&self) -> usize {
-                self.written
-            }
-        }
-
-        impl std::io::Write for ChannelWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                let remaining = self.buffer.capacity() - self.buffer.len();
-
-                let out_of_space = remaining < buf.len();
-
-                if out_of_space {
-                    self.flush0()?;
-                }
-
-                // assume that this will often under normal operation just move the pointer back to the
-                // beginning of allocation, because previous split off parts are already sent and
-                // dropped.
-                self.buffer.extend_from_slice(buf);
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.flush0().map(|_| ())
-            }
-        }
-
-        let (tx, rx) = mpsc::channel(1);
-
-        let body = Body::wrap_stream(ReceiverStream::new(rx));
-
-        let mut writer = ChannelWriter::new(128 * 1024, tx);
-
-        let encoder = TextEncoder::new();
-
-        let response = Response::builder()
-            .status(200)
-            .header(CONTENT_TYPE, encoder.format_type())
-            .body(body)
-            .unwrap();
-
-        let span = info_span!("blocking");
-        tokio::task::spawn_blocking(move || {
-            let _span = span.entered();
-            let metrics = metrics::gather();
-            let res = encoder
-                .encode(&metrics, &mut writer)
-                .and_then(|_| writer.flush().map_err(|e| e.into()));
-
-            match res {
-                Ok(()) => {
-                    tracing::info!(
-                        bytes = writer.flushed_bytes(),
-                        elapsed_ms = started_at.elapsed().as_millis(),
-                        "responded /metrics"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("failed to write out /metrics response: {e:#}");
-                    // semantics of this error are quite... unclear. we want to error the stream out to
-                    // abort the response to somehow notify the client that we failed.
-                    //
-                    // though, most likely the reason for failure is that the receiver is already gone.
-                    drop(
-                        writer
-                            .tx
-                            .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
-                    );
-                }
-            }
-        });
-
-        Ok(response)
+    /// An [`std::io::Write`] implementation on top of a channel sending [`bytes::Bytes`] chunks.
+    struct ChannelWriter {
+        buffer: bytes::BytesMut,
+        tx: mpsc::Sender<std::io::Result<bytes::Bytes>>,
+        written: usize,
     }
+
+    impl ChannelWriter {
+        fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
+            ChannelWriter {
+                buffer: BytesMut::with_capacity(buf_len),
+                tx,
+                written: 0,
+            }
+        }
+
+        fn flush0(&mut self) -> std::io::Result<usize> {
+            let n = self.buffer.len();
+            if n == 0 {
+                return Ok(0);
+            }
+
+            tracing::trace!(n, "flushing");
+            let ready = self.buffer.split().freeze();
+
+            // not ideal to call from blocking code to block_on, but we are sure that this
+            // operation does not spawn_blocking other tasks
+            let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
+                self.tx.send(Ok(ready)).await.map_err(|_| ())?;
+
+                // throttle sending to allow reuse of our buffer in `write`.
+                self.tx.reserve().await.map_err(|_| ())?;
+
+                // now the response task has picked up the buffer and hopefully started
+                // sending it to the client.
+                Ok(())
+            });
+            if res.is_err() {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.written += n;
+            Ok(n)
+        }
+
+        fn flushed_bytes(&self) -> usize {
+            self.written
+        }
+    }
+
+    impl std::io::Write for ChannelWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.buffer.capacity() - self.buffer.len();
+
+            let out_of_space = remaining < buf.len();
+
+            if out_of_space {
+                self.flush0()?;
+            }
+
+            // assume that this will often under normal operation just move the pointer back to the
+            // beginning of allocation, because previous split off parts are already sent and
+            // dropped.
+            self.buffer.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flush0().map(|_| ())
+        }
+    }
+
+    let (tx, rx) = mpsc::channel(1);
+
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
+
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
+
+    let encoder = TextEncoder::new();
+
+    let response = Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, encoder.format_type())
+        .body(body)
+        .unwrap();
+
+    let span = info_span!("blocking");
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+        let metrics = metrics::gather();
+        let res = encoder
+            .encode(&metrics, &mut writer)
+            .and_then(|_| writer.flush().map_err(|e| e.into()));
+
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /metrics"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to write out /metrics response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
