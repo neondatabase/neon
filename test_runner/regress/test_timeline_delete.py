@@ -162,7 +162,7 @@ def combinations():
 # cover the two cases: remote storage configured vs not configured
 @pytest.mark.parametrize("remote_storage_kind, failpoint", combinations())
 @pytest.mark.parametrize("check", list(Check))
-def test_delete_timeline_excersize_crash_safety_failpoints(
+def test_delete_timeline_exercise_crash_safety_failpoints(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
     failpoint: str,
@@ -187,7 +187,7 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
 
     if remote_storage_kind is not None:
         neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_delete_timeline_excersize_crash_safety_failpoints"
+            remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
         )
 
     env = neon_env_builder.init_start(
