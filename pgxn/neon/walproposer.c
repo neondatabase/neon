@@ -83,7 +83,6 @@ char	   *neon_tenant_walproposer = NULL;
 char	   *neon_safekeeper_token_walproposer = NULL;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
-#define SIMLIB
 
 #ifdef SIMLIB
 #include "rust_bindings.h"
@@ -1283,6 +1282,7 @@ HandleElectedProposer(void)
 	}
 	else if (syncSafekeepers)
 	{
+		// elog(FATAL, "synced %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
 		/* Sync is not needed: just exit */
 		fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
 		exit(0);

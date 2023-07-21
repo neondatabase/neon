@@ -10,8 +10,6 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
-#define SIMLIB
-
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 

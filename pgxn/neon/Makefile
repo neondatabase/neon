@@ -13,7 +13,7 @@ OBJS = \
 	walproposer.o \
 	walproposer_utils.o
 
-PG_CPPFLAGS = -I$(libpq_srcdir)
+PG_CPPFLAGS = -I$(libpq_srcdir) -DSIMLIB
 PG_LIBS = $(libpq)
 
 EXTENSION = neon
