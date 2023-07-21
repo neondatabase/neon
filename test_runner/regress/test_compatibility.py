@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     PortDistributor,
-    parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -276,14 +275,6 @@ def prepare_snapshot(
     pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
         pageserver_config["listen_pg_addr"]
     )
-    # since storage_broker these are overridden by neon_local during pageserver
-    # start; remove both to prevent unknown options during etcd ->
-    # storage_broker migration. TODO: remove once broker is released
-    pageserver_config.pop("broker_endpoint", None)
-    pageserver_config.pop("broker_endpoints", None)
-    etcd_broker_endpoints = [f"http://localhost:{port_distributor.get_port()}/"]
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
 
     # Older pageserver versions had just one `auth_type` setting. Now there
     # are separate settings for pg and http ports. We don't use authentication
@@ -301,20 +292,8 @@ def prepare_snapshot(
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
 
-    # Provide up/downgrade etcd <-> storage_broker to make forward/backward
-    # compatibility test happy. TODO: leave only the new part once broker is released.
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        # old etcd version
-        snapshot_config["etcd_broker"] = {
-            "etcd_binary_path": shutil.which("etcd"),
-            "broker_endpoints": etcd_broker_endpoints,
-        }
-        snapshot_config.pop("broker", None)
-    else:
-        # new storage_broker version
-        broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
-        snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
-        snapshot_config.pop("etcd_broker", None)
+    broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
+    snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
 
     snapshot_config["pageserver"]["listen_http_addr"] = port_distributor.replace_with_new_port(
         snapshot_config["pageserver"]["listen_http_addr"]
@@ -348,12 +327,6 @@ def prepare_snapshot(
     assert (
         rv.returncode != 0
     ), f"there're files referencing `test_create_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
-
-
-# get git SHA of neon binary
-def get_neon_version(neon_binpath: Path):
-    out = subprocess.check_output([neon_binpath / "neon_local", "--version"]).decode("utf-8")
-    return parse_project_git_version_output(out)
 
 
 def check_neon_works(
