@@ -20,7 +20,7 @@ use aws_sdk_s3::{
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use aws_smithy_http::{body::SdkBody, result};
+use aws_smithy_http::{body::SdkBody};
 use hyper::Body;
 use tokio::{
     io::{self, AsyncRead},
