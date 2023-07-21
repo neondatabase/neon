@@ -2544,6 +2544,7 @@ dependencies = [
  "metrics",
  "nix",
  "num-traits",
+ "num_cpus",
  "once_cell",
  "pageserver_api",
  "pin-project-lite",

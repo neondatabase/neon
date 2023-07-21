@@ -135,6 +135,19 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create background op runtime")
 });
 
+pub(crate) static RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
+    // force init and thus panics
+    drop(BACKGROUND_RUNTIME.handle());
+    // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
+    // tokio would had already panicked for parsing errors or NotUnicode
+    //
+    // this will be wrong if any of the runtimes gets their worker threads configured to something
+    // else, but that has not been needed in a long time.
+    std::env::var("TOKIO_WORKER_THREADS")
+        .map(|s| s.parse::<usize>().unwrap())
+        .unwrap_or_else(|_e| usize::max(1, num_cpus::get()))
+});
+
 #[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);
 
