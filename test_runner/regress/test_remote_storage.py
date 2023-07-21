@@ -378,12 +378,10 @@ def test_remote_timeline_client_calls_started_metric(
         test_name="test_remote_timeline_client_metrics",
     )
 
-    env = neon_env_builder.init_start()
-
-    # create tenant with config that will determinstically allow
-    # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
-        conf={
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{128 * 1024}",
             "compaction_threshold": "1",
@@ -397,6 +395,10 @@ def test_remote_timeline_client_calls_started_metric(
             "image_creation_threshold": "1",
         }
     )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
 
     client = env.pageserver.http_client()
 
@@ -518,12 +520,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
     )
 
-    env = neon_env_builder.init_start()
-
-    # create tenant with config that will determinstically allow
-    # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many operations
             "checkpoint_distance": f"{64 * 1024}",
             "compaction_threshold": "1",
@@ -535,6 +533,10 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             "pitr_interval": "0s",
         }
     )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
+
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
     client = env.pageserver.http_client()
@@ -787,12 +789,8 @@ def test_compaction_delete_before_upload(
         test_name="test_compaction_delete_before_upload",
     )
 
-    env = neon_env_builder.init_start()
-
-    # create tenant with config that will determinstically allow
-    # compaction and disables gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # Set a small compaction threshold
             "compaction_threshold": "3",
             # Disable GC
@@ -801,6 +799,10 @@ def test_compaction_delete_before_upload(
             "pitr_interval": "0s",
         }
     )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
 
     client = env.pageserver.http_client()
 
