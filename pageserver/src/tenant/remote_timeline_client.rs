@@ -994,7 +994,7 @@ impl RemoteTimelineClient {
             // the Future, but we're not 100% sure if the remote storage library
             // is cancellation safe, so we don't dare to do that. Hopefully, the
             // upload finishes or times out soon enough.
-            if task_mgr::is_shutdown_requested() {
+            if cancel.is_cancelled() {
                 info!("upload task cancelled by shutdown request");
                 match self.stop() {
                     Ok(()) => {}
@@ -1005,6 +1005,10 @@ impl RemoteTimelineClient {
                 return;
             }
 
+            // on cancellation these will all fail with an error... which sadly is deep in the
+            // anyhow, so there is a chance of dumping unnecessary stacktraces.
+            //
+            // after that, we'll loop around to above, and shutdown everything.
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer_file_name, ref layer_metadata) => {
                     let path = &self
@@ -1098,7 +1102,7 @@ impl RemoteTimelineClient {
 
                     // sleep until it's time to retry, or we're cancelled
                     tokio::select! {
-                        _ = task_mgr::shutdown_watcher() => { },
+                        _ = cancel.cancelled() => { },
                         _ = exponential_backoff(
                             retries,
                             DEFAULT_BASE_BACKOFF_SECONDS,
