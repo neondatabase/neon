@@ -355,11 +355,10 @@ pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
-static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub(crate) static EVICTIONS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_evictions",
         "Number of layers evicted from the pageserver",
-        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -904,7 +903,6 @@ pub struct TimelineMetrics {
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
-    pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
 }
 
@@ -951,9 +949,6 @@ impl TimelineMetrics {
         let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let evictions = EVICTIONS
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
@@ -973,7 +968,6 @@ impl TimelineMetrics {
             current_logical_size_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
-            evictions,
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
@@ -991,7 +985,6 @@ impl Drop for TimelineMetrics {
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()

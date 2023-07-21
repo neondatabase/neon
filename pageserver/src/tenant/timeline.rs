@@ -1190,7 +1190,7 @@ impl Timeline {
             .resident_physical_size_gauge
             .sub(layer_file_size);
 
-        self.metrics.evictions.inc();
+        crate::metrics::EVICTIONS.inc();
 
         if let Some(delta) = local_layer_residence_duration {
             self.metrics
