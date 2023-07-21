@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
 pub use prometheus::opts;
 pub use prometheus::register;
+pub use prometheus::Error;
 pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
 pub use prometheus::{register_counter_vec, Counter, CounterVec};
