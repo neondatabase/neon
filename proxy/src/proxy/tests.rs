@@ -309,26 +309,38 @@ fn connect_compute_total_wait() {
     assert!(total_wait > tokio::time::Duration::from_secs(10));
 }
 
+#[derive(Clone, Copy)]
+enum ConnectAction {
+    Connect,
+    Retry,
+    Fail,
+}
+
 struct TestConnectMechanism {
     counter: Arc<std::sync::Mutex<usize>>,
+    sequence: Vec<ConnectAction>,
 }
 
 impl TestConnectMechanism {
-    fn new() -> Self {
+    fn new(sequence: Vec<ConnectAction>) -> Self {
         Self {
             counter: Arc::new(std::sync::Mutex::new(0)),
+            sequence,
         }
     }
 }
 
+#[derive(Debug)]
 struct TestConnection;
 
 #[derive(Debug)]
-struct TestConnectError(());
+struct TestConnectError {
+    retryable: bool,
+}
 
 impl std::fmt::Display for TestConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "()")
+        write!(f, "{:?}", self)
     }
 }
 
@@ -336,7 +348,7 @@ impl std::error::Error for TestConnectError {}
 
 impl ShouldRetry for TestConnectError {
     fn could_retry(&self) -> bool {
-        true
+        self.retryable
     }
 }
 
@@ -352,20 +364,23 @@ impl ConnectMechanism for TestConnectMechanism {
         _timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
+        let action = self.sequence[*counter];
         *counter += 1;
-        if *counter < 3 {
-            Err(TestConnectError(()))
-        } else {
-            Ok(TestConnection)
+        match action {
+            ConnectAction::Connect => Ok(TestConnection),
+            ConnectAction::Retry => Err(TestConnectError { retryable: true }),
+            ConnectAction::Fail => Err(TestConnectError { retryable: false }),
         }
     }
 
     fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
-#[tokio::test]
-async fn connect_to_compute_retry() {
-    let mechanism = TestConnectMechanism::new();
+fn helper_create_connect_info() -> (
+    CachedNodeInfo,
+    console::ConsoleReqExtra<'static>,
+    auth::BackendType<'static, ClientCredentials<'static>>,
+) {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
         aux: Default::default(),
@@ -379,7 +394,62 @@ async fn connect_to_compute_retry() {
     let url = "https://TEST_URL".parse().unwrap();
     let api = console::provider::mock::Api::new(url);
     let creds = auth::BackendType::Postgres(Cow::Owned(api), ClientCredentials::new_noop());
+    (cache, extra, creds)
+}
+
+#[tokio::test]
+async fn connect_to_compute_success() {
+    use ConnectAction::*;
+    let mechanism = TestConnectMechanism::new(vec![Connect]);
+    let (cache, extra, creds) = helper_create_connect_info();
     connect_to_compute(&mechanism, cache, &extra, &creds)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn connect_to_compute_retry() {
+    use ConnectAction::*;
+    let mechanism = TestConnectMechanism::new(vec![Retry, Retry, Connect]);
+    let (cache, extra, creds) = helper_create_connect_info();
+    connect_to_compute(&mechanism, cache, &extra, &creds)
+        .await
+        .unwrap();
+}
+
+/// Test that we don't retry if the error is not retryable.
+#[tokio::test]
+async fn connect_to_compute_non_retry_1() {
+    use ConnectAction::*;
+    let mechanism = TestConnectMechanism::new(vec![Retry, Retry, Fail]);
+    let (cache, extra, creds) = helper_create_connect_info();
+    connect_to_compute(&mechanism, cache, &extra, &creds)
+        .await
+        .unwrap_err();
+}
+
+/// Even for non-retryable errors, we should retry at least once.
+#[tokio::test]
+async fn connect_to_compute_non_retry_2() {
+    use ConnectAction::*;
+    let mechanism = TestConnectMechanism::new(vec![Fail, Retry, Connect]);
+    let (cache, extra, creds) = helper_create_connect_info();
+    connect_to_compute(&mechanism, cache, &extra, &creds)
+        .await
+        .unwrap();
+}
+
+/// Retry for at most `NUM_RETRIES_CONNECT` times.
+#[tokio::test]
+async fn connect_to_compute_non_retry_3() {
+    assert_eq!(NUM_RETRIES_CONNECT, 10);
+    use ConnectAction::*;
+    let mechanism = TestConnectMechanism::new(vec![
+        Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
+        /* the 11th time */ Retry,
+    ]);
+    let (cache, extra, creds) = helper_create_connect_info();
+    connect_to_compute(&mechanism, cache, &extra, &creds)
+        .await
+        .unwrap_err();
 }
