@@ -244,19 +244,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
                 let out_of_space = remaining < buf.len();
 
                 if out_of_space {
-                    let pre_len = self.buffer.len();
-                    let pre_cap = self.buffer.capacity();
                     self.flush0()?;
-
-                    tracing::info!(
-                        out_of_space,
-                        buf.len = buf.len(),
-                        pre_len,
-                        pre_cap,
-                        post_len = self.buffer.len(),
-                        post_cap = self.buffer.capacity(),
-                        "flushing"
-                    );
                 }
 
                 // assume that this will often under normal operation just move the pointer back to the
