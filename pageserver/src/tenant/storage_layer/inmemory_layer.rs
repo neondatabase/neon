@@ -7,7 +7,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};

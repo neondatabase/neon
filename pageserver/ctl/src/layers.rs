@@ -44,7 +44,6 @@ pub(crate) enum LayerCmd {
 }
 
 fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    use pageserver::tenant::blob_io::BlobCursor;
     use pageserver::tenant::block_io::BlockReader;
 
     let path = path.as_ref();
