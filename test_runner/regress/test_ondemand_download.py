@@ -176,7 +176,8 @@ def test_ondemand_download_timetravel(
             "compaction_threshold": "1",
             "image_creation_threshold": "1",
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
-        })
+        }
+    )
     pageserver_http = env.pageserver.http_client()
 
     endpoint = env.endpoints.create_start("main")
