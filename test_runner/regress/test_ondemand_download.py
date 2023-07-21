@@ -160,12 +160,8 @@ def test_ondemand_download_timetravel(
     )
 
     ##### First start, insert data and upload it to the remote storage
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-
-    # Override defaults, to create more layers
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # Disable background GC & compaction
             # We don't want GC, that would break the assertion about num downloads.
             # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
@@ -178,7 +174,7 @@ def test_ondemand_download_timetravel(
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
-    env.initial_tenant = tenant
+    pageserver_http = env.pageserver.http_client()
 
     endpoint = env.endpoints.create_start("main")
 
@@ -324,11 +320,8 @@ def test_download_remote_layers_api(
     )
 
     ##### First start, insert data and upload it to the remote storage
-    env = neon_env_builder.init_start()
-
-    # Override defaults, to create more layers
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # Disable background GC & compaction
             # We don't want GC, that would break the assertion about num downloads.
             # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
@@ -341,7 +334,6 @@ def test_download_remote_layers_api(
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
-    env.initial_tenant = tenant
 
     endpoint = env.endpoints.create_start("main")
 
@@ -489,8 +481,6 @@ def test_compaction_downloads_on_demand_without_image_creation(
         test_name="test_compaction_downloads_on_demand_without_image_creation",
     )
 
-    env = neon_env_builder.init_start()
-
     conf = {
         # Disable background GC & compaction
         "gc_period": "0s",
@@ -506,6 +496,8 @@ def test_compaction_downloads_on_demand_without_image_creation(
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
+    env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
+
     def downloaded_bytes_and_count(pageserver_http: PageserverHttpClient) -> Tuple[int, int]:
         m = pageserver_http.get_metrics()
         # these are global counters
@@ -517,10 +509,11 @@ def test_compaction_downloads_on_demand_without_image_creation(
         assert count < 2**53 and count.is_integer(), "count should still be safe integer-in-f64"
         return (int(total_bytes), int(count))
 
-    # Override defaults, to create more layers
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
-    env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
 
     with env.endpoints.create_start("main") as endpoint:
         # no particular reason to create the layers like this, but we are sure
@@ -577,8 +570,6 @@ def test_compaction_downloads_on_demand_with_image_creation(
         test_name="test_compaction_downloads_on_demand",
     )
 
-    env = neon_env_builder.init_start()
-
     conf = {
         # Disable background GC & compaction
         "gc_period": "0s",
@@ -593,9 +584,11 @@ def test_compaction_downloads_on_demand_with_image_creation(
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
-    # Override defaults, to create more layers
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
-    env.initial_tenant = tenant_id
+    env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
+
     pageserver_http = env.pageserver.http_client()
 
     endpoint = env.endpoints.create_start("main")
@@ -664,10 +657,6 @@ def test_compaction_downloads_on_demand_with_image_creation(
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
 
 
-def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
-    return dict(map(lambda x: (x[0], str(x[1])), conf.items()))
-
-
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_ondemand_download_failure_to_replace(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
@@ -691,9 +680,10 @@ def test_ondemand_download_failure_to_replace(
 
     env = neon_env_builder.init_start()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
 
-    env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
 
     lsn = Lsn(pageserver_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
@@ -724,3 +714,7 @@ def test_ondemand_download_failure_to_replace(
     env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
 
     # if the above returned, then we didn't have a livelock, and all is well
+
+
+def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
+    return dict(map(lambda x: (x[0], str(x[1])), conf.items()))
