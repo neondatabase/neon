@@ -46,6 +46,7 @@ const BASE_PREFIX: &str = "test/";
 #[test_context(MaybeEnabledS3WithTestBlobs)]
 #[tokio::test]
 async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
     let ctx = match ctx {
         MaybeEnabledS3WithTestBlobs::Enabled(ctx) => ctx,
         MaybeEnabledS3WithTestBlobs::Disabled => return Ok(()),
@@ -58,7 +59,7 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
     let base_prefix = RemotePath::new(Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
-        .list_prefixes(None)
+        .list_prefixes(None, &cancel)
         .await
         .context("client list root prefixes failure")?
         .into_iter()
@@ -69,7 +70,7 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
     );
 
     let nested_remote_prefixes = test_client
-        .list_prefixes(Some(&base_prefix))
+        .list_prefixes(Some(&base_prefix), &cancel)
         .await
         .context("client list nested prefixes failure")?
         .into_iter()
@@ -99,6 +100,7 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
 #[test_context(MaybeEnabledS3WithSimpleTestBlobs)]
 #[tokio::test]
 async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
     let ctx = match ctx {
         MaybeEnabledS3WithSimpleTestBlobs::Enabled(ctx) => ctx,
         MaybeEnabledS3WithSimpleTestBlobs::Disabled => return Ok(()),
@@ -110,7 +112,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
     let base_prefix =
         RemotePath::new(Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
-        .list_files(None)
+        .list_files(None, &cancel)
         .await
         .context("client list root files failure")?
         .into_iter()
@@ -121,7 +123,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         "remote storage list_files on root mismatches with the uploads."
     );
     let nested_remote_files = test_client
-        .list_files(Some(&base_prefix))
+        .list_files(Some(&base_prefix), &cancel)
         .await
         .context("client list nested files failure")?
         .into_iter()
@@ -143,6 +145,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
 #[test_context(MaybeEnabledS3)]
 #[tokio::test]
 async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
     let ctx = match ctx {
         MaybeEnabledS3::Enabled(ctx) => ctx,
         MaybeEnabledS3::Disabled => return Ok(()),
@@ -154,7 +157,10 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
     )))
     .with_context(|| "RemotePath conversion")?;
 
-    ctx.client.delete(&path).await.expect("should succeed");
+    ctx.client
+        .delete(&path, &cancel)
+        .await
+        .expect("should succeed");
 
     Ok(())
 }
@@ -162,6 +168,7 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
 #[test_context(MaybeEnabledS3)]
 #[tokio::test]
 async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
     let ctx = match ctx {
         MaybeEnabledS3::Enabled(ctx) => ctx,
         MaybeEnabledS3::Disabled => return Ok(()),
@@ -183,24 +190,42 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     let data3 = "remote blob data3".as_bytes();
     let data3_len = data3.len();
     ctx.client
-        .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
+        .upload(
+            std::io::Cursor::new(data1),
+            data1_len,
+            &path1,
+            None,
+            &cancel,
+        )
         .await?;
 
     ctx.client
-        .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
+        .upload(
+            std::io::Cursor::new(data2),
+            data2_len,
+            &path2,
+            None,
+            &cancel,
+        )
         .await?;
 
     ctx.client
-        .upload(std::io::Cursor::new(data3), data3_len, &path3, None)
+        .upload(
+            std::io::Cursor::new(data3),
+            data3_len,
+            &path3,
+            None,
+            &cancel,
+        )
         .await?;
 
-    ctx.client.delete_objects(&[path1, path2]).await?;
+    ctx.client.delete_objects(&[path1, path2], &cancel).await?;
 
-    let prefixes = ctx.client.list_prefixes(None).await?;
+    let prefixes = ctx.client.list_prefixes(None, &cancel).await?;
 
     assert_eq!(prefixes.len(), 1);
 
-    ctx.client.delete_objects(&[path3]).await?;
+    ctx.client.delete_objects(&[path3], &cancel).await?;
 
     Ok(())
 }
@@ -284,7 +309,15 @@ impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
 
         let enabled = EnabledS3::setup(Some(max_keys_in_list_response)).await;
 
-        match upload_s3_data(&enabled.client, enabled.base_prefix, upload_tasks_count).await {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        match upload_s3_data(
+            &enabled.client,
+            enabled.base_prefix,
+            upload_tasks_count,
+            &cancel,
+        )
+        .await
+        {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 
@@ -412,6 +445,7 @@ async fn upload_s3_data(
     client: &Arc<GenericRemoteStorage>,
     base_prefix_str: &'static str,
     upload_tasks_count: usize,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> ControlFlow<Uploads, Uploads> {
     info!("Creating {upload_tasks_count} S3 files");
     let mut upload_tasks = JoinSet::new();
@@ -427,7 +461,13 @@ async fn upload_s3_data(
             let data = format!("remote blob data {i}").into_bytes();
             let data_len = data.len();
             task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
+                .upload(
+                    std::io::Cursor::new(data),
+                    data_len,
+                    &blob_path,
+                    None,
+                    cancel,
+                )
                 .await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
@@ -465,6 +505,7 @@ async fn upload_s3_data(
 }
 
 async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<RemotePath>) {
+    let cancel = tokio_util::sync::CancellationToken::new();
     info!(
         "Removing {} objects from the remote storage during cleanup",
         objects_to_delete.len()
@@ -475,7 +516,7 @@ async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<
         delete_tasks.spawn(async move {
             debug!("Deleting remote item at path {object_to_delete:?}");
             task_client
-                .delete(&object_to_delete)
+                .delete(&object_to_delete, &cancel)
                 .await
                 .with_context(|| format!("{object_to_delete:?} removal"))
         });
@@ -497,6 +538,7 @@ async fn upload_simple_s3_data(
     client: &Arc<GenericRemoteStorage>,
     upload_tasks_count: usize,
 ) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
+    let cancel = tokio_util::sync::CancellationToken::neW();
     info!("Creating {upload_tasks_count} S3 files");
     let mut upload_tasks = JoinSet::new();
     for i in 1..upload_tasks_count + 1 {
@@ -510,7 +552,13 @@ async fn upload_simple_s3_data(
             let data = format!("remote blob data {i}").into_bytes();
             let data_len = data.len();
             task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
+                .upload(
+                    std::io::Cursor::new(data),
+                    data_len,
+                    &blob_path,
+                    None,
+                    &cancel,
+                )
                 .await?;
 
             Ok::<_, anyhow::Error>(blob_path)

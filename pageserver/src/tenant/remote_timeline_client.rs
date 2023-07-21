@@ -758,6 +758,7 @@ impl RemoteTimelineClient {
             &self.tenant_id,
             &self.timeline_id,
             &index_part_with_deleted_at,
+            &task_mgr::shutdown_token(),
         )
         .await?;
 
@@ -827,7 +828,14 @@ impl RemoteTimelineClient {
             )
         };
 
-        receiver.changed().await?;
+        let cancel = task_mgr::shutdown_token();
+
+        tokio::select! {
+            res = receiver.changed() => { res? },
+            _ = cancel.cancelled() => {
+                anyhow::bail!("cancelled while waiting uploads to complete")
+            }
+        };
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
@@ -836,7 +844,7 @@ impl RemoteTimelineClient {
 
         let remaining = self
             .storage_impl
-            .list_prefixes(Some(&timeline_storage_path))
+            .list_prefixes(Some(&timeline_storage_path), &cancel)
             .await?;
 
         let remaining: Vec<RemotePath> = remaining
@@ -852,13 +860,15 @@ impl RemoteTimelineClient {
             .collect();
 
         if !remaining.is_empty() {
-            self.storage_impl.delete_objects(&remaining).await?;
+            self.storage_impl
+                .delete_objects(&remaining, &cancel)
+                .await?;
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
 
         debug!("deleting index part");
-        self.storage_impl.delete(&index_file_path).await?;
+        self.storage_impl.delete(&index_file_path, &cancel).await?;
 
         info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
 
@@ -971,6 +981,8 @@ impl RemoteTimelineClient {
     /// queue.
     ///
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+        let cancel = task_mgr::shutdown_token();
+
         // Loop to retry until it completes.
         loop {
             // If we're requested to shut down, close up shop and exit.
@@ -1004,6 +1016,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         path,
                         layer_metadata,
+                        &cancel,
                     )
                     .measure_remote_op(
                         self.tenant_id,
@@ -1021,6 +1034,7 @@ impl RemoteTimelineClient {
                         &self.tenant_id,
                         &self.timeline_id,
                         index_part,
+                        &cancel,
                     )
                     .measure_remote_op(
                         self.tenant_id,
@@ -1040,7 +1054,7 @@ impl RemoteTimelineClient {
                         .conf
                         .timeline_path(&self.tenant_id, &self.timeline_id)
                         .join(delete.layer_file_name.file_name());
-                    delete::delete_layer(self.conf, &self.storage_impl, path)
+                    delete::delete_layer(self.conf, &self.storage_impl, path, &cancel)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,

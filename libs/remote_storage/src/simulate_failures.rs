@@ -5,6 +5,8 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
 
 pub struct UnreliableWrapper {
@@ -78,14 +80,19 @@ impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
-        self.inner.list_prefixes(prefix).await
+        self.inner.list_prefixes(prefix, cancel).await
     }
 
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<RemotePath>> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))?;
-        self.inner.list_files(folder).await
+        self.inner.list_files(folder, cancel).await
     }
 
     async fn upload(
@@ -96,14 +103,21 @@ impl RemoteStorage for UnreliableWrapper {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Upload(to.clone()))?;
-        self.inner.upload(data, data_size_bytes, to, metadata).await
+        self.inner
+            .upload(data, data_size_bytes, to, metadata, cancel)
+            .await
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         self.attempt(RemoteOp::Download(from.clone()))?;
-        self.inner.download(from).await
+        self.inner.download(from, cancel).await
     }
 
     async fn download_byte_range(
@@ -111,26 +125,31 @@ impl RemoteStorage for UnreliableWrapper {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // Note: We treat any download_byte_range as an "attempt" of the same
         // operation. We don't pay attention to the ranges. That's good enough
         // for now.
         self.attempt(RemoteOp::Download(from.clone()))?;
         self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive)
+            .download_byte_range(from, start_inclusive, end_exclusive, cancel)
             .await
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Delete(path.clone()))?;
-        self.inner.delete(path).await
+        self.inner.delete(path, cancel).await
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::DeleteObjects(paths.to_vec()))?;
         let mut error_counter = 0;
         for path in paths {
-            if (self.delete(path).await).is_err() {
+            if (self.delete(path, cancel).await).is_err() {
                 error_counter += 1;
             }
         }

@@ -17,6 +17,7 @@ use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
@@ -105,6 +106,7 @@ impl RemoteStorage for LocalFs {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        _cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         let path = match prefix {
             Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
@@ -143,7 +145,11 @@ impl RemoteStorage for LocalFs {
 
     // recursively lists all files in a directory,
     // mirroring the `list_files` for `s3_bucket`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<RemotePath>> {
         let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
@@ -172,6 +178,7 @@ impl RemoteStorage for LocalFs {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        _cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let target_file_path = to.with_base(&self.storage_root);
         create_target_directory(&target_file_path).await?;
@@ -261,7 +268,11 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        _cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = io::BufReader::new(
@@ -293,6 +304,7 @@ impl RemoteStorage for LocalFs {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        _cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         if let Some(end_exclusive) = end_exclusive {
             if end_exclusive <= start_inclusive {
@@ -339,7 +351,7 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, _cancel: &CancellationToken) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
         match fs::remove_file(&file_path).await {
             Ok(()) => Ok(()),
@@ -351,9 +363,13 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         for path in paths {
-            self.delete(path).await?
+            self.delete(path, _cancel).await?
         }
         Ok(())
     }

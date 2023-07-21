@@ -4,6 +4,7 @@ use anyhow::{bail, Context};
 use fail::fail_point;
 use std::{io::ErrorKind, path::Path};
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
 use remote_storage::GenericRemoteStorage;
@@ -20,6 +21,7 @@ pub(super) async fn upload_index_part<'a>(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     index_part: &'a IndexPart,
+    cancel: &'a CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
 
@@ -38,7 +40,12 @@ pub(super) async fn upload_index_part<'a>(
     let storage_path = conf.remote_path(&index_part_path)?;
 
     storage
-        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
+        .upload_storage_object(
+            Box::new(index_part_bytes),
+            index_part_size,
+            &storage_path,
+            &cancel,
+        )
         .await
         .with_context(|| format!("Failed to upload index part for '{tenant_id} / {timeline_id}'"))
 }
@@ -52,6 +59,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     storage: &'a GenericRemoteStorage,
     source_path: &'a Path,
     known_metadata: &'a LayerFileMetadata,
+    cancel: &'a CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
@@ -92,7 +100,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     })?;
 
     storage
-        .upload(source_file, fs_size, &storage_path, None)
+        .upload(source_file, fs_size, &storage_path, None, cancel)
         .await
         .with_context(|| {
             format!(

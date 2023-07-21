@@ -20,13 +20,13 @@ use aws_sdk_s3::{
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use aws_smithy_http::body::SdkBody;
+use aws_smithy_http::{body::SdkBody, result};
 use hyper::Body;
 use tokio::{
     io::{self, AsyncRead},
     sync::Semaphore,
 };
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::debug;
 
 use super::StorageMetadata;
@@ -209,11 +209,13 @@ impl S3Bucket {
         full_path
     }
 
-    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+    async fn download_object(
+        &self,
+        request: GetObjectRequest,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         let permit = self
-            .concurrency_limiter
-            .clone()
-            .acquire_owned()
+            .wait_owned_permit(cancel)
             .await
             .context("Concurrency limiter semaphore got closed during S3 download")
             .map_err(DownloadError::Other)?;
@@ -279,6 +281,28 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
     }
 }
 
+impl S3Bucket {
+    async fn wait_permit(
+        &self,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<tokio::sync::SemaphorePermit> {
+        tokio::select! {
+            permit = self.concurrency_limiter.acquire() => { Ok(permit?) },
+            _ = cancel.cancelled() => { Err(anyhow::anyhow!("Cancelled while waiting for permit")) }
+        }
+    }
+
+    async fn wait_owned_permit(
+        &self,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<tokio::sync::OwnedSemaphorePermit> {
+        tokio::select! {
+            permit = self.concurrency_limiter.clone().acquire_owned() => { Ok(permit?) },
+            _ = cancel.cancelled() => { Err(anyhow::anyhow!("Cancelled while waiting for permit")) }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
     /// See the doc for `RemoteStorage::list_prefixes`
@@ -286,6 +310,7 @@ impl RemoteStorage for S3Bucket {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -305,8 +330,7 @@ impl RemoteStorage for S3Bucket {
         let mut continuation_token = None;
         loop {
             let _guard = self
-                .concurrency_limiter
-                .acquire()
+                .wait_permit(cancel)
                 .await
                 .context("Concurrency limiter semaphore got closed during S3 list")
                 .map_err(DownloadError::Other)?;
@@ -348,7 +372,11 @@ impl RemoteStorage for S3Bucket {
     }
 
     /// See the doc for `RemoteStorage::list_files`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<RemotePath>> {
         let folder_name = folder
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());
@@ -358,8 +386,7 @@ impl RemoteStorage for S3Bucket {
         let mut all_files = vec![];
         loop {
             let _guard = self
-                .concurrency_limiter
-                .acquire()
+                .wait_permit(cancel)
                 .await
                 .context("Concurrency limiter semaphore got closed during S3 list_files")?;
             metrics::inc_list_objects();
@@ -398,10 +425,10 @@ impl RemoteStorage for S3Bucket {
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let _guard = self
-            .concurrency_limiter
-            .acquire()
+            .wait_permit(cancel)
             .await
             .context("Concurrency limiter semaphore got closed during S3 upload")?;
 
@@ -426,12 +453,19 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: self.relative_path_to_s3_object(from),
-            ..GetObjectRequest::default()
-        })
+    async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
+        self.download_object(
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: self.relative_path_to_s3_object(from),
+                ..GetObjectRequest::default()
+            },
+            cancel,
+        )
         .await
     }
 
@@ -440,6 +474,7 @@ impl RemoteStorage for S3Bucket {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
         // and needs both ends to be exclusive
@@ -449,17 +484,23 @@ impl RemoteStorage for S3Bucket {
             None => format!("bytes={start_inclusive}-"),
         });
 
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: self.relative_path_to_s3_object(from),
-            range,
-        })
+        self.download_object(
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: self.relative_path_to_s3_object(from),
+                range,
+            },
+            cancel,
+        )
         .await
     }
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let _guard = self
-            .concurrency_limiter
-            .acquire()
+            .wait_permit(cancel)
             .await
             .context("Concurrency limiter semaphore got closed during S3 delete")?;
 
@@ -501,10 +542,9 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
         let _guard = self
-            .concurrency_limiter
-            .acquire()
+            .wait_permit(cancel)
             .await
             .context("Concurrency limiter semaphore got closed during S3 delete")?;
 

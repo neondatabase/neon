@@ -1,6 +1,7 @@
 //! Helper functions to delete files from remote storage with a RemoteStorage
 use anyhow::Context;
 use std::path::Path;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use remote_storage::GenericRemoteStorage;
@@ -11,6 +12,7 @@ pub(super) async fn delete_layer<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     local_layer_path: &'a Path,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail::fail_point!("before-delete-layer", |_| {
         anyhow::bail!("failpoint before-delete-layer")
@@ -23,7 +25,10 @@ pub(super) async fn delete_layer<'a>(
     // already been deleted. Thankfully, in this situation S3 already
     // does not yield an error. While OS-provided local file system APIs do yield
     // errors, we avoid them in the `LocalFs` wrapper.
-    storage.delete(&path_to_delete).await.with_context(|| {
-        format!("Failed to delete remote layer from storage at {path_to_delete:?}")
-    })
+    storage
+        .delete(&path_to_delete, cancel)
+        .await
+        .with_context(|| {
+            format!("Failed to delete remote layer from storage at {path_to_delete:?}")
+        })
 }

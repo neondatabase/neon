@@ -21,6 +21,7 @@ use std::{
 use anyhow::{bail, Context};
 
 use tokio::io;
+use tokio_util::sync::CancellationToken;
 use toml_edit::Item;
 use tracing::info;
 
@@ -98,6 +99,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError>;
 
     /// Lists all files in directory "recursively"
@@ -111,7 +113,11 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
     /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -122,11 +128,16 @@ pub trait RemoteStorage: Send + Sync + 'static {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError>;
+    async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError>;
 
     /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
     /// Returns the metadata, if any was stored with the file previously.
@@ -135,11 +146,16 @@ pub trait RemoteStorage: Send + Sync + 'static {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()>;
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct Download {
@@ -193,19 +209,24 @@ impl GenericRemoteStorage {
     pub async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list_prefixes(prefix).await,
-            Self::AwsS3(s) => s.list_prefixes(prefix).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+            Self::LocalFs(s) => s.list_prefixes(prefix, cancel).await,
+            Self::AwsS3(s) => s.list_prefixes(prefix, cancel).await,
+            Self::Unreliable(s) => s.list_prefixes(prefix, cancel).await,
         }
     }
 
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    pub async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Vec<RemotePath>> {
         match self {
-            Self::LocalFs(s) => s.list_files(folder).await,
-            Self::AwsS3(s) => s.list_files(folder).await,
-            Self::Unreliable(s) => s.list_files(folder).await,
+            Self::LocalFs(s) => s.list_files(folder, cancel).await,
+            Self::AwsS3(s) => s.list_files(folder, cancel).await,
+            Self::Unreliable(s) => s.list_files(folder, cancel).await,
         }
     }
 
@@ -215,19 +236,24 @@ impl GenericRemoteStorage {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
         }
     }
 
-    pub async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    pub async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from).await,
-            Self::AwsS3(s) => s.download(from).await,
-            Self::Unreliable(s) => s.download(from).await,
+            Self::LocalFs(s) => s.download(from, cancel).await,
+            Self::AwsS3(s) => s.download(from, cancel).await,
+            Self::Unreliable(s) => s.download(from, cancel).await,
         }
     }
 
@@ -236,36 +262,45 @@ impl GenericRemoteStorage {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
             Self::LocalFs(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
             Self::AwsS3(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
             Self::Unreliable(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
         }
     }
 
-    pub async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    pub async fn delete(
+        &self,
+        path: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete(path).await,
-            Self::AwsS3(s) => s.delete(path).await,
-            Self::Unreliable(s) => s.delete(path).await,
+            Self::LocalFs(s) => s.delete(path, cancel).await,
+            Self::AwsS3(s) => s.delete(path, cancel).await,
+            Self::Unreliable(s) => s.delete(path, cancel).await,
         }
     }
 
-    pub async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    pub async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete_objects(paths).await,
-            Self::AwsS3(s) => s.delete_objects(paths).await,
-            Self::Unreliable(s) => s.delete_objects(paths).await,
+            Self::LocalFs(s) => s.delete_objects(paths, cancel).await,
+            Self::AwsS3(s) => s.delete_objects(paths, cancel).await,
+            Self::Unreliable(s) => s.delete_objects(paths, cancel).await,
         }
     }
 }
@@ -299,8 +334,9 @@ impl GenericRemoteStorage {
         from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        self.upload(from, from_size_bytes, to, None)
+        self.upload(from, from_size_bytes, to, None, cancel)
             .await
             .with_context(|| {
                 format!("Failed to upload data of length {from_size_bytes} to storage path {to:?}")
@@ -313,10 +349,11 @@ impl GenericRemoteStorage {
         &self,
         byte_range: Option<(u64, Option<u64>)>,
         from: &RemotePath,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match byte_range {
-            Some((start, end)) => self.download_byte_range(from, start, end).await,
-            None => self.download(from).await,
+            Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
+            None => self.download(from, cancel).await,
         }
     }
 }
