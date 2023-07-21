@@ -403,6 +403,8 @@ impl DeleteTimelineFlow {
         remote_client: Option<RemoteTimelineClient>,
         init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<()> {
+        // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
+        // RemoteTimelineClient is the only functioning part.
         let timeline = tenant
             .create_timeline_struct(
                 timeline_id,
@@ -422,9 +424,6 @@ impl DeleteTimelineFlow {
                 .expect("cannot happen because we're the only owner"),
         );
 
-        // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
-        // RemoteTimelineClient is the only functioning part.
-        timeline.set_state(TimelineState::Stopping);
         // We meed to do this because when console retries delete request we shouldnt answer with 404
         // because 404 means successful deletion.
         {

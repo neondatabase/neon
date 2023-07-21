@@ -2019,7 +2019,8 @@ impl Tenant {
         let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
 
         let pg_version = new_metadata.pg_version();
-        Ok(Timeline::new(
+
+        let timeline = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             new_metadata,
@@ -2031,7 +2032,13 @@ impl Tenant {
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned(),
-        ))
+        );
+
+        if matches!(cause, CreateTimelineCause::Delete) {
+            timeline.set_state(TimelineState::Stopping);
+        }
+
+        Ok(timeline)
     }
 
     fn new(
