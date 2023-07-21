@@ -281,7 +281,7 @@ static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static REMOTE_ONDEMAND_DOWNLOADED_LAYERS: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static REMOTE_ONDEMAND_DOWNLOADED_LAYERS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "pageserver_remote_ondemand_downloaded_layers_total",
         "Total on-demand downloaded layers"
@@ -289,7 +289,7 @@ pub static REMOTE_ONDEMAND_DOWNLOADED_LAYERS: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static REMOTE_ONDEMAND_DOWNLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static REMOTE_ONDEMAND_DOWNLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "pageserver_remote_ondemand_downloaded_bytes_total",
         "Total bytes of layers on-demand downloaded",
