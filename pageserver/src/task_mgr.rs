@@ -137,7 +137,7 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 pub(crate) static RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
     // force init and thus panics
-    drop(BACKGROUND_RUNTIME.handle());
+    let _ = BACKGROUND_RUNTIME.handle();
     // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
     // tokio would had already panicked for parsing errors or NotUnicode
     //
