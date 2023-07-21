@@ -451,6 +451,7 @@ async fn upload_s3_data(
     let mut upload_tasks = JoinSet::new();
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
+        let cancel = cancel.child_token();
         upload_tasks.spawn(async move {
             let prefix = PathBuf::from(format!("{base_prefix_str}/sub_prefix_{i}/"));
             let blob_prefix = RemotePath::new(&prefix)
@@ -466,7 +467,7 @@ async fn upload_s3_data(
                     data_len,
                     &blob_path,
                     None,
-                    cancel,
+                    &cancel,
                 )
                 .await?;
 
@@ -513,6 +514,7 @@ async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<
     let mut delete_tasks = JoinSet::new();
     for object_to_delete in objects_to_delete {
         let task_client = Arc::clone(client);
+        let cancel = cancel.child_token();
         delete_tasks.spawn(async move {
             debug!("Deleting remote item at path {object_to_delete:?}");
             task_client
@@ -538,11 +540,12 @@ async fn upload_simple_s3_data(
     client: &Arc<GenericRemoteStorage>,
     upload_tasks_count: usize,
 ) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
-    let cancel = tokio_util::sync::CancellationToken::neW();
+    let cancel = tokio_util::sync::CancellationToken::new();
     info!("Creating {upload_tasks_count} S3 files");
     let mut upload_tasks = JoinSet::new();
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
+        let cancel = cancel.child_token();
         upload_tasks.spawn(async move {
             let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
             let blob_path = RemotePath::new(&blob_path)

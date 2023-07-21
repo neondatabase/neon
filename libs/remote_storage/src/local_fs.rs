@@ -459,7 +459,7 @@ mod fs_tests {
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
         let mut download = storage
-            .download(remote_storage_path)
+            .download(remote_storage_path, &CancellationToken::new())
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
         ensure!(
@@ -507,20 +507,40 @@ mod fs_tests {
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(Box::new(content.clone()), 0, &id, None)
+            .upload(
+                Box::new(content.clone()),
+                0,
+                &id,
+                None,
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(Box::new(content.clone()), 4, &id, None)
+            .upload(
+                Box::new(content.clone()),
+                4,
+                &id,
+                None,
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(Box::new(content.clone()), 6, &id, None)
+            .upload(
+                Box::new(content.clone()),
+                6,
+                &id,
+                None,
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage.upload(Box::new(content), 5, &id, None).await?;
+        storage
+            .upload(Box::new(content), 5, &id, None, &CancellationToken::new())
+            .await?;
 
         Ok(())
     }
@@ -543,7 +563,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Path::new(non_existing_path))?).await {
+        match storage.download(&RemotePath::new(Path::new(non_existing_path))?,&CancellationToken::new() ).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -568,7 +588,12 @@ mod fs_tests {
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
         let mut first_part_download = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                &CancellationToken::new(),
+            )
             .await?;
         assert!(
             first_part_download.metadata.is_none(),
@@ -594,6 +619,7 @@ mod fs_tests {
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
+                &CancellationToken::new(),
             )
             .await?;
         assert!(
@@ -631,6 +657,7 @@ mod fs_tests {
                 &upload_target,
                 start,
                 Some(end), // exclusive end
+                &CancellationToken::new(),
             )
             .await
         {
@@ -647,7 +674,7 @@ mod fs_tests {
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_byte_range(&upload_target, start, Some(end))
+            .download_byte_range(&upload_target, start, Some(end), &CancellationToken::new())
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -668,11 +695,13 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
-        storage.delete(&upload_target).await?;
+        storage
+            .delete(&upload_target, &CancellationToken::new())
+            .await?;
         assert!(storage.list().await?.is_empty());
 
         storage
-            .delete(&upload_target)
+            .delete(&upload_target, &CancellationToken::new())
             .await
             .expect("Should allow deleting non-existing storage files");
 
@@ -702,7 +731,12 @@ mod fs_tests {
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
         let mut partial_download_with_metadata = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                &CancellationToken::new(),
+            )
             .await?;
         let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
         io::copy(
@@ -751,7 +785,13 @@ mod fs_tests {
             })?;
 
         storage
-            .upload(Box::new(file), size, &relative_path, metadata)
+            .upload(
+                Box::new(file),
+                size,
+                &relative_path,
+                metadata,
+                &CancellationToken::new(),
+            )
             .await?;
         Ok(relative_path)
     }
