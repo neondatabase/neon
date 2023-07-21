@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Layer(cmd) => {
-            layers::main(&cmd)?;
+            layers::main(&cmd).await?;
         }
         Commands::Metadata(cmd) => {
             handle_metadata(&cmd)?;
