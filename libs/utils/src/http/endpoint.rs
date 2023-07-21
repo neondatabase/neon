@@ -213,6 +213,8 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
             let out_of_space = remaining < buf.len();
 
+            let original_len = buf.len();
+
             if out_of_space {
                 let can_still_fit = buf.len() - remaining;
                 self.buffer.extend_from_slice(&buf[..can_still_fit]);
@@ -224,7 +226,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
             // beginning of allocation, because previous split off parts are already sent and
             // dropped.
             self.buffer.extend_from_slice(buf);
-            Ok(buf.len())
+            Ok(original_len)
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
