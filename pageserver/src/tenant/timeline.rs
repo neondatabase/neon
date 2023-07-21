@@ -3452,7 +3452,7 @@ impl Timeline {
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
             deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
+            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 < b.0),
         )? {
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -3492,11 +3492,7 @@ impl Timeline {
                 iter_iter.kmerge_by(|a, b| {
                     if let Ok((a_key, a_lsn, _)) = a {
                         if let Ok((b_key, b_lsn, _)) = b {
-                            match a_key.cmp(b_key) {
-                                Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
-                                Ordering::Greater => false,
-                            }
+                            (a_key, a_lsn) < (b_key, b_lsn)
                         } else {
                             false
                         }
@@ -3514,11 +3510,7 @@ impl Timeline {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
                     let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
-                    }
+                    (a_key, a_lsn) < (b_key, b_lsn)
                 })
             },
         )?;
