@@ -368,9 +368,6 @@ pub async fn create_tenant(
             ctx,
         )?;
 
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
-
         // Put all code that might error into the check function.
 
         let check = || {
@@ -388,6 +385,8 @@ pub async fn create_tenant(
         };
 
         if let Err(e) = check() {
+            // schedule_local_tenant_processing eventually launches the tenant's background task
+            // We need to shut them down before bailing out.
             created_tenant.set_broken("failed to create".into()).await;
             return Err(e);
         }
@@ -636,8 +635,6 @@ pub async fn attach_tenant(
             None,
             ctx,
         )?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
 
         // Put all code that might error in the check function.
 
@@ -651,6 +648,8 @@ pub async fn attach_tenant(
         };
 
         if let Err(e) = check() {
+            // schedule_local_tenant_processing eventually launches the tenant's background task
+            // We need to shut them down before bailing out.
             attached_tenant.set_broken("failed to create".into()).await;
             return Err(e);
         }
