@@ -105,10 +105,10 @@ fn watch_compute_activity(compute: &ComputeNode) {
 }
 
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>, std::io::Error> {
+pub fn launch_monitor(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
 
-    thread::Builder::new()
+    Ok(thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&state))
+        .spawn(move || watch_compute_activity(&state))?)
 }
