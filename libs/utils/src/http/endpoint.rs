@@ -156,15 +156,19 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     /// An [`std::io::Write`] implementation on top of a channel sending [`bytes::Bytes`] chunks.
     struct ChannelWriter {
-        buffer: bytes::BytesMut,
-        tx: mpsc::Sender<std::io::Result<bytes::Bytes>>,
+        buffer: BytesMut,
+        tx: mpsc::Sender<std::io::Result<Bytes>>,
         written: usize,
     }
 
     impl ChannelWriter {
         fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
+            assert_ne!(buf_len, 0);
             ChannelWriter {
-                buffer: BytesMut::with_capacity(buf_len),
+                // split about half off the buffer from the start, because we flush depending on
+                // capacity. first flush will come sooner than without this, but now resizes will
+                // have better chance of picking up the "other" half. not guaranteed of course.
+                buffer: BytesMut::with_capacity(buf_len).split_off(buf_len / 2),
                 tx,
                 written: 0,
             }
@@ -204,12 +208,15 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     }
 
     impl std::io::Write for ChannelWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
             let remaining = self.buffer.capacity() - self.buffer.len();
 
             let out_of_space = remaining < buf.len();
 
             if out_of_space {
+                let can_still_fit = buf.len() - remaining;
+                self.buffer.extend_from_slice(&buf[..can_still_fit]);
+                buf = &buf[can_still_fit..];
                 self.flush0()?;
             }
 
