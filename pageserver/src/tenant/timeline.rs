@@ -2252,8 +2252,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut read_count =
-            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+        let mut read_count = scopeguard::guard(0, |cnt| {
+            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+        });
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.

@@ -84,11 +84,10 @@ pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static READ_NUM_FS_LAYERS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_read_num_fs_layers",
         "Number of persistent layers accessed for processing a read request, including those in the cache",
-        &["tenant_id", "timeline_id"],
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
     )
     .expect("failed to define a metric")
@@ -908,7 +907,6 @@ pub struct TimelineMetrics {
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
-    pub read_num_fs_layers: Histogram,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -966,9 +964,6 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let read_num_fs_layers = READ_NUM_FS_LAYERS
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
@@ -993,7 +988,6 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
-            read_num_fs_layers,
         }
     }
 }
@@ -1010,7 +1004,6 @@ impl Drop for TimelineMetrics {
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = READ_NUM_FS_LAYERS.remove_label_values(&[tenant_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
