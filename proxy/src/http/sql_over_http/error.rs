@@ -1,13 +1,14 @@
 use std::{error, fmt, io};
 
-use postgres_protocol::message::backend::{ErrorFields, ErrorResponseBody};
-use tokio_postgres::error::{SqlState, ErrorPosition};
 use fallible_iterator::FallibleIterator;
+use postgres_protocol::message::backend::{ErrorFields, ErrorResponseBody};
+use tokio_postgres::error::{ErrorPosition, SqlState};
 
 #[derive(Debug, PartialEq)]
 enum Kind {
     Io,
     UnexpectedMessage,
+    FromSql(usize),
     Closed,
     Db,
     Parse,
@@ -36,6 +37,7 @@ impl fmt::Display for Error {
         match &self.0.kind {
             Kind::Io => fmt.write_str("error communicating with the server")?,
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server")?,
+            Kind::FromSql(idx) => write!(fmt, "error deserializing column {}", idx)?,
             Kind::Closed => fmt.write_str("connection closed")?,
             Kind::Db => fmt.write_str("db error")?,
             Kind::Parse => fmt.write_str("error parsing response from server")?,
@@ -89,6 +91,10 @@ impl Error {
             Ok(e) => Error::new(Kind::Db, Some(Box::new(e))),
             Err(e) => Error::new(Kind::Parse, Some(Box::new(e))),
         }
+    }
+
+    pub(crate) fn from_sql(e: Box<dyn error::Error + Sync + Send>, idx: usize) -> Error {
+        Error::new(Kind::FromSql(idx), Some(e))
     }
 
     pub(crate) fn closed() -> Error {

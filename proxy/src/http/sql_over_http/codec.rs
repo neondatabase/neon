@@ -17,7 +17,7 @@ pub enum BackendMessage {
     Async(backend::Message),
 }
 
-pub struct BackendMessages(BytesMut);
+pub struct BackendMessages(pub BytesMut);
 
 impl BackendMessages {
     pub fn empty() -> BackendMessages {
