@@ -232,6 +232,8 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
         }
     }
 
+    let started_at = std::time::Instant::now();
+
     let (tx, rx) = mpsc::channel(1);
 
     let body = Body::wrap_stream(ReceiverStream::new(rx));
