@@ -222,11 +222,6 @@ fn main() -> Result<()> {
     compute.state_changed.notify_all();
     drop(state);
 
-    // Launch remaining service threads
-    let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
-    let _configurator_handle =
-        launch_configurator(&compute).expect("cannot launch configurator thread");
-
     // Start Postgres
     let mut delay_exit = false;
     let mut exit_code = None;
@@ -242,6 +237,14 @@ fn main() -> Result<()> {
             None
         }
     };
+
+    // Launch remaining service threads
+    //
+    // NOTE we do this after starting postgres so that these two extra threads
+    //      don't blow the cpu budget and throttle the startup process.
+    let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    let _configurator_handle =
+        launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
