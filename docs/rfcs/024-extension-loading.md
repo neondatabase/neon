@@ -140,64 +140,60 @@ popular extensions.
 ## Extension Storage implementation
 
 The layout of the S3 bucket is as follows:
-```
-├── 111
-    │   ├── v14
-    │   │   ├── extensions
-    │   │   │   ├── anon.tar.zst
-    │   │   │   └── embedding.tar.zst
-    │   │   └── ext_index.json
-    │   └── v15
-    │       ├── extensions
-    │       │   ├── anon.tar.zst
-    │       │   └── embedding.tar.zst
-    │       └── ext_index.json
-    ├── 112
-    │   ├── v14
-    │   │   ├── extensions
-    │   │   │   └── anon.tar.zst
-    │   │   └── ext_index.json
-    │   └── v15
-    │       ├── extensions
-    │       │   └── anon.tar.zst
-    │       └── ext_index.json
-    └── 113
-        ├── v14
-        │   ├── extensions
-        │   │   └── embedding.tar.zst
-        │   └── ext_index.json
-        └── v15
-            ├── extensions
-            │   └── embedding.tar.zst
-            └── ext_index.json
-```
+5615610098 // this is an extension build number
+├── v14
+│   ├── extensions
+│   │   ├── anon.tar.zst
+│   │   └── embedding.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   ├── anon.tar.zst
+    │   └── embedding.tar.zst
+    └── ext_index.json
+5615261079
+├── v14
+│   ├── extensions
+│   │   └── anon.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   └── anon.tar.zst
+    └── ext_index.json
+5623261088
+├── v14
+│   ├── extensions
+│   │   └── embedding.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   └── embedding.tar.zst
+    └── ext_index.json
+
 Note that build number cannot be part of prefix because we might need extensions
 from other build numbers.
 
-`ext_index.json` stores the control files and location of extension archives
+ext_index.json stores the control files and location of extension archives
 
-We do not duplicate `extension.tar.zst` files.
+We do not duplicate extension.tar.zst files.
 We only upload a new one if it is updated.
-**access** is controlled by spec
+*access* is controlled by spec
 
-More specifically, here is an example `ext_index.json` that could be found in `111/v14`
-```
+More specifically, here is an example ext_index.json
 {
   "embedding": {
     "control_data": {
       "embedding.control": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true"
     },
-    "archive_path": "111/v15/extensions/embedding.tar.zst"
+    "archive_path": "5623261088/v15/extensions/embedding.tar.zst"
   },
   "anon": {
     "control_data": {
       "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
     },
-    "archive_path": "111/v15/extensions/anon.tar.zst"
+    "archive_path": "5615261079/v15/extensions/anon.tar.zst"
   }
 }
-```
-
 
 ### How to add new extension to the Extension Storage?
 

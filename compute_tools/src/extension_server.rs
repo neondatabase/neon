@@ -2,35 +2,35 @@
 // and put them in the right place in the postgres directory (share / lib)
 /*
 The layout of the S3 bucket is as follows:
-├── 111
-    │   ├── v14
-    │   │   ├── extensions
-    │   │   │   ├── anon.tar.zst
-    │   │   │   └── embedding.tar.zst
-    │   │   └── ext_index.json
-    │   └── v15
-    │       ├── extensions
-    │       │   ├── anon.tar.zst
-    │       │   └── embedding.tar.zst
-    │       └── ext_index.json
-    ├── 112
-    │   ├── v14
-    │   │   ├── extensions
-    │   │   │   └── anon.tar.zst
-    │   │   └── ext_index.json
-    │   └── v15
-    │       ├── extensions
-    │       │   └── anon.tar.zst
-    │       └── ext_index.json
-    └── 113
-        ├── v14
-        │   ├── extensions
-        │   │   └── embedding.tar.zst
-        │   └── ext_index.json
-        └── v15
-            ├── extensions
-            │   └── embedding.tar.zst
-            └── ext_index.json
+5615610098 // this is an extension build number
+├── v14
+│   ├── extensions
+│   │   ├── anon.tar.zst
+│   │   └── embedding.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   ├── anon.tar.zst
+    │   └── embedding.tar.zst
+    └── ext_index.json
+5615261079
+├── v14
+│   ├── extensions
+│   │   └── anon.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   └── anon.tar.zst
+    └── ext_index.json
+5623261088
+├── v14
+│   ├── extensions
+│   │   └── embedding.tar.zst
+│   └── ext_index.json
+└── v15
+    ├── extensions
+    │   └── embedding.tar.zst
+    └── ext_index.json
 
 Note that build number cannot be part of prefix because we might need extensions
 from other build numbers.
@@ -47,13 +47,13 @@ More specifically, here is an example ext_index.json
     "control_data": {
       "embedding.control": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true"
     },
-    "archive_path": "111/v15/extensions/embedding.tar.zst"
+    "archive_path": "5623261088/v15/extensions/embedding.tar.zst"
   },
   "anon": {
     "control_data": {
       "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
     },
-    "archive_path": "111/v15/extensions/anon.tar.zst"
+    "archive_path": "5615261079/v15/extensions/anon.tar.zst"
   }
 }
 */
@@ -161,7 +161,8 @@ pub async fn get_available_extensions(
     Ok(ext_remote_paths)
 }
 
-// download all sqlfiles (and possibly data files) for a given extension name
+// download the archive for a given extension,
+// unzip it, and place files in the appropriate locations (share/lib)
 pub async fn download_extension(
     ext_name: &str,
     ext_path: &RemotePath,
