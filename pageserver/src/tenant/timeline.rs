@@ -555,7 +555,7 @@ impl Timeline {
             "wait_lsn cannot be called in WAL receiver"
         );
 
-        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
         match self
             .last_record_lsn

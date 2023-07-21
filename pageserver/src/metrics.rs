@@ -244,11 +244,10 @@ pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheS
     },
 });
 
-static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -903,7 +902,6 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
@@ -941,9 +939,6 @@ impl TimelineMetrics {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let wait_lsn_time_histo = WAIT_LSN_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -973,7 +968,6 @@ impl TimelineMetrics {
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
-            wait_lsn_time_histo,
             resident_physical_size_gauge,
             current_logical_size_gauge,
             num_persistent_files_created,
@@ -991,7 +985,6 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);

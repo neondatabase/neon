@@ -74,6 +74,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
     *histogram("pageserver_read_num_fs_layers"),
     *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
+    *histogram("pageserver_wait_lsn_seconds"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
@@ -89,9 +90,6 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_sum",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
-    "pageserver_wait_lsn_seconds_bucket",
-    "pageserver_wait_lsn_seconds_count",
-    "pageserver_wait_lsn_seconds_sum",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
     "pageserver_tenant_states_count",
