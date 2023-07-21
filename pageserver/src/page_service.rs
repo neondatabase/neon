@@ -314,21 +314,11 @@ struct PageRequestMetrics {
 }
 
 impl PageRequestMetrics {
-    fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-
-        let get_rel_exists =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_exists", &tenant_id, &timeline_id]);
-
-        let get_rel_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_size", &tenant_id, &timeline_id]);
-
-        let get_page_at_lsn =
-            SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id]);
-
-        let get_db_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
+    fn new() -> Self {
+        let get_rel_exists = SMGR_QUERY_TIME.with_label_values(&["get_rel_exists"]);
+        let get_rel_size = SMGR_QUERY_TIME.with_label_values(&["get_rel_size"]);
+        let get_page_at_lsn = SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn"]);
+        let get_db_size = SMGR_QUERY_TIME.with_label_values(&["get_db_size"]);
 
         Self {
             get_rel_exists,
@@ -406,7 +396,7 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+        let metrics = PageRequestMetrics::new();
 
         loop {
             let msg = tokio::select! {

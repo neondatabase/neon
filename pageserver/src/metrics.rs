@@ -522,18 +522,11 @@ pub static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-const SMGR_QUERY_TIME_OPERATIONS: &[&str] = &[
-    "get_rel_exists",
-    "get_rel_size",
-    "get_page_at_lsn",
-    "get_db_size",
-];
-
-pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
-        &["smgr_query_type", "tenant_id", "timeline_id"],
+        &["smgr_query_type"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -1014,10 +1007,6 @@ impl Drop for TimelineMetrics {
 
         for op in STORAGE_IO_SIZE_OPERATIONS {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, timeline_id]);
-        }
-
-        for op in SMGR_QUERY_TIME_OPERATIONS {
-            let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
     }
 }
