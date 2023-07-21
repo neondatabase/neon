@@ -165,11 +165,8 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     if !chunked {
         let span = info_span!("blocking");
-
         tokio::task::spawn_blocking(move || {
             let _span = span.entered();
-            // Currently we take a lot of mutexes while collecting metrics, so it's
-            // better to spawn a blocking task to avoid blocking the event loop.
             let metrics = metrics::gather();
             let mut buffer = Vec::new();
             let encoder = TextEncoder::new();
@@ -187,13 +184,9 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
         .map_err(|e| ApiError::InternalServerError(e.into()))
         .and_then(|e| e)
     } else {
-        let (tx, rx) = mpsc::channel(1);
-
-        let body = Body::wrap_stream(ReceiverStream::new(rx));
-
         struct ChannelWriter {
             buffer: bytes::BytesMut,
-            tx: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+            tx: mpsc::Sender<std::io::Result<bytes::Bytes>>,
             written: usize,
         }
 
@@ -259,6 +252,10 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
             }
         }
 
+        let (tx, rx) = mpsc::channel(1);
+
+        let body = Body::wrap_stream(ReceiverStream::new(rx));
+
         let mut writer = ChannelWriter::new(128 * 1024, tx);
 
         let encoder = TextEncoder::new();
@@ -270,11 +267,8 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
             .unwrap();
 
         let span = info_span!("blocking");
-
         tokio::task::spawn_blocking(move || {
             let _span = span.entered();
-            // Currently we take a lot of mutexes while collecting metrics, so it's
-            // better to spawn a blocking task to avoid blocking the event loop.
             let metrics = metrics::gather();
             let res = encoder
                 .encode(&metrics, &mut writer)
