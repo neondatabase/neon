@@ -22,7 +22,6 @@ use tokio::task::JoinSet;
 use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::fs_ext;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -886,23 +885,24 @@ impl Tenant {
                     continue;
                 }
 
-                // Missing metadata means that timeline directory should be empty at this point.
-                // Remove delete mark afterwards.
-                // Note that failure during the process wont prevent tenant from successfully loading.
-                // TODO: this is very much similar to DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces
-                // but here we're inside spawn_blocking.
-                if let Err(e) = fs_ext::ignore_absent_files(|| {
-                    fs::remove_dir(self.conf.timeline_path(&self.tenant_id, &timeline_id))
-                })
-                .context("remove deleted timeline dir")
-                .and_then(|_| fs::remove_file(&timeline_dir).context("remove delete mark"))
-                {
+                // Is is suboptimal because we use block_on while we're in spawn_blocking.
+                // Here cleanup_remaining_timeline_fs_traces uses fs operations that basically result in a cycle:
+                // spawn_blocking
+                // - block_on
+                //   - spawn_blocking
+                // which can lead to running out of threads.
+                // We invoke several fs operations one by one so this should be less risky.
+                // An alternative would be to convert it to sync and tolerate potential executor stalls.
+                let rt = tokio::runtime::Handle::current();
+                if let Err(e) = rt.block_on(
+                    DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(&self, timeline_id),
+                ) {
                     warn!(
                         "cannot clean up deleted timeline dir at: {} error: {:#}",
                         timeline_dir.display(),
                         e
                     );
-                };
+                }
             } else {
                 if !timeline_dir.exists() {
                     warn!(
