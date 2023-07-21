@@ -57,9 +57,9 @@ pub fn slru_may_delete_clogsegment(segpage: u32, cutoff_page: u32) -> bool {
 // Multixact utils
 
 pub fn mx_offset_to_flags_offset(xid: MultiXactId) -> usize {
-    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32) as u16
-        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE
-        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE) as usize
+    ((xid / pg_constants::MULTIXACT_MEMBERS_PER_MEMBERGROUP as u32)
+        % pg_constants::MULTIXACT_MEMBERGROUPS_PER_PAGE as u32
+        * pg_constants::MULTIXACT_MEMBERGROUP_SIZE as u32) as usize
 }
 
 pub fn mx_offset_to_flags_bitshift(xid: MultiXactId) -> u16 {
