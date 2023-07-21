@@ -3210,7 +3210,7 @@ impl Drop for Tenant {
     }
 }
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(
+pub async fn dump_layerfile_from_path(
     path: &Path,
     verbose: bool,
     ctx: &RequestContext,
@@ -3224,8 +3224,16 @@ pub fn dump_layerfile_from_path(
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
-        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
+        crate::IMAGE_FILE_MAGIC => {
+            ImageLayer::new_for_path(path, file)?
+                .dump(verbose, ctx)
+                .await?
+        }
+        crate::DELTA_FILE_MAGIC => {
+            DeltaLayer::new_for_path(path, file)?
+                .dump(verbose, ctx)
+                .await?
+        }
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 

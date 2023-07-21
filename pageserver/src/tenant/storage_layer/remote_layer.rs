@@ -78,7 +78,7 @@ impl Layer for RemoteLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} is_delta {} is_incremental {} size {} ----",
             self.desc.tenant_id,

@@ -378,7 +378,7 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     ) -> Result<ValueReconstructResult>;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
+    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Returned by [`PersistentLayer::iter`]

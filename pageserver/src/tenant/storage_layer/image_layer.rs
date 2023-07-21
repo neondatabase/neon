@@ -158,7 +158,7 @@ impl std::fmt::Debug for ImageLayerInner {
 #[async_trait::async_trait]
 impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,

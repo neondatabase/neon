@@ -626,17 +626,17 @@ impl LayerMap {
 
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!("Begin dump LayerMap");
 
         println!("open_layer:");
         if let Some(open_layer) = &self.open_layer {
-            open_layer.dump(verbose, ctx)?;
+            open_layer.dump(verbose, ctx).await?;
         }
 
         println!("frozen_layers:");
         for frozen_layer in self.frozen_layers.iter() {
-            frozen_layer.dump(verbose, ctx)?;
+            frozen_layer.dump(verbose, ctx).await?;
         }
 
         println!("historic_layers:");

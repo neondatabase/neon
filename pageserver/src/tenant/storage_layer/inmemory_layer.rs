@@ -133,7 +133,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
