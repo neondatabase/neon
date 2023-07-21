@@ -68,23 +68,31 @@ impl LayerManager {
         }
     }
 
+    /// Take the snapshot of the layer map and return a read guard. The read guard will prevent
+    /// the layer map from being modified.
     pub async fn read(&self) -> LayerManagerReadGuard {
+        // take the lock before taking snapshot
+        let pseudo_lock = self.pseudo_lock.clone().read_owned().await;
         LayerManagerReadGuard {
             snapshot: LayerSnapshot {
                 layer_map: self.layer_map.load_full(),
                 layer_fmgr: Arc::clone(&self.layer_fmgr),
             },
-            pseudo_lock: self.pseudo_lock.clone().read_owned().await,
+            pseudo_lock,
         }
     }
 
+    /// Take the snapshot of the layer map and return a write guard. The read guard will prevent
+    /// the layer map from being read.
     pub async fn write(self: &Arc<Self>) -> LayerManagerWriteGuard {
+        // take the lock before taking snapshot
+        let pseudo_lock = self.pseudo_lock.clone().write_owned().await;
         LayerManagerWriteGuard {
             snapshot: LayerSnapshot {
                 layer_map: self.layer_map.load_full(),
                 layer_fmgr: Arc::clone(&self.layer_fmgr),
             },
-            pseudo_lock: self.pseudo_lock.clone().write_owned().await,
+            pseudo_lock,
             layer_manager: self.clone(),
         }
     }
