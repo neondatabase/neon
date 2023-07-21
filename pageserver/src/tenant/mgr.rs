@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::crashsafe;
+use utils::{completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -385,9 +385,12 @@ pub async fn create_tenant(
         };
 
         if let Err(e) = check() {
-            // schedule_local_tenant_processing eventually launches the tenant's background task
-            // We need to shut them down before bailing out.
-            created_tenant.set_broken("failed to create".into()).await;
+            // `schedule_local_tenant_processing` eventually launches the tenant's background task
+            // We need to shut them down before bailing out. Shutdown the tenant in the background.
+            tokio::spawn(async move {
+                let (_guard, shutdown_progress) = completion::channel();
+                created_tenant.shutdown(shutdown_progress, false).await
+            });
             return Err(e);
         }
 
@@ -648,9 +651,12 @@ pub async fn attach_tenant(
         };
 
         if let Err(e) = check() {
-            // schedule_local_tenant_processing eventually launches the tenant's background task
-            // We need to shut them down before bailing out.
-            attached_tenant.set_broken("failed to create".into()).await;
+            // `schedule_local_tenant_processing` eventually launches the tenant's background task
+            // We need to shut them down before bailing out. Shutdown the tenant in the background.
+            tokio::spawn(async move {
+                let (_guard, shutdown_progress) = completion::channel();
+                attached_tenant.shutdown(shutdown_progress, false).await
+            });
             return Err(e);
         }
 
