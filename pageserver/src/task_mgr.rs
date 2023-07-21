@@ -205,7 +205,7 @@ pub enum TaskKind {
     ///
     /// Walreceiver uses its own abstraction called `TaskHandle` to represent the activity of establishing and handling a connection.
     /// That abstraction doesn't use `task_mgr`.
-    /// The [`WalReceiverManager`] task ensures that this `TaskHandle` task does not outlive the [`WalReceiverManager`] task.
+    /// The `WalReceiverManager` task ensures that this `TaskHandle` task does not outlive the `WalReceiverManager` task.
     /// For the `RequestContext` that we hand to the TaskHandle, we use the [`WalReceiverConnectionHandler`] task kind.
     ///
     /// Once the connection is established, the `TaskHandle` task creates a
@@ -213,16 +213,21 @@ pub enum TaskKind {
     /// the `Connection` object.
     /// A `CancellationToken` created by the `TaskHandle` task ensures
     /// that the [`WalReceiverConnectionPoller`] task will cancel soon after as the `TaskHandle` is dropped.
+    ///
+    /// [`WalReceiverConnectionHandler`]: Self::WalReceiverConnectionHandler
+    /// [`WalReceiverConnectionPoller`]: Self::WalReceiverConnectionPoller
     WalReceiverManager,
 
-    /// The `TaskHandle` task that executes [`walreceiver_connection::handle_walreceiver_connection`].
+    /// The `TaskHandle` task that executes `handle_walreceiver_connection`.
     /// Not a `task_mgr` task, but we use this `TaskKind` for its `RequestContext`.
     /// See the comment on [`WalReceiverManager`].
+    ///
+    /// [`WalReceiverManager`]: Self::WalReceiverManager
     WalReceiverConnectionHandler,
 
     /// The task that polls the `tokio-postgres::Connection` object.
-    /// Spawned by task [`WalReceiverConnectionHandler`].
-    /// See the comment on [`WalReceiverManager`].
+    /// Spawned by task [`WalReceiverConnectionHandler`](Self::WalReceiverConnectionHandler).
+    /// See the comment on [`WalReceiverManager`](Self::WalReceiverManager).
     WalReceiverConnectionPoller,
 
     // Garbage collection worker. One per tenant
@@ -506,17 +511,13 @@ pub async fn shutdown_tasks(
                     warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
-            let join_handle = tokio::select! {
-                biased;
-                _ = &mut join_handle => { None },
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                    // allow some time to elapse before logging to cut down the number of log
-                    // lines.
-                    info!("waiting for {} to shut down", task.name);
-                    Some(join_handle)
-                }
-            };
-            if let Some(join_handle) = join_handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
+                .await
+                .is_err()
+            {
+                // allow some time to elapse before logging to cut down the number of log
+                // lines.
+                info!("waiting for {} to shut down", task.name);
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)

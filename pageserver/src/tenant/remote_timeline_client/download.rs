@@ -46,7 +46,7 @@ pub async fn download_layer_file<'a>(
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
+    let timeline_path = conf.timeline_path(&tenant_id, &timeline_id);
 
     let local_path = timeline_path.join(layer_file_name.file_name());
 
@@ -229,11 +229,11 @@ pub async fn list_remote_timelines<'a>(
 pub(super) async fn download_index_part(
     conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
 ) -> Result<IndexPart, DownloadError> {
     let index_part_path = conf
-        .metadata_path(timeline_id, tenant_id)
+        .metadata_path(tenant_id, timeline_id)
         .with_file_name(IndexPart::FILE_NAME);
     let part_storage_path = conf
         .remote_path(&index_part_path)

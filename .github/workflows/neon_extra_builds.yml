@@ -3,7 +3,8 @@ name: Check neon with extra platform builds
 on:
   push:
     branches:
-    - main
+      - main
+      - ci-run/pr-*
   pull_request:
 
 defaults:

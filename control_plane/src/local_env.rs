@@ -137,6 +137,7 @@ impl Default for PageServerConf {
 pub struct SafekeeperConf {
     pub id: NodeId,
     pub pg_port: u16,
+    pub pg_tenant_only_port: Option<u16>,
     pub http_port: u16,
     pub sync: bool,
     pub remote_storage: Option<String>,
@@ -149,12 +150,21 @@ impl Default for SafekeeperConf {
         Self {
             id: NodeId(0),
             pg_port: 0,
+            pg_tenant_only_port: None,
             http_port: 0,
             sync: true,
             remote_storage: None,
             backup_threads: None,
             auth_enabled: false,
         }
+    }
+}
+
+impl SafekeeperConf {
+    /// Compute is served by port on which only tenant scoped tokens allowed, if
+    /// it is configured.
+    pub fn get_compute_port(&self) -> u16 {
+        self.pg_tenant_only_port.unwrap_or(self.pg_port)
     }
 }
 

@@ -223,9 +223,8 @@ fn main() -> Result<()> {
     drop(state);
 
     // Launch remaining service threads
-    let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
-    let _configurator_handle =
-        launch_configurator(&compute).expect("cannot launch configurator thread");
+    let _monitor_handle = launch_monitor(&compute);
+    let _configurator_handle = launch_configurator(&compute);
 
     // Start Postgres
     let mut delay_exit = false;

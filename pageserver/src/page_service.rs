@@ -10,6 +10,7 @@
 //
 
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -31,8 +32,10 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
+use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
@@ -51,6 +54,7 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::GetTenantError;
 use crate::tenant::{Tenant, Timeline};
@@ -238,6 +242,7 @@ pub async fn libpq_listener_main(
     Ok(())
 }
 
+#[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
@@ -260,6 +265,7 @@ async fn page_service_conn_main(
         .context("could not set TCP_NODELAY")?;
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
+    tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
     // - long enough for most valid compute connections
@@ -362,7 +368,7 @@ impl PageServerHandler {
         }
     }
 
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -373,6 +379,8 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
@@ -473,7 +481,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(%base_lsn, end_lsn=%_end_lsn, %pg_version))]
     async fn handle_import_basebackup<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -487,6 +495,8 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
@@ -531,7 +541,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(%start_lsn, %end_lsn))]
     async fn handle_import_wal<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -544,6 +554,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
@@ -738,7 +749,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -747,11 +758,14 @@ impl PageServerHandler {
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
+        gzip: bool,
         ctx: RequestContext,
     ) -> anyhow::Result<()>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let started = std::time::Instant::now();
 
         // check that the timeline exists
@@ -772,8 +786,9 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
-        // Send a tarball of the latest layer on the timeline
-        {
+        // Send a tarball of the latest layer on the timeline. Compress if not
+        // fullbackup. TODO Compress in that case too (tests need to be updated)
+        if full_backup {
             let mut writer = pgb.copyout_writer();
             basebackup::send_basebackup_tarball(
                 &mut writer,
@@ -784,6 +799,40 @@ impl PageServerHandler {
                 &ctx,
             )
             .await?;
+        } else {
+            let mut writer = pgb.copyout_writer();
+            if gzip {
+                let mut encoder = GzipEncoder::with_quality(
+                    writer,
+                    // NOTE using fast compression because it's on the critical path
+                    //      for compute startup. For an empty database, we get
+                    //      <100KB with this method. The Level::Best compression method
+                    //      gives us <20KB, but maybe we should add basebackup caching
+                    //      on compute shutdown first.
+                    async_compression::Level::Fastest,
+                );
+                basebackup::send_basebackup_tarball(
+                    &mut encoder,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+                // shutdown the encoder to ensure the gzip footer is written
+                encoder.shutdown().await?;
+            } else {
+                basebackup::send_basebackup_tarball(
+                    &mut writer,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+            }
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
@@ -862,6 +911,7 @@ where
         Ok(())
     }
 
+    #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -883,6 +933,10 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
 
             self.handle_pagerequests(pgb, tenant_id, timeline_id, ctx)
@@ -902,6 +956,10 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
 
             let lsn = if params.len() >= 3 {
@@ -911,6 +969,19 @@ where
                 )
             } else {
                 None
+            };
+
+            let gzip = if params.len() >= 4 {
+                if params[3] == "--gzip" {
+                    true
+                } else {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "Parameter in position 3 unknown {}",
+                        params[3],
+                    )));
+                }
+            } else {
+                false
             };
 
             metrics::metric_vec_duration::observe_async_block_duration_by_result(
@@ -923,6 +994,7 @@ where
                         lsn,
                         None,
                         false,
+                        gzip,
                         ctx,
                     )
                     .await?;
@@ -947,6 +1019,10 @@ where
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
             let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
@@ -979,6 +1055,10 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
                 Some(
@@ -1000,8 +1080,17 @@ where
             self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
-                .await?;
+            self.handle_basebackup_request(
+                pgb,
+                tenant_id,
+                timeline_id,
+                lsn,
+                prev_lsn,
+                true,
+                false,
+                ctx,
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
@@ -1032,6 +1121,10 @@ where
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
             let pg_version = u32::from_str(params[4])
                 .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1077,6 +1170,10 @@ where
             let end_lsn = Lsn::from_str(params[3])
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
 
             match self
@@ -1107,6 +1204,8 @@ where
             }
             let tenant_id = TenantId::from_str(params[0])
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+
+            tracing::Span::current().record("tenant_id", field::display(tenant_id));
 
             self.check_permission(Some(tenant_id))?;
 

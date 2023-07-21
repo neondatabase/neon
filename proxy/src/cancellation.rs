@@ -110,7 +110,7 @@ impl<'a> Session<'a> {
 
 impl Session<'_> {
     /// Store the cancel token for the given session.
-    /// This enables query cancellation in [`crate::proxy::handshake`].
+    /// This enables query cancellation in `crate::proxy::prepare_client_connection`.
     pub fn enable_query_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
         info!("enabling query cancellation for this session");
         self.cancel_map

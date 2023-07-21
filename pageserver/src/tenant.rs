@@ -84,6 +84,25 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
+/// Declare a failpoint that can use the `pause` failpoint action.
+/// We don't want to block the executor thread, hence, spawn_blocking + await.
+macro_rules! pausable_failpoint {
+    ($name:literal) => {
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint {}", $name);
+                    fail::fail_point!($name);
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+    };
+}
+
 pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
@@ -102,7 +121,7 @@ pub mod mgr;
 pub mod tasks;
 pub mod upload_queue;
 
-mod timeline;
+pub(crate) mod timeline;
 
 pub mod size;
 
@@ -114,7 +133,7 @@ pub use timeline::{
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
-// re-export for use in storage_sync.rs
+// re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
@@ -262,7 +281,7 @@ pub enum DeleteTimelineError {
 }
 
 pub enum SetStoppingError {
-    AlreadyStopping,
+    AlreadyStopping(completion::Barrier),
     Broken,
 }
 
@@ -297,10 +316,6 @@ impl std::fmt::Display for WaitToBecomeActiveError {
             }
         }
     }
-}
-
-pub(crate) enum ShutdownError {
-    AlreadyStopping,
 }
 
 struct DeletionGuard(OwnedMutexGuard<bool>);
@@ -410,7 +425,7 @@ impl Tenant {
                     .layers
                     .read()
                     .await
-                    .0
+                    .layer_map()
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -421,8 +436,8 @@ impl Tenant {
         if !picked_local {
             save_metadata(
                 self.conf,
-                timeline_id,
-                tenant_id,
+                &tenant_id,
+                &timeline_id,
                 up_to_date_metadata,
                 first_save,
             )
@@ -451,7 +466,7 @@ impl Tenant {
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let tenant_conf =
-            Self::load_tenant_config(conf, tenant_id).context("load tenant config")?;
+            Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -560,7 +575,7 @@ impl Tenant {
                 .map(move |res| {
                     res.with_context(|| format!("download index part for timeline {timeline_id}"))
                 })
-                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+                .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
         // Wait for all the download tasks to complete & collect results.
@@ -646,7 +661,7 @@ impl Tenant {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
-        tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
+        tokio::fs::create_dir_all(self.conf.timeline_path(&self.tenant_id, &timeline_id))
             .await
             .context("Failed to create new timeline directory")?;
 
@@ -724,7 +739,7 @@ impl Tenant {
     ) -> Arc<Tenant> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
+        let tenant_conf = match Self::load_tenant_config(conf, &tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
                 error!("load tenant config failed: {:?}", e);
@@ -835,7 +850,7 @@ impl Tenant {
                             timeline_uninit_mark_file.display()
                         )
                     })?;
-                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+                let timeline_dir = self.conf.timeline_path(&self.tenant_id, &timeline_id);
                 if let Err(e) =
                     remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                 {
@@ -880,7 +895,7 @@ impl Tenant {
                 if let Ok(timeline_id) =
                     file_name.to_str().unwrap_or_default().parse::<TimelineId>()
                 {
-                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+                    let metadata = load_metadata(self.conf, &self.tenant_id, &timeline_id)
                         .context("failed to load metadata")?;
                     timelines_to_load.insert(timeline_id, metadata);
                 } else {
@@ -1153,7 +1168,7 @@ impl Tenant {
         )
     }
 
-    /// Helper for unit tests to create an emtpy timeline.
+    /// Helper for unit tests to create an empty timeline.
     ///
     /// The timeline is has state value `Active` but its background loops are not running.
     // This makes the various functions which anyhow::ensure! for Active state work in tests.
@@ -1349,7 +1364,7 @@ impl Tenant {
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
                 .compact(ctx)
-                .instrument(info_span!("compact_timeline", timeline = %timeline_id))
+                .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
 
@@ -1440,12 +1455,12 @@ impl Tenant {
             let layer_removal_guard = timeline.layer_removal_cs.lock().await;
             info!("got layer_removal_cs.lock(), deleting layer files");
 
-            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            // NB: remote_timeline_client upload tasks that reference these layers have been cancelled
             //     by the caller.
 
             let local_timeline_directory = self
                 .conf
-                .timeline_path(&timeline.timeline_id, &self.tenant_id);
+                .timeline_path(&self.tenant_id, &timeline.timeline_id);
 
             fail::fail_point!("timeline-delete-before-rm", |_| {
                 Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
@@ -1498,20 +1513,7 @@ impl Tenant {
             remote_client.delete_all().await.context("delete_all")?
         };
 
-        // Have a failpoint that can use the `pause` failpoint action.
-        // We don't want to block the executor thread, hence, spawn_blocking + await.
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint in_progress_delete");
-                    fail::fail_point!("in_progress_delete");
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
+        pausable_failpoint!("in_progress_delete");
 
         {
             // Remove the timeline from the map.
@@ -1715,7 +1717,7 @@ impl Tenant {
         self.state.send_modify(|current_state| {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
-                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
+                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
                 TenantState::Loading => {
@@ -1779,7 +1781,16 @@ impl Tenant {
     /// - detach + ignore (freeze_and_flush == false)
     ///
     /// This will attempt to shutdown even if tenant is broken.
-    pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+    ///
+    /// `shutdown_progress` is a [`completion::Barrier`] for the shutdown initiated by this call.
+    /// If the tenant is already shutting down, we return a clone of the first shutdown call's
+    /// `Barrier` as an `Err`. This not-first caller can use the returned barrier to join with
+    /// the ongoing shutdown.
+    async fn shutdown(
+        &self,
+        shutdown_progress: completion::Barrier,
+        freeze_and_flush: bool,
+    ) -> Result<(), completion::Barrier> {
         span::debug_assert_current_span_has_tenant_id();
         // Set tenant (and its timlines) to Stoppping state.
         //
@@ -1798,12 +1809,16 @@ impl Tenant {
         // But the tenant background loops are joined-on in our caller.
         // It's mesed up.
         // we just ignore the failure to stop
-        match self.set_stopping().await {
+
+        match self.set_stopping(shutdown_progress).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
             }
-            Err(SetStoppingError::AlreadyStopping) => return Err(ShutdownError::AlreadyStopping),
+            Err(SetStoppingError::AlreadyStopping(other)) => {
+                // give caller the option to wait for this this shutdown
+                return Err(other);
+            }
         };
 
         if freeze_and_flush {
@@ -1835,7 +1850,7 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
@@ -1847,7 +1862,7 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
@@ -1862,7 +1877,7 @@ impl Tenant {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
-                *current_state = TenantState::Stopping;
+                *current_state = TenantState::Stopping { progress };
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
                 true
@@ -1874,9 +1889,9 @@ impl Tenant {
                 err = Some(SetStoppingError::Broken);
                 false
             }
-            TenantState::Stopping => {
+            TenantState::Stopping { progress } => {
                 info!("Tenant is already in Stopping state");
-                err = Some(SetStoppingError::AlreadyStopping);
+                err = Some(SetStoppingError::AlreadyStopping(progress.clone()));
                 false
             }
         });
@@ -1920,7 +1935,7 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
@@ -1943,7 +1958,7 @@ impl Tenant {
                     warn!("Tenant is already in Broken state");
                 }
                 // This is the only "expected" path, any other path is a bug.
-                TenantState::Stopping => {
+                TenantState::Stopping { .. } => {
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
@@ -1976,7 +1991,7 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken { .. } | TenantState::Stopping => {
+                TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
                     return Err(WaitToBecomeActiveError::WillNotBecomeActive {
                         tenant_id: self.tenant_id,
@@ -2226,7 +2241,7 @@ impl Tenant {
     /// Locate and load config
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
     ) -> anyhow::Result<TenantConfOpt> {
         let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
@@ -2813,7 +2828,7 @@ impl Tenant {
         timeline_struct.init_empty_layer_map(start_lsn);
 
         if let Err(e) =
-            self.create_timeline_files(&uninit_mark.timeline_path, new_timeline_id, new_metadata)
+            self.create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
         {
             error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
@@ -2832,7 +2847,7 @@ impl Tenant {
     fn create_timeline_files(
         &self,
         timeline_path: &Path,
-        new_timeline_id: TimelineId,
+        new_timeline_id: &TimelineId,
         new_metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
@@ -2843,8 +2858,8 @@ impl Tenant {
 
         save_metadata(
             self.conf,
+            &self.tenant_id,
             new_timeline_id,
-            self.tenant_id,
             new_metadata,
             true,
         )
@@ -2867,7 +2882,7 @@ impl Tenant {
             timelines.get(&timeline_id).is_none(),
             "Timeline {tenant_id}/{timeline_id} already exists in pageserver's memory"
         );
-        let timeline_path = self.conf.timeline_path(&timeline_id, &tenant_id);
+        let timeline_path = self.conf.timeline_path(&tenant_id, &timeline_id);
         anyhow::ensure!(
             !timeline_path.exists(),
             "Timeline {} already exists, cannot create its uninit mark file",
@@ -2998,10 +3013,10 @@ pub(crate) enum CreateTenantFilesMode {
 pub(crate) fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
-    let target_tenant_directory = conf.tenant_path(&tenant_id);
+    let target_tenant_directory = conf.tenant_path(tenant_id);
     anyhow::ensure!(
         !target_tenant_directory
             .try_exists()
@@ -3052,7 +3067,7 @@ pub(crate) fn create_tenant_files(
 fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
     target_tenant_directory: &Path,
@@ -3076,7 +3091,7 @@ fn try_create_target_tenant_dir(
     }
 
     let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(&tenant_id),
+        &conf.timelines_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
@@ -3088,7 +3103,7 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(&tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
@@ -3344,14 +3359,18 @@ pub mod harness {
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
-                self.try_load(&ctx)
+                self.try_load(&ctx, None)
                     .await
                     .expect("failed to load test tenant"),
                 ctx,
             )
         }
 
-        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+        pub async fn try_load(
+            &self,
+            ctx: &RequestContext,
+            remote_storage: Option<remote_storage::GenericRemoteStorage>,
+        ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Arc::new(Tenant::new(
@@ -3360,7 +3379,7 @@ pub mod harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
-                None,
+                remote_storage,
             ));
             tenant
                 .load(None, ctx)
@@ -3376,7 +3395,7 @@ pub mod harness {
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
-            self.conf.timeline_path(timeline_id, &self.tenant_id)
+            self.conf.timeline_path(&self.tenant_id, timeline_id)
         }
     }
 
@@ -3898,7 +3917,11 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness.try_load(&ctx).await.err().expect("should fail");
+        let err = harness
+            .try_load(&ctx, None)
+            .await
+            .err()
+            .expect("should fail");
         // get all the stack with all .context, not tonly the last one
         let message = format!("{err:#}");
         let expected = "Failed to parse metadata bytes from path";
@@ -4329,13 +4352,13 @@ mod tests {
         // assert freeze_and_flush exercised the initdb optimization
         {
             let state = tline.flush_loop_state.lock().unwrap();
-            let
-                timeline::FlushLoopState::Running {
-                    expect_initdb_optimization,
-                    initdb_optimization_count,
-                } = *state else {
-                    panic!("unexpected state: {:?}", *state);
-                };
+            let timeline::FlushLoopState::Running {
+                expect_initdb_optimization,
+                initdb_optimization_count,
+            } = *state
+            else {
+                panic!("unexpected state: {:?}", *state);
+            };
             assert!(expect_initdb_optimization);
             assert!(initdb_optimization_count > 0);
         }
@@ -4370,7 +4393,7 @@ mod tests {
 
         assert!(!harness
             .conf
-            .timeline_path(&TIMELINE_ID, &tenant.tenant_id)
+            .timeline_path(&tenant.tenant_id, &TIMELINE_ID)
             .exists());
 
         assert!(!harness

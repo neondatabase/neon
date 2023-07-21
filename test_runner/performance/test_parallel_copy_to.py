@@ -6,7 +6,7 @@ from fixtures.neon_fixtures import PgProtocol
 
 
 async def repeat_bytes(buf, repetitions: int):
-    for i in range(repetitions):
+    for _ in range(repetitions):
         yield buf
 
 

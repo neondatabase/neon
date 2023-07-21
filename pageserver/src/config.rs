@@ -171,11 +171,13 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
+    /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
     /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
     /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
     /// See the comment in `eviction_task` for details.
+    ///
+    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
     pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
@@ -570,21 +572,21 @@ impl PageServerConf {
             .join(TENANT_ATTACHING_MARKER_FILENAME)
     }
 
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: TenantId) -> PathBuf {
-        self.tenant_path(&tenant_id).join(IGNORED_TENANT_FILE_NAME)
+    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn tenant_config_path(&self, tenant_id: TenantId) -> PathBuf {
-        self.tenant_path(&tenant_id).join(TENANT_CONFIG_NAME)
+    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> PathBuf {
+        self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
     }
 
     pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, timeline_id: &TimelineId, tenant_id: &TenantId) -> PathBuf {
+    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
@@ -594,7 +596,7 @@ impl PageServerConf {
         timeline_id: TimelineId,
     ) -> PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&timeline_id, &tenant_id),
+            self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
@@ -617,8 +619,8 @@ impl PageServerConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, timeline_id: TimelineId, tenant_id: TenantId) -> PathBuf {
-        self.timeline_path(&timeline_id, &tenant_id)
+    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
+        self.timeline_path(tenant_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 
@@ -993,6 +995,8 @@ impl ConfigurableSemaphore {
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
     /// feature such as [`Tenant::gather_size_inputs`]. Otherwise any semaphore using future will
     /// behave like [`futures::future::pending`], just waiting until new permits are added.
+    ///
+    /// [`Tenant::gather_size_inputs`]: crate::tenant::Tenant::gather_size_inputs
     pub fn new(initial_permits: NonZeroUsize) -> Self {
         ConfigurableSemaphore {
             initial_permits,

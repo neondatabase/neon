@@ -1,4 +1,4 @@
-comment = 'hnsw index'
+comment = '** Deprecated ** Please use pg_embedding instead'
 default_version = '0.1.0'
 module_pathname = '$libdir/hnsw'
 relocatable = true

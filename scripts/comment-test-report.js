@@ -205,28 +205,24 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     const {reportUrl, reportJsonUrl} = report
 
-    if (!reportUrl || !reportJsonUrl) {
+    if (reportUrl && reportJsonUrl) {
+        try {
+            const parsed = await parseReportJson({ reportJsonUrl, fetch })
+            commentBody += await reportSummary({ ...parsed, reportUrl })
+        } catch (error) {
+            commentBody += `### [full report](${reportUrl})\n___\n`
+            commentBody += `#### Failed to create a summary for the test run: \n`
+            commentBody += "```\n"
+            commentBody += `${error.stack}\n`
+            commentBody += "```\n"
+            commentBody += "\nTo reproduce and debug the error locally run:\n"
+            commentBody += "```\n"
+            commentBody += `scripts/comment-test-report.js ${reportJsonUrl}`
+            commentBody += "\n```\n"
+        }
+    } else {
         commentBody += `#### No tests were run or test report is not available\n`
-        commentBody += autoupdateNotice
-        return
     }
-
-    try {
-        const parsed = await parseReportJson({ reportJsonUrl, fetch })
-        commentBody += await reportSummary({ ...parsed, reportUrl })
-    } catch (error) {
-        commentBody += `### [full report](${reportUrl})\n___\n`
-        commentBody += `#### Failed to create a summary for the test run: \n`
-        commentBody += "```\n"
-        commentBody += `${error.stack}\n`
-        commentBody += "```\n"
-        commentBody += "\nTo reproduce and debug the error locally run:\n"
-        commentBody += "```\n"
-        commentBody += `scripts/comment-test-report.js ${reportJsonUrl}`
-        commentBody += "\n```\n"
-    }
-
-    commentBody += autoupdateNotice
 
     let createCommentFn, listCommentsFn, updateCommentFn, issueNumberOrSha
     if (isPullRequest) {

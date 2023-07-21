@@ -4,9 +4,9 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
-use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -20,12 +20,12 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
-/// [`crate::storage_layer::DeltaLayer`].
+/// [`DeltaLayer`](super::DeltaLayer).
 ///
 /// RemoteLayer might be downloaded on-demand during operations which are
 /// allowed download remote layers and during which, it gets replaced with a
@@ -50,6 +50,8 @@ pub struct RemoteLayer {
     /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
     /// a possible fast loop between `Timeline::get_reconstruct_data` and
     /// `Timeline::download_remote_layer`, which also logs.
+    ///
+    /// [`ongoing_download`]: Self::ongoing_download
     pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
@@ -115,11 +117,13 @@ impl std::fmt::Display for RemoteLayer {
     }
 }
 
-impl PersistentLayer for RemoteLayer {
+impl AsLayerDesc for RemoteLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
     }
+}
 
+impl PersistentLayer for RemoteLayer {
     fn local_path(&self) -> Option<PathBuf> {
         None
     }
@@ -222,7 +226,7 @@ impl RemoteLayer {
     /// Create a Layer struct representing this layer, after it has been downloaded.
     pub fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_>,
+        layer_map_lock_held_witness: &LayerManager,
         conf: &'static PageServerConf,
         file_size: u64,
     ) -> Arc<dyn PersistentLayer> {

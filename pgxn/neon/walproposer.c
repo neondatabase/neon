@@ -2231,6 +2231,18 @@ HandleSafekeeperResponse(void)
 		if (n_synced >= quorum)
 		{
 			/* All safekeepers synced! */
+			
+			/*
+			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
+			 * This helps to finish next sync-safekeepers eailier, by skipping recovery
+			 * step.
+			 * 
+			 * We don't need to wait for response because it doesn't affect correctness,
+			 * and TCP should be able to deliver the message to safekeepers in case of
+			 * network working properly.
+			 */
+			BroadcastAppendRequest();
+
 			fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
 			exit(0);
 		}

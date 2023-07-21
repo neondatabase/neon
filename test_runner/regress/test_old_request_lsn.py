@@ -58,12 +58,12 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
 
     # Make a lot of updates on a single row, generating a lot of WAL. Trigger
     # garbage collections so that the page server will remove old page versions.
-    for i in range(10):
+    for _ in range(10):
         pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
         gc_result = pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
         print_gc_result(gc_result)
 
-        for j in range(100):
+        for _ in range(100):
             cur.execute("UPDATE foo SET val = val + 1 WHERE id = 1;")
 
     # All (or at least most of) the updates should've been on the same page, so

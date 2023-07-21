@@ -28,7 +28,7 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     endpoint = env.endpoints.create_start("test_layer_map", tenant_id=tenant)
     cur = endpoint.connect().cursor()
     cur.execute("create table t(x integer)")
-    for i in range(n_iters):
+    for _ in range(n_iters):
         cur.execute(f"insert into t values (generate_series(1,{n_records}))")
         time.sleep(1)
 

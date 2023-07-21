@@ -7,14 +7,18 @@
 //! must be page images or WAL records with the 'will_init' flag set, so that
 //! they can be replayed without referring to an older page version.
 //!
-//! The delta files are stored in timelines/<timeline_id> directory.  Currently,
+//! The delta files are stored in `timelines/<timeline_id>` directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
+//! ```text
 //!    <key start>-<key end>__<start LSN>-<end LSN>
+//! ```
 //!
 //! For example:
 //!
+//! ```text
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
+//! ```
 //!
 //! Every delta file consists of three parts: "summary", "index", and
 //! "values". The summary is a fixed size header at the beginning of the file,
@@ -47,6 +51,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::*;
 
 use utils::{
@@ -56,8 +61,8 @@ use utils::{
 };
 
 use super::{
-    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    PathOrConf, PersistentLayerDesc,
+    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
+    LayerKeyIter, PathOrConf, PersistentLayerDesc,
 };
 
 ///
@@ -403,9 +408,15 @@ impl std::fmt::Display for DeltaLayer {
     }
 }
 
-impl PersistentLayer for DeltaLayer {
+impl AsLayerDesc for DeltaLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
+    }
+}
+
+impl PersistentLayer for DeltaLayer {
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        Some(self)
     }
 
     fn local_path(&self) -> Option<PathBuf> {
@@ -459,22 +470,22 @@ impl PersistentLayer for DeltaLayer {
 impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
         fname: &DeltaFileName,
     ) -> PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.clone(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
+                .timeline_path(tenant_id, timeline_id)
                 .join(fname.to_string()),
         }
     }
 
     fn temp_path_for(
         conf: &PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
     ) -> PathBuf {
@@ -484,7 +495,7 @@ impl DeltaLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id).join(format!(
+        conf.timeline_path(tenant_id, timeline_id).join(format!(
             "{}-XXX__{:016X}-{:016X}.{}.{}",
             key_start,
             u64::from(lsn_range.start),
@@ -606,8 +617,8 @@ impl DeltaLayer {
     pub fn path(&self) -> PathBuf {
         Self::path_for(
             &self.path_or_conf,
-            self.desc.timeline_id,
-            self.desc.tenant_id,
+            &self.desc.tenant_id,
+            &self.desc.timeline_id,
             &self.layer_name(),
         )
     }
@@ -655,7 +666,7 @@ impl DeltaLayerWriterInner {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = DeltaLayer::temp_path_for(conf, timeline_id, tenant_id, key_start, &lsn_range);
+        let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
@@ -770,8 +781,8 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let final_path = DeltaLayer::path_for(
             &PathOrConf::Conf(self.conf),
-            self.timeline_id,
-            self.tenant_id,
+            &self.tenant_id,
+            &self.timeline_id,
             &DeltaFileName {
                 key_range: self.key_start..key_end,
                 lsn_range: self.lsn_range,
@@ -798,7 +809,7 @@ impl DeltaLayerWriterInner {
 ///
 /// # Note
 ///
-/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// As described in <https://github.com/neondatabase/neon/issues/2650>, it's
 /// possible for the writer to drop before `finish` is actually called. So this
 /// could lead to odd temporary files in the directory, exhausting file system.
 /// This structure wraps `DeltaLayerWriterInner` and also contains `Drop`

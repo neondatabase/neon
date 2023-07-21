@@ -385,7 +385,7 @@ pub static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-/// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
+/// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {
     data_source: &'static str,
@@ -541,6 +541,17 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// keep in sync with control plane Go code so that we can validate
+// compute's basebackup_ms metric with our perspective in the context of SLI/SLO.
+static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
+    // Go code uses milliseconds. Variable is called `computeStartupBuckets`
+    [
+        5, 10, 20, 30, 50, 70, 100, 120, 150, 200, 250, 300, 350, 400, 450, 500, 600, 800, 1000,
+        1500, 2000, 2500, 3000, 5000, 10000, 20000, 40000, 60000,
+    ]
+    .map(|ms| (ms as f64) / 1000.0)
+});
+
 pub struct BasebackupQueryTime(HistogramVec);
 pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
     BasebackupQueryTime({
@@ -548,7 +559,7 @@ pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
             "pageserver_basebackup_query_seconds",
             "Histogram of basebackup queries durations, by result type",
             &["result"],
-            CRITICAL_OP_BUCKETS.into(),
+            COMPUTE_STARTUP_BUCKETS.to_vec(),
         )
         .expect("failed to define a metric")
     })
@@ -818,7 +829,7 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Similar to [`prometheus::HistogramTimer`] but does not record on drop.
+/// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
@@ -876,7 +887,7 @@ impl StorageTimeMetrics {
 
     /// Starts timing a new operation.
     ///
-    /// Note: unlike [`prometheus::HistogramTimer`] the returned timer does not record on drop.
+    /// Note: unlike `prometheus::HistogramTimer` the returned timer does not record on drop.
     pub fn start_timer(&self) -> StorageTimeMetricsTimer {
         StorageTimeMetricsTimer::new(self.clone())
     }
@@ -1256,7 +1267,7 @@ impl RemoteTimelineClientMetrics {
     /// Update the metrics that change when a call to the remote timeline client instance starts.
     ///
     /// Drop the returned guard object once the operation is finished to updates corresponding metrics that track completions.
-    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`] if that
+    /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`](Self::call_end) if that
     /// is more suitable.
     /// Never do both.
     pub(crate) fn call_begin(
@@ -1289,7 +1300,7 @@ impl RemoteTimelineClientMetrics {
 
     /// Manually udpate the metrics that track completions, instead of using the guard object.
     /// Using the guard object is generally preferable.
-    /// See [`call_begin`] for more context.
+    /// See [`call_begin`](Self::call_begin) for more context.
     pub(crate) fn call_end(
         &self,
         file_kind: &RemoteOpFileKind,

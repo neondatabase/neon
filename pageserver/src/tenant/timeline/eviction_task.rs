@@ -30,6 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
 };
@@ -100,11 +101,11 @@ impl Timeline {
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            break;
-                        }
-                        _ = tokio::time::sleep_until(sleep_until) => { }
+                    if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+                        .await
+                        .is_ok()
+                    {
+                        break;
                     }
                 }
             }
@@ -198,10 +199,10 @@ impl Timeline {
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
             let guard = self.layers.read().await;
-            let (layers, mapping) = &*guard;
+            let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
-                let hist_layer = mapping.get_from_desc(&hist_layer);
+                let hist_layer = guard.get_from_desc(&hist_layer);
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
@@ -270,20 +271,22 @@ impl Timeline {
                 None => {
                     stats.skipped_for_shutdown += 1;
                 }
-                Some(Ok(true)) => {
-                    debug!("evicted layer {l:?}");
+                Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Ok(false)) => {
-                    debug!("layer is not evictable: {l:?}");
+                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
                     stats.not_evictable += 1;
                 }
-                Some(Err(e)) => {
-                    // This variant is the case where an unexpected error happened during eviction.
-                    // Expected errors that result in non-eviction are `Some(Ok(false))`.
-                    // So, dump Debug here to gather as much info as possible in this rare case.
-                    warn!("failed to evict layer {l:?}: {e:?}");
-                    stats.errors += 1;
+                Some(Err(EvictionError::FileNotFound)) => {
+                    // compaction/gc removed the file while we were waiting on layer_removal_cs
+                    stats.not_evictable += 1;
+                }
+                Some(Err(
+                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
+                )) => {
+                    let e = utils::error::report_compact_sources(&e);
+                    warn!(layer = %l, "failed to evict layer: {e}");
+                    stats.not_evictable += 1;
                 }
             }
         }
