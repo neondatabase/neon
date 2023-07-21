@@ -197,9 +197,7 @@ def test_ondemand_download_timetravel(
         """
         )
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-    # wait until pageserver receives that data
     wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
-    # run checkpoint manually to be sure that data landed in remote storage
     client.timeline_checkpoint(tenant_id, timeline_id)
     lsns.append((0, current_lsn))
 
@@ -209,16 +207,12 @@ def test_ondemand_download_timetravel(
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
         lsns.append((checkpoint_number, current_lsn))
 
-        # wait until pageserver receives that data
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
-        # run checkpoint manually to be sure that data landed in remote storage
         client.timeline_checkpoint(tenant_id, timeline_id)
 
-    ##### Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
 
-    # wait until pageserver has successfully uploaded all the data to remote storage
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 
     def get_api_current_physical_size():
@@ -266,7 +260,6 @@ def test_ondemand_download_timetravel(
             branch_name="main", endpoint_id=f"ep-old_lsn_{checkpoint_number}", lsn=lsn
         )
         with endpoint_old.cursor() as cur:
-            # assert query_scalar(cur, f"select count(*) from testtab where checkpoint_number={checkpoint_number}") == 100000
             assert (
                 query_scalar(
                     cur,
