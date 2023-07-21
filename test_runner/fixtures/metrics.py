@@ -48,7 +48,6 @@ def histogram(prefix_without_trailing_underscore: str) -> List[str]:
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_timeline_client_calls_unfinished",
     *[f"pageserver_remote_timeline_client_calls_started_{x}" for x in ["bucket", "count", "sum"]],
-    *[f"pageserver_remote_operation_seconds_{x}" for x in ["bucket", "count", "sum"]],
     "pageserver_remote_physical_size",
     "pageserver_remote_timeline_client_bytes_started_total",
     "pageserver_remote_timeline_client_bytes_finished_total",
@@ -75,6 +74,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_read_num_fs_layers"),
     *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
     *histogram("pageserver_wait_lsn_seconds"),
+    *histogram("pageserver_remote_operation_seconds"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
