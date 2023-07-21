@@ -95,7 +95,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
+async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let summary_blk = file.read_blk(0)?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -129,7 +129,7 @@ fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     Ok(holes)
 }
 
-pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
+pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
 
@@ -160,7 +160,7 @@ pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {
-                        layer_file.holes = get_holes(&layer.path(), max_holes)?;
+                        layer_file.holes = get_holes(&layer.path(), max_holes).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

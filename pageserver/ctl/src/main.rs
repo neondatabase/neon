@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             draw_timeline_dir::main()?;
         }
         Commands::AnalyzeLayerMap(cmd) => {
-            layer_map_analyzer::main(&cmd)?;
+            layer_map_analyzer::main(&cmd).await?;
         }
         Commands::PrintLayerFile(cmd) => {
             if let Err(e) = read_pg_control_file(&cmd.path) {
