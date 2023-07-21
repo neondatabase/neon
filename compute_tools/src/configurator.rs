@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::Result;
 use tracing::{error, info, instrument};
 
 use compute_api::responses::ComputeStatus;
@@ -42,9 +41,7 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     }
 }
 
-pub fn launch_configurator(
-    compute: &Arc<ComputeNode>,
-) -> Result<thread::JoinHandle<()>, std::io::Error> {
+pub fn launch_configurator(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
     let compute = Arc::clone(compute);
 
     thread::Builder::new()
@@ -53,4 +50,5 @@ pub fn launch_configurator(
             configurator_main_loop(&compute);
             info!("configurator thread is exited");
         })
+        .expect("cannot launch configurator thread")
 }
