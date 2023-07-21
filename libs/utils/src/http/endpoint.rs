@@ -201,27 +201,29 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
             fn flush0(&mut self) -> std::io::Result<usize> {
                 let n = self.buffer.len();
-                if n > 0 {
-                    let ready = self.buffer.split().freeze();
-                    tracing::trace!(n = ready.len(), "flushing");
-
-                    // not ideal to call from blocking code to block_on, but we are sure that this
-                    // operation does not spawn_blocking other tasks
-                    let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
-                        self.tx.send(Ok(ready)).await.map_err(|_| ())?;
-
-                        // throttle sending to allow reuse of our buffer in `write`.
-                        self.tx.reserve().await.map_err(|_| ())?;
-
-                        // now the response task has picked up the buffer and hopefully started
-                        // sending it to the client.
-                        Ok(())
-                    });
-                    if res.is_err() {
-                        return Err(std::io::ErrorKind::BrokenPipe.into());
-                    }
-                    self.written += n;
+                if n == 0 {
+                    return Ok(0);
                 }
+
+                tracing::trace!(n, "flushing");
+                let ready = self.buffer.split().freeze();
+
+                // not ideal to call from blocking code to block_on, but we are sure that this
+                // operation does not spawn_blocking other tasks
+                let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
+                    self.tx.send(Ok(ready)).await.map_err(|_| ())?;
+
+                    // throttle sending to allow reuse of our buffer in `write`.
+                    self.tx.reserve().await.map_err(|_| ())?;
+
+                    // now the response task has picked up the buffer and hopefully started
+                    // sending it to the client.
+                    Ok(())
+                });
+                if res.is_err() {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                self.written += n;
                 Ok(n)
             }
 
