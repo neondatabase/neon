@@ -397,8 +397,8 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-    assert timeline_id is not None
+    assert env.initial_timeline is not None
+    timeline_id: TimelineId = env.initial_timeline
 
     client = env.pageserver.http_client()
 
@@ -421,6 +421,7 @@ def test_remote_timeline_client_calls_started_metric(
                 "VACUUM foo",
             ]
         )
+        assert timeline_id is not None
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     calls_started: Dict[Tuple[str, str], List[int]] = {
@@ -430,6 +431,7 @@ def test_remote_timeline_client_calls_started_metric(
     }
 
     def fetch_calls_started():
+        assert timeline_id is not None
         for (file_kind, op_kind), observations in calls_started.items():
             val = client.get_remote_timeline_client_metric(
                 "pageserver_remote_timeline_client_calls_started_count",
@@ -534,8 +536,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         }
     )
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-    assert timeline_id is not None
+    assert env.initial_timeline is not None
+    timeline_id: TimelineId = env.initial_timeline
 
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
@@ -801,8 +803,8 @@ def test_compaction_delete_before_upload(
     )
 
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-    assert timeline_id is not None
+    assert env.initial_timeline is not None
+    timeline_id: TimelineId = env.initial_timeline
 
     client = env.pageserver.http_client()
 
