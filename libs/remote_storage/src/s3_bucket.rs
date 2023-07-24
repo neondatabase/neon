@@ -427,10 +427,20 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        // if prefix is not none then download file `prefix/from`
+        // if prefix is none then download file `from`
+        let query_key = match &self.prefix_in_bucket {
+            Some(_) => self.relative_path_to_s3_object(from),
+            None => from
+                .get_path()
+                .to_str()
+                .expect("bad object name")
+                .to_string(),
+        };
         self.download_object(GetObjectRequest {
             bucket: self.bucket_name.clone(),
-            key: self.relative_path_to_s3_object(from),
-            ..GetObjectRequest::default()
+            key: query_key,
+            range: None,
         })
         .await
     }
