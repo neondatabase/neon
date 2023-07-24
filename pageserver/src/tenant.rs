@@ -2216,7 +2216,10 @@ impl Tenant {
                 current.inc();
 
                 if rx.changed().await.is_err() {
-                    // tenant has been dropped
+                    // tenant has been dropped; decrement the counter because a tenant with that
+                    // state is no longer in tenant map, but allow any broken set item to exist
+                    // still.
+                    current.dec();
                     break;
                 }
 
