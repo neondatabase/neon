@@ -27,7 +27,7 @@ for extension in os.listdir("."):
                 control_data[control_file] = f.read()
         ext_index[extension] = {
             "control_data": control_data,
-            "archive_path": f"{build_numbers[extension]}/{pg_version}/{extension}/{extension}.tar.zstd",
+            "archive_path": f"{build_numbers[extension]}/{pg_version}/extensions/{extension}.tar.zstd",
         }
 
 os.chdir("..")

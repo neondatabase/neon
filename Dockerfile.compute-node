@@ -113,7 +113,7 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
     find /usr/local/pgsql -type f >> /after.txt && \
     mkdir -p /extensions/postgis && cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/postgis/postgis.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/postgis.tar.zstd -T -
 
 #########################################################################################
 #
@@ -442,7 +442,7 @@ RUN apt-get update && \
     find /usr/local/pgsql -type f > /after.txt && \
     mkdir -p /extensions/kq_imcx && cp /usr/local/pgsql/share/extension/kq_imcx.control /extensions/kq_imcx && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/kq_imcx/kq_imcx.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/kq_imcx.tar.zstd -T -
 
 #########################################################################################
 #
@@ -581,7 +581,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
     find /usr/local/pgsql -type f  > /after.txt && \
     mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/anon/anon.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/anon.tar.zstd -T -
 
 #########################################################################################
 #
@@ -792,7 +792,7 @@ RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG}
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
 # As for now, it's only a couple for testing purposses
-COPY --from=generate-ext-index /extensions/ /extensions/
+COPY --from=generate-ext-index /extensions/*.tar.zstd /extensions/
 COPY --from=generate-ext-index /ext_index.json /ext_index.json
 
 #########################################################################################
