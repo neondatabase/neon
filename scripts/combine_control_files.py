@@ -13,7 +13,7 @@ build_numbers = {}
 with open("build_numbers.txt", "r") as f:
     for line in f.readlines():
         ext_name, build_num = line.split(" ")
-        build_numbers[ext_name] = build_num
+        build_numbers[ext_name] = build_num.strip()
 
 ext_index = {}
 os.chdir("extensions")
@@ -27,12 +27,12 @@ for extension in os.listdir("."):
                 control_data[control_file] = f.read()
         ext_index[extension] = {
             "control_data": control_data,
-            "archive_path": f"{build_numbers[extension]}/{pg_version}/{extension}.tar.zst",
+            "archive_path": f"{build_numbers[extension]}/{pg_version}/{extension}.tar.zstd",
         }
 
         # TODO: uncomment this to enable de-duplication:
         #  if build_numbers[extension] != build_tag:
         #      shutil.rmtree(extension)
-
+os.chdir("..")
 with open("ext_index.json", "w") as f:
     json.dump(ext_index, f)
