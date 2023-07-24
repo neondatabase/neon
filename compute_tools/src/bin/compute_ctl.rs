@@ -58,7 +58,9 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
-const BUILD_TAG_DEFAULT: &str = "111"; // TODO: change back to local; I need 111 for my test
+// this is an arbitrary build tag. Fine as a default / for testing purposes
+// in-case of not-set environment var
+const BUILD_TAG_DEFAULT: &str = "5648391853";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;

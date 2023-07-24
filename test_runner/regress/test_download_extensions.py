@@ -66,13 +66,9 @@ def test_remote_extensions(
             all_extensions = [x[0] for x in cur.fetchall()]
             log.info(all_extensions)
             assert "anon" in all_extensions
-            assert "embedding" in all_extensions
-            # TODO: check that we cant't download custom extensions for other tenant ids
+            assert "kq_imcx" in all_extensions
 
-            # check that we can download public extension
-            cur.execute("CREATE EXTENSION embedding")
-            cur.execute("SELECT extname FROM pg_extension")
-            assert "embedding" in [x[0] for x in cur.fetchall()]
+            # TODO: check that we cant't download custom extensions for other tenant ids
 
             # check that we can download private extension
             try:

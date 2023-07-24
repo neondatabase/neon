@@ -499,7 +499,7 @@ impl Endpoint {
             //
             // The proper way to implement this is to pass the custom extension
             // in spec, but we don't have a way to do that yet in the python tests.
-            custom_extensions: Some(vec!["embedding".into(), "anon".into()]),
+            custom_extensions: Some(vec!["anon".into(), "kq_imcx".into()]),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

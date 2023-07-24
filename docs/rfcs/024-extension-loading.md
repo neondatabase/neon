@@ -140,6 +140,7 @@ popular extensions.
 ## Extension Storage implementation
 
 The layout of the S3 bucket is as follows:
+```
 5615610098 // this is an extension build number
 ├── v14
 │   ├── extensions
@@ -169,6 +170,7 @@ The layout of the S3 bucket is as follows:
     ├── extensions
     │   └── embedding.tar.zst
     └── ext_index.json
+```
 
 Note that build number cannot be part of prefix because we might need extensions
 from other build numbers.
@@ -180,6 +182,7 @@ We only upload a new one if it is updated.
 *access* is controlled by spec
 
 More specifically, here is an example ext_index.json
+```
 {
   "embedding": {
     "control_data": {
@@ -194,6 +197,7 @@ More specifically, here is an example ext_index.json
     "archive_path": "5615261079/v15/extensions/anon.tar.zst"
   }
 }
+```
 
 ### How to add new extension to the Extension Storage?
 

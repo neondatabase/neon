@@ -117,7 +117,7 @@ pub async fn get_available_extensions(
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download ext_index.json from: {:?}", &index_path);
 
-    let mut download = remote_storage.download(&index_path).await?;
+    let mut download = better_download(remote_storage, &index_path).await?;
     let mut ext_idx_buffer = Vec::new();
     download
         .download_stream
@@ -170,7 +170,7 @@ pub async fn download_extension(
     pgbin: &str,
 ) -> Result<()> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
-    let mut download = remote_storage.download(ext_path).await?;
+    let mut download = better_download(remote_storage, ext_path).await?;
     let mut download_buffer = Vec::new();
     download
         .download_stream
@@ -189,11 +189,11 @@ pub async fn download_extension(
     info!("Download + unzip {:?} completed successfully", &ext_path);
 
     let sharedir_paths = (
-        format!("{unzip_dest}/{ext_name}/share/extension"),
+        unzip_dest.to_string() + "/share/extension",
         Path::new(&get_pg_config("--sharedir", pgbin)).join("extension"),
     );
     let libdir_paths = (
-        format!("{unzip_dest}/{ext_name}/lib"),
+        unzip_dest.to_string() + "/lib",
         Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql"),
     );
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
@@ -221,17 +221,14 @@ pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRem
         .as_str()
         .context("config parse error")?;
     let remote_ext_endpoint = remote_ext_config["endpoint"].as_str();
-    let remote_ext_prefix = remote_ext_config["prefix"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let remote_ext_prefix = remote_ext_config["prefix"].as_str();
 
     // If needed, it is easy to allow modification of other parameters
     // however, default values should be fine for now
     let config = S3Config {
         bucket_name: remote_ext_bucket.to_string(),
         bucket_region: remote_ext_region.to_string(),
-        prefix_in_bucket: Some(remote_ext_prefix),
+        prefix_in_bucket: remote_ext_prefix.map(str::to_string),
         endpoint: remote_ext_endpoint.map(|x| x.to_string()),
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
