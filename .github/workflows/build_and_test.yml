@@ -979,10 +979,6 @@ jobs:
           docker cp ${{ steps.create-container.outputs.EID }}:/extensions/ ./extensions-to-upload/
           docker cp ${{ steps.create-container.outputs.EID }}:/ext_index.json ./extensions-to-upload/
 
-          # Remove control files, they'll be replaced by an index file
-          # TODO: this doesn't actually work because control files are in subdirectories
-          rm -f ./extensions-to-upload/extensions/*.control
-
       - name: Upload postgres-extensions to S3
         run: |
           for BUCKET in $(echo ${S3_BUCKETS:-[]} | jq --raw-output '.[]'); do
