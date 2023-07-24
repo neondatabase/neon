@@ -201,7 +201,12 @@ async fn ws_handler(
             .await;
         let status_code = match result {
             Ok(_) => StatusCode::OK,
-            Err(_) => StatusCode::BAD_REQUEST,
+            Err(ref e) => {
+                if cfg!(debug_assertions) {
+                    error!("error in sql-over-http: {}, backtrace: {}", e, e.backtrace());
+                }
+                StatusCode::BAD_REQUEST
+            }
         };
         let json = match result {
             Ok(r) => r,
