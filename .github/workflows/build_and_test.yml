@@ -977,13 +977,13 @@ jobs:
           mkdir -p extensions-to-upload
 
           docker cp ${{ steps.create-container.outputs.EID }}:/extensions/ ./extensions-to-upload/
+          docker cp ${{ steps.create-container.outputs.EID }}:/ext_index.json ./extensions-to-upload/
 
           # Remove control files, they'll be replaced by an index file
-          rm -f ./extensions-to-upload/*.control
+          # TODO: this doesn't actually work because control files are in subdirectories
+          rm -f ./extensions-to-upload/extensions/*.control
 
       - name: Upload postgres-extensions to S3
-        # TODO: Reenable step after switching to the new extensions format (tar-gzipped + index.json)
-        # if: false
         run: |
           for BUCKET in $(echo ${S3_BUCKETS:-[]} | jq --raw-output '.[]'); do
             aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}

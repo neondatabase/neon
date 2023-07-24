@@ -794,6 +794,7 @@ FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
 # As for now, it's only a couple for testing purposses
 COPY --from=alekpython /extensions/ /extensions/
+COPY --from=alekpython /ext_index.json /ext_index.json
 
 #########################################################################################
 #
