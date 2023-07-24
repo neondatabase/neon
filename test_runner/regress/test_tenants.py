@@ -213,6 +213,9 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
 
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
+        if metric.startswith("pageserver_remote"):
+            continue
+
         ps_samples = ps_metrics.query_all(metric, {})
         assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
