@@ -75,15 +75,13 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_remote_timeline_client_calls_started"),
+    *histogram("pageserver_io_operations_seconds"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",
-    "pageserver_io_operations_seconds_bucket",
-    "pageserver_io_operations_seconds_count",
-    "pageserver_io_operations_seconds_sum",
     "pageserver_last_record_lsn",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",

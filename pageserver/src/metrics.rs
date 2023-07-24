@@ -496,18 +496,13 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
-    "open", "close", "read", "write", "seek", "fsync", "gc", "metadata",
-];
-
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
-// Needed for https://neonprod.grafana.net/d/8G011dlnk/timeline-inspector?orgId=1
 pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
         "Time spent in IO operations",
-        &["operation", "tenant_id", "timeline_id"],
+        &["operation"],
         STORAGE_IO_TIME_BUCKETS.into()
     )
     .expect("failed to define a metric")
@@ -1002,9 +997,6 @@ impl Drop for TimelineMetrics {
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
             let _ =
                 STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
-        }
-        for op in STORAGE_IO_TIME_OPERATIONS {
-            let _ = STORAGE_IO_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
 
         for op in STORAGE_IO_SIZE_OPERATIONS {
