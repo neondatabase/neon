@@ -20,6 +20,7 @@ use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio::sync::OwnedMutexGuard;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
@@ -1335,7 +1336,11 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compaction_iteration(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
@@ -1363,7 +1368,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(ctx)
+                .compact(cancel, ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
@@ -3441,6 +3446,7 @@ mod tests {
     use hex_literal::hex;
     use once_cell::sync::Lazy;
     use rand::{thread_rng, Rng};
+    use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
@@ -3962,7 +3968,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3972,7 +3978,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3982,7 +3988,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3992,7 +3998,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
@@ -4061,7 +4067,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 
@@ -4138,7 +4144,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 
@@ -4226,7 +4232,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 

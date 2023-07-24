@@ -994,23 +994,18 @@ async fn timeline_gc_handler(
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let result_receiver = mgr::immediate_compact(tenant_id, timeline_id, &ctx)
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    timeline
+        .compact(&cancel, &ctx)
         .await
-        .context("spawn compaction task")
         .map_err(ApiError::InternalServerError)?;
-
-    let result: anyhow::Result<()> = result_receiver
-        .await
-        .context("receive compaction result")
-        .map_err(ApiError::InternalServerError)?;
-    result.map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1018,7 +1013,7 @@ async fn timeline_compact_handler(
 // Run checkpoint immediately on given timeline.
 async fn timeline_checkpoint_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1031,7 +1026,7 @@ async fn timeline_checkpoint_handler(
             .await
             .map_err(ApiError::InternalServerError)?;
         timeline
-            .compact(&ctx)
+            .compact(&cancel, &ctx)
             .await
             .map_err(ApiError::InternalServerError)?;
 

@@ -611,7 +611,11 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compact(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
         static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
@@ -642,7 +646,7 @@ impl Timeline {
             permit = CONCURRENT_COMPACTIONS.acquire() => {
                 permit
             },
-            _ = task_mgr::shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 return Ok(());
             }
         };
