@@ -203,7 +203,11 @@ async fn ws_handler(
             Ok(_) => StatusCode::OK,
             Err(ref e) => {
                 if cfg!(debug_assertions) {
-                    error!("error in sql-over-http: {}, backtrace: {}", e, e.backtrace());
+                    error!(
+                        "error in sql-over-http: {}, backtrace: {}",
+                        e,
+                        e.backtrace()
+                    );
                 }
                 StatusCode::BAD_REQUEST
             }

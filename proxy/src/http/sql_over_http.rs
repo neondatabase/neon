@@ -216,7 +216,7 @@ pub async fn handle(
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 if let Err(e) = result {
                     transaction.rollback().await?;
-                    return Err(e.into());
+                    return Err(e);
                 }
                 results.push(result?);
             }
