@@ -1,12 +1,12 @@
+# Script to generate ext_index.json metadata file
+# that stores content of the control files and location of extension archives
+#  for all extensions in /extensions subdir.
 import json
 import os
 import sys
 from os.path import isdir, join
 
-# import shutil
-
 pg_version = sys.argv[1]
-#  build_tag = sys.argv[2]
 assert pg_version in ("v14", "v15")
 
 build_numbers = {}
@@ -27,12 +27,9 @@ for extension in os.listdir("."):
                 control_data[control_file] = f.read()
         ext_index[extension] = {
             "control_data": control_data,
-            "archive_path": f"{build_numbers[extension]}/{pg_version}/{extension}.tar.zstd",
+            "archive_path": f"{build_numbers[extension]}/{pg_version}/{extension}/{extension}.tar.zstd",
         }
 
-        # TODO: uncomment this to enable de-duplication:
-        #  if build_numbers[extension] != build_tag:
-        #      shutil.rmtree(extension)
 os.chdir("..")
 with open("ext_index.json", "w") as f:
     json.dump(ext_index, f)

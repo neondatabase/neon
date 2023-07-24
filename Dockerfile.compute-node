@@ -773,13 +773,12 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Extenstion only
 #
 #########################################################################################
-FROM python:3.11-slim-bookworm AS alekpython
+FROM python:3.11-slim-bookworm AS generate-ext-index
 ARG PG_VERSION
 ARG BUILD_TAG
-# define extension build numbers
-# NOTE: it is *not* necessary for the build tag to be BUILD_TAG in particular,
+# Define extension build numbers
+# NOTE: it is *not* necessary for the build tag to be BUILD_TAG. In particular,
 # you should update the build_tag for each extension only when you build it
-# in the future it should be something like this: 5615610098
 RUN echo "kq_imcx ${BUILD_TAG}" >>  build_numbers.txt
 RUN echo "anon ${BUILD_TAG}" >>  build_numbers.txt
 # RUN echo "postgis-build 5615610098" >>  build_numbers.txt
@@ -793,8 +792,8 @@ RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG}
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
 # As for now, it's only a couple for testing purposses
-COPY --from=alekpython /extensions/ /extensions/
-COPY --from=alekpython /ext_index.json /ext_index.json
+COPY --from=generate-ext-index /extensions/ /extensions/
+COPY --from=generate-ext-index /ext_index.json /ext_index.json
 
 #########################################################################################
 #
