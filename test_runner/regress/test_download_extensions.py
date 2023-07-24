@@ -12,6 +12,28 @@ from fixtures.neon_fixtures import (
 from fixtures.pg_version import PgVersion
 
 
+def add_pgdir_prefix(pgversion, files):
+    return [f"pg_install/v{pgversion}/" + x for x in files]
+
+
+# Cleaning up downloaded files is important for local tests
+# or else one test could reuse the files from another test or another test run
+def cleanup(cleanup_files, cleanup_folders):
+    for file in cleanup_files:
+        try:
+            os.remove(file)
+            log.info(f"removed file {file}")
+        except Exception as err:
+            log.info(f"error removing file {file}: {err}")
+
+    for folder in cleanup_folders:
+        try:
+            shutil.rmtree(folder)
+            log.info(f"removed folder {folder}")
+        except Exception as err:
+            log.info(f"error removing folder {folder}: {err}")
+
+
 # Test downloading remote extension.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_extensions(
@@ -78,38 +100,17 @@ def test_remote_extensions(
                 log.info("error creating anon extension")
                 assert "pgcrypto" in str(err), "unexpected error creating anon extension"
 
-    # Cleaning up downloaded files is important for local tests
-    # or else one test could reuse the files from another test or another test run
-    cleanup_files = [
-        "lib/postgresql/anon.so",
-        "lib/postgresql/embedding.so",
-        "share/postgresql/extension/anon.control",
-        "share/postgresql/extension/anon.control.zst",
-        "share/postgresql/extension/embedding--0.1.0.sql",
-        "share/postgresql/extension/embedding--0.1.0.sql.zst",
-        "share/postgresql/extension/embedding.control",
-        "share/postgresql/extension/embedding.control.zst",
-    ]
-    cleanup_files = [f"pg_install/v{pg_version}/" + x for x in cleanup_files]
-    cleanup_folders = [
-        "extensions",
-        f"pg_install/v{pg_version}/share/postgresql/extension/anon",
-        f"pg_install/v{pg_version}/extensions",
-    ]
-
-    for file in cleanup_files:
-        try:
-            os.remove(file)
-            log.info(f"removed file {file}")
-        except Exception as err:
-            log.info(f"error removing file {file}: {err}")
-
-    for folder in cleanup_folders:
-        try:
-            shutil.rmtree(folder)
-            log.info(f"removed folder {folder}")
-        except Exception as err:
-            log.info(f"error removing folder {folder}: {err}")
+    cleanup_files = add_pgdir_prefix(
+        pg_version,
+        [
+            "lib/postgresql/anon.so",
+            "share/postgresql/extension/anon.control",
+        ],
+    )
+    cleanup_folders = add_pgdir_prefix(
+        pg_version, ["share/postgresql/extension/anon", "download_extensions"]
+    )
+    cleanup(cleanup_files, cleanup_folders)
 
 
 # Test downloading remote library.
@@ -168,33 +169,16 @@ def test_remote_library(
                 log.info(f"error loading anon library: {err}")
                 raise AssertionError("unexpected error loading anon library") from err
 
-    # Cleaning up downloaded files is important for local tests
-    # or else one test could reuse the files from another test or another test run
-    cleanup_files = [
-        "lib/postgresql/anon.so",
-        "share/postgresql/extension/anon.control",
-        "share/postgresql/extension/anon.control.zst",
-    ]
-    cleanup_files = [f"pg_install/v{pg_version}/" + x for x in cleanup_files]
-    cleanup_folders = [
-        "extensions",
-        f"pg_install/v{pg_version}/share/postgresql/extension/anon",
-        f"pg_install/v{pg_version}/extensions",
-    ]
+            # TODO test library which name is different from extension name
 
-    for file in cleanup_files:
-        try:
-            os.remove(file)
-            log.info(f"removed file {file}")
-        except Exception as err:
-            log.info(f"error removing file {file}: {err}")
-
-    for folder in cleanup_folders:
-        try:
-            shutil.rmtree(folder)
-            log.info(f"removed folder {folder}")
-        except Exception as err:
-            log.info(f"error removing folder {folder}: {err}")
-
-
-# TODO test library which name is different from extension name
+    cleanup_files = add_pgdir_prefix(
+        pg_version,
+        [
+            "lib/postgresql/anon.so",
+            "share/postgresql/extension/anon.control",
+        ],
+    )
+    cleanup_folders = add_pgdir_prefix(
+        pg_version, ["share/postgresql/extension/anon", "download_extensions"]
+    )
+    cleanup(cleanup_files, cleanup_folders)
