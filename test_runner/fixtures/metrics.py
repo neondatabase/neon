@@ -40,6 +40,11 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
     return metrics
 
 
+def histogram(prefix_without_trailing_underscore: str) -> List[str]:
+    assert not prefix_without_trailing_underscore.endswith("_")
+    return [f"{prefix_without_trailing_underscore}_{x}" for x in ["bucket", "count", "sum"]]
+
+
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_timeline_client_calls_unfinished",
     *[f"pageserver_remote_timeline_client_calls_started_{x}" for x in ["bucket", "count", "sum"]],
