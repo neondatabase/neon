@@ -274,7 +274,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
         assert response.status_code == 200
-        return response.json()
+        return response.json()["results"]
 
     result = qq(
         [

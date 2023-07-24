@@ -223,7 +223,7 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            Ok(Value::Array(results))
+            Ok(json!({ "results": results }))
         }
     };
 
