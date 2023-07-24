@@ -13,7 +13,7 @@ FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd
 
 #########################################################################################
 #
@@ -77,6 +77,7 @@ ENV PATH "/usr/local/pgsql/bin:$PATH"
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postgis.tar.gz && \
     echo "9a2a219da005a1730a39d1959a1c7cec619b1efb009b65be80ffc25bad299068 postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f > /before.txt && \
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -89,17 +90,30 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control && \
+    find /usr/local/pgsql -type f > /after.txt && \
+    mkdir -p /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_raster.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_sfcgal.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_topology.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/address_standardizer.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/address_standardizer_data_us.control /extensions/postgis
 
 RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
     echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
-    mkdir build && \
-    cd build && \
+    find /usr/local/pgsql -type f >> /before.txt && \
+    mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control && \
+    find /usr/local/pgsql -type f >> /after.txt && \
+    mkdir -p /extensions/postgis && cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/postgis.tar.zstd -T -
 
 #########################################################################################
 #
@@ -419,12 +433,16 @@ RUN apt-get update && \
     wget https://github.com/ketteq-neon/postgres-exts/archive/e0bd1a9d9313d7120c1b9c7bb15c48c0dede4c4e.tar.gz -O kq_imcx.tar.gz && \
     echo "dc93a97ff32d152d32737ba7e196d9687041cda15e58ab31344c2f2de8855336 kq_imcx.tar.gz" | sha256sum --check && \
     mkdir kq_imcx-src && cd kq_imcx-src && tar xvzf ../kq_imcx.tar.gz --strip-components=1 -C . && \
-    mkdir build && \
-    cd build && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
+    mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/kq_imcx.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/kq_imcx.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/kq_imcx && cp /usr/local/pgsql/share/extension/kq_imcx.control /extensions/kq_imcx && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/kq_imcx.tar.zstd -T -
 
 #########################################################################################
 #
@@ -553,16 +571,17 @@ RUN wget https://github.com/neondatabase/pg_embedding/archive/eeb3ba7c3a60c95b26
 FROM build-deps AS pg-anon-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-# Kaniko doesn't allow to do `${from#/usr/local/pgsql/}`, so we use `${from:17}` instead
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgresql_anonymizer-1.1.0.tar.gz -O pg_anon.tar.gz && \
     echo "08b09d2ff9b962f96c60db7e6f8e79cf7253eb8772516998fc35ece08633d3ad pg_anon.tar.gz" | sha256sum --check && \
     mkdir pg_anon-src && cd pg_anon-src && tar xvzf ../pg_anon.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sort  > /before.txt && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
-    find /usr/local/pgsql -type f | sort  > /after.txt && \
-    /bin/bash -c 'for from in $(comm -13 /before.txt /after.txt); do to=/extensions/anon/${from:17} && mkdir -p $(dirname ${to}) && cp -a ${from} ${to}; done'
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zstd -T -
 
 #########################################################################################
 #
@@ -754,16 +773,27 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Extenstion only
 #
 #########################################################################################
+FROM python:3.11-slim-bookworm AS generate-ext-index
+ARG PG_VERSION
+ARG BUILD_TAG
+# Define extension build numbers
+# NOTE: it is *not* necessary for the build tag to be BUILD_TAG. In particular,
+# you should update the build_tag for each extension only when you build it
+RUN echo "kq_imcx ${BUILD_TAG}" >>  build_numbers.txt
+RUN echo "anon ${BUILD_TAG}" >>  build_numbers.txt
+# RUN echo "postgis-build 5615610098" >>  build_numbers.txt
+# copy the control files here
+COPY --from=kq-imcx-pg-build /extensions/ /extensions/
+COPY --from=pg-anon-pg-build /extensions/ /extensions/
+# COPY --from=postgis-build /extensions/ /extensions/
+COPY scripts/combine_control_files.py ./combine_control_files.py
+RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG}
+
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
-# As for now, it's only for new custom ones
-#
-# # Default extensions
-# COPY --from=postgres-cleanup-layer /usr/local/pgsql/share/extension /usr/local/pgsql/share/extension
-# COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
-# Custom extensions
-COPY --from=pg-anon-pg-build /extensions/anon/lib/ /extensions/anon/lib
-COPY --from=pg-anon-pg-build /extensions/anon/share/extension /extensions/anon/share/extension
+# As for now, it's only a couple for testing purposses
+COPY --from=generate-ext-index /extensions/*.tar.zstd /extensions/
+COPY --from=generate-ext-index /ext_index.json /ext_index.json
 
 #########################################################################################
 #
