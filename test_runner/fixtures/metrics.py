@@ -76,6 +76,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_remote_timeline_client_calls_started"),
     *histogram("pageserver_io_operations_seconds"),
+    "pageserver_tenant_states_count",
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
@@ -90,8 +91,8 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_storage_operations_seconds_sum_total",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
-    "pageserver_tenant_states_count",
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
+    # pageserver_broken_tenants_count is a leaked "metric" which is "cleared" on restart or reload
 )

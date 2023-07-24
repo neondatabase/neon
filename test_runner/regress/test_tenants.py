@@ -383,10 +383,8 @@ def test_pageserver_with_empty_tenants(
     ps_metrics = client.get_metrics()
     broken_tenants_metric_filter = {
         "tenant_id": str(tenant_without_timelines_dir),
-        "state": "Broken",
     }
     active_tenants_metric_filter = {
-        "tenant_id": str(tenant_with_empty_timelines),
         "state": "Active",
     }
 
@@ -402,7 +400,7 @@ def test_pageserver_with_empty_tenants(
 
     tenant_broken_count = int(
         ps_metrics.query_one(
-            "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
+            "pageserver_broken_tenants_count", filter=broken_tenants_metric_filter
         ).value
     )
 

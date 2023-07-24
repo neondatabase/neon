@@ -6,7 +6,6 @@ use metrics::{
     IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
-use pageserver_api::models::TenantState;
 use strum::VariantNames;
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
@@ -306,11 +305,24 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define current logical size metric")
 });
 
-pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_tenant_states_count",
         "Count of tenants per state",
-        &["tenant_id", "state"]
+        &["state"]
+    )
+    .expect("Failed to register pageserver_tenant_states_count metric")
+});
+
+/// A set of broken tenants.
+///
+/// These are expected to be so rare that a set is fine. Set as in a new timeseries per each broken
+/// tenant.
+pub(crate) static BROKEN_TENANTS_SET: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_broken_tenants_count",
+        "Set of broken tenants",
+        &["tenant_id"]
     )
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
@@ -1023,9 +1035,7 @@ impl Drop for TimelineMetrics {
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     let tid = tenant_id.to_string();
     let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
-    for state in TenantState::VARIANTS {
-        let _ = TENANT_STATE_METRIC.remove_label_values(&[&tid, state]);
-    }
+    // we leave the BROKEN_TENANTS_SET entry if any
 }
 
 use futures::Future;
