@@ -496,8 +496,17 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
-
+/// Tracks time taken by fs operations near VirtualFile.
+///
+/// Operations:
+/// - open ([`std::fs::OpenOptions::open`])
+/// - close (dropping [`std::fs::File`])
+/// - close-by-replace (close by replacement algorithm)
+/// - read (`read_at`)
+/// - write (`write_at`)
+/// - seek (modify internal position or file length query)
+/// - fsync ([`std::fs::File::sync_all`])
+/// - metadata ([`std::fs::File::metadata`])
 pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
@@ -507,6 +516,8 @@ pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
 pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
