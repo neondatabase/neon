@@ -130,12 +130,13 @@ pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("background op worker")
+        // if you change the number of worker threads please change the constant below
         .enable_all()
         .build()
         .expect("Failed to create background op runtime")
 });
 
-pub(crate) static RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
+pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
     // force init and thus panics
     let _ = BACKGROUND_RUNTIME.handle();
     // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
