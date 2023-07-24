@@ -136,8 +136,6 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
             filter={
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },

@@ -475,7 +475,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
@@ -555,7 +555,7 @@ impl Timeline {
             "wait_lsn cannot be called in WAL receiver"
         );
 
-        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
         match self
             .last_record_lsn
@@ -2252,8 +2252,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut read_count =
-            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+        let mut read_count = scopeguard::guard(0, |cnt| {
+            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+        });
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.

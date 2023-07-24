@@ -84,11 +84,10 @@ pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static READ_NUM_FS_LAYERS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_read_num_fs_layers",
         "Number of persistent layers accessed for processing a read request, including those in the cache",
-        &["tenant_id", "timeline_id"],
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
     )
     .expect("failed to define a metric")
@@ -112,11 +111,10 @@ pub static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static GET_RECONSTRUCT_DATA_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_getpage_get_reconstruct_data_seconds",
         "Time spent in get_reconstruct_value_data",
-        &["tenant_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -246,11 +244,10 @@ pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheS
     },
 });
 
-static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
-        &["tenant_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -499,23 +496,31 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
-    "open", "close", "read", "write", "seek", "fsync", "gc", "metadata",
-];
-
-const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
-
-pub static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+/// Tracks time taken by fs operations near VirtualFile.
+///
+/// Operations:
+/// - open ([`std::fs::OpenOptions::open`])
+/// - close (dropping [`std::fs::File`])
+/// - close-by-replace (close by replacement algorithm)
+/// - read (`read_at`)
+/// - write (`write_at`)
+/// - seek (modify internal position or file length query)
+/// - fsync ([`std::fs::File::sync_all`])
+/// - metadata ([`std::fs::File::metadata`])
+pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
         "Time spent in IO operations",
-        &["operation", "tenant_id", "timeline_id"],
+        &["operation"],
         STORAGE_IO_TIME_BUCKETS.into()
     )
     .expect("failed to define a metric")
 });
 
-pub static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
+
+// Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
+pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
@@ -605,7 +610,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
          at a given instant. It gives you a better idea of the queue depth \
          than plotting the gauge directly, since operations may complete faster \
          than the sampling interval.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        &["file_kind", "op_kind"],
         // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
         vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
     )
@@ -662,13 +667,13 @@ impl RemoteOpFileKind {
     }
 }
 
-pub static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+pub(crate) static REMOTE_OPERATION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_remote_operation_seconds",
         "Time spent on remote storage operations. \
         Grouped by tenant, timeline, operation_kind and status. \
         Does not account for time spent waiting in remote timeline client's queues.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind", "status"]
+        &["file_kind", "op_kind", "status"]
     )
     .expect("failed to define a metric")
 });
@@ -897,7 +902,6 @@ impl StorageTimeMetrics {
 pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
-    pub get_reconstruct_data_time_histo: Histogram,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
@@ -906,9 +910,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
-    pub read_num_fs_layers: Histogram,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -925,9 +927,6 @@ impl TimelineMetrics {
     ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
-        let get_reconstruct_data_time_histo = GET_RECONSTRUCT_DATA_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let flush_time_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
         let compact_time_histo =
@@ -948,9 +947,6 @@ impl TimelineMetrics {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let wait_lsn_time_histo = WAIT_LSN_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -966,16 +962,12 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let read_num_fs_layers = READ_NUM_FS_LAYERS
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
             timeline_id,
-            get_reconstruct_data_time_histo,
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
@@ -984,7 +976,6 @@ impl TimelineMetrics {
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
-            wait_lsn_time_histo,
             resident_physical_size_gauge,
             current_logical_size_gauge,
             num_persistent_files_created,
@@ -993,7 +984,6 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
-            read_num_fs_layers,
         }
     }
 }
@@ -1002,15 +992,12 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
-        let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = READ_NUM_FS_LAYERS.remove_label_values(&[tenant_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -1021,9 +1008,6 @@ impl Drop for TimelineMetrics {
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
             let _ =
                 STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
-        }
-        for op in STORAGE_IO_TIME_OPERATIONS {
-            let _ = STORAGE_IO_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
         }
 
         for op in STORAGE_IO_SIZE_OPERATIONS {
@@ -1056,9 +1040,7 @@ pub struct RemoteTimelineClientMetrics {
     tenant_id: String,
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
-    remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
-    calls_started_hist: Mutex<HashMap<(&'static str, &'static str), Histogram>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
 }
@@ -1068,14 +1050,13 @@ impl RemoteTimelineClientMetrics {
         RemoteTimelineClientMetrics {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
-            remote_operation_time: Mutex::new(HashMap::default()),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
-            calls_started_hist: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
         }
     }
+
     pub fn remote_physical_size_gauge(&self) -> UIntGauge {
         let mut guard = self.remote_physical_size_gauge.lock().unwrap();
         guard
@@ -1089,26 +1070,17 @@ impl RemoteTimelineClientMetrics {
             })
             .clone()
     }
+
     pub fn remote_operation_time(
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
         status: &'static str,
     ) -> Histogram {
-        let mut guard = self.remote_operation_time.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str(), status);
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_OPERATION_TIME
-                .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
-                    key.0,
-                    key.1,
-                    key.2,
-                ])
-                .unwrap()
-        });
-        metric.clone()
+        REMOTE_OPERATION_TIME
+            .get_metric_with_label_values(&[key.0, key.1, key.2])
+            .unwrap()
     }
 
     fn calls_unfinished_gauge(
@@ -1136,19 +1108,10 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> Histogram {
-        let mut guard = self.calls_started_hist.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
-                .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
-                    key.0,
-                    key.1,
-                ])
-                .unwrap()
-        });
-        metric.clone()
+        REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
+            .get_metric_with_label_values(&[key.0, key.1])
+            .unwrap()
     }
 
     fn bytes_started_counter(
@@ -1328,25 +1291,12 @@ impl Drop for RemoteTimelineClientMetrics {
             tenant_id,
             timeline_id,
             remote_physical_size_gauge,
-            remote_operation_time,
             calls_unfinished_gauge,
-            calls_started_hist,
             bytes_started_counter,
             bytes_finished_counter,
         } = self;
-        for ((a, b, c), _) in remote_operation_time.get_mut().unwrap().drain() {
-            let _ = REMOTE_OPERATION_TIME.remove_label_values(&[tenant_id, timeline_id, a, b, c]);
-        }
         for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
-                tenant_id,
-                timeline_id,
-                a,
-                b,
-            ]);
-        }
-        for ((a, b), _) in calls_started_hist.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST.remove_label_values(&[
                 tenant_id,
                 timeline_id,
                 a,

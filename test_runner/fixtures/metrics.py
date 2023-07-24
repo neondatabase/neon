@@ -40,10 +40,13 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
     return metrics
 
 
+def histogram(prefix_without_trailing_underscore: str) -> List[str]:
+    assert not prefix_without_trailing_underscore.endswith("_")
+    return [f"{prefix_without_trailing_underscore}_{x}" for x in ["bucket", "count", "sum"]]
+
+
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_timeline_client_calls_unfinished",
-    *[f"pageserver_remote_timeline_client_calls_started_{x}" for x in ["bucket", "count", "sum"]],
-    *[f"pageserver_remote_operation_seconds_{x}" for x in ["bucket", "count", "sum"]],
     "pageserver_remote_physical_size",
     "pageserver_remote_timeline_client_bytes_started_total",
     "pageserver_remote_timeline_client_bytes_finished_total",
@@ -67,30 +70,24 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "pageserver_getpage_reconstruct_seconds_count",
     "pageserver_getpage_reconstruct_seconds_sum",
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
+    *histogram("pageserver_read_num_fs_layers"),
+    *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
+    *histogram("pageserver_wait_lsn_seconds"),
+    *histogram("pageserver_remote_operation_seconds"),
+    *histogram("pageserver_remote_timeline_client_calls_started"),
+    *histogram("pageserver_io_operations_seconds"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_resident_physical_size",
-    "pageserver_getpage_get_reconstruct_data_seconds_bucket",
-    "pageserver_getpage_get_reconstruct_data_seconds_count",
-    "pageserver_getpage_get_reconstruct_data_seconds_sum",
     "pageserver_io_operations_bytes_total",
-    "pageserver_io_operations_seconds_bucket",
-    "pageserver_io_operations_seconds_count",
-    "pageserver_io_operations_seconds_sum",
     "pageserver_last_record_lsn",
-    "pageserver_read_num_fs_layers_bucket",
-    "pageserver_read_num_fs_layers_count",
-    "pageserver_read_num_fs_layers_sum",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
-    "pageserver_wait_lsn_seconds_bucket",
-    "pageserver_wait_lsn_seconds_count",
-    "pageserver_wait_lsn_seconds_sum",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
     "pageserver_tenant_states_count",
