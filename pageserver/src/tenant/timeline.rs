@@ -2387,12 +2387,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match open_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match open_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2414,12 +2417,15 @@ impl Timeline {
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match frozen_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match frozen_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2450,12 +2456,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };

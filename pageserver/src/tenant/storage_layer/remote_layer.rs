@@ -65,8 +65,9 @@ impl std::fmt::Debug for RemoteLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for RemoteLayer {
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
@@ -77,7 +78,7 @@ impl Layer for RemoteLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} is_delta {} is_incremental {} size {} ----",
             self.desc.tenant_id,

@@ -2506,6 +2506,7 @@ dependencies = [
  "pageserver",
  "postgres_ffi",
  "svg_fmt",
+ "tokio",
  "utils",
  "workspace_hack",
 ]
