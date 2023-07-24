@@ -309,6 +309,49 @@ impl ComputeNode {
         Ok(())
     }
 
+    // Fast path for sync_safekeepers. If they're already synced we get the lsn
+    // in one roundtrip. If not, we should do a full sync_safekeepers.
+    pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
+        let pspec: ParsedSpec = compute_state
+            .pspec
+            .as_ref()
+            .expect("spec must be set")
+            .clone();
+        let sk_connstrs: Vec<String> = pspec.spec.safekeeper_connstrings.clone();
+
+        for connstr in sk_connstrs {
+            // Format connstr
+            let connstr = format!("postgresql://no_user@{}", connstr);
+            let options = format!(
+                "-c timeline_id={} tenant_id={}",
+                pspec.timeline_id, pspec.tenant_id
+            );
+
+            // Construct client
+            let mut config = postgres::Config::from_str(&connstr)?;
+            config.options(&&options);
+            if let Some(storage_auth_token) = pspec.storage_auth_token.clone() {
+                config.password(storage_auth_token);
+            }
+
+            // Connect and query
+            let mut client = config.connect(NoTls)?;
+            let result = client.simple_query("TIMELINE_STATUS")?;
+
+            // Interpret result
+            if let postgres::SimpleQueryMessage::Row(row) = &result[0] {
+                let lsn_1 = row.get("lsn_1");
+                let lsn_2 = row.get("lsn_2");
+                dbg!(lsn_1);
+                dbg!(lsn_2);
+            } else {
+                anyhow::bail!("expected SimpleQueryMessage::Row");
+            }
+        }
+
+        Ok(None)
+    }
+
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
     #[instrument(skip_all)]
@@ -371,10 +414,19 @@ impl ComputeNode {
         // cannot sync safekeepers.
         let lsn = match spec.mode {
             ComputeMode::Primary => {
-                info!("starting safekeepers syncing");
-                let lsn = self
-                    .sync_safekeepers(pspec.storage_auth_token.clone())
-                    .with_context(|| "failed to sync safekeepers")?;
+                info!("checking if safekeepers are synced");
+
+                if let Err(e) = self.check_safekeepers_synced(compute_state) {
+                    println!("sync check error: {:?}", e);
+                }
+
+                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
+                    lsn
+                } else {
+                    info!("starting safekeepers syncing");
+                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                        .with_context(|| "failed to sync safekeepers")?
+                };
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
