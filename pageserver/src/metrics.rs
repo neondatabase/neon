@@ -604,7 +604,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
          at a given instant. It gives you a better idea of the queue depth \
          than plotting the gauge directly, since operations may complete faster \
          than the sampling interval.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        &["file_kind", "op_kind"],
         // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
         vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
     )
@@ -1038,7 +1038,6 @@ pub struct RemoteTimelineClientMetrics {
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
-    calls_started_hist: Mutex<HashMap<(&'static str, &'static str), Histogram>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
 }
@@ -1049,7 +1048,6 @@ impl RemoteTimelineClientMetrics {
             tenant_id: tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
-            calls_started_hist: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
@@ -1107,19 +1105,10 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> Histogram {
-        let mut guard = self.calls_started_hist.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
-        let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
-                .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
-                    key.0,
-                    key.1,
-                ])
-                .unwrap()
-        });
-        metric.clone()
+        REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
+            .get_metric_with_label_values(&[key.0, key.1])
+            .unwrap()
     }
 
     fn bytes_started_counter(
@@ -1300,20 +1289,11 @@ impl Drop for RemoteTimelineClientMetrics {
             timeline_id,
             remote_physical_size_gauge,
             calls_unfinished_gauge,
-            calls_started_hist,
             bytes_started_counter,
             bytes_finished_counter,
         } = self;
         for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
-                tenant_id,
-                timeline_id,
-                a,
-                b,
-            ]);
-        }
-        for ((a, b), _) in calls_started_hist.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST.remove_label_values(&[
                 tenant_id,
                 timeline_id,
                 a,

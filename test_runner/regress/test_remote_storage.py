@@ -433,12 +433,12 @@ def test_remote_timeline_client_calls_started_metric(
     def fetch_calls_started():
         assert timeline_id is not None
         for (file_kind, op_kind), observations in calls_started.items():
-            val = client.get_remote_timeline_client_metric(
-                "pageserver_remote_timeline_client_calls_started_count",
-                tenant_id,
-                timeline_id,
-                file_kind,
-                op_kind,
+            val = client.get_metric_value(
+                name="pageserver_remote_timeline_client_calls_started_count",
+                filter={
+                    "file_kind": str(file_kind),
+                    "op_kind": str(op_kind),
+                },
             )
             assert val is not None, f"expecting metric to be present: {file_kind} {op_kind}"
             val = int(val)
