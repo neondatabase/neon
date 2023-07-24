@@ -2,6 +2,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     cell::RefCell,
     ops::DerefMut,
+    panic::AssertUnwindSafe,
     sync::{atomic::AtomicU64, Arc},
 };
 
@@ -45,7 +46,11 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(seed: u64, network_options: Arc<NetworkOptions>, nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>) -> World {
+    pub fn new(
+        seed: u64,
+        network_options: Arc<NetworkOptions>,
+        nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>,
+    ) -> World {
         World {
             nodes: Mutex::new(Vec::new()),
             unconditional_parking: Mutex::new(Vec::new()),
@@ -231,6 +236,8 @@ pub struct Node {
     world: Arc<World>,
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub rng: Mutex<StdRng>,
+    /// Every node can set a result string, which can be read by the test.
+    pub result: Mutex<(i32, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +259,7 @@ impl Node {
             world,
             join_handle: Mutex::new(None),
             rng: Mutex::new(rng),
+            result: Mutex::new((-1, String::new())),
         }
     }
 
@@ -285,8 +293,17 @@ impl Node {
                 nodes_init(NodeOs::new(world.clone(), node.clone()));
             }
 
-            // TODO: recover from panic (update state, log the error)
-            f(NodeOs::new(world, node.clone()));
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                f(NodeOs::new(world, node.clone()));
+            }));
+            match res {
+                Ok(_) => {
+                    println!("Node {} finished successfully", node.id);
+                }
+                Err(e) => {
+                    println!("Node {} finished with panic: {:?}", node.id, e);
+                }
+            }
 
             let mut status = node.status.lock();
             *status = NodeStatus::Finished;
@@ -349,6 +366,11 @@ impl Node {
 
     pub fn is_node_thread() -> bool {
         CURRENT_NODE.with(|current_node| current_node.borrow().is_some())
+    }
+
+    pub fn is_finished(&self) -> bool {
+        let status = self.status.lock();
+        *status == NodeStatus::Finished
     }
 }
 

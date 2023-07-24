@@ -4650,6 +4650,7 @@ dependencies = [
  "env_logger",
  "hex",
  "hyper",
+ "libc",
  "log",
  "memoffset 0.8.0",
  "once_cell",

@@ -10,6 +10,24 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
+#define WALPROPOSER_TAG "[WALPROPOSER] "
+
+#ifdef SIMLIB
+#define walprop_log(tag, fmt, ...) do { \
+	ereport((tag > WARNING ? WARNING : tag),                                  \
+			(errmsg(fmt, ##__VA_ARGS__), \
+			errhidestmt(true), errhidecontext(true), internalerrposition(0))); \
+	if (tag > WARNING) \
+		sim_exit(tag, "walprop_log error macros"); \
+} while (0)
+
+#define exit(code) sim_exit(code, "exit()")
+#else
+#define walprop_log(tag, fmt, ...) ereport(tag,                                  \
+										(errmsg(WALPROPOSER_TAG fmt, ##__VA_ARGS__), \
+										 errhidestmt(true), errhidecontext(true), internalerrposition(0)))
+#endif
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 
@@ -32,6 +50,9 @@ extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
 extern bool am_wal_proposer;
+
+/* If true, we're exiting. */
+extern bool walproposer_exited;
 
 struct WalProposerConn;			/* Defined in libpqwalproposer */
 typedef struct WalProposerConn WalProposerConn;

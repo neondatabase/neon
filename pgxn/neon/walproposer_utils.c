@@ -121,11 +121,11 @@ CompareLsn(const void *a, const void *b)
  *
  * The strings are intended to be used as a prefix to "state", e.g.:
  *
- *   elog(LOG, "currently in %s state", FormatSafekeeperState(sk->state));
+ *   walprop_log(LOG, "currently in %s state", FormatSafekeeperState(sk->state));
  *
  * If this sort of phrasing doesn't fit the message, instead use something like:
  *
- *   elog(LOG, "currently in state [%s]", FormatSafekeeperState(sk->state));
+ *   walprop_log(LOG, "currently in state [%s]", FormatSafekeeperState(sk->state));
  */
 char *
 FormatSafekeeperState(SafekeeperState state)
@@ -192,10 +192,10 @@ AssertEventsOkForState(uint32 events, Safekeeper *sk)
 	if (!events_ok_for_state)
 	{
 		/*
-		 * To give a descriptive message in the case of failure, we use elog
+		 * To give a descriptive message in the case of failure, we use walprop_log
 		 * and then an assertion that's guaranteed to fail.
 		 */
-		elog(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
+		walprop_log(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
 			 FormatEvents(events), sk->host, sk->port, FormatSafekeeperState(sk->state));
 		Assert(events_ok_for_state);
 	}
@@ -298,7 +298,7 @@ FormatEvents(uint32 events)
 
 	if (events & (~all_flags))
 	{
-		elog(WARNING, "Event formatting found unexpected component %d",
+		walprop_log(WARNING, "Event formatting found unexpected component %d",
 			 events & (~all_flags));
 		return_str[6] = '*';
 		return_str[7] = '\0';
@@ -1111,7 +1111,7 @@ XLogSendPhysical(void)
 
 		WalSndCaughtUp = true;
 
-		elog(DEBUG1, "walsender reached end of timeline at %X/%X (sent up to %X/%X)",
+		walprop_log(DEBUG1, "walsender reached end of timeline at %X/%X (sent up to %X/%X)",
 			 LSN_FORMAT_ARGS(sendTimeLineValidUpto),
 			 LSN_FORMAT_ARGS(sentPtr));
 		return;

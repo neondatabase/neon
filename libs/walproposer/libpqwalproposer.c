@@ -13,7 +13,7 @@ struct WalProposerConn
 static bool
 ensure_nonblocking_status(WalProposerConn *conn, bool is_nonblocking)
 {
-	elog(INFO, "not implemented");
+	walprop_log(INFO, "not implemented");
     return false;
 }
 
@@ -21,14 +21,14 @@ ensure_nonblocking_status(WalProposerConn *conn, bool is_nonblocking)
 char *
 walprop_error_message(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented");
+	walprop_log(INFO, "not implemented");
     return NULL;
 }
 
 WalProposerConnStatusType
 walprop_status(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented: walprop_status");
+	walprop_log(INFO, "not implemented: walprop_status");
     return WP_CONNECTION_OK;
 }
 
@@ -37,7 +37,7 @@ walprop_connect_start(char *conninfo)
 {
 	WalProposerConn *conn;
 
-	elog(INFO, "walprop_connect_start: %s", conninfo);
+	walprop_log(INFO, "walprop_connect_start: %s", conninfo);
 	
 	const char *connstr_prefix = "host=node port=";
 	Assert(strncmp(conninfo, connstr_prefix, strlen(connstr_prefix)) == 0);
@@ -52,21 +52,21 @@ walprop_connect_start(char *conninfo)
 WalProposerConnectPollStatusType
 walprop_connect_poll(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented: walprop_connect_poll");
+	walprop_log(INFO, "not implemented: walprop_connect_poll");
     return WP_CONN_POLLING_OK;
 }
 
 bool
 walprop_send_query(WalProposerConn *conn, char *query)
 {
-	elog(INFO, "not implemented: walprop_send_query");
+	walprop_log(INFO, "not implemented: walprop_send_query");
     return true;
 }
 
 WalProposerExecStatusType
 walprop_get_query_result(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented: walprop_get_query_result");
+	walprop_log(INFO, "not implemented: walprop_get_query_result");
     return WP_EXEC_SUCCESS_COPYBOTH;
 }
 
@@ -79,14 +79,14 @@ walprop_socket(WalProposerConn *conn)
 int
 walprop_flush(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented");
+	walprop_log(INFO, "not implemented");
     return 0;
 }
 
 void
 walprop_finish(WalProposerConn *conn)
 {
-	elog(INFO, "not implemented");
+	walprop_log(INFO, "not implemented");
 }
 
 /*
@@ -104,7 +104,7 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 	msg = sim_msg_get_bytes(&len);
 	*buf = msg;
 	*amount = len;
-	elog(INFO, "walprop_async_read: %d", len);
+	walprop_log(INFO, "walprop_async_read: %d", len);
 
     return PG_ASYNC_READ_SUCCESS;
 }
@@ -112,7 +112,7 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 PGAsyncWriteResult
 walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 {
-	elog(INFO, "not implemented");
+	walprop_log(INFO, "not implemented");
     return PG_ASYNC_WRITE_FAIL;
 }
 
@@ -123,7 +123,7 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 bool
 walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size)
 {
-	elog(INFO, "not implemented: walprop_blocking_write");
+	walprop_log(INFO, "not implemented: walprop_blocking_write");
 	sim_msg_set_bytes(buf, size);
 	sim_tcp_send(conn->tcp);
     return true;

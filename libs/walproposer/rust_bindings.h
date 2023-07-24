@@ -57,6 +57,8 @@ struct Event sim_epoll_rcv(int64_t timeout);
 
 int64_t sim_now(void);
 
+void sim_exit(int32_t code, const uint8_t *msg);
+
 /**
  * Get tag of the current message.
  */

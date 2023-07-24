@@ -56,7 +56,7 @@ impl NodeOs {
             }
             break event;
         };
-    
+
         if let Some(event) = ready_event {
             // return event if it's ready
             return Some(event);
@@ -68,17 +68,13 @@ impl NodeOs {
         }
 
         // or wait for timeout
-        
+
         let rand_nonce = self.random(u64::MAX);
         if timeout > 0 {
-            self.world
-                .schedule(
-                    timeout as u64,
-                    SendMessageEvent::new(
-                        epoll.clone(),
-                        NodeEvent::WakeTimeout(rand_nonce),
-                    ),
-                );
+            self.world.schedule(
+                timeout as u64,
+                SendMessageEvent::new(epoll.clone(), NodeEvent::WakeTimeout(rand_nonce)),
+            );
         }
 
         loop {
@@ -107,5 +103,10 @@ impl NodeOs {
     /// Generate a random number in range [0, max).
     pub fn random(&self, max: u64) -> u64 {
         self.internal.rng.lock().gen_range(0..max)
+    }
+
+    /// Set the result for the current node.
+    pub fn set_result(&self, code: i32, result: String) {
+        *self.internal.result.lock() = (code, result);
     }
 }

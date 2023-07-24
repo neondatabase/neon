@@ -14,6 +14,7 @@ crc32c.workspace = true
 hex.workspace = true
 once_cell.workspace = true
 log.workspace = true
+libc.workspace = true
 memoffset.workspace = true
 thiserror.workspace = true
 serde.workspace = true

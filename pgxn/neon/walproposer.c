@@ -323,7 +323,7 @@ nwp_shmem_startup_hook(void)
 
 void WalProposerRust()
 {
-	elog(LOG, "WalProposerRust");
+	walprop_log(LOG, "WalProposerRust");
 	WalProposerSync(0, NULL);
 }
 
@@ -395,7 +395,7 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 	Event event = sim_epoll_rcv(timeout);
 	if (event.tag == Closed) {
 		// TODO: shutdown connection?
-		// elog(LOG, "connection closed");
+		// walprop_log(LOG, "connection closed");
 		// ShutdownConnection(sk);
 		return 0;
 	} else if (event.tag == Message) {
@@ -409,7 +409,7 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 				return 1;
 			}
 		}
-		elog(FATAL, "unknown tcp connection");
+		walprop_log(FATAL, "unknown tcp connection");
 	} else if (event.tag == Timeout) {
 		return 0;
 	} else {
@@ -497,7 +497,7 @@ WalProposerPoll(void)
 				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
 											   wal_acceptor_connection_timeout))
 				{
-					elog(WARNING, "failed to connect to node '%s:%s' in '%s' state: exceeded connection timeout %dms",
+					walprop_log(WARNING, "failed to connect to node '%s:%s' in '%s' state: exceeded connection timeout %dms",
 						 sk->host, sk->port, FormatSafekeeperState(sk->state), wal_acceptor_connection_timeout);
 					ShutdownConnection(sk);
 				}
@@ -541,7 +541,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 #ifndef SIMLIB
 	load_file("libpqwalreceiver", false);
 	if (WalReceiverFunctions == NULL)
-		elog(ERROR, "libpqwalreceiver didn't initialize correctly");
+		walprop_log(ERROR, "libpqwalreceiver didn't initialize correctly");
 #endif
 
 	for (host = wal_acceptors_list; host != NULL && *host != '\0'; host = sep)
@@ -549,7 +549,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 		port = strchr(host, ':');
 		if (port == NULL)
 		{
-			elog(FATAL, "port is not specified");
+			walprop_log(FATAL, "port is not specified");
 		}
 		*port++ = '\0';
 		sep = strchr(port, ',');
@@ -557,7 +557,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			*sep++ = '\0';
 		if (n_safekeepers + 1 >= MAX_SAFEKEEPERS)
 		{
-			elog(FATAL, "Too many safekeepers");
+			walprop_log(FATAL, "Too many safekeepers");
 		}
 		safekeeper[n_safekeepers].host = host;
 		safekeeper[n_safekeepers].port = port;
@@ -580,13 +580,13 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			}
 
 			if (written > MAXCONNINFO || written < 0)
-				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
+				walprop_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
 
 		initStringInfo(&safekeeper[n_safekeepers].outbuf);
 		safekeeper[n_safekeepers].xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
 		if (safekeeper[n_safekeepers].xlogreader == NULL)
-			elog(FATAL, "Failed to allocate xlog reader");
+			walprop_log(FATAL, "Failed to allocate xlog reader");
 		safekeeper[n_safekeepers].flushWrite = false;
 		safekeeper[n_safekeepers].startStreamingAt = InvalidXLogRecPtr;
 		safekeeper[n_safekeepers].streamingAt = InvalidXLogRecPtr;
@@ -594,7 +594,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	}
 	if (n_safekeepers < 1)
 	{
-		elog(FATAL, "Safekeepers addresses are not specified");
+		walprop_log(FATAL, "Safekeepers addresses are not specified");
 	}
 	quorum = n_safekeepers / 2 + 1;
 
@@ -605,15 +605,15 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	pg_strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
 	greetRequest.systemId = systemId;
 	if (!neon_timeline_walproposer)
-		elog(FATAL, "neon.timeline_id is not provided");
+		walprop_log(FATAL, "neon.timeline_id is not provided");
 	if (*neon_timeline_walproposer != '\0' &&
 		!HexDecodeString(greetRequest.timeline_id, neon_timeline_walproposer, 16))
-		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline_walproposer);
+		walprop_log(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline_walproposer);
 	if (!neon_tenant_walproposer)
-		elog(FATAL, "neon.tenant_id is not provided");
+		walprop_log(FATAL, "neon.tenant_id is not provided");
 	if (*neon_tenant_walproposer != '\0' &&
 		!HexDecodeString(greetRequest.tenant_id, neon_tenant_walproposer, 16))
-		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant_walproposer);
+		walprop_log(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant_walproposer);
 
 #if PG_VERSION_NUM >= 150000
 	/* FIXME don't use hardcoded timeline id */
@@ -653,7 +653,7 @@ static void
 InitEventSet(void)
 {
 	if (waitEvents)
-		elog(FATAL, "double-initialization of event set");
+		walprop_log(FATAL, "double-initialization of event set");
 
 	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + n_safekeepers);
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
@@ -723,19 +723,19 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 static void
 InitEventSet(void)
 {
-	elog(DEBUG5, "InitEventSet");
+	walprop_log(DEBUG5, "InitEventSet");
 }
 
 static void
 UpdateEventSet(Safekeeper *sk, uint32 events)
 {
-	elog(DEBUG5, "UpdateEventSet");
+	walprop_log(DEBUG5, "UpdateEventSet");
 }
 
 static void
 HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 {
-	elog(DEBUG5, "HackyRemoveWalProposerEvent");
+	walprop_log(DEBUG5, "HackyRemoveWalProposerEvent");
 }
 #endif
 
@@ -783,7 +783,7 @@ ResetConnection(Safekeeper *sk)
 	 * PGconn structure"
 	 */
 	if (!sk->conn)
-		elog(FATAL, "failed to allocate new PGconn object");
+		walprop_log(FATAL, "failed to allocate new PGconn object");
 
 	/*
 	 * PQconnectStart won't actually start connecting until we run
@@ -801,7 +801,7 @@ ResetConnection(Safekeeper *sk)
 		 *
 		 * https://www.postgresql.org/docs/devel/libpq-connect.html#LIBPQ-PQCONNECTSTARTPARAMS
 		 */
-		elog(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
+		walprop_log(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
 			 sk->host, sk->port, walprop_error_message(sk->conn));
 
 		/*
@@ -826,7 +826,7 @@ ResetConnection(Safekeeper *sk)
 	 * (see libpqrcv_connect, defined in
 	 * src/backend/replication/libpqwalreceiver/libpqwalreceiver.c)
 	 */
-	elog(LOG, "connecting with node %s:%s", sk->host, sk->port);
+	walprop_log(LOG, "connecting with node %s:%s", sk->host, sk->port);
 
 	sk->state = SS_CONNECTING_WRITE;
 	sk->latestMsgReceivedAt = GetCurrentTimestamp();
@@ -900,7 +900,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * ResetConnection
 			 */
 		case SS_OFFLINE:
-			elog(FATAL, "Unexpected safekeeper %s:%s state advancement: is offline",
+			walprop_log(FATAL, "Unexpected safekeeper %s:%s state advancement: is offline",
 				 sk->host, sk->port);
 			break;				/* actually unreachable, but prevents
 								 * -Wimplicit-fallthrough */
@@ -936,7 +936,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * requests.
 			 */
 		case SS_VOTING:
-			elog(WARNING, "EOF from node %s:%s in %s state", sk->host,
+			walprop_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
 				 sk->port, FormatSafekeeperState(sk->state));
 			ResetConnection(sk);
 			return;
@@ -965,7 +965,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * Idle state for waiting votes from quorum.
 			 */
 		case SS_IDLE:
-			elog(WARNING, "EOF from node %s:%s in %s state", sk->host,
+			walprop_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
 				 sk->port, FormatSafekeeperState(sk->state));
 			ResetConnection(sk);
 			return;
@@ -990,7 +990,7 @@ HandleConnectionEvent(Safekeeper *sk)
 	switch (result)
 	{
 		case WP_CONN_POLLING_OK:
-			elog(LOG, "connected with node %s:%s", sk->host,
+			walprop_log(LOG, "connected with node %s:%s", sk->host,
 				 sk->port);
 			sk->latestMsgReceivedAt = GetCurrentTimestamp();
 			/*
@@ -1013,7 +1013,7 @@ HandleConnectionEvent(Safekeeper *sk)
 			break;
 
 		case WP_CONN_POLLING_FAILED:
-			elog(WARNING, "failed to connect to node '%s:%s': %s",
+			walprop_log(WARNING, "failed to connect to node '%s:%s': %s",
 				 sk->host, sk->port, walprop_error_message(sk->conn));
 
 			/*
@@ -1050,7 +1050,7 @@ SendStartWALPush(Safekeeper *sk)
 {
 	if (!walprop_send_query(sk->conn, "START_WAL_PUSH"))
 	{
-		elog(WARNING, "Failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
+		walprop_log(WARNING, "Failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
 			 sk->host, sk->port, walprop_error_message(sk->conn));
 		ShutdownConnection(sk);
 		return;
@@ -1085,7 +1085,7 @@ RecvStartWALPushResult(Safekeeper *sk)
 			break;
 
 		case WP_EXEC_FAILED:
-			elog(WARNING, "Failed to send query to safekeeper %s:%s: %s",
+			walprop_log(WARNING, "Failed to send query to safekeeper %s:%s: %s",
 				 sk->host, sk->port, walprop_error_message(sk->conn));
 			ShutdownConnection(sk);
 			return;
@@ -1096,7 +1096,7 @@ RecvStartWALPushResult(Safekeeper *sk)
 			 * wrong"
 			 */
 		case WP_EXEC_UNEXPECTED_SUCCESS:
-			elog(WARNING, "Received bad response from safekeeper %s:%s query execution",
+			walprop_log(WARNING, "Received bad response from safekeeper %s:%s query execution",
 				 sk->host, sk->port);
 			ShutdownConnection(sk);
 			return;
@@ -1143,7 +1143,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		if (n_connected == quorum)
 		{
 			propTerm++;
-			elog(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, quorum, propTerm);
+			walprop_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, quorum, propTerm);
 
 			voteRequest = (VoteRequest)
 			{
@@ -1156,7 +1156,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	else if (sk->greetResponse.term > propTerm)
 	{
 		/* Another compute with higher term is running. */
-		elog(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
+		walprop_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
 			 sk->host, sk->port,
 			 sk->greetResponse.term, propTerm);
 	}
@@ -1196,7 +1196,7 @@ static void
 SendVoteRequest(Safekeeper *sk)
 {
 	/* We have quorum for voting, send our vote request */
-	elog(LOG, "requesting vote from %s:%s for term " UINT64_FORMAT, sk->host, sk->port, voteRequest.term);
+	walprop_log(LOG, "requesting vote from %s:%s for term " UINT64_FORMAT, sk->host, sk->port, voteRequest.term);
 	/* On failure, logging & resetting is handled */
 	if (!BlockingWrite(sk, &voteRequest, sizeof(voteRequest), SS_WAIT_VERDICT))
 		return;
@@ -1211,7 +1211,7 @@ RecvVoteResponse(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) & sk->voteResponse))
 		return;
 
-	elog(LOG,
+	walprop_log(LOG,
 		 "got VoteResponse from acceptor %s:%s, voteGiven=" UINT64_FORMAT ", epoch=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X, timelineStartLsn=%X/%X",
 		 sk->host, sk->port, sk->voteResponse.voteGiven, GetHighestTerm(&sk->voteResponse.termHistory),
 		 LSN_FORMAT_ARGS(sk->voteResponse.flushLsn),
@@ -1226,7 +1226,7 @@ RecvVoteResponse(Safekeeper *sk)
 	if ((!sk->voteResponse.voteGiven) &&
 		(sk->voteResponse.term > propTerm || n_votes < quorum))
 	{
-		elog(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
+		walprop_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
 			 sk->host, sk->port,
 			 sk->voteResponse.term, propTerm);
 	}
@@ -1271,18 +1271,24 @@ HandleElectedProposer(void)
 	 */
 	if (truncateLsn < propEpochStartLsn)
 	{
-		elog(LOG,
+		walprop_log(LOG,
 			 "start recovery because truncateLsn=%X/%X is not "
 			 "equal to epochStartLsn=%X/%X",
 			 LSN_FORMAT_ARGS(truncateLsn),
 			 LSN_FORMAT_ARGS(propEpochStartLsn));
 		/* Perform recovery */
 		if (!WalProposerRecovery(donor, greetRequest.timeline, truncateLsn, propEpochStartLsn))
-			elog(FATAL, "Failed to recover state");
+			walprop_log(FATAL, "Failed to recover state");
 	}
 	else if (syncSafekeepers)
 	{
-		// elog(FATAL, "synced %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
+	#ifdef SIMLIB
+		char lsn_str[8 + 1 + 8 + 1];
+
+		snprintf(lsn_str, sizeof(lsn_str), "%X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
+		sim_exit(0, lsn_str);
+	#endif
+
 		/* Sync is not needed: just exit */
 		fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
 		exit(0);
@@ -1385,7 +1391,7 @@ DetermineEpochStartLsn(void)
 				if (timelineStartLsn != InvalidXLogRecPtr &&
 					timelineStartLsn != safekeeper[i].voteResponse.timelineStartLsn)
 				{
-					elog(WARNING,
+					walprop_log(WARNING,
 						 "inconsistent timelineStartLsn: current %X/%X, received %X/%X",
 						 LSN_FORMAT_ARGS(timelineStartLsn),
 						 LSN_FORMAT_ARGS(safekeeper[i].voteResponse.timelineStartLsn));
@@ -1406,7 +1412,7 @@ DetermineEpochStartLsn(void)
 		{
 			timelineStartLsn = GetRedoStartLsn();
 		}
-		elog(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
+		walprop_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
 	}
 
 	/*
@@ -1433,7 +1439,7 @@ DetermineEpochStartLsn(void)
 	propTermHistory.entries[propTermHistory.n_entries - 1].term = propTerm;
 	propTermHistory.entries[propTermHistory.n_entries - 1].lsn = propEpochStartLsn;
 
-	elog(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
+	walprop_log(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
 		 quorum,
 		 propTerm,
 		 LSN_FORMAT_ARGS(propEpochStartLsn),
@@ -1463,7 +1469,7 @@ DetermineEpochStartLsn(void)
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
 											walprop_shared->mineLastElectedTerm)))
 			{
-				elog(PANIC,
+				walprop_log(PANIC,
 					 "collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
 					 LSN_FORMAT_ARGS(propEpochStartLsn),
 					 LSN_FORMAT_ARGS(GetRedoStartLsn()));
@@ -1492,7 +1498,7 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 						err)));
 		return false;
 	}
-	elog(LOG,
+	walprop_log(LOG,
 		 "start recovery from %s:%s starting from %X/%08X till %X/%08X timeline "
 		 "%d",
 		 safekeeper[donor].host, safekeeper[donor].port, (uint32) (startpos >> 32),
@@ -1626,7 +1632,7 @@ SendProposerElected(Safekeeper *sk)
 			 */
 			sk->startStreamingAt = truncateLsn;
 
-			elog(WARNING, "empty safekeeper joined cluster as %s:%s, historyStart=%X/%X, sk->startStreamingAt=%X/%X",
+			walprop_log(WARNING, "empty safekeeper joined cluster as %s:%s, historyStart=%X/%X, sk->startStreamingAt=%X/%X",
 				 sk->host, sk->port, LSN_FORMAT_ARGS(propTermHistory.entries[0].lsn),
 				 LSN_FORMAT_ARGS(sk->startStreamingAt));
 		}
@@ -1661,7 +1667,7 @@ SendProposerElected(Safekeeper *sk)
 	msg.timelineStartLsn = timelineStartLsn;
 
 	lastCommonTerm = i >= 0 ? propTermHistory.entries[i].term : 0;
-	elog(LOG,
+	walprop_log(LOG,
 		 "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s, timelineStartLsn=%X/%X",
 		 sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port, LSN_FORMAT_ARGS(msg.timelineStartLsn));
 
@@ -1691,7 +1697,7 @@ WalProposerStartStreaming(XLogRecPtr startpos)
 {
 	StartReplicationCmd cmd;
 
-	elog(LOG, "WAL proposer starts streaming at %X/%X",
+	walprop_log(LOG, "WAL proposer starts streaming at %X/%X",
 		 LSN_FORMAT_ARGS(startpos));
 	cmd.slotname = WAL_PROPOSER_SLOT_NAME;
 	cmd.timeline = greetRequest.timeline;
@@ -1893,7 +1899,7 @@ SendAppendRequests(Safekeeper *sk)
 				return true;
 
 			case PG_ASYNC_WRITE_FAIL:
-				elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
+				walprop_log(WARNING, "Failed to send to node %s:%s in %s state: %s",
 					 sk->host, sk->port, FormatSafekeeperState(sk->state),
 					 walprop_error_message(sk->conn));
 				ShutdownConnection(sk);
@@ -1942,7 +1948,7 @@ RecvAppendResponses(Safekeeper *sk)
 		if (sk->appendResponse.term > propTerm)
 		{
 			/* Another compute with higher term is running. */
-			elog(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
+			walprop_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
 				 sk->host, sk->port,
 				 sk->appendResponse.term, propTerm);
 		}
@@ -1988,7 +1994,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->currentClusterSize = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: current_timeline_size %lu",
+			walprop_log(DEBUG2, "ParseReplicationFeedbackMessage: current_timeline_size %lu",
 				 rf->currentClusterSize);
 		}
 		else if (strcmp(key, "ps_writelsn") == 0)
@@ -1996,7 +2002,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->ps_writelsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_writelsn %X/%X",
+			walprop_log(DEBUG2, "ParseReplicationFeedbackMessage: ps_writelsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_writelsn));
 		}
 		else if (strcmp(key, "ps_flushlsn") == 0)
@@ -2004,7 +2010,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->ps_flushlsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_flushlsn %X/%X",
+			walprop_log(DEBUG2, "ParseReplicationFeedbackMessage: ps_flushlsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_flushlsn));
 		}
 		else if (strcmp(key, "ps_applylsn") == 0)
@@ -2012,7 +2018,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->ps_applylsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_applylsn %X/%X",
+			walprop_log(DEBUG2, "ParseReplicationFeedbackMessage: ps_applylsn %X/%X",
 				 LSN_FORMAT_ARGS(rf->ps_applylsn));
 		}
 		else if (strcmp(key, "ps_replytime") == 0)
@@ -2025,7 +2031,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 
 				/* Copy because timestamptz_to_str returns a static buffer */
 				replyTimeStr = pstrdup(timestamptz_to_str(rf->ps_replytime));
-				elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_replytime %lu reply_time: %s",
+				walprop_log(DEBUG2, "ParseReplicationFeedbackMessage: ps_replytime %lu reply_time: %s",
 					 rf->ps_replytime, replyTimeStr);
 
 				pfree(replyTimeStr);
@@ -2040,7 +2046,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-			elog(LOG, "ParseReplicationFeedbackMessage: unknown key: %s len %d", key, len);
+			walprop_log(LOG, "ParseReplicationFeedbackMessage: unknown key: %s len %d", key, len);
 			pq_getmsgbytes(reply_message, len);
 		};
 	}
@@ -2191,7 +2197,7 @@ GetLatestNeonFeedback(ReplicationFeedback * rf)
 	rf->ps_applylsn = safekeeper[latest_safekeeper].appendResponse.rf.ps_applylsn;
 	rf->ps_replytime = safekeeper[latest_safekeeper].appendResponse.rf.ps_replytime;
 
-	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
+	walprop_log(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
 		 " ps_writelsn %X/%X, ps_flushlsn %X/%X, ps_applylsn %X/%X, ps_replytime %lu",
 		 rf->currentClusterSize,
 		 LSN_FORMAT_ARGS(rf->ps_writelsn),
@@ -2311,6 +2317,13 @@ HandleSafekeeperResponse(void)
 		}
 		if (n_synced >= quorum)
 		{
+		#ifdef SIMLIB
+			char lsn_str[8 + 1 + 8 + 1];
+
+			snprintf(lsn_str, sizeof(lsn_str), "%X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
+			sim_exit(0, lsn_str);
+		#endif
+
 			/* All safekeepers synced! */
 			fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
 			exit(0);
@@ -2335,7 +2348,7 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
 			return false;
 
 		case PG_ASYNC_READ_FAIL:
-			elog(WARNING, "Failed to read from node %s:%s in %s state: %s", sk->host,
+			walprop_log(WARNING, "Failed to read from node %s:%s in %s state: %s", sk->host,
 				 sk->port, FormatSafekeeperState(sk->state),
 				 walprop_error_message(sk->conn));
 			ShutdownConnection(sk);
@@ -2373,7 +2386,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 	tag = pq_getmsgint64_le(&s);
 	if (tag != anymsg->tag)
 	{
-		elog(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
+		walprop_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
 			 sk->port, FormatSafekeeperState(sk->state));
 		ResetConnection(sk);
 		return false;
@@ -2448,7 +2461,7 @@ BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState succes
 
 	if (!walprop_blocking_write(sk->conn, msg, msg_size))
 	{
-		elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
+		walprop_log(WARNING, "Failed to send to node %s:%s in %s state: %s",
 			 sk->host, sk->port, FormatSafekeeperState(sk->state),
 			 walprop_error_message(sk->conn));
 		ShutdownConnection(sk);
@@ -2493,7 +2506,7 @@ AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_sta
 			UpdateEventSet(sk, WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE);
 			return false;
 		case PG_ASYNC_WRITE_FAIL:
-			elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
+			walprop_log(WARNING, "Failed to send to node %s:%s in %s state: %s",
 				 sk->host, sk->port, FormatSafekeeperState(sk->state),
 				 walprop_error_message(sk->conn));
 			ShutdownConnection(sk);
@@ -2530,7 +2543,7 @@ AsyncFlush(Safekeeper *sk)
 			/* Nothing to do; try again when the socket's ready */
 			return false;
 		case -1:
-			elog(WARNING, "Failed to flush write to node %s:%s in %s state: %s",
+			walprop_log(WARNING, "Failed to flush write to node %s:%s in %s state: %s",
 				 sk->host, sk->port, FormatSafekeeperState(sk->state),
 				 walprop_error_message(sk->conn));
 			ResetConnection(sk);
@@ -2558,7 +2571,7 @@ backpressure_lag_impl(void)
 		replication_feedback_get_lsns(&writePtr, &flushPtr, &applyPtr);
 #define MB ((XLogRecPtr)1024 * 1024)
 
-		elog(DEBUG2, "current flushLsn %X/%X ReplicationFeedback: write %X/%X flush %X/%X apply %X/%X",
+		walprop_log(DEBUG2, "current flushLsn %X/%X ReplicationFeedback: write %X/%X flush %X/%X apply %X/%X",
 			 LSN_FORMAT_ARGS(myFlushLsn),
 			 LSN_FORMAT_ARGS(writePtr),
 			 LSN_FORMAT_ARGS(flushPtr),
@@ -2606,7 +2619,7 @@ backpressure_throttling_impl(void)
 	/* Suspend writers until replicas catch up */
 	set_ps_display("backpressure throttling");
 
-	elog(DEBUG2, "backpressure throttling: lag %lu", lag);
+	walprop_log(DEBUG2, "backpressure throttling: lag %lu", lag);
 	start = GetCurrentTimestamp();
 	pg_usleep(BACK_PRESSURE_DELAY);
 	stop = GetCurrentTimestamp();

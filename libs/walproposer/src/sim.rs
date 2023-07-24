@@ -1,8 +1,11 @@
-use std::{cell::RefCell, collections::HashMap};
-
 use safekeeper::simlib::{network::TCP, node_os::NodeOs, world::NodeEvent};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ffi::{CStr, CString},
+};
 
-use crate::sim_proto::{AnyMessageTag, Event, EventTag, MESSAGE_BUF, anymessage_tag};
+use crate::sim_proto::{anymessage_tag, AnyMessageTag, Event, EventTag, MESSAGE_BUF};
 
 thread_local! {
     static CURRENT_NODE_OS: RefCell<Option<NodeOs>> = RefCell::new(None);
@@ -114,4 +117,21 @@ pub extern "C" fn sim_epoll_rcv(timeout: i64) -> Event {
 #[no_mangle]
 pub extern "C" fn sim_now() -> i64 {
     os().now() as i64
+}
+
+#[no_mangle]
+pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
+    let msg = unsafe { CStr::from_ptr(msg as *const i8) };
+    let msg = msg.to_string_lossy().into_owned();
+    println!("sim_exit({}, {:?})", code, msg);
+    os().set_result(code, msg);
+
+    // I tried to make use of pthread_exit, but it doesn't work.
+    // https://github.com/rust-lang/unsafe-code-guidelines/issues/211
+    // unsafe { libc::pthread_exit(std::ptr::null_mut()) };
+
+    // https://doc.rust-lang.org/nomicon/unwinding.html
+    // Everyone on the internet saying this is UB, but it works for me,
+    // so I'm going to use it for now.
+    panic!("sim_exit() called from C code")
 }
