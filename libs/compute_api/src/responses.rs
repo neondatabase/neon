@@ -70,6 +70,7 @@ where
 pub struct ComputeMetrics {
     pub wait_for_spec_ms: u64,
     pub sync_safekeepers_ms: u64,
+    pub sync_sk_check_ms: u64,
     pub basebackup_ms: u64,
     pub basebackup_bytes: u64,
     pub start_postgres_ms: u64,

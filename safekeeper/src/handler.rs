@@ -11,6 +11,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
@@ -272,15 +273,34 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
+        // Get timeline, handling "not found" error
+        let tli = match GlobalTimelines::get(self.ttid) {
+            Ok(tli) => Ok(Some(tli)),
+            Err(TimelineError::NotFound(_)) => Ok(None),
+            Err(e) => Err(QueryError::Other(e.into())),
+        }?;
+
+        // Write row description
         pgb.write_message_noflush(&BeMessage::RowDescription(&[
-            RowDescriptor::text_col(b"lsn_1"),
-            RowDescriptor::text_col(b"lsn_2"),
-        ]))?
-        .write_message_noflush(&BeMessage::DataRow(&[
-            Some("1".to_string().as_bytes()),
-            Some("2".to_string().as_bytes()),
-        ]))?
-        .write_message_noflush(&BeMessage::CommandComplete(b"TIMELINE_STATUS"))?;
+            RowDescriptor::text_col(b"flush_lsn"),
+            RowDescriptor::text_col(b"commit_lsn"),
+            RowDescriptor::text_col(b"peer_horizon_lsn"),
+        ]))?;
+
+        // Write row if timeline exists
+        if let Some(tli) = tli {
+            let (inmem, _state) = tli.get_state().await;
+            let flush_lsn = tli.get_flush_lsn().await;
+            let commit_lsn = inmem.commit_lsn;
+            let peer_horizon_lsn = inmem.peer_horizon_lsn;
+            pgb.write_message_noflush(&BeMessage::DataRow(&[
+                Some(flush_lsn.to_string().as_bytes()),
+                Some(commit_lsn.to_string().as_bytes()),
+                Some(peer_horizon_lsn.to_string().as_bytes()),
+            ]))?;
+        }
+
+        pgb.write_message_noflush(&BeMessage::CommandComplete(b"TIMELINE_STATUS"))?;
         Ok(())
     }
 
