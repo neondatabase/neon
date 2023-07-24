@@ -214,11 +214,13 @@ pub async fn handle(
             let transaction = client.transaction().await?;
             for query in queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
-                if let Err(e) = result {
-                    transaction.rollback().await?;
-                    return Err(e);
+                match result {
+                    Ok(r) => results.push(r),
+                    Err(e) => {
+                        transaction.rollback().await?;
+                        return Err(e);
+                    }
                 }
-                results.push(result?);
             }
             transaction.commit().await?;
             Ok(Value::Array(results))
