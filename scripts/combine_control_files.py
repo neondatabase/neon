@@ -24,7 +24,7 @@ if __name__ == "__main__":
     for extension in EXT_PATH.iterdir():
         if extension.is_dir():
             control_data = {}
-            for control_file in extension.iterdir():
+            for control_file in extension.glob("*.control"):
                 if control_file.suffix != ".control":
                     continue
                 with open(control_file, "r") as f:
