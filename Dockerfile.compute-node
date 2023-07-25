@@ -773,7 +773,7 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Extenstion only
 #
 #########################################################################################
-FROM python:3.11-slim-bookworm AS generate-ext-index
+FROM python:3.9-slim-bullseye AS generate-ext-index
 ARG PG_VERSION
 ARG BUILD_TAG
 # Define extension build numbers
