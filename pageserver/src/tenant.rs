@@ -2208,12 +2208,20 @@ impl Tenant {
             let mut tuple = inspect_state(&rx.borrow_and_update());
 
             let is_broken = tuple.1;
-            if !is_broken {
+            let mut counted_broken = if !is_broken {
                 // the tenant might be ignored and reloaded, so first remove any previous set
                 // element. it most likely has already been scraped, as these are manual operations
                 // right now. most likely we will add it back very soon.
                 drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
-            }
+                false
+            } else {
+                // add the id to the set right away, there should not be any updates on the channel
+                // after
+                crate::metrics::BROKEN_TENANTS_SET
+                    .with_label_values(&[&tid])
+                    .set(1);
+                true
+            };
 
             loop {
                 let labels = &tuple.0;
@@ -2232,7 +2240,8 @@ impl Tenant {
                 tuple = inspect_state(&rx.borrow_and_update());
 
                 let is_broken = tuple.1;
-                if is_broken {
+                if is_broken && !counted_broken {
+                    counted_broken = true;
                     // insert the tenant_id (back) into the set
                     crate::metrics::BROKEN_TENANTS_SET
                         .with_label_values(&[&tid])
