@@ -334,7 +334,7 @@ pub struct GcInfo {
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
     #[error(transparent)]
-    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+    Other(#[from] anyhow::Error),
 
     /// The operation would require downloading a layer that is missing locally.
     NeedsDownload(TenantTimelineId, LayerFileName),
@@ -475,7 +475,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
@@ -555,7 +555,7 @@ impl Timeline {
             "wait_lsn cannot be called in WAL receiver"
         );
 
-        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
         match self
             .last_record_lsn
@@ -611,8 +611,45 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compact(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
+
+        static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+            once_cell::sync::Lazy::new(|| {
+                let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+                let permits = usize::max(
+                    1,
+                    // while a lot of the work is done on spawn_blocking, we still do
+                    // repartitioning in the async context. this should give leave us some workers
+                    // unblocked to be blocked on other work, hopefully easing any outside visible
+                    // effects of restarts.
+                    //
+                    // 6/8 is a guess; previously we ran with unlimited 8 and more from
+                    // spawn_blocking.
+                    (total_threads * 3).checked_div(4).unwrap_or(0),
+                );
+                assert_ne!(permits, 0, "we will not be adding in permits later");
+                assert!(
+                    permits < total_threads,
+                    "need threads avail for shorter work"
+                );
+                tokio::sync::Semaphore::new(permits)
+            });
+
+        // this wait probably never needs any "long time spent" logging, because we already nag if
+        // compaction task goes over it's period (20s) which is quite often in production.
+        let _permit = tokio::select! {
+            permit = CONCURRENT_COMPACTIONS.acquire() => {
+                permit
+            },
+            _ = cancel.cancelled() => {
+                return Ok(());
+            }
+        };
 
         let last_record_lsn = self.get_last_record_lsn();
 
@@ -671,11 +708,9 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let mut cancelled = pin!(task_mgr::shutdown_watcher());
-
             loop {
                 tokio::select! {
-                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    _ = cancel.cancelled() => anyhow::bail!("Cancelled while downloading remote layers"),
                     res = downloads.next() => {
                         match res {
                             Some(Ok(())) => {},
@@ -890,7 +925,7 @@ impl Timeline {
                     new_state,
                     TimelineState::Stopping | TimelineState::Broken { .. }
                 ) {
-                    // drop the copmletion guard, if any; it might be holding off the completion
+                    // drop the completion guard, if any; it might be holding off the completion
                     // forever needlessly
                     self.initial_logical_size_attempt
                         .lock()
@@ -1011,11 +1046,11 @@ impl Timeline {
             .evict_layer_batch(remote_client, &[local_layer], cancel)
             .await?;
         assert_eq!(results.len(), 1);
-        let result: Option<anyhow::Result<bool>> = results.into_iter().next().unwrap();
+        let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
         match result {
             None => anyhow::bail!("task_mgr shutdown requested"),
-            Some(Ok(b)) => Ok(Some(b)),
-            Some(Err(e)) => Err(e),
+            Some(Ok(())) => Ok(Some(true)),
+            Some(Err(e)) => Err(anyhow::Error::new(e)),
         }
     }
 
@@ -1024,12 +1059,12 @@ impl Timeline {
     /// GenericRemoteStorage reference is required as a (witness)[witness_article] for "remote storage is configured."
     ///
     /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
-    pub async fn evict_layers(
+    pub(crate) async fn evict_layers(
         &self,
         _: &GenericRemoteStorage,
         layers_to_evict: &[Arc<dyn PersistentLayer>],
         cancel: CancellationToken,
-    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let remote_client = self.remote_client.clone().expect(
             "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
         );
@@ -1064,7 +1099,7 @@ impl Timeline {
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Arc<dyn PersistentLayer>],
         cancel: CancellationToken,
-    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
         remote_client
@@ -1110,11 +1145,9 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         layer_mgr: &mut LayerManager,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<(), EvictionError> {
         if local_layer.is_remote_layer() {
-            // TODO(issue #3851): consider returning an err here instead of false,
-            // which is the same out the match later
-            return Ok(false);
+            return Err(EvictionError::CannotEvictRemoteLayer);
         }
 
         let layer_file_size = local_layer.file_size();
@@ -1123,13 +1156,22 @@ impl Timeline {
             .local_path()
             .expect("local layer should have a local path")
             .metadata()
-            .context("get local layer file stat")?
+            // when the eviction fails because we have already deleted the layer in compaction for
+            // example, a NotFound error bubbles up from here.
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    EvictionError::FileNotFound
+                } else {
+                    EvictionError::StatFailed(e)
+                }
+            })?
             .modified()
-            .context("get mtime of layer file")?;
+            .map_err(EvictionError::StatFailed)?;
+
         let local_layer_residence_duration =
             match SystemTime::now().duration_since(local_layer_mtime) {
                 Err(e) => {
-                    warn!("layer mtime is in the future: {}", e);
+                    warn!(layer = %local_layer, "layer mtime is in the future: {}", e);
                     None
                 }
                 Ok(delta) => Some(delta),
@@ -1160,52 +1202,63 @@ impl Timeline {
 
         assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
 
-        let succeed = match layer_mgr.replace_and_verify(local_layer.clone(), new_remote_layer) {
-            Ok(()) => {
-                if let Err(e) = local_layer.delete_resident_layer_file() {
-                    error!("failed to remove layer file on evict after replacement: {e:#?}");
-                }
-                // Always decrement the physical size gauge, even if we failed to delete the file.
-                // Rationale: we already replaced the layer with a remote layer in the layer map,
-                // and any subsequent download_remote_layer will
-                // 1. overwrite the file on disk and
-                // 2. add the downloaded size to the resident size gauge.
-                //
-                // If there is no re-download, and we restart the pageserver, then load_layer_map
-                // will treat the file as a local layer again, count it towards resident size,
-                // and it'll be like the layer removal never happened.
-                // The bump in resident size is perhaps unexpected but overall a robust behavior.
-                self.metrics
-                    .resident_physical_size_gauge
-                    .sub(layer_file_size);
+        layer_mgr
+            .replace_and_verify(local_layer.clone(), new_remote_layer)
+            .map_err(EvictionError::LayerNotFound)?;
 
-                self.metrics.evictions.inc();
+        if let Err(e) = local_layer.delete_resident_layer_file() {
+            // this should never happen, because of layer_removal_cs usage and above stat
+            // access for mtime
+            error!("failed to remove layer file on evict after replacement: {e:#?}");
+        }
+        // Always decrement the physical size gauge, even if we failed to delete the file.
+        // Rationale: we already replaced the layer with a remote layer in the layer map,
+        // and any subsequent download_remote_layer will
+        // 1. overwrite the file on disk and
+        // 2. add the downloaded size to the resident size gauge.
+        //
+        // If there is no re-download, and we restart the pageserver, then load_layer_map
+        // will treat the file as a local layer again, count it towards resident size,
+        // and it'll be like the layer removal never happened.
+        // The bump in resident size is perhaps unexpected but overall a robust behavior.
+        self.metrics
+            .resident_physical_size_gauge
+            .sub(layer_file_size);
 
-                if let Some(delta) = local_layer_residence_duration {
-                    self.metrics
-                        .evictions_with_low_residence_duration
-                        .read()
-                        .unwrap()
-                        .observe(delta);
-                    info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
-                } else {
-                    info!(layer=%local_layer, "evicted layer after unknown residence period");
-                }
+        self.metrics.evictions.inc();
 
-                true
-            }
-            Err(err) => {
-                if cfg!(debug_assertions) {
-                    panic!("failed to replace: {err}, evicted: {local_layer:?}");
-                } else {
-                    error!(evicted=?local_layer, "failed to replace: {err}");
-                }
-                false
-            }
-        };
+        if let Some(delta) = local_layer_residence_duration {
+            self.metrics
+                .evictions_with_low_residence_duration
+                .read()
+                .unwrap()
+                .observe(delta);
+            info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
+        } else {
+            info!(layer=%local_layer, "evicted layer after unknown residence period");
+        }
 
-        Ok(succeed)
+        Ok(())
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EvictionError {
+    #[error("cannot evict a remote layer")]
+    CannotEvictRemoteLayer,
+    /// Most likely the to-be evicted layer has been deleted by compaction or gc which use the same
+    /// locks, so they got to execute before the eviction.
+    #[error("file backing the layer has been removed already")]
+    FileNotFound,
+    #[error("stat failed")]
+    StatFailed(#[source] std::io::Error),
+    /// In practice, this can be a number of things, but lets assume it means only this.
+    ///
+    /// This case includes situations such as the Layer was evicted and redownloaded in between,
+    /// because the file existed before an replacement attempt was made but now the Layers are
+    /// different objects in memory.
+    #[error("layer was no longer part of LayerMap")]
+    LayerNotFound(#[source] anyhow::Error),
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
@@ -2243,8 +2296,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut read_count =
-            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+        let mut read_count = scopeguard::guard(0, |cnt| {
+            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+        });
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
@@ -2378,12 +2432,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match open_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match open_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2405,12 +2462,15 @@ impl Timeline {
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match frozen_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match frozen_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2441,12 +2501,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2694,7 +2757,7 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let layer_paths_to_upload =
+        let (layer_paths_to_upload, delta_layer_to_add) =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
                 #[cfg(test)]
                 match &mut *self.flush_loop_state.lock().unwrap() {
@@ -2713,8 +2776,12 @@ impl Timeline {
                 let (partitioning, _lsn) = self
                     .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
                     .await?;
-                self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                    .await?
+                // For image layers, we add them immediately into the layer map.
+                (
+                    self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
+                        .await?,
+                    None,
+                )
             } else {
                 #[cfg(test)]
                 match &mut *self.flush_loop_state.lock().unwrap() {
@@ -2728,35 +2795,50 @@ impl Timeline {
                         assert!(!*expect_initdb_optimization, "expected initdb optimization");
                     }
                 }
-                // normal case, write out a L0 delta layer file.
-                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer).await?;
-                HashMap::from([(delta_path, metadata)])
+                // Normal case, write out a L0 delta layer file.
+                // `create_delta_layer` will not modify the layer map.
+                // We will remove frozen layer and add delta layer in one atomic operation later.
+                let layer = self.create_delta_layer(&frozen_layer).await?;
+                (
+                    HashMap::from([(layer.filename(), LayerFileMetadata::new(layer.file_size()))]),
+                    Some(layer),
+                )
             };
-
-        // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
-        // a compaction can delete the file and then it won't be available for uploads any more.
-        // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
-        // race situation.
-        // See https://github.com/neondatabase/neon/issues/4526
-
-        pausable_failpoint!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
         {
             let mut guard = self.layers.write().await;
-            let l = guard.layer_map_mut().frozen_layers.pop_front();
 
-            // Only one thread may call this function at a time (for this
-            // timeline). If two threads tried to flush the same frozen
-            // layer to disk at the same time, that would not work.
-            assert!(compare_arced_layers(&l.unwrap(), &frozen_layer));
+            if let Some(ref l) = delta_layer_to_add {
+                // TODO: move access stats, metrics update, etc. into layer manager.
+                l.access_stats().record_residence_event(
+                    &guard,
+                    LayerResidenceStatus::Resident,
+                    LayerResidenceEventReason::LayerCreate,
+                );
 
+                // update metrics
+                let sz = l.file_size();
+                self.metrics.resident_physical_size_gauge.add(sz);
+                self.metrics.num_persistent_files_created.inc_by(1);
+                self.metrics.persistent_bytes_written.inc_by(sz);
+            }
+
+            guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
             // release lock on 'layers'
         }
 
-        fail_point!("checkpoint-after-sync");
+        // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
+        // a compaction can delete the file and then it won't be available for uploads any more.
+        // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
+        // race situation.
+        // See https://github.com/neondatabase/neon/issues/4526
+        pausable_failpoint!("flush-frozen-pausable");
+
+        // This failpoint is used by another test case `test_pageserver_recovery`.
+        fail_point!("flush-frozen-exit");
 
         // Update the metadata file, with new 'disk_consistent_lsn'
         //
@@ -2838,11 +2920,12 @@ impl Timeline {
         Ok(())
     }
 
-    // Write out the given frozen in-memory layer as a new L0 delta file
+    // Write out the given frozen in-memory layer as a new L0 delta file. This L0 file will not be tracked
+    // in layer map immediately. The caller is responsible to put it into the layer map.
     async fn create_delta_layer(
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
-    ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
+    ) -> anyhow::Result<DeltaLayer> {
         let span = tracing::info_span!("blocking");
         let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
@@ -2879,25 +2962,8 @@ impl Timeline {
         })
         .await
         .context("spawn_blocking")??;
-        let new_delta_name = new_delta.filename();
-        let sz = new_delta.desc.file_size;
 
-        // Add it to the layer map
-        let l = Arc::new(new_delta);
-        let mut guard = self.layers.write().await;
-        l.access_stats().record_residence_event(
-            &guard,
-            LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::LayerCreate,
-        );
-        guard.track_new_l0_delta_layer(l);
-
-        // update metrics
-        self.metrics.resident_physical_size_gauge.add(sz);
-        self.metrics.num_persistent_files_created.inc_by(1);
-        self.metrics.persistent_bytes_written.inc_by(sz);
-
-        Ok((new_delta_name, LayerFileMetadata::new(sz)))
+        Ok(new_delta)
     }
 
     async fn repartition(
@@ -3440,7 +3506,7 @@ impl Timeline {
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
             deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
+            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 < b.0),
         )? {
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -3480,11 +3546,7 @@ impl Timeline {
                 iter_iter.kmerge_by(|a, b| {
                     if let Ok((a_key, a_lsn, _)) = a {
                         if let Ok((b_key, b_lsn, _)) = b {
-                            match a_key.cmp(b_key) {
-                                Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
-                                Ordering::Greater => false,
-                            }
+                            (a_key, a_lsn) < (b_key, b_lsn)
                         } else {
                             false
                         }
@@ -3502,11 +3564,7 @@ impl Timeline {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
                     let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
-                    }
+                    (a_key, a_lsn) < (b_key, b_lsn)
                 })
             },
         )?;
@@ -4581,6 +4639,7 @@ impl LocalLayerInfoForDiskUsageEviction {
 }
 
 impl Timeline {
+    /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
         let guard = self.layers.read().await;
         let layers = guard.layer_map();
@@ -4749,4 +4808,180 @@ pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
     let right = Arc::as_ptr(right) as *const ();
 
     left == right
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use utils::{id::TimelineId, lsn::Lsn};
+
+    use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
+
+    use super::{EvictionError, Timeline};
+
+    #[tokio::test]
+    async fn two_layer_eviction_attempts_at_the_same_time() {
+        let harness =
+            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+
+        let remote_storage = {
+            // this is never used for anything, because of how the create_test_timeline works, but
+            // it is with us in spirit and a Some.
+            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
+            let path = harness.conf.workdir.join("localfs");
+            std::fs::create_dir_all(&path).unwrap();
+            let config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(path),
+            };
+            GenericRemoteStorage::from_config(&config).unwrap()
+        };
+
+        let ctx = any_context();
+        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let timeline = tenant
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .await
+            .unwrap();
+
+        let rc = timeline
+            .remote_client
+            .clone()
+            .expect("just configured this");
+
+        let layer = find_some_layer(&timeline).await;
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let batch = [layer];
+
+        let first = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+        let second = async {
+            timeline
+                .evict_layer_batch(&rc, &batch, cancel)
+                .await
+                .unwrap()
+        };
+
+        let (first, second) = tokio::join!(first, second);
+
+        let (first, second) = (only_one(first), only_one(second));
+
+        match (first, second) {
+            (Ok(()), Err(EvictionError::FileNotFound))
+            | (Err(EvictionError::FileNotFound), Ok(())) => {
+                // one of the evictions gets to do it,
+                // other one gets FileNotFound. all is good.
+            }
+            other => unreachable!("unexpected {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn layer_eviction_aba_fails() {
+        let harness = TenantHarness::create("layer_eviction_aba_fails").unwrap();
+
+        let remote_storage = {
+            // this is never used for anything, because of how the create_test_timeline works, but
+            // it is with us in spirit and a Some.
+            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
+            let path = harness.conf.workdir.join("localfs");
+            std::fs::create_dir_all(&path).unwrap();
+            let config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(path),
+            };
+            GenericRemoteStorage::from_config(&config).unwrap()
+        };
+
+        let ctx = any_context();
+        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let timeline = tenant
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .await
+            .unwrap();
+
+        let _e = tracing::info_span!("foobar", tenant_id = %tenant.tenant_id, timeline_id = %timeline.timeline_id).entered();
+
+        let rc = timeline.remote_client.clone().unwrap();
+
+        // TenantHarness allows uploads to happen given GenericRemoteStorage is configured
+        let layer = find_some_layer(&timeline).await;
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let batch = [layer];
+
+        let first = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // lets imagine this is stuck somehow, still referencing the original `Arc<dyn PersistentLayer>`
+        let second = {
+            let cancel = cancel.clone();
+            async {
+                timeline
+                    .evict_layer_batch(&rc, &batch, cancel)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // while it's stuck, we evict and end up redownloading it
+        only_one(first.await).expect("eviction succeeded");
+
+        let layer = find_some_layer(&timeline).await;
+        let layer = layer.downcast_remote_layer().unwrap();
+        timeline.download_remote_layer(layer).await.unwrap();
+
+        let res = only_one(second.await);
+
+        assert!(
+            matches!(res, Err(EvictionError::LayerNotFound(_))),
+            "{res:?}"
+        );
+
+        // no more specific asserting, outside of preconds this is the only valid replacement
+        // failure
+    }
+
+    fn any_context() -> crate::context::RequestContext {
+        use crate::context::*;
+        use crate::task_mgr::*;
+        RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+    }
+
+    fn only_one<T>(mut input: Vec<Option<T>>) -> T {
+        assert_eq!(1, input.len());
+        input
+            .pop()
+            .expect("length just checked")
+            .expect("no cancellation")
+    }
+
+    async fn find_some_layer(timeline: &Timeline) -> Arc<dyn PersistentLayer> {
+        let layers = timeline.layers.read().await;
+        let desc = layers
+            .layer_map()
+            .iter_historic_layers()
+            .next()
+            .expect("must find one layer to evict");
+
+        layers.get_from_desc(&desc)
+    }
 }

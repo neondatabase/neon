@@ -768,55 +768,6 @@ pub async fn immediate_gc(
     Ok(wait_task_done)
 }
 
-pub async fn immediate_compact(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    ctx: &RequestContext,
-) -> Result<tokio::sync::oneshot::Receiver<anyhow::Result<()>>, ApiError> {
-    let guard = TENANTS.read().await;
-
-    let tenant = guard
-        .get(&tenant_id)
-        .map(Arc::clone)
-        .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(|e| ApiError::NotFound(e.into()))?;
-
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(|e| ApiError::NotFound(e.into()))?;
-
-    // Run in task_mgr to avoid race with tenant_detach operation
-    let ctx = ctx.detached_child(TaskKind::Compaction, DownloadBehavior::Download);
-    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
-    task_mgr::spawn(
-        &tokio::runtime::Handle::current(),
-        TaskKind::Compaction,
-        Some(tenant_id),
-        Some(timeline_id),
-        &format!(
-            "timeline_compact_handler compaction run for tenant {tenant_id} timeline {timeline_id}"
-        ),
-        false,
-        async move {
-            let result = timeline
-                .compact(&ctx)
-                .instrument(info_span!("manual_compact", %tenant_id, %timeline_id))
-                .await;
-
-            match task_done.send(result) {
-                Ok(_) => (),
-                Err(result) => error!("failed to send compaction result: {result:?}"),
-            }
-            Ok(())
-        },
-    );
-
-    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
-    drop(guard);
-
-    Ok(wait_task_done)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

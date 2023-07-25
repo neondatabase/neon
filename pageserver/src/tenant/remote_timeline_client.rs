@@ -514,7 +514,7 @@ impl RemoteTimelineClient {
     /// updated metadata.
     ///
     /// The upload will be added to the queue immediately, but it
-    /// won't be performed until all previosuly scheduled layer file
+    /// won't be performed until all previously scheduled layer file
     /// upload operations have completed successfully.  This is to
     /// ensure that when the index file claims that layers X, Y and Z
     /// exist in remote storage, they really do. To wait for the upload
@@ -625,7 +625,7 @@ impl RemoteTimelineClient {
     /// Note: This schedules an index file upload before the deletions.  The
     /// deletion won't actually be performed, until any previously scheduled
     /// upload operations, and the index file upload, have completed
-    /// succesfully.
+    /// successfully.
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
         names: &[LayerFileName],
@@ -1117,7 +1117,7 @@ impl RemoteTimelineClient {
             debug!("remote task {} completed successfully", task.op);
         }
 
-        // The task has completed succesfully. Remove it from the in-progress list.
+        // The task has completed successfully. Remove it from the in-progress list.
         {
             let mut upload_queue_guard = self.upload_queue.lock().unwrap();
             let upload_queue = match upload_queue_guard.deref_mut() {

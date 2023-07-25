@@ -111,7 +111,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 Duration::from_secs(10)
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration(&ctx).await {
+                if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
                     error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
                     wait_duration
                 } else {
@@ -122,12 +122,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             warn_when_period_overrun(started_at.elapsed(), period, "compaction");
 
             // Sleep
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!("received cancellation request during idling");
-                    break;
-                },
-                _ = tokio::time::sleep(sleep_duration) => {},
+            if tokio::time::timeout(sleep_duration, cancel.cancelled())
+                .await
+                .is_ok()
+            {
+                info!("received cancellation request during idling");
+                break;
             }
         }
     }
@@ -196,12 +196,12 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             warn_when_period_overrun(started_at.elapsed(), period, "gc");
 
             // Sleep
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!("received cancellation request during idling");
-                    break;
-                },
-                _ = tokio::time::sleep(sleep_duration) => {},
+            if tokio::time::timeout(sleep_duration, cancel.cancelled())
+                .await
+                .is_ok()
+            {
+                info!("received cancellation request during idling");
+                break;
             }
         }
     }
@@ -263,9 +263,9 @@ pub(crate) async fn random_init_delay(
         rng.gen_range(Duration::ZERO..=period)
     };
 
-    tokio::select! {
-        _ = cancel.cancelled() => Err(Cancelled),
-        _ = tokio::time::sleep(d) => Ok(()),
+    match tokio::time::timeout(d, cancel.cancelled()).await {
+        Ok(_) => Err(Cancelled),
+        Err(_) => Ok(()),
     }
 }
 

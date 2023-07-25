@@ -60,7 +60,7 @@ use utils::serde_percent::Percent;
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, storage_layer::PersistentLayer, Timeline},
+    tenant::{self, storage_layer::PersistentLayer, timeline::EvictionError, Timeline},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,11 +166,11 @@ async fn disk_usage_eviction_task(
         .await;
 
         let sleep_until = start + task_config.period;
-        tokio::select! {
-            _ = tokio::time::sleep_until(sleep_until) => {},
-            _ = cancel.cancelled() => {
-                break
-            }
+        if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+            .await
+            .is_ok()
+        {
+            break;
         }
     }
 }
@@ -390,23 +390,28 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     assert_eq!(results.len(), batch.len());
                     for (result, layer) in results.into_iter().zip(batch.iter()) {
                         match result {
-                            Some(Ok(true)) => {
+                            Some(Ok(())) => {
                                 usage_assumed.add_available_bytes(layer.file_size());
                             }
-                            Some(Ok(false)) => {
-                                // this is:
-                                // - Replacement::{NotFound, Unexpected}
-                                // - it cannot be is_remote_layer, filtered already
+                            Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
+                                unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
+                            }
+                            Some(Err(EvictionError::FileNotFound)) => {
+                                evictions_failed.file_sizes += layer.file_size();
+                                evictions_failed.count += 1;
+                            }
+                            Some(Err(
+                                e @ EvictionError::LayerNotFound(_)
+                                | e @ EvictionError::StatFailed(_),
+                            )) => {
+                                let e = utils::error::report_compact_sources(&e);
+                                warn!(%layer, "failed to evict layer: {e}");
                                 evictions_failed.file_sizes += layer.file_size();
                                 evictions_failed.count += 1;
                             }
                             None => {
                                 assert!(cancel.is_cancelled());
                                 return;
-                            }
-                            Some(Err(e)) => {
-                                // we really shouldn't be getting this, precondition failure
-                                error!("failed to evict layer: {:#}", e);
                             }
                         }
                     }
@@ -540,12 +545,12 @@ async fn collect_eviction_candidates(
         // We could be better here, e.g., sum of all L0 layers + most recent L1 layer.
         // That's what's typically used by the various background loops.
         //
-        // The default can be overriden with a fixed value in the tenant conf.
+        // The default can be overridden with a fixed value in the tenant conf.
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             debug!(
                 tenant_id=%tenant.tenant_id(),
-                overriden_size=s,
+                overridden_size=s,
                 "using overridden min resident size for tenant"
             );
             s
