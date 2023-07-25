@@ -559,7 +559,7 @@ pub fn current_task_id() -> Option<PageserverTaskId> {
 pub async fn shutdown_watcher() {
     let token = SHUTDOWN_TOKEN
         .try_with(|t| t.clone())
-        .expect("shutdown_requested() called in an unexpected task or thread");
+        .expect("shutdown_watcher() called in an unexpected task or thread");
 
     token.cancelled().await;
 }
