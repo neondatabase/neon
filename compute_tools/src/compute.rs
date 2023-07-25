@@ -345,34 +345,40 @@ impl ComputeNode {
         let mut tasks = FuturesUnordered::new();
         let quorum = sk_configs.len() / 2 + 1;
         for config in sk_configs {
-            tasks.push(tokio::spawn(ping_safekeeper(config)));
+            let timeout = tokio::time::Duration::from_millis(100);
+            let task = tokio::time::timeout(timeout, ping_safekeeper(config));
+            tasks.push(tokio::spawn(task));
         }
 
         // Get a quorum of responses or errors
         let mut responses = Vec::new();
         let mut join_errors = Vec::new();
         let mut task_errors = Vec::new();
+        let mut timeout_errors = Vec::new();
         while let Some(response) = tasks.next().await {
             match response {
-                Ok(Ok(r)) => responses.push(r),
-                Ok(Err(e)) => task_errors.push(e),
+                Ok(Ok(Ok(r))) => responses.push(r),
+                Ok(Ok(Err(e))) => task_errors.push(e),
+                Ok(Err(e)) => timeout_errors.push(e),
                 Err(e) => join_errors.push(e),
             };
             if responses.len() >= quorum {
                 break;
             }
-            if join_errors.len() + task_errors.len() >= quorum {
+            if join_errors.len() + task_errors.len() + timeout_errors.len() >= quorum {
                 break;
             }
         }
 
         // In case of error, log and fail the check, but don't crash.
         // We're playing it safe because these errors could be transient
-        // and we don't yet retry.
+        // and we don't yet retry. Also being careful here allows us to
+        // be backwards compatible with safekeepers that don't have the
+        // TIMELINE_STATUS API yet.
         if responses.len() < quorum {
             error!(
-                "failed sync safekeepers check {:?} {:?}",
-                join_errors, task_errors
+                "failed sync safekeepers check {:?} {:?} {:?}",
+                join_errors, task_errors, timeout_errors
             );
             return Ok(None);
         }
