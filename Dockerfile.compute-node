@@ -774,12 +774,6 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 FROM python:3.9-slim-bullseye AS generate-ext-index
 ARG PG_VERSION
 ARG BUILD_TAG
-# Define extension build numbers
-# NOTE: it is *not* necessary for the build tag to be BUILD_TAG. In particular,
-# you should update the build_tag for each extension only when you build it
-RUN echo "kq_imcx ${BUILD_TAG}" >>  build_numbers.txt
-RUN echo "anon ${BUILD_TAG}" >>  build_numbers.txt
-RUN echo "postgis-build ${BUILD_TAG}" >>  build_numbers.txt
 # copy the control files here
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/

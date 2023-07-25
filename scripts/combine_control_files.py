@@ -12,12 +12,7 @@ if __name__ == "__main__":
     parser.add_argument("BUILD_TAG", type=str, help="BUILD_TAG for this compute image")
     args = parser.parse_args()
     pg_version = args.pg_version
-
-    build_numbers = {}
-    with open("build_numbers.txt", "r") as f:
-        for line in f.readlines():
-            ext_name, build_num = line.split(" ")
-            build_numbers[ext_name] = build_num.strip()
+    BUILD_TAG = args.BUILD_TAG
 
     ext_index = {}
     EXT_PATH = Path("extensions")
@@ -31,7 +26,7 @@ if __name__ == "__main__":
                     control_data[control_file.name] = f.read()
             ext_index[extension.name] = {
                 "control_data": control_data,
-                "archive_path": f"{build_numbers[extension.name]}/{pg_version}/extensions/{extension.name}.tar.zst",
+                "archive_path": f"{BUILD_TAG}/{pg_version}/extensions/{extension.name}.tar.zst",
             }
 
     with open("ext_index.json", "w") as f:
