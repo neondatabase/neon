@@ -343,6 +343,7 @@ impl ComputeNode {
 
         // Create task set to query all safekeepers
         let mut tasks = FuturesUnordered::new();
+        let quorum = sk_configs.len() / 2 + 1;
         for config in sk_configs {
             tasks.push(tokio::spawn(ping_safekeeper(config)));
         }
@@ -357,10 +358,10 @@ impl ComputeNode {
                 Ok(Err(e)) => task_errors.push(e),
                 Err(e) => join_errors.push(e),
             };
-            if responses.len() >= 2 {
+            if responses.len() >= quorum {
                 break;
             }
-            if join_errors.len() + task_errors.len() >= 2 {
+            if join_errors.len() + task_errors.len() >= quorum {
                 break;
             }
         }
@@ -368,7 +369,7 @@ impl ComputeNode {
         // In case of error, log and fail the check, but don't crash.
         // We're playing it safe because these errors could be transient
         // and we don't yet retry.
-        if responses.len() < 2 {
+        if responses.len() < quorum {
             error!(
                 "failed sync safekeepers check {:?} {:?}",
                 join_errors, task_errors
@@ -376,7 +377,7 @@ impl ComputeNode {
             return Ok(None);
         }
 
-        Ok(check_if_synced(responses[0..2].try_into()?))
+        Ok(check_if_synced(responses))
     }
 
     // Fast path for sync_safekeepers. If they're already synced we get the lsn

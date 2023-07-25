@@ -48,23 +48,48 @@ pub async fn ping_safekeeper(config: tokio_postgres::Config) -> Result<TimelineS
 }
 
 /// Given a quorum of responses, check if safekeepers are synced at some Lsn
-pub fn check_if_synced(responses: &[TimelineStatusResponse; 2]) -> Option<Lsn> {
-    info!(
-        "checking sk responses {:?} {:?}",
-        responses[0], responses[1]
-    );
-    match (responses[0], responses[1]) {
-        (TimelineStatusResponse::Ok(r1), TimelineStatusResponse::Ok(r2)) => {
-            // Check that quorum has identical commit and flush lsns
-            if r1.commit_lsn == r1.flush_lsn
-                && r1.commit_lsn == r2.commit_lsn
-                && r1.flush_lsn == r2.flush_lsn
-            {
-                Some(r1.commit_lsn)
-            } else {
-                None
-            }
-        }
-        _ => None,
+pub fn check_if_synced(responses: Vec<TimelineStatusResponse>) -> Option<Lsn> {
+    // Check if all responses are ok
+    let ok_responses: Vec<TimelineStatusOkResponse> = responses
+        .iter()
+        .filter_map(|r| match r {
+            TimelineStatusResponse::Ok(ok_response) => Some(ok_response),
+            _ => None,
+        })
+        .cloned()
+        .collect();
+    if ok_responses.len() < responses.len() {
+        info!(
+            "not synced. Only {} out of {} know about this timeline",
+            ok_responses.len(),
+            responses.len()
+        );
+        return None;
     }
+
+    // Get the min and the max of everything
+    let commit: Vec<Lsn> = ok_responses.iter().map(|r| r.commit_lsn).collect();
+    let flush: Vec<Lsn> = ok_responses.iter().map(|r| r.flush_lsn).collect();
+    let commit_max = commit.iter().max().unwrap();
+    let commit_min = commit.iter().min().unwrap();
+    let flush_max = flush.iter().max().unwrap();
+    let flush_min = flush.iter().min().unwrap();
+
+    // Check that all values are equal
+    if commit_min != commit_max {
+        info!("not synced. {:?} {:?}", commit_min, commit_max);
+        return None;
+    }
+    if flush_min != flush_max {
+        info!("not synced. {:?} {:?}", flush_min, flush_max);
+        return None;
+    }
+
+    // Check that commit == flush
+    if commit_max != flush_max {
+        info!("not synced. {:?} {:?}", commit_max, flush_max);
+        return None;
+    }
+
+    Some(*commit_max)
 }
