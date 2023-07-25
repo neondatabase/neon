@@ -334,7 +334,7 @@ pub struct GcInfo {
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
     #[error(transparent)]
-    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+    Other(#[from] anyhow::Error),
 
     /// The operation would require downloading a layer that is missing locally.
     NeedsDownload(TenantTimelineId, LayerFileName),
@@ -475,7 +475,7 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
@@ -555,7 +555,7 @@ impl Timeline {
             "wait_lsn cannot be called in WAL receiver"
         );
 
-        let _timer = self.metrics.wait_lsn_time_histo.start_timer();
+        let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
         match self
             .last_record_lsn
@@ -611,8 +611,45 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compact(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
+
+        static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+            once_cell::sync::Lazy::new(|| {
+                let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+                let permits = usize::max(
+                    1,
+                    // while a lot of the work is done on spawn_blocking, we still do
+                    // repartitioning in the async context. this should give leave us some workers
+                    // unblocked to be blocked on other work, hopefully easing any outside visible
+                    // effects of restarts.
+                    //
+                    // 6/8 is a guess; previously we ran with unlimited 8 and more from
+                    // spawn_blocking.
+                    (total_threads * 3).checked_div(4).unwrap_or(0),
+                );
+                assert_ne!(permits, 0, "we will not be adding in permits later");
+                assert!(
+                    permits < total_threads,
+                    "need threads avail for shorter work"
+                );
+                tokio::sync::Semaphore::new(permits)
+            });
+
+        // this wait probably never needs any "long time spent" logging, because we already nag if
+        // compaction task goes over it's period (20s) which is quite often in production.
+        let _permit = tokio::select! {
+            permit = CONCURRENT_COMPACTIONS.acquire() => {
+                permit
+            },
+            _ = cancel.cancelled() => {
+                return Ok(());
+            }
+        };
 
         let last_record_lsn = self.get_last_record_lsn();
 
@@ -671,11 +708,9 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let mut cancelled = pin!(task_mgr::shutdown_watcher());
-
             loop {
                 tokio::select! {
-                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    _ = cancel.cancelled() => anyhow::bail!("Cancelled while downloading remote layers"),
                     res = downloads.next() => {
                         match res {
                             Some(Ok(())) => {},
@@ -890,7 +925,7 @@ impl Timeline {
                     new_state,
                     TimelineState::Stopping | TimelineState::Broken { .. }
                 ) {
-                    // drop the copmletion guard, if any; it might be holding off the completion
+                    // drop the completion guard, if any; it might be holding off the completion
                     // forever needlessly
                     self.initial_logical_size_attempt
                         .lock()
@@ -2262,8 +2297,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
-        let mut read_count =
-            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+        let mut read_count = scopeguard::guard(0, |cnt| {
+            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+        });
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
@@ -2397,12 +2433,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match open_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match open_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2424,12 +2463,15 @@ impl Timeline {
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match frozen_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match frozen_layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
@@ -2460,12 +2502,15 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
+                            result = match layer
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx,
+                                )
+                                .await
+                            {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };

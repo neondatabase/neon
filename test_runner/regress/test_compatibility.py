@@ -276,7 +276,7 @@ def prepare_snapshot(
     pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
         pageserver_config["listen_pg_addr"]
     )
-    # since storage_broker these are overriden by neon_local during pageserver
+    # since storage_broker these are overridden by neon_local during pageserver
     # start; remove both to prevent unknown options during etcd ->
     # storage_broker migration. TODO: remove once broker is released
     pageserver_config.pop("broker_endpoint", None)

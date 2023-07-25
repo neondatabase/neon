@@ -140,8 +140,6 @@ def test_metric_collection(
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
             filter={
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },

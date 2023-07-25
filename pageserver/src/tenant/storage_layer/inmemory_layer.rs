@@ -7,7 +7,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
@@ -110,6 +110,7 @@ impl InMemoryLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
@@ -132,7 +133,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
@@ -183,7 +184,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given value in the layer.
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,

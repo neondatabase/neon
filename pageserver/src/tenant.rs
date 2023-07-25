@@ -19,6 +19,7 @@ use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
@@ -1443,7 +1444,11 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compaction_iteration(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
@@ -1471,7 +1476,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(ctx)
+                .compact(cancel, ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
@@ -2053,28 +2058,53 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
-            TENANT_STATE_METRIC
-                .with_label_values(&[&tid, current_state])
-                .inc();
-            loop {
-                match rx.changed().await {
-                    Ok(()) => {
-                        let new_state: &'static str = From::from(&*rx.borrow_and_update());
-                        TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, current_state])
-                            .dec();
-                        TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, new_state])
-                            .inc();
 
-                        current_state = new_state;
-                    }
-                    Err(_sender_dropped_error) => {
-                        info!("Tenant dropped the state updates sender, quitting waiting for tenant state change");
-                        return;
-                    }
+            fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
+                ([state.into()], matches!(state, TenantState::Broken { .. }))
+            }
+
+            let mut tuple = inspect_state(&rx.borrow_and_update());
+
+            let is_broken = tuple.1;
+            let mut counted_broken = if !is_broken {
+                // the tenant might be ignored and reloaded, so first remove any previous set
+                // element. it most likely has already been scraped, as these are manual operations
+                // right now. most likely we will add it back very soon.
+                drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
+                false
+            } else {
+                // add the id to the set right away, there should not be any updates on the channel
+                // after
+                crate::metrics::BROKEN_TENANTS_SET
+                    .with_label_values(&[&tid])
+                    .set(1);
+                true
+            };
+
+            loop {
+                let labels = &tuple.0;
+                let current = TENANT_STATE_METRIC.with_label_values(labels);
+                current.inc();
+
+                if rx.changed().await.is_err() {
+                    // tenant has been dropped; decrement the counter because a tenant with that
+                    // state is no longer in tenant map, but allow any broken set item to exist
+                    // still.
+                    current.dec();
+                    break;
+                }
+
+                current.dec();
+                tuple = inspect_state(&rx.borrow_and_update());
+
+                let is_broken = tuple.1;
+                if is_broken && !counted_broken {
+                    counted_broken = true;
+                    // insert the tenant_id (back) into the set
+                    crate::metrics::BROKEN_TENANTS_SET
+                        .with_label_values(&[&tid])
+                        .inc();
                 }
             }
         });
@@ -3076,7 +3106,7 @@ impl Drop for Tenant {
     }
 }
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(
+pub async fn dump_layerfile_from_path(
     path: &Path,
     verbose: bool,
     ctx: &RequestContext,
@@ -3090,8 +3120,16 @@ pub fn dump_layerfile_from_path(
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
-        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
+        crate::IMAGE_FILE_MAGIC => {
+            ImageLayer::new_for_path(path, file)?
+                .dump(verbose, ctx)
+                .await?
+        }
+        crate::DELTA_FILE_MAGIC => {
+            DeltaLayer::new_for_path(path, file)?
+                .dump(verbose, ctx)
+                .await?
+        }
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 
@@ -3294,6 +3332,7 @@ mod tests {
     use hex_literal::hex;
     use once_cell::sync::Lazy;
     use rand::{thread_rng, Rng};
+    use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
@@ -3815,7 +3854,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3825,7 +3864,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3835,7 +3874,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         let writer = tline.writer().await;
         writer
@@ -3845,7 +3884,7 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&ctx).await?;
+        tline.compact(&CancellationToken::new(), &ctx).await?;
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
@@ -3914,7 +3953,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 
@@ -3991,7 +4030,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 
@@ -4079,7 +4118,7 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&ctx).await?;
+            tline.compact(&CancellationToken::new(), &ctx).await?;
             tline.gc().await?;
         }
 

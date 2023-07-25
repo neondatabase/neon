@@ -328,7 +328,7 @@ fn to_io_error(e: anyhow::Error, context: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::blob_io::{BlobCursor, BlobWriter};
+    use crate::tenant::blob_io::BlobWriter;
     use crate::tenant::block_io::BlockCursor;
     use rand::{seq::SliceRandom, thread_rng, RngCore};
     use std::fs;

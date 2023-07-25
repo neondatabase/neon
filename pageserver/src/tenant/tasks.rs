@@ -111,7 +111,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 Duration::from_secs(10)
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration(&ctx).await {
+                if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
                     error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
                     wait_duration
                 } else {

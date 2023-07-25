@@ -17,7 +17,9 @@ use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use hyper::StatusCode;
-use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+use metrics::{
+    exponential_buckets, register_histogram, register_int_counter_vec, Histogram, IntCounterVec,
+};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::{error::Error, io, ops::ControlFlow, sync::Arc};
@@ -38,18 +40,30 @@ const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "proxy_accepted_connections_total",
-        "Number of TCP client connections accepted."
+        "Number of TCP client connections accepted.",
+        &["protocol"],
     )
     .unwrap()
 });
 
-static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "proxy_closed_connections_total",
-        "Number of TCP client connections closed."
+        "Number of TCP client connections closed.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+static COMPUTE_CONNECTION_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_compute_connection_latency_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 2^16 * 0.5ms = 32s
+        exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
     .unwrap()
 });
@@ -137,6 +151,13 @@ pub enum ClientMode {
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
+    fn protocol_label(&self) -> &'static str {
+        match self {
+            ClientMode::Tcp => "tcp",
+            ClientMode::Websockets { .. } => "ws",
+        }
+    }
+
     fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
@@ -176,9 +197,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
-    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
+    NUM_CONNECTIONS_ACCEPTED_COUNTER
+        .with_label_values(&[mode.protocol_label()])
+        .inc();
     scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[mode.protocol_label()]).inc();
     }
 
     let tls = config.tls_config.as_ref();
@@ -380,6 +403,8 @@ where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
+    let _timer = COMPUTE_CONNECTION_LATENCY.start_timer();
+
     mechanism.update_connect_config(&mut node_info.config);
 
     let mut num_retries = 0;

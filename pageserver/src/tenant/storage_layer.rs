@@ -338,7 +338,8 @@ impl LayerAccessStats {
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
-pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
+#[async_trait::async_trait]
+pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -368,7 +369,7 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
     /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -377,7 +378,7 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync {
     ) -> Result<ValueReconstructResult>;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
+    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Returned by [`PersistentLayer::iter`]
