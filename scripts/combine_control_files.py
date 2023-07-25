@@ -1,3 +1,4 @@
+#! /usr/bin/env python3
 # Script to generate ext_index.json metadata file
 # that stores content of the control files and location of extension archives
 #  for all extensions in /extensions subdir.
