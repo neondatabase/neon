@@ -1000,14 +1000,17 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    timeline
-        .compact(&cancel, &ctx)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+        timeline
+            .compact(&cancel, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_compaction", %tenant_id, %timeline_id))
+    .await
 }
 
 // Run checkpoint immediately on given timeline.
@@ -1032,7 +1035,7 @@ async fn timeline_checkpoint_handler(
 
         json_response(StatusCode::OK, ())
     }
-    .instrument(info_span!("manual_checkpoint", tenant_id = %tenant_id, timeline_id = %timeline_id))
+    .instrument(info_span!("manual_checkpoint", %tenant_id, %timeline_id))
     .await
 }
 
