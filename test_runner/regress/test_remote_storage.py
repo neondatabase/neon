@@ -815,7 +815,7 @@ def test_compaction_delete_before_upload(
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         # Now make the flushing hang and update one small piece of data
-        client.configure_failpoints(("flush-frozen-before-sync", "pause"))
+        client.configure_failpoints(("flush-frozen-pausable", "pause"))
 
         endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
 
@@ -841,7 +841,7 @@ def test_compaction_delete_before_upload(
         time.sleep(4)
         client.timeline_compact(tenant_id, timeline_id)
 
-        client.configure_failpoints(("flush-frozen-before-sync", "off"))
+        client.configure_failpoints(("flush-frozen-pausable", "off"))
 
         conflict = q.get()
 
