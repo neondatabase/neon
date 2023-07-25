@@ -337,7 +337,7 @@ pub enum CreateTimelineError {
 
 struct TenantDirectoryScan {
     sorted_timelines_to_load: Vec<(TimelineId, TimelineMetadata)>,
-    timelines_to_resume_deletion: Vec<(TimelineId, TimelineMetadata)>,
+    timelines_to_resume_deletion: Vec<(TimelineId, Option<TimelineMetadata>)>,
 }
 
 enum CreateTimelineCause {
@@ -817,7 +817,8 @@ impl Tenant {
         // Note timelines_to_resume_deletion needs to be separate because it can be not sortable
         // from the point of `tree_sort_timelines`. I e some parents can be missing because deletion
         // completed in non topological order (for example because parent has smaller number of layer files in it)
-        let mut timelines_to_resume_deletion: Vec<(TimelineId, TimelineMetadata)> = vec![];
+        let mut timelines_to_resume_deletion: Vec<(TimelineId, Option<TimelineMetadata>)> = vec![];
+
         let timelines_dir = self.conf.timelines_path(&self.tenant_id);
 
         for entry in
@@ -867,7 +868,6 @@ impl Tenant {
                 }
             } else if crate::is_delete_mark(&timeline_dir) {
                 // If metadata exists, load as usual, continue deletion
-                // If metadata doesnt exist remove timeline dir and delete mark
                 let timeline_id =
                     TimelineId::try_from(timeline_dir.file_stem()).with_context(|| {
                         format!(
@@ -881,29 +881,19 @@ impl Tenant {
                     // Remote deletion did not finish. Need to resume.
                     timelines_to_resume_deletion.push((
                         timeline_id,
-                        load_metadata(self.conf, &self.tenant_id, &timeline_id)?,
+                        Some(load_metadata(self.conf, &self.tenant_id, &timeline_id)?),
                     ));
                     continue;
                 }
 
-                // Is is suboptimal because we use block_on while we're in spawn_blocking.
-                // Here cleanup_remaining_timeline_fs_traces uses fs operations that basically result in a cycle:
+                // If metadata doesnt exist save it for later call of `DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`.
+                // We cant do it here because the method is async so we'd need block_on and here we're in spawn_blocking.
+                // cleanup_remaining_timeline_fs_traces uses fs operations so that basically results in a cycle:
                 // spawn_blocking
                 // - block_on
                 //   - spawn_blocking
                 // which can lead to running out of threads.
-                // We invoke several fs operations one by one so this should be less risky.
-                // An alternative would be to convert it to sync and tolerate potential executor stalls.
-                let rt = tokio::runtime::Handle::current();
-                if let Err(e) = rt.block_on(
-                    DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(&self, timeline_id),
-                ) {
-                    warn!(
-                        "cannot clean up deleted timeline dir at: {} error: {:#}",
-                        timeline_dir.display(),
-                        e
-                    );
-                }
+                timelines_to_resume_deletion.push((timeline_id, None));
             } else {
                 if !timeline_dir.exists() {
                     warn!(
@@ -1022,21 +1012,37 @@ impl Tenant {
         }
 
         // Resume deletion ones with deleted_mark
-        for (timeline_id, local_metadata) in scan.timelines_to_resume_deletion {
-            if let Err(e) = self
-                .load_local_timeline(timeline_id, local_metadata, init_order, ctx, true)
-                .await
-            {
-                match e {
-                    LoadLocalTimelineError::Load(source) => {
-                        // We tried to load deleted timeline, this is a bug.
-                        return Err(anyhow::anyhow!(source).context(
-                            "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
-                        ));
+        for (timeline_id, maybe_local_metadata) in scan.timelines_to_resume_deletion {
+            match maybe_local_metadata {
+                None => {
+                    // See comment in `scan_and_sort_timelines_dir`.
+                    if let Err(e) =
+                        DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(&self, timeline_id)
+                            .await
+                    {
+                        warn!(
+                            "cannot clean up deleted timeline dir timeline_id: {} error: {:#}",
+                            timeline_id, e
+                        );
                     }
-                    LoadLocalTimelineError::ResumeDeletion(source) => {
-                        // Make sure resumed deletion wont fail loading for entire tenant.
-                        error!("Failed to resume timeline deletion: {source:#}")
+                }
+                Some(local_metadata) => {
+                    if let Err(e) = self
+                        .load_local_timeline(timeline_id, local_metadata, init_order, ctx, true)
+                        .await
+                    {
+                        match e {
+                            LoadLocalTimelineError::Load(source) => {
+                                // We tried to load deleted timeline, this is a bug.
+                                return Err(anyhow::anyhow!(source).context(
+                                "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
+                            ));
+                            }
+                            LoadLocalTimelineError::ResumeDeletion(source) => {
+                                // Make sure resumed deletion wont fail loading for entire tenant.
+                                error!("Failed to resume timeline deletion: {source:#}")
+                            }
+                        }
                     }
                 }
             }
