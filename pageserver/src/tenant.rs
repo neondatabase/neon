@@ -2199,28 +2199,44 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
-            TENANT_STATE_METRIC
-                .with_label_values(&[&tid, current_state])
-                .inc();
-            loop {
-                match rx.changed().await {
-                    Ok(()) => {
-                        let new_state: &'static str = From::from(&*rx.borrow_and_update());
-                        TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, current_state])
-                            .dec();
-                        TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, new_state])
-                            .inc();
 
-                        current_state = new_state;
-                    }
-                    Err(_sender_dropped_error) => {
-                        info!("Tenant dropped the state updates sender, quitting waiting for tenant state change");
-                        return;
-                    }
+            fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
+                ([state.into()], matches!(state, TenantState::Broken { .. }))
+            }
+
+            let mut tuple = inspect_state(&rx.borrow_and_update());
+
+            let is_broken = tuple.1;
+            if !is_broken {
+                // the tenant might be ignored and reloaded, so first remove any previous set
+                // element. it most likely has already been scraped, as these are manual operations
+                // right now. most likely we will add it back very soon.
+                drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
+            }
+
+            loop {
+                let labels = &tuple.0;
+                let current = TENANT_STATE_METRIC.with_label_values(labels);
+                current.inc();
+
+                if rx.changed().await.is_err() {
+                    // tenant has been dropped; decrement the counter because a tenant with that
+                    // state is no longer in tenant map, but allow any broken set item to exist
+                    // still.
+                    current.dec();
+                    break;
+                }
+
+                current.dec();
+                tuple = inspect_state(&rx.borrow_and_update());
+
+                let is_broken = tuple.1;
+                if is_broken {
+                    // insert the tenant_id (back) into the set
+                    crate::metrics::BROKEN_TENANTS_SET
+                        .with_label_values(&[&tid])
+                        .inc();
                 }
             }
         });

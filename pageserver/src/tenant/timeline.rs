@@ -334,7 +334,7 @@ pub struct GcInfo {
 #[derive(thiserror::Error)]
 pub enum PageReconstructError {
     #[error(transparent)]
-    Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
+    Other(#[from] anyhow::Error),
 
     /// The operation would require downloading a layer that is missing locally.
     NeedsDownload(TenantTimelineId, LayerFileName),
@@ -925,7 +925,7 @@ impl Timeline {
                     new_state,
                     TimelineState::Stopping | TimelineState::Broken { .. }
                 ) {
-                    // drop the copmletion guard, if any; it might be holding off the completion
+                    // drop the completion guard, if any; it might be holding off the completion
                     // forever needlessly
                     self.initial_logical_size_attempt
                         .lock()
