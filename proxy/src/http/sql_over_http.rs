@@ -11,6 +11,7 @@ use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
+use tokio_postgres::GenericClient;
 use tokio_postgres::Row;
 use url::Url;
 
@@ -21,6 +22,13 @@ use super::conn_pool::GlobalConnPool;
 struct QueryData {
     query: String,
     params: Vec<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Payload {
+    Single(QueryData),
+    Batch(Vec<QueryData>),
 }
 
 pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
@@ -192,15 +200,53 @@ pub async fn handle(
     // Read the query and query params from the request body
     //
     let body = hyper::body::to_bytes(request.into_body()).await?;
-    let QueryData { query, params } = serde_json::from_slice(&body)?;
-    let query_params = json_to_pg_text(params)?;
+    let payload: Payload = serde_json::from_slice(&body)?;
+
+    let mut client = conn_pool.get(&conn_info, !allow_pool).await?;
 
     //
     // Now execute the query and return the result
     //
-    let client = conn_pool.get(&conn_info, !allow_pool).await?;
+    let result = match payload {
+        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode).await,
+        Payload::Batch(queries) => {
+            let mut results = Vec::new();
+            let transaction = client.transaction().await?;
+            for query in queries {
+                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                match result {
+                    Ok(r) => results.push(r),
+                    Err(e) => {
+                        transaction.rollback().await?;
+                        return Err(e);
+                    }
+                }
+            }
+            transaction.commit().await?;
+            Ok(Value::Array(results))
+        }
+    };
 
-    let row_stream = client.query_raw_txt(query, query_params).await?;
+    if allow_pool {
+        // return connection to the pool
+        tokio::task::spawn(async move {
+            let _ = conn_pool.put(&conn_info, client).await;
+        });
+    }
+
+    result
+}
+
+async fn query_to_json<T: GenericClient>(
+    client: &T,
+    data: QueryData,
+    raw_output: bool,
+    array_mode: bool,
+) -> anyhow::Result<Value> {
+    let query_params = json_to_pg_text(data.params)?;
+    let row_stream = client
+        .query_raw_txt::<String, _>(data.query, query_params)
+        .await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -255,13 +301,6 @@ pub async fn handle(
         .iter()
         .map(|row| pg_text_row_to_json(row, raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
-
-    if allow_pool {
-        // return connection to the pool
-        tokio::task::spawn(async move {
-            let _ = conn_pool.put(&conn_info, client).await;
-        });
-    }
 
     // resulting JSON format is based on the format of node-postgres result
     Ok(json!({
