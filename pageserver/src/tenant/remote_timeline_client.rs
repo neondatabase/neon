@@ -827,7 +827,7 @@ impl RemoteTimelineClient {
             )
         };
 
-        receiver.changed().await?;
+        receiver.changed().await.context("upload queue shut down")?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
@@ -855,10 +855,22 @@ impl RemoteTimelineClient {
             self.storage_impl.delete_objects(&remaining).await?;
         }
 
+        fail::fail_point!("timeline-delete-before-index-delete", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-index-delete"
+            ))?
+        });
+
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
 
         debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
+
+        fail::fail_point!("timeline-delete-after-index-delete", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-after-index-delete"
+            ))?
+        });
 
         info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
 

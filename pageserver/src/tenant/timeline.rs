@@ -86,6 +86,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
+use super::delete::DeleteTimelineFlow;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
@@ -237,11 +238,10 @@ pub struct Timeline {
 
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
-    /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
+    /// This lock is acquired in [`Timeline::gc`] and [`Timeline::compact`].
+    /// This is an `Arc<Mutex>` lock because we need an owned
     /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
-    ///
-    /// [`Tenant::delete_timeline`]: super::Tenant::delete_timeline
+    /// Note that [`DeleteTimelineFlow`] uses `delete_progress` field.
     pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
@@ -283,7 +283,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_lock: Arc<tokio::sync::Mutex<bool>>,
+    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -1453,7 +1453,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_lock: Arc::new(tokio::sync::Mutex::new(false)),
+                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
@@ -1918,6 +1918,15 @@ impl Timeline {
     }
 
     fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
+        let state = self.current_state();
+        if matches!(
+            state,
+            TimelineState::Broken { .. } | TimelineState::Stopping
+        ) {
+            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+            return;
+        }
+
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
