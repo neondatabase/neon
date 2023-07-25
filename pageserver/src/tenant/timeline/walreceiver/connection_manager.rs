@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
+    async fn lsn_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
         let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
@@ -1189,8 +1189,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_connection_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_connection_threshhold_current_candidate")?;
+    async fn timeout_connection_threshold_current_candidate() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("timeout_connection_threshold_current_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1252,8 +1252,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_wal_over_threshhold_current_candidate")?;
+    async fn timeout_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("timeout_wal_over_threshold_current_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let new_lsn = Lsn(100_100).align();

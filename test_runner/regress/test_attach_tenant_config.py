@@ -123,7 +123,7 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
 @pytest.mark.parametrize("content_type", [None, "application/json"])
 def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
     """
-    For backwards-compatiblity: if we send an empty body,
+    For backwards-compatibility: if we send an empty body,
     the request should be accepted and the config should be the default config.
     """
     env = positive_env
