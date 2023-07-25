@@ -10,7 +10,7 @@ use utils::{id::TenantTimelineId, logging, lsn::Lsn};
 use crate::{
     bindings::{
         neon_tenant_walproposer, neon_timeline_walproposer, wal_acceptor_connection_timeout,
-        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust,
+        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup,
     },
     c_context,
     simtest::safekeeper::run_server,
@@ -94,6 +94,8 @@ impl Test {
             let list = CString::new(guc).unwrap();
 
             unsafe {
+                WalProposerCleanup();
+
                 wal_acceptors_list = list.into_raw();
                 wal_acceptor_reconnect_timeout = 1000;
                 wal_acceptor_connection_timeout = 5000;
@@ -134,4 +136,9 @@ fn sync_empty_safekeepers() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
+    println!("Sucessfully synced empty safekeepers at 0/0");
+
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    println!("Sucessfully synced empty safekeepers at 0/0");
 }

@@ -51,9 +51,6 @@ extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
 extern bool am_wal_proposer;
 
-/* If true, we're exiting. */
-extern bool walproposer_exited;
-
 struct WalProposerConn;			/* Defined in libpqwalproposer */
 typedef struct WalProposerConn WalProposerConn;
 

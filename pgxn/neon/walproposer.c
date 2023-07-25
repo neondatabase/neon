@@ -321,6 +321,33 @@ nwp_shmem_startup_hook(void)
 	WalproposerShmemInit();
 }
 
+void WalProposerCleanup()
+{
+	n_safekeepers = 0;
+	quorum = 0;
+	lastSentCommitLsn = 0;
+	availableLsn = 0;
+	lastSentCommitLsn = 0;
+	truncateLsn = 0;
+	propTerm = 0;
+	propTermHistory.entries = NULL;
+	propTermHistory.n_entries = 0;
+	propEpochStartLsn = 0;
+	donorEpoch = 0;
+	donor = 0;
+	timelineStartLsn = 0;
+	n_votes = 0;
+	n_connected = 0;
+	last_reconnect_attempt = 0;
+
+	if (walprop_shared != NULL)
+	{
+		memset(walprop_shared, 0, WalproposerShmemSize());
+		SpinLockInit(&walprop_shared->mutex);
+		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+	}
+}
+
 void WalProposerRust()
 {
 	walprop_log(LOG, "WalProposerRust");
