@@ -8,9 +8,11 @@ use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use postgres::{Client, NoTls};
 use tokio_postgres;
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -21,6 +23,7 @@ use utils::measured_stream::MeasuredReader;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
+use crate::sync_sk::{check_if_synced, ping_safekeeper};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -309,6 +312,101 @@ impl ComputeNode {
         Ok(())
     }
 
+    pub async fn check_safekeepers_synced_async(
+        &self,
+        compute_state: &ComputeState,
+    ) -> Result<Option<Lsn>> {
+        // Construct a connection config for each safekeeper
+        let pspec: ParsedSpec = compute_state
+            .pspec
+            .as_ref()
+            .expect("spec must be set")
+            .clone();
+        let sk_connstrs: Vec<String> = pspec.spec.safekeeper_connstrings.clone();
+        let sk_configs = sk_connstrs.into_iter().map(|connstr| {
+            // Format connstr
+            let connstr = format!("postgresql://no_user@{}", connstr);
+            let options = format!(
+                "-c timeline_id={} tenant_id={}",
+                pspec.timeline_id, pspec.tenant_id
+            );
+
+            // Construct client
+            let mut config = tokio_postgres::Config::from_str(&connstr).unwrap();
+            config.options(&options);
+            if let Some(storage_auth_token) = pspec.storage_auth_token.clone() {
+                config.password(storage_auth_token);
+            }
+
+            config
+        });
+
+        // Create task set to query all safekeepers
+        let mut tasks = FuturesUnordered::new();
+        let quorum = sk_configs.len() / 2 + 1;
+        for config in sk_configs {
+            let timeout = tokio::time::Duration::from_millis(100);
+            let task = tokio::time::timeout(timeout, ping_safekeeper(config));
+            tasks.push(tokio::spawn(task));
+        }
+
+        // Get a quorum of responses or errors
+        let mut responses = Vec::new();
+        let mut join_errors = Vec::new();
+        let mut task_errors = Vec::new();
+        let mut timeout_errors = Vec::new();
+        while let Some(response) = tasks.next().await {
+            match response {
+                Ok(Ok(Ok(r))) => responses.push(r),
+                Ok(Ok(Err(e))) => task_errors.push(e),
+                Ok(Err(e)) => timeout_errors.push(e),
+                Err(e) => join_errors.push(e),
+            };
+            if responses.len() >= quorum {
+                break;
+            }
+            if join_errors.len() + task_errors.len() + timeout_errors.len() >= quorum {
+                break;
+            }
+        }
+
+        // In case of error, log and fail the check, but don't crash.
+        // We're playing it safe because these errors could be transient
+        // and we don't yet retry. Also being careful here allows us to
+        // be backwards compatible with safekeepers that don't have the
+        // TIMELINE_STATUS API yet.
+        if responses.len() < quorum {
+            error!(
+                "failed sync safekeepers check {:?} {:?} {:?}",
+                join_errors, task_errors, timeout_errors
+            );
+            return Ok(None);
+        }
+
+        Ok(check_if_synced(responses))
+    }
+
+    // Fast path for sync_safekeepers. If they're already synced we get the lsn
+    // in one roundtrip. If not, we should do a full sync_safekeepers.
+    pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
+        let start_time = Utc::now();
+
+        // Run actual work with new tokio runtime
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create rt");
+        let result = rt.block_on(self.check_safekeepers_synced_async(compute_state));
+
+        // Record runtime
+        self.state.lock().unwrap().metrics.sync_sk_check_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        result
+    }
+
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
     #[instrument(skip_all)]
@@ -371,10 +469,14 @@ impl ComputeNode {
         // cannot sync safekeepers.
         let lsn = match spec.mode {
             ComputeMode::Primary => {
-                info!("starting safekeepers syncing");
-                let lsn = self
-                    .sync_safekeepers(pspec.storage_auth_token.clone())
-                    .with_context(|| "failed to sync safekeepers")?;
+                info!("checking if safekeepers are synced");
+                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
+                    lsn
+                } else {
+                    info!("starting safekeepers syncing");
+                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                        .with_context(|| "failed to sync safekeepers")?
+                };
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
