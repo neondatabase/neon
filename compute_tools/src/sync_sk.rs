@@ -13,7 +13,6 @@ pub enum TimelineStatusResponse {
 pub struct TimelineStatusOkResponse {
     flush_lsn: Lsn,
     commit_lsn: Lsn,
-    peer_horizon_lsn: Lsn,
 }
 
 /// Get a safekeeper's metadata for our timeline
@@ -40,7 +39,6 @@ pub async fn ping_safekeeper(config: tokio_postgres::Config) -> Result<TimelineS
         let response = TimelineStatusResponse::Ok(TimelineStatusOkResponse {
             flush_lsn: Lsn::from_str(row.get("flush_lsn").unwrap())?,
             commit_lsn: Lsn::from_str(row.get("commit_lsn").unwrap())?,
-            peer_horizon_lsn: Lsn::from_str(row.get("peer_horizon_lsn").unwrap())?,
         });
         Ok(response)
     } else {
@@ -51,14 +49,18 @@ pub async fn ping_safekeeper(config: tokio_postgres::Config) -> Result<TimelineS
 
 /// Given a quorum of responses, check if safekeepers are synced at some Lsn
 pub fn check_if_synced(responses: &[TimelineStatusResponse; 2]) -> Option<Lsn> {
+    info!(
+        "checking sk responses {:?} {:?}",
+        responses[0], responses[1]
+    );
     match (responses[0], responses[1]) {
         (TimelineStatusResponse::Ok(r1), TimelineStatusResponse::Ok(r2)) => {
-            // TODO is this correct?
-            let max_commit = std::cmp::max(r1.commit_lsn, r2.commit_lsn);
-            let min_flush = std::cmp::min(r1.flush_lsn, r2.flush_lsn);
-            let min_peer = std::cmp::min(r1.peer_horizon_lsn, r2.peer_horizon_lsn);
-            if max_commit == min_flush && max_commit == min_peer {
-                Some(max_commit)
+            // Check that quorum has identical commit and flush lsns
+            if r1.commit_lsn == r1.flush_lsn
+                && r1.commit_lsn == r2.commit_lsn
+                && r1.flush_lsn == r2.flush_lsn
+            {
+                Some(r1.commit_lsn)
             } else {
                 None
             }

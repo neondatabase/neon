@@ -6,13 +6,13 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Condvar, Mutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use postgres::{Client, NoTls};
 use tokio_postgres;
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 

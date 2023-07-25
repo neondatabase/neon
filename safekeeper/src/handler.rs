@@ -284,7 +284,6 @@ impl SafekeeperPostgresHandler {
         pgb.write_message_noflush(&BeMessage::RowDescription(&[
             RowDescriptor::text_col(b"flush_lsn"),
             RowDescriptor::text_col(b"commit_lsn"),
-            RowDescriptor::text_col(b"peer_horizon_lsn"),
         ]))?;
 
         // Write row if timeline exists
@@ -292,11 +291,9 @@ impl SafekeeperPostgresHandler {
             let (inmem, _state) = tli.get_state().await;
             let flush_lsn = tli.get_flush_lsn().await;
             let commit_lsn = inmem.commit_lsn;
-            let peer_horizon_lsn = inmem.peer_horizon_lsn;
             pgb.write_message_noflush(&BeMessage::DataRow(&[
                 Some(flush_lsn.to_string().as_bytes()),
                 Some(commit_lsn.to_string().as_bytes()),
-                Some(peer_horizon_lsn.to_string().as_bytes()),
             ]))?;
         }
 
