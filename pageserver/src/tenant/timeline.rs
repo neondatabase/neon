@@ -611,8 +611,45 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compact(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
+
+        static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+            once_cell::sync::Lazy::new(|| {
+                let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+                let permits = usize::max(
+                    1,
+                    // while a lot of the work is done on spawn_blocking, we still do
+                    // repartitioning in the async context. this should give leave us some workers
+                    // unblocked to be blocked on other work, hopefully easing any outside visible
+                    // effects of restarts.
+                    //
+                    // 6/8 is a guess; previously we ran with unlimited 8 and more from
+                    // spawn_blocking.
+                    (total_threads * 3).checked_div(4).unwrap_or(0),
+                );
+                assert_ne!(permits, 0, "we will not be adding in permits later");
+                assert!(
+                    permits < total_threads,
+                    "need threads avail for shorter work"
+                );
+                tokio::sync::Semaphore::new(permits)
+            });
+
+        // this wait probably never needs any "long time spent" logging, because we already nag if
+        // compaction task goes over it's period (20s) which is quite often in production.
+        let _permit = tokio::select! {
+            permit = CONCURRENT_COMPACTIONS.acquire() => {
+                permit
+            },
+            _ = cancel.cancelled() => {
+                return Ok(());
+            }
+        };
 
         let last_record_lsn = self.get_last_record_lsn();
 
@@ -671,11 +708,9 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let mut cancelled = pin!(task_mgr::shutdown_watcher());
-
             loop {
                 tokio::select! {
-                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    _ = cancel.cancelled() => anyhow::bail!("Cancelled while downloading remote layers"),
                     res = downloads.next() => {
                         match res {
                             Some(Ok(())) => {},
