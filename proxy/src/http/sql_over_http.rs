@@ -35,6 +35,8 @@ use super::conn_pool::GlobalConnPool;
 mod codec;
 mod connection;
 mod error;
+// mod prepare;
+// mod pg_type;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -420,7 +422,6 @@ where
     }
 
     conn.send().await?;
-    conn.flush().await?;
 
     // now read the responses
 

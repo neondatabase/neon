@@ -82,10 +82,7 @@ where
     pub async fn send(&mut self) -> Result<(), Error> {
         poll_fn(|cx| self.poll_send(cx)).await?;
         let request = FrontendMessage::Raw(self.buf.split().freeze());
-        self.stream.start_send_unpin(request).map_err(Error::io)
-    }
-
-    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.stream.start_send_unpin(request).map_err(Error::io)?;
         poll_fn(|cx| self.poll_flush(cx)).await
     }
 
