@@ -23,7 +23,7 @@ use utils::measured_stream::MeasuredReader;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
-use crate::sync_sk::ping_safekeeper;
+use crate::sync_sk::{check_if_synced, ping_safekeeper};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -365,25 +365,18 @@ impl ComputeNode {
             }
         }
 
-        // Check for errors
+        // In case of error, log and fail the check, but don't crash.
+        // We're playing it safe because these errors could be transient
+        // and we don't yet retry.
         if responses.len() < 2 {
-            // TODO better error
-            bail!(
+            error!(
                 "failed sync safekeepers check {:?} {:?}",
-                join_errors,
-                task_errors
+                join_errors, task_errors
             );
+            return Ok(None);
         }
-        let sk1 = responses[0].clone();
-        let sk2 = responses[1].clone();
 
-        // Decide if full sync_safekeepers can be skipped
-        // TODO this is not the correct logic
-        if sk1.is_some() && sk1 == sk2 {
-            Ok(Some(Lsn::from_str(&sk1.unwrap().1)?))
-        } else {
-            Ok(None)
-        }
+        Ok(check_if_synced(responses[0..2].try_into()?))
     }
 
     // Fast path for sync_safekeepers. If they're already synced we get the lsn
