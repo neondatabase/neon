@@ -333,7 +333,7 @@ impl ComputeNode {
 
             // Construct client
             let mut config = tokio_postgres::Config::from_str(&connstr).unwrap();
-            config.options(&&options);
+            config.options(&options);
             if let Some(storage_auth_token) = pspec.storage_auth_token.clone() {
                 config.password(storage_auth_token);
             }
