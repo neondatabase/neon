@@ -2,9 +2,9 @@
 # Script to generate ext_index.json metadata file
 # that stores content of the control files and location of extension archives
 # for all extensions in extensions subdir.
+import argparse
 import json
 from pathlib import Path
-import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="generate ext_index.json")
