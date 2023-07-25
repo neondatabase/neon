@@ -1017,7 +1017,7 @@ impl Tenant {
                 None => {
                     // See comment in `scan_and_sort_timelines_dir`.
                     if let Err(e) =
-                        DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(&self, timeline_id)
+                        DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(self, timeline_id)
                             .await
                     {
                         warn!(
