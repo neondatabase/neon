@@ -58,6 +58,7 @@ pub struct ComputeNode {
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     // (key: extension name, value: path to extension archive in remote storage)
     pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
+    pub library_index: OnceLock<HashMap<String, String>>,
     pub already_downloaded_extensions: Mutex<HashSet<String>>,
     pub build_tag: String,
 }
@@ -744,7 +745,7 @@ LIMIT 100",
             let spec = &pspec.spec;
             let custom_ext = spec.custom_extensions.clone().unwrap_or(Vec::new());
             info!("custom extensions: {:?}", &custom_ext);
-            let ext_remote_paths = extension_server::get_available_extensions(
+            let (ext_remote_paths, library_index) = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
@@ -754,38 +755,44 @@ LIMIT 100",
             .await?;
             self.ext_remote_paths
                 .set(ext_remote_paths)
-                .expect("ext_remote_paths.set error");
+                .expect("this is the only time we set ext_remote_paths");
+            self.library_index
+                .set(library_index)
+                .expect("this is the only time we set library_index");
         }
         Ok(())
     }
 
-    pub async fn download_extension(&self, ext_name: &str) -> Result<()> {
+    pub async fn download_extension(&self, ext_name: &str, is_library: bool) -> Result<()> {
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                // TODO: eliminate useless LOAD Library calls to this function (if possible)
-                // not clear that we can distinguish between useful and useless
-                // library calls better than the below code
-                let ext_name = ext_name.replace(".so", "");
+                let mut real_ext_name = ext_name.to_string();
+                if is_library {
+                    real_ext_name = real_ext_name.replace(".so", "");
+                    real_ext_name =
+                        self.library_index.get().expect("oncelock err")[&real_ext_name].clone();
+                }
+
                 {
                     let mut already_downloaded_extensions =
                         self.already_downloaded_extensions.lock().expect("bad lock");
-                    if already_downloaded_extensions.contains(&ext_name) {
+                    if already_downloaded_extensions.contains(&real_ext_name) {
                         info!(
                             "extension {:?} already exists, skipping download",
                             &ext_name
                         );
                         return Ok(());
                     } else {
-                        already_downloaded_extensions.insert(ext_name.clone());
+                        already_downloaded_extensions.insert(real_ext_name.clone());
                     }
                 }
                 extension_server::download_extension(
-                    &ext_name,
+                    &real_ext_name,
                     &self
                         .ext_remote_paths
                         .get()
-                        .expect("error accessing ext_remote_paths")[&ext_name],
+                        .expect("error accessing ext_remote_paths")[&real_ext_name],
                     remote_storage,
                     &self.pgbin,
                 )
@@ -838,7 +845,7 @@ LIMIT 100",
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            download_tasks.push(self.download_extension(library));
+            download_tasks.push(self.download_extension(library, true));
         }
         let results = join_all(download_tasks).await;
         for result in results {

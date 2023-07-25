@@ -59,7 +59,8 @@ More specifically, here is an example ext_index.json
 */
 use anyhow::Context;
 use anyhow::{self, Result};
-use futures::future::join_all;
+use futures::future::{join_all, Remote};
+use opentelemetry::InstrumentationLibrary;
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::collections::HashMap;
@@ -109,9 +110,9 @@ pub async fn get_available_extensions(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
     pg_version: &str,
-    enabled_extensions: &[String],
+    custom_extensions: &[String],
     build_tag: &str,
-) -> Result<HashMap<String, RemotePath>> {
+) -> Result<(HashMap<String, RemotePath>, HashMap<String, String>)> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let index_path = format!("{build_tag}/{pg_version}/ext_index.json");
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
@@ -123,16 +124,40 @@ pub async fn get_available_extensions(
         .download_stream
         .read_to_end(&mut ext_idx_buffer)
         .await?;
-    let ext_index_str = str::from_utf8(&ext_idx_buffer).expect("error parsing json");
+    let ext_index_str = str::from_utf8(&ext_idx_buffer).expect("json err");
     let ext_index_full: Value = serde_json::from_str(ext_index_str)?;
-    let ext_index_full = ext_index_full.as_object().context("error parsing json")?;
+    let ext_index_full = ext_index_full.as_object().expect("json err");
     info!("ext_index: {:?}", &ext_index_full);
+
+    let public_extensions = ext_index_full["public_extensions"]
+        .as_array()
+        .expect("json err");
+    let mut enabled_extensions = public_extensions
+        .iter()
+        .map(|x| x.as_str().expect("json err"))
+        .collect::<Vec<&str>>();
+    for custom_extension in custom_extensions {
+        enabled_extensions.push(&custom_extension);
+    }
+
+    let library_index = ext_index_full["library_index"]
+        .as_object()
+        .context("error parsing json")?;
+    let mut parsed_lib_index = HashMap::new();
+    for (key, val) in library_index {
+        let parsed_val = val.as_str().expect("json err").to_string();
+        parsed_lib_index.insert(key.to_string(), parsed_val);
+    }
+
+    let all_extension_data = ext_index_full["extension_data"]
+        .as_object()
+        .context("error parsing json")?;
 
     info!("enabled_extensions: {:?}", enabled_extensions);
     let mut ext_remote_paths = HashMap::new();
     let mut file_create_tasks = Vec::new();
     for extension in enabled_extensions {
-        let ext_data = ext_index_full[extension]
+        let ext_data = all_extension_data[extension]
             .as_object()
             .context("error parsing json")?;
 
@@ -158,7 +183,7 @@ pub async fn get_available_extensions(
     for result in results {
         result?;
     }
-    Ok(ext_remote_paths)
+    Ok((ext_remote_paths, parsed_lib_index))
 }
 
 // download the archive for a given extension,

@@ -125,13 +125,23 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
-            let filename = route.split('/').last().unwrap().to_string();
-            info!(
-                "serving /extension_server POST request, filename: {:?}",
-                &filename
-            );
 
-            match compute.download_extension(&filename).await {
+            let mut is_library = false;
+            if let Some(params) = req.uri().query() {
+                info!("serving {:?} POST request with params: {}", route, params);
+                if params == "is_library=true" {
+                    is_library = true;
+                } else {
+                    let mut resp = Response::new(Body::from("Wrong request parameters"));
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    return resp;
+                }
+            }
+
+            let filename = route.split('/').last().unwrap().to_string();
+            info!("serving /extension_server POST request, filename: {filename:?} is_library: {is_library}");
+
+            match compute.download_extension(&filename, is_library).await {
                 Ok(_) => Response::new(Body::from("OK")),
                 Err(e) => {
                     error!("extension download failed: {}", e);
