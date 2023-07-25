@@ -2007,13 +2007,17 @@ impl Tenant {
         init_order: Option<&InitializationOrder>,
         cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
-        if matches!(cause, CreateTimelineCause::Load) {
-            let ancestor_id = new_metadata.ancestor_timeline();
-            anyhow::ensure!(
-                ancestor_id == ancestor.as_ref().map(|t| t.timeline_id),
-                "Timeline's {new_timeline_id} ancestor {ancestor_id:?} was not found"
-            );
-        }
+        let state = match cause {
+            CreateTimelineCause::Load => {
+                let ancestor_id = new_metadata.ancestor_timeline();
+                anyhow::ensure!(
+                    ancestor_id == ancestor.as_ref().map(|t| t.timeline_id),
+                    "Timeline's {new_timeline_id} ancestor {ancestor_id:?} was not found"
+                );
+                TimelineState::Loading
+            }
+            CreateTimelineCause::Delete => TimelineState::Stopping,
+        };
 
         let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
         let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
@@ -2032,11 +2036,8 @@ impl Tenant {
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned(),
+            state,
         );
-
-        if matches!(cause, CreateTimelineCause::Delete) {
-            timeline.set_state(TimelineState::Stopping);
-        }
 
         Ok(timeline)
     }
