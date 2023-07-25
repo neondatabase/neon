@@ -43,8 +43,7 @@ pub(crate) enum LayerCmd {
     },
 }
 
-fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    use pageserver::tenant::blob_io::BlobCursor;
+async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     use pageserver::tenant::block_io::BlockReader;
 
     let path = path.as_ref();
@@ -78,7 +77,7 @@ fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
+pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
     match cmd {
         LayerCmd::List { path } => {
             for tenant in fs::read_dir(path.join("tenants"))? {
@@ -153,7 +152,7 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                         );
 
                         if layer_file.is_delta {
-                            read_delta_file(layer.path())?;
+                            read_delta_file(layer.path()).await?;
                         } else {
                             anyhow::bail!("not supported yet :(");
                         }

@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, List, Optional
 
+import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -866,6 +867,41 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_1["config"]["id"] == env.safekeepers[0].id
 
 
+# Test auth on WAL service (postgres protocol) ports.
+def test_sk_auth(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_sk_auth")
+    endpoint = env.endpoints.create_start("test_sk_auth")
+
+    sk = env.safekeepers[0]
+
+    # learn neon timeline from compute
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+
+    tenant_token = env.auth_keys.generate_tenant_token(tenant_id)
+    full_token = env.auth_keys.generate_safekeeper_token()
+
+    conn_opts = {
+        "host": "127.0.0.1",
+        "options": f"-c timeline_id={timeline_id} tenant_id={tenant_id}",
+    }
+    connector = PgProtocol(**conn_opts)
+    # no password, should fail
+    with pytest.raises(psycopg2.OperationalError):
+        connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg)
+    # giving password, should be ok with either token on main pg port
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg, password=tenant_token)
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg, password=full_token)
+    # on tenant only port tenant only token should work
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=tenant_token)
+    # but full token should fail
+    with pytest.raises(psycopg2.OperationalError):
+        connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=full_token)
+
+
 class SafekeeperEnv:
     def __init__(
         self,
@@ -912,6 +948,7 @@ class SafekeeperEnv:
     def start_safekeeper(self, i):
         port = SafekeeperPort(
             pg=self.port_distributor.get_port(),
+            pg_tenant_only=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
 

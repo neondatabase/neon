@@ -1007,6 +1007,8 @@ jobs:
           done
 
       - name: Upload postgres-extensions to S3
+        # TODO: Reenable step after switching to the new extensions format (tar-gzipped + index.json)
+        if: false
         run: |
           for BUCKET in $(echo ${S3_BUCKETS}); do
             aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}

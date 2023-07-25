@@ -213,6 +213,9 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
 
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
+        if metric.startswith("pageserver_remote"):
+            continue
+
         ps_samples = ps_metrics.query_all(metric, {})
         assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
@@ -380,10 +383,8 @@ def test_pageserver_with_empty_tenants(
     ps_metrics = client.get_metrics()
     broken_tenants_metric_filter = {
         "tenant_id": str(tenant_without_timelines_dir),
-        "state": "Broken",
     }
     active_tenants_metric_filter = {
-        "tenant_id": str(tenant_with_empty_timelines),
         "state": "Active",
     }
 
@@ -399,7 +400,7 @@ def test_pageserver_with_empty_tenants(
 
     tenant_broken_count = int(
         ps_metrics.query_one(
-            "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
+            "pageserver_broken_tenants_count", filter=broken_tenants_metric_filter
         ).value
     )
 

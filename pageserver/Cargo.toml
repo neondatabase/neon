@@ -35,6 +35,8 @@ humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
 nix.workspace = true
+# hack to get the number of worker threads tokio uses
+num_cpus = { version = "1.15" }
 num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -82,6 +84,7 @@ strum_macros.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 
 [[bench]]
 name = "bench_layer_map"

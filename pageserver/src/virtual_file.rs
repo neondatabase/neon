@@ -149,12 +149,10 @@ impl OpenFiles {
         // old file.
         //
         if let Some(old_file) = slot_guard.file.take() {
-            // We do not have information about tenant_id/timeline_id of evicted file.
-            // It is possible to store path together with file or use filepath crate,
-            // but as far as close() is not expected to be fast, it is not so critical to gather
-            // precise per-tenant statistic here.
+            // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
+            // distinguish the two.
             STORAGE_IO_TIME
-                .with_label_values(&["close", "-", "-"])
+                .with_label_values(&["close-by-replace"])
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -208,7 +206,7 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open", &tenant_id, &timeline_id])
+            .with_label_values(&["open"])
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -271,7 +269,7 @@ impl VirtualFile {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
                             return Ok(STORAGE_IO_TIME
-                                .with_label_values(&[op, &self.tenant_id, &self.timeline_id])
+                                .with_label_values(&[op])
                                 .observe_closure_duration(|| func(file)));
                         }
                     }
@@ -298,12 +296,12 @@ impl VirtualFile {
 
         // Open the physical file
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open", &self.tenant_id, &self.timeline_id])
+            .with_label_values(&["open"])
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
         let result = STORAGE_IO_TIME
-            .with_label_values(&[op, &self.tenant_id, &self.timeline_id])
+            .with_label_values(&[op])
             .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -333,13 +331,11 @@ impl Drop for VirtualFile {
         let mut slot_guard = slot.inner.write().unwrap();
         if slot_guard.tag == handle.tag {
             slot.recently_used.store(false, Ordering::Relaxed);
-            // Unlike files evicted by replacement algorithm, here
-            // we group close time by tenant_id/timeline_id.
-            // At allows to compare number/time of "normal" file closes
-            // with file eviction.
+            // there is also operation "close-by-replace" for closes done on eviction for
+            // comparison.
             STORAGE_IO_TIME
-                .with_label_values(&["close", &self.tenant_id, &self.timeline_id])
-                .observe_closure_duration(|| slot_guard.file.take());
+                .with_label_values(&["close"])
+                .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
     }
 }

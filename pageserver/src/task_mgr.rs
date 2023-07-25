@@ -130,9 +130,23 @@ pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("background op worker")
+        // if you change the number of worker threads please change the constant below
         .enable_all()
         .build()
         .expect("Failed to create background op runtime")
+});
+
+pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
+    // force init and thus panics
+    let _ = BACKGROUND_RUNTIME.handle();
+    // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
+    // tokio would had already panicked for parsing errors or NotUnicode
+    //
+    // this will be wrong if any of the runtimes gets their worker threads configured to something
+    // else, but that has not been needed in a long time.
+    std::env::var("TOKIO_WORKER_THREADS")
+        .map(|s| s.parse::<usize>().unwrap())
+        .unwrap_or_else(|_e| usize::max(1, num_cpus::get()))
 });
 
 #[derive(Debug, Clone, Copy)]
@@ -511,17 +525,13 @@ pub async fn shutdown_tasks(
                     warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
-            let join_handle = tokio::select! {
-                biased;
-                _ = &mut join_handle => { None },
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                    // allow some time to elapse before logging to cut down the number of log
-                    // lines.
-                    info!("waiting for {} to shut down", task.name);
-                    Some(join_handle)
-                }
-            };
-            if let Some(join_handle) = join_handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
+                .await
+                .is_err()
+            {
+                // allow some time to elapse before logging to cut down the number of log
+                // lines.
+                info!("waiting for {} to shut down", task.name);
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)
@@ -549,7 +559,7 @@ pub fn current_task_id() -> Option<PageserverTaskId> {
 pub async fn shutdown_watcher() {
     let token = SHUTDOWN_TOKEN
         .try_with(|t| t.clone())
-        .expect("shutdown_requested() called in an unexpected task or thread");
+        .expect("shutdown_watcher() called in an unexpected task or thread");
 
     token.cancelled().await;
 }

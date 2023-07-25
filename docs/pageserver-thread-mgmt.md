@@ -30,8 +30,8 @@ or similar, to wake up on shutdown.
 
 In async Rust, futures can be "cancelled" at any await point, by
 dropping the Future. For example, `tokio::select!` returns as soon as
-one of the Futures returns, and drops the others. `tokio::timeout!` is
-another example. In the Rust ecosystem, some functions are
+one of the Futures returns, and drops the others. `tokio::time::timeout`
+is another example. In the Rust ecosystem, some functions are
 cancellation-safe, meaning they can be safely dropped without
 side-effects, while others are not. See documentation of
 `tokio::select!` for examples.
@@ -42,9 +42,9 @@ function that you call cannot be assumed to be async
 cancellation-safe, and must be polled to completion.
 
 The downside of non-cancellation safe code is that you have to be very
-careful when using `tokio::select!`, `tokio::timeout!`, and other such
-functions that can cause a Future to be dropped. They can only be used
-with functions that are explicitly documented to be cancellation-safe,
+careful when using `tokio::select!`, `tokio::time::timeout`, and other
+such functions that can cause a Future to be dropped. They can only be
+used with functions that are explicitly documented to be cancellation-safe,
 or you need to spawn a separate task to shield from the cancellation.
 
 At the entry points to the code, we also take care to poll futures to

@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -223,9 +223,10 @@ impl std::fmt::Debug for DeltaLayerInner {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.desc.tenant_id,
@@ -300,7 +301,7 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,

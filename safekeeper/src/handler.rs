@@ -34,6 +34,8 @@ pub struct SafekeeperPostgresHandler {
     pub ttid: TenantTimelineId,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
+    /// Auth scope allowed on the connections. None if auth is not configured.
+    allowed_auth_scope: Option<Scope>,
     claims: Option<Claims>,
     io_metrics: Option<TrafficMetrics>,
 }
@@ -147,6 +149,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .unwrap()
             .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
+        let scope = self
+            .allowed_auth_scope
+            .expect("auth is enabled but scope is not configured");
+        // The handler might be configured to allow only tenant scope tokens.
+        if matches!(scope, Scope::Tenant) && !matches!(data.claims.scope, Scope::Tenant) {
+            return Err(QueryError::Other(anyhow::anyhow!(
+                "passed JWT token is for full access, but only tenant scope is allowed"
+            )));
+        }
+
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
             return Err(QueryError::Other(anyhow::anyhow!(
                 "jwt token scope is Tenant, but tenant id is missing"
@@ -215,7 +227,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf, conn_id: u32, io_metrics: Option<TrafficMetrics>) -> Self {
+    pub fn new(
+        conf: SafeKeeperConf,
+        conn_id: u32,
+        io_metrics: Option<TrafficMetrics>,
+        allowed_auth_scope: Option<Scope>,
+    ) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
@@ -224,6 +241,7 @@ impl SafekeeperPostgresHandler {
             ttid: TenantTimelineId::empty(),
             conn_id,
             claims: None,
+            allowed_auth_scope,
             io_metrics,
         }
     }

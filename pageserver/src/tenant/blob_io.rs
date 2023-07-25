@@ -16,29 +16,19 @@ use crate::tenant::block_io::{BlockCursor, BlockReader};
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
-/// For reading
-pub trait BlobCursor {
+impl<R> BlockCursor<R>
+where
+    R: BlockReader,
+{
     /// Read a blob into a new buffer.
-    fn read_blob(&mut self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
+    pub fn read_blob(&mut self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf)?;
         Ok(buf)
     }
-
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
-    fn read_blob_into_buf(
-        &mut self,
-        offset: u64,
-        dstbuf: &mut Vec<u8>,
-    ) -> Result<(), std::io::Error>;
-}
-
-impl<R> BlobCursor for BlockCursor<R>
-where
-    R: BlockReader,
-{
-    fn read_blob_into_buf(
+    pub fn read_blob_into_buf(
         &mut self,
         offset: u64,
         dstbuf: &mut Vec<u8>,

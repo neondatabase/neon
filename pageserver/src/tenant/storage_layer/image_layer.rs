@@ -27,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -155,9 +155,10 @@ impl std::fmt::Debug for ImageLayerInner {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
@@ -189,7 +190,7 @@ impl Layer for ImageLayer {
     }
 
     /// Look up given page in the file
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
