@@ -198,6 +198,7 @@ fn main() -> Result<()> {
         ext_remote_storage,
         ext_remote_paths: OnceLock::new(),
         already_downloaded_extensions: Mutex::new(HashSet::new()),
+        library_index: OnceLock::new(),
         build_tag,
     };
     let compute = Arc::new(compute_node);

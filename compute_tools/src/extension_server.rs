@@ -59,8 +59,7 @@ More specifically, here is an example ext_index.json
 */
 use anyhow::Context;
 use anyhow::{self, Result};
-use futures::future::{join_all, Remote};
-use opentelemetry::InstrumentationLibrary;
+use futures::future::join_all;
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::collections::HashMap;
