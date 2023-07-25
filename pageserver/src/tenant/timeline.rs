@@ -708,11 +708,9 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let mut cancelled = pin!(task_mgr::shutdown_watcher());
-
             loop {
                 tokio::select! {
-                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    _ = cancel.cancelled() => anyhow::bail!("Cancelled while downloading remote layers"),
                     res = downloads.next() => {
                         match res {
                             Some(Ok(())) => {},
