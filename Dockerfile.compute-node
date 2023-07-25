@@ -77,7 +77,7 @@ ENV PATH "/usr/local/pgsql/bin:$PATH"
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postgis.tar.gz && \
     echo "9a2a219da005a1730a39d1959a1c7cec619b1efb009b65be80ffc25bad299068 postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f > /before.txt && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -91,7 +91,6 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control && \
-    find /usr/local/pgsql -type f > /after.txt && \
     mkdir -p /extensions/postgis && \
     cp /usr/local/pgsql/share/extension/postgis.control /extensions/postgis && \
     cp /usr/local/pgsql/share/extension/postgis_raster.control /extensions/postgis && \
@@ -104,16 +103,15 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
 RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
     echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f >> /before.txt && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control && \
-    find /usr/local/pgsql -type f >> /after.txt && \
-    mkdir -p /extensions/postgis && cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --zstd -cf /extensions/postgis.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/postgis.tar.zst -T -
 
 #########################################################################################
 #
@@ -442,7 +440,7 @@ RUN apt-get update && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
     mkdir -p /extensions/kq_imcx && cp /usr/local/pgsql/share/extension/kq_imcx.control /extensions/kq_imcx && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/kq_imcx.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/kq_imcx.tar.zst -T -
 
 #########################################################################################
 #
@@ -581,7 +579,7 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
     mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
     sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zstd -T -
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zst -T -
 
 #########################################################################################
 #
@@ -781,18 +779,18 @@ ARG BUILD_TAG
 # you should update the build_tag for each extension only when you build it
 RUN echo "kq_imcx ${BUILD_TAG}" >>  build_numbers.txt
 RUN echo "anon ${BUILD_TAG}" >>  build_numbers.txt
-# RUN echo "postgis-build 5615610098" >>  build_numbers.txt
+RUN echo "postgis-build ${BUILD_TAG}" >>  build_numbers.txt
 # copy the control files here
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/
-# COPY --from=postgis-build /extensions/ /extensions/
+COPY --from=postgis-build /extensions/ /extensions/
 COPY scripts/combine_control_files.py ./combine_control_files.py
 RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG}
 
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
 # As for now, it's only a couple for testing purposses
-COPY --from=generate-ext-index /extensions/*.tar.zstd /extensions/
+COPY --from=generate-ext-index /extensions/*.tar.zst /extensions/
 COPY --from=generate-ext-index /ext_index.json /ext_index.json
 
 #########################################################################################

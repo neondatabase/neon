@@ -945,8 +945,8 @@ jobs:
 
   upload-postgres-extensions-to-s3:
     if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-       github.event_name != 'workflow_dispatch'
+      # (github.ref_name == 'main' || github.ref_name == 'release') &&
+      #  github.event_name != 'workflow_dispatch'
     runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
     needs: [ tag, promote-images ]
     strategy:
