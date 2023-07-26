@@ -776,6 +776,13 @@ ARG PG_VERSION
 ARG BUILD_TAG
 RUN apt update && apt install -y zstd
 
+# Define extension build numbers
+# NOTE: it is *not* necessary for the build_tag to be BUILD_TAG. In particular,
+# you should update the build_tag for each extension only when you build it
+RUN echo "kq_imcx 5670669815" >>  build_tags.txt
+RUN echo "anon 5670669815" >>  build_tags.txt
+RUN echo "postgis 5670669815" >>  build_tags.txt
+
 # copy the control files here
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/

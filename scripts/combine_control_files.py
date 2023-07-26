@@ -45,11 +45,18 @@ if __name__ == "__main__":
     BUILD_TAG = args.BUILD_TAG
     public_ext_list = args.public_extensions.split(",")
 
+    build_tags = {}
+    with open("build_tags.txt", "r") as f:
+        for line in f.readlines():
+            ext, build_tag = line.strip().split(" ")
+            build_tags[ext] = build_tag
+
     ext_index = {}
     library_index = {}
     EXT_PATH = Path("extensions")
     for extension in EXT_PATH.iterdir():
         if extension.is_dir():
+            build_tag = build_tags[extension.name]
             control_data = {}
             for control_file in extension.glob("*.control"):
                 if control_file.suffix != ".control":
@@ -58,8 +65,15 @@ if __name__ == "__main__":
                     control_data[control_file.name] = f.read()
             ext_index[extension.name] = {
                 "control_data": control_data,
-                "archive_path": f"{BUILD_TAG}/{pg_version}/extensions/{extension.name}.tar.zst",
+                "archive_path": f"{build_tag}/{pg_version}/extensions/{extension.name}.tar.zst",
             }
+            # if we didn't build the extension for this build tag
+            # then we don't need to re-upload it. so we delete it
+            if build_tag != BUILD_TAG:
+                import shutil
+
+                shutil.rmtree(extension)
+
         elif extension.suffix == ".zst":
             file_list = (
                 str(subprocess.check_output(["tar", "tf", str(extension)]), "utf-8")
