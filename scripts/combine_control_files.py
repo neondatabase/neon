@@ -4,6 +4,7 @@
 # for all extensions in extensions subdir.
 import argparse
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -70,8 +71,6 @@ if __name__ == "__main__":
             # if we didn't build the extension for this build tag
             # then we don't need to re-upload it. so we delete it
             if build_tag != BUILD_TAG:
-                import shutil
-
                 shutil.rmtree(extension)
 
         elif extension.suffix == ".zst":
