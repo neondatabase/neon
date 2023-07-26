@@ -6,7 +6,7 @@ use crate::{
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
-    console::{self, errors::WakeComputeError, messages::MetricsAuxInfo},
+    console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
@@ -413,18 +413,18 @@ where
     loop {
         match state {
             ConnectionState::Invalid(config, err) => {
+                info!("compute node's state has likely changed; requesting a wake-up");
+
                 let wake_res = match creds {
-                    auth::BackendType::Console(api, creds) => {
-                        try_wake(api.as_ref(), extra, creds).await
-                    }
-                    auth::BackendType::Postgres(api, creds) => {
-                        try_wake(api.as_ref(), extra, creds).await
-                    }
+                    auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+                    auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
                     // nothing to do?
                     auth::BackendType::Link(_) => return Err(err.into()),
+                    // test backend
+                    auth::BackendType::Test(x) => x.wake_compute(),
                 };
 
-                match wake_res {
+                match handle_try_wake(wake_res) {
                     // there was an error communicating with the control plane
                     Err(e) => return Err(e.into()),
                     // failed to wake up but we can continue to retry
@@ -478,13 +478,10 @@ where
 /// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
 /// * Returns Ok(Break(node)) if the wakeup succeeded
 /// * Returns Err(e) if there was an error
-pub async fn try_wake(
-    api: &impl console::Api,
-    extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::ClientCredentials<'_>,
+fn handle_try_wake(
+    result: Result<console::CachedNodeInfo, WakeComputeError>,
 ) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    info!("compute node's state has likely changed; requesting a wake-up");
-    match api.wake_compute(extra, creds).await {
+    match result {
         Err(err) => match &err {
             WakeComputeError::ApiError(api) if api.could_retry() => Ok(ControlFlow::Continue(err)),
             _ => Err(err),
@@ -492,6 +489,16 @@ pub async fn try_wake(
         // Ready to try again.
         Ok(new) => Ok(ControlFlow::Break(new)),
     }
+}
+
+/// Attempts to wake up the compute node.
+pub async fn try_wake(
+    api: &impl console::Api,
+    extra: &console::ConsoleReqExtra<'_>,
+    creds: &auth::ClientCredentials<'_>,
+) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
+    info!("compute node's state has likely changed; requesting a wake-up");
+    handle_try_wake(api.wake_compute(extra, creds).await)
 }
 
 pub trait ShouldRetry {
