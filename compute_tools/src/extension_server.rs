@@ -137,7 +137,7 @@ pub async fn get_available_extensions(
         .map(|x| x.as_str().expect("json err"))
         .collect::<Vec<&str>>();
     for custom_extension in custom_extensions {
-        enabled_extensions.push(&custom_extension);
+        enabled_extensions.push(custom_extension);
     }
 
     let library_index = ext_index_full["library_index"]
