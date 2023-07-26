@@ -1415,13 +1415,15 @@ pub fn preinitialize_metrics() {
     ]
     .into_iter()
     .for_each(|c| {
-        c.get();
+        Lazy::get(c);
     });
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
-        .for_each(|c| c.reset());
+        .for_each(|c| {
+            Lazy::get(c);
+        });
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();
@@ -1438,6 +1440,6 @@ pub fn preinitialize_metrics() {
     ]
     .into_iter()
     .for_each(|h| {
-        h.start_timer().stop_and_discard();
+        Lazy::get(h);
     });
 }
