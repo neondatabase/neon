@@ -120,7 +120,6 @@ def test_remote_extensions(
     cleanup(cleanup_files, cleanup_folders)
 
 
-"""
 # Test downloading remote library.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_library(
@@ -178,6 +177,8 @@ def test_remote_library(
                 raise AssertionError("unexpected error loading anon library") from err
 
             # TODO test library which name is different from extension name
+            if remote_storage_kind == RemoteStorageKind.REAL_S3:
+                cur.execute("LOAD 'postgis_topology-3'")
 
     cleanup_files = add_pgdir_prefix(
         pg_version,
@@ -190,4 +191,3 @@ def test_remote_library(
         pg_version, ["share/postgresql/extension/anon", "download_extensions"]
     )
     cleanup(cleanup_files, cleanup_folders)
-"""
