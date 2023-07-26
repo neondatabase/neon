@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
@@ -46,6 +47,7 @@ use std::time::{Duration, Instant};
 
 use self::config::TenantConf;
 use self::delete::DeleteTimelineFlow;
+use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
@@ -876,24 +878,31 @@ impl Tenant {
                         )
                     })?;
 
-                let metadata_path = self.conf.metadata_path(&self.tenant_id, &timeline_id);
-                if metadata_path.exists() {
-                    // Remote deletion did not finish. Need to resume.
-                    timelines_to_resume_deletion.push((
-                        timeline_id,
-                        Some(load_metadata(self.conf, &self.tenant_id, &timeline_id)?),
-                    ));
-                    continue;
-                }
+                match load_metadata(self.conf, &self.tenant_id, &timeline_id) {
+                    Ok(metadata) => {
+                        timelines_to_resume_deletion.push((timeline_id, Some(metadata)))
+                    }
+                    Err(e) => match &e {
+                        LoadMetadataError::Read { source, .. } => {
+                            if source.kind() != io::ErrorKind::NotFound {
+                                return Err(anyhow::anyhow!(e));
+                            }
 
-                // If metadata doesnt exist save it for later call of `DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`.
-                // We cant do it here because the method is async so we'd need block_on and here we're in spawn_blocking.
-                // cleanup_remaining_timeline_fs_traces uses fs operations so that basically results in a cycle:
-                // spawn_blocking
-                // - block_on
-                //   - spawn_blocking
-                // which can lead to running out of threads.
-                timelines_to_resume_deletion.push((timeline_id, None));
+                            // If metadata doesnt exist it means that we've crashed without
+                            // completing cleanup_remaining_timeline_fs_traces in DeleteTimelineFlow.
+                            // So save timeline_id for later call to `DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`.
+                            // We cant do it here because the method is async so we'd need block_on
+                            // and here we're in spawn_blocking. cleanup_remaining_timeline_fs_traces uses fs operations
+                            // so that basically results in a cycle:
+                            // spawn_blocking
+                            // - block_on
+                            //   - spawn_blocking
+                            // which can lead to running out of threads in blocing pool.
+                            timelines_to_resume_deletion.push((timeline_id, None));
+                        }
+                        _ => return Err(anyhow::anyhow!(e)),
+                    },
+                }
             } else {
                 if !timeline_dir.exists() {
                     warn!(
@@ -3812,9 +3821,9 @@ mod tests {
             .await
             .err()
             .expect("should fail");
-        // get all the stack with all .context, not tonly the last one
+        // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
-        let expected = "Failed to parse metadata bytes from path";
+        let expected = "Failed to decode metadata at";
         assert!(
             message.contains(expected),
             "message '{message}' expected to contain {expected}"
@@ -3831,7 +3840,8 @@ mod tests {
         }
         assert!(
             found_error_message,
-            "didn't find the corrupted metadata error"
+            "didn't find the corrupted metadata error in {}",
+            message
         );
 
         Ok(())

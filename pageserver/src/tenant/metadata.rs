@@ -9,12 +9,14 @@
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tracing::info_span;
 use utils::bin_ser::SerializeError;
+use utils::fs_ext;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
@@ -267,23 +269,32 @@ pub fn save_metadata(
     Ok(())
 }
 
+#[derive(Error, Debug)]
+pub enum LoadMetadataError {
+    #[error("Got io error while reading metadata at {path}: {source}")]
+    Read { source: io::Error, path: Box<str> },
+
+    #[error("Failed to decode metadata at {path}: {source}")]
+    Decode {
+        source: anyhow::Error,
+        path: Box<str>,
+    },
+}
+
 pub fn load_metadata(
     conf: &'static PageServerConf,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-) -> anyhow::Result<TimelineMetadata> {
+) -> Result<TimelineMetadata, LoadMetadataError> {
     let metadata_path = conf.metadata_path(tenant_id, timeline_id);
-    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
-        format!(
-            "Failed to read metadata bytes from path {}",
-            metadata_path.display()
-        )
+    let metadata_bytes = std::fs::read(&metadata_path).map_err(|e| LoadMetadataError::Read {
+        source: e,
+        path: fs_ext::error_path(&metadata_path),
     })?;
-    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
-        format!(
-            "Failed to parse metadata bytes from path {}",
-            metadata_path.display()
-        )
+
+    TimelineMetadata::from_bytes(&metadata_bytes).map_err(|e| LoadMetadataError::Decode {
+        source: e,
+        path: fs_ext::error_path(&metadata_path),
     })
 }
 
