@@ -485,16 +485,20 @@ pub async fn try_wake(
 ) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     info!("compute node's state has likely changed; requesting a wake-up");
     match api.wake_compute(extra, creds).await {
-        // retry wake if the compute was in an invalid state
-        Err(
-            e @ WakeComputeError::ApiError(ApiError::Console {
+        Err(err) => match &err {
+            // retry wake if the compute was in an invalid state
+            WakeComputeError::ApiError(ApiError::Console {
                 status: StatusCode::BAD_REQUEST,
                 ..
-            }),
-        ) => Ok(ControlFlow::Continue(e)),
+            }) => Ok(ControlFlow::Continue(err)),
+            // retry network errors
+            WakeComputeError::ApiError(ApiError::Transport(ref io)) if io.could_retry() => {
+                Ok(ControlFlow::Continue(err))
+            }
+            _ => Err(err),
+        },
         // Ready to try again.
         Ok(new) => Ok(ControlFlow::Break(new)),
-        Err(e) => Err(e),
     }
 }
 
