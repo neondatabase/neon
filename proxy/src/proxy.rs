@@ -6,17 +6,12 @@ use crate::{
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
-    console::{
-        self,
-        errors::{ApiError, WakeComputeError},
-        messages::MetricsAuxInfo,
-    },
+    console::{self, errors::WakeComputeError, messages::MetricsAuxInfo},
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use hyper::StatusCode;
 use metrics::{
     exponential_buckets, register_histogram, register_int_counter_vec, Histogram, IntCounterVec,
 };
@@ -486,15 +481,7 @@ pub async fn try_wake(
     info!("compute node's state has likely changed; requesting a wake-up");
     match api.wake_compute(extra, creds).await {
         Err(err) => match &err {
-            // retry wake if the compute was in an invalid state
-            WakeComputeError::ApiError(ApiError::Console {
-                status: StatusCode::BAD_REQUEST,
-                ..
-            }) => Ok(ControlFlow::Continue(err)),
-            // retry network errors
-            WakeComputeError::ApiError(ApiError::Transport(ref io)) if io.could_retry() => {
-                Ok(ControlFlow::Continue(err))
-            }
+            WakeComputeError::ApiError(api) if api.could_retry() => Ok(ControlFlow::Continue(err)),
             _ => Err(err),
         },
         // Ready to try again.
