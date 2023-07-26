@@ -1415,14 +1415,14 @@ pub fn preinitialize_metrics() {
     ]
     .into_iter()
     .for_each(|c| {
-        Lazy::get(c);
+        Lazy::force(c);
     });
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
         .for_each(|c| {
-            Lazy::get(c);
+            Lazy::force(c);
         });
 
     // gauges
@@ -1440,6 +1440,6 @@ pub fn preinitialize_metrics() {
     ]
     .into_iter()
     .for_each(|h| {
-        Lazy::get(h);
+        Lazy::force(h);
     });
 }
