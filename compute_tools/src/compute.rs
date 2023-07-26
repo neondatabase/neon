@@ -770,8 +770,11 @@ LIMIT 100",
                 let mut real_ext_name = ext_name.to_string();
                 if is_library {
                     real_ext_name = real_ext_name.replace(".so", "");
-                    real_ext_name =
-                        self.library_index.get().expect("oncelock err")[&real_ext_name].clone();
+                    real_ext_name = self
+                        .library_index
+                        .get()
+                        .expect("must have already downloaded the library_index")[&real_ext_name]
+                        .clone();
                 }
 
                 {

@@ -60,7 +60,7 @@ use compute_tools::spec::*;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "5648391853";
+const BUILD_TAG_DEFAULT: &str = "5670669815";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;

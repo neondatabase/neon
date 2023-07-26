@@ -11,13 +11,14 @@
             "control_data": {
                 "kq_imcx.control": "# This file is generated content from add_postgresql_extension.\n# No point in modifying it, it will be overwritten anyway.\n\n# Default version, always set\ndefault_version = '0.1'\n\n# Module pathname generated from target shared library name. Use\n# MODULE_PATHNAME in script file.\nmodule_pathname = '$libdir/kq_imcx.so'\n\n# Comment for extension. Set using COMMENT option. Can be set in\n# script file as well.\ncomment = 'ketteQ In-Memory Calendar Extension (IMCX)'\n\n# Encoding for script file. Set using ENCODING option.\n#encoding = ''\n\n# Required extensions. Set using REQUIRES option (multi-valued).\n#requires = ''\ntrusted = true\n"
             },
-            "archive_path": "5648391853/v14/extensions/kq_imcx.tar.zst"
+            "archive_path": "5670669815/v14/extensions/kq_imcx.tar.zst"
         },
         "anon": {
             "control_data": {
                 "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
             },
-            "archive_path": "5648391853/v14/extensions/anon.tar.zst"
+            "archive_path": "5670669815/v14/extensions/anon.tar.zst"
         }
     }
 }
+
