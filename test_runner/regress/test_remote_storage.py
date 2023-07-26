@@ -348,6 +348,9 @@ def test_remote_storage_upload_queue_retries(
     # XXX: should vary this test to selectively fail just layer uploads, index uploads, deletions
     #      but how do we validate the result after restore?
 
+    # these are always possible when we do an immediate stop. perhaps something with compacting has changed since.
+    env.pageserver.allowed_errors.append(r".*found future (delta|image) layer.*")
+
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
