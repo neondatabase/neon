@@ -61,7 +61,7 @@ use anyhow::Context;
 use anyhow::{self, Result};
 use futures::future::join_all;
 use remote_storage::*;
-use serde_json::{self, Value};
+use serde_json;
 use std::collections::HashMap;
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -123,67 +123,46 @@ pub async fn get_available_extensions(
         .download_stream
         .read_to_end(&mut ext_idx_buffer)
         .await?;
-    let ext_index_str = str::from_utf8(&ext_idx_buffer).expect("json err");
-    let ext_index_full: Value = serde_json::from_str(ext_index_str)?;
-    let ext_index_full = ext_index_full.as_object().expect("json err");
-    info!("ext_index: {:?}", &ext_index_full);
 
-    let public_extensions = ext_index_full["public_extensions"]
-        .as_array()
-        .expect("json err");
-    // TODO: maybe enabled_extensions should be a HashSet? probably doesn't matter
-    let mut enabled_extensions = public_extensions
-        .iter()
-        .map(|x| x.as_str().expect("json err"))
-        .collect::<Vec<&str>>();
-    for custom_extension in custom_extensions {
-        enabled_extensions.push(custom_extension);
+    #[derive(Debug, serde::Deserialize)]
+    struct Index {
+        public_extensions: Vec<String>,
+        library_index: HashMap<String, String>,
+        extension_data: HashMap<String, ExtensionData>,
     }
 
-    let library_index = ext_index_full["library_index"]
-        .as_object()
-        .context("error parsing json")?;
-    let mut parsed_lib_index = HashMap::new();
-    for (key, val) in library_index {
-        let parsed_val = val.as_str().expect("json err").to_string();
-        parsed_lib_index.insert(key.to_string(), parsed_val);
+    #[derive(Debug, serde::Deserialize)]
+    struct ExtensionData {
+        control_data: HashMap<String, String>,
+        archive_path: String,
     }
 
-    let all_extension_data = ext_index_full["extension_data"]
-        .as_object()
-        .context("error parsing json")?;
+    let ext_index_full = serde_json::from_slice::<Index>(&ext_idx_buffer)?;
+    let mut enabled_extensions = ext_index_full.public_extensions;
+    enabled_extensions.extend_from_slice(custom_extensions);
+    let library_index = ext_index_full.library_index;
+    let all_extension_data = ext_index_full.extension_data;
 
     info!("enabled_extensions: {:?}", enabled_extensions);
     let mut ext_remote_paths = HashMap::new();
     let mut file_create_tasks = Vec::new();
     for extension in enabled_extensions {
-        let ext_data = all_extension_data[extension]
-            .as_object()
-            .context("error parsing json")?;
-
-        let control_files = ext_data["control_data"]
-            .as_object()
-            .context("error parsing json")?;
-        for (control_file, control_contents) in control_files {
+        let ext_data = &all_extension_data[&extension];
+        for (control_file, control_contents) in &ext_data.control_data {
             let control_path = local_sharedir.join(control_file);
-            let control_contents_str = control_contents.as_str().context("error parsing json")?;
             info!("writing file {:?}{:?}", control_path, control_contents);
-            file_create_tasks.push(tokio::fs::write(control_path, control_contents_str));
+            file_create_tasks.push(tokio::fs::write(control_path, control_contents));
         }
-
-        let ext_archive_path = ext_data["archive_path"]
-            .as_str()
-            .context("error parsing json")?;
         ext_remote_paths.insert(
             extension.to_string(),
-            RemotePath::from_string(ext_archive_path)?,
+            RemotePath::from_string(&ext_data.archive_path)?,
         );
     }
     let results = join_all(file_create_tasks).await;
     for result in results {
         result?;
     }
-    Ok((ext_remote_paths, parsed_lib_index))
+    Ok((ext_remote_paths, library_index))
 }
 
 // download the archive for a given extension,
@@ -237,24 +216,20 @@ pub async fn download_extension(
 
 // This function initializes the necessary structs to use remote storage (should be fairly cheap)
 pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRemoteStorage> {
-    let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
+    #[derive(Debug, serde::Deserialize)]
+    struct RemoteExtJson {
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        prefix: Option<String>,
+    }
+    let remote_ext_json = serde_json::from_str::<RemoteExtJson>(remote_ext_config)?;
 
-    let remote_ext_bucket = remote_ext_config["bucket"]
-        .as_str()
-        .context("config parse error")?;
-    let remote_ext_region = remote_ext_config["region"]
-        .as_str()
-        .context("config parse error")?;
-    let remote_ext_endpoint = remote_ext_config["endpoint"].as_str();
-    let remote_ext_prefix = remote_ext_config["prefix"].as_str();
-
-    // If needed, it is easy to allow modification of other parameters
-    // however, default values should be fine for now
     let config = S3Config {
-        bucket_name: remote_ext_bucket.to_string(),
-        bucket_region: remote_ext_region.to_string(),
-        prefix_in_bucket: remote_ext_prefix.map(str::to_string),
-        endpoint: remote_ext_endpoint.map(|x| x.to_string()),
+        bucket_name: remote_ext_json.bucket,
+        bucket_region: remote_ext_json.region,
+        prefix_in_bucket: remote_ext_json.prefix,
+        endpoint: remote_ext_json.endpoint,
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
     };
