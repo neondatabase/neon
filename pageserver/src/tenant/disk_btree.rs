@@ -230,7 +230,7 @@ where
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
+    pub async fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(search_key, VisitDirection::Forwards, |key, value| {
             if key == search_key {
@@ -782,12 +782,12 @@ mod tests {
 
         // Test the `get` function on all the keys.
         for (key, val) in all_data.iter() {
-            assert_eq!(reader.get(key)?, Some(*val));
+            assert_eq!(reader.get(key).await?, Some(*val));
         }
         // And on some keys that don't exist
-        assert_eq!(reader.get(b"aaaaaa")?, None);
-        assert_eq!(reader.get(b"zzzzzz")?, None);
-        assert_eq!(reader.get(b"xaaabx")?, None);
+        assert_eq!(reader.get(b"aaaaaa").await?, None);
+        assert_eq!(reader.get(b"zzzzzz").await?, None);
+        assert_eq!(reader.get(b"xaaabx").await?, None);
 
         // Test search with `visit` function
         let search_key = b"xabaaa";
@@ -880,7 +880,7 @@ mod tests {
         for search_key_int in 0..(NUM_KEYS * 2 + 10) {
             let search_key = u64::to_be_bytes(search_key_int);
             assert_eq!(
-                reader.get(&search_key)?,
+                reader.get(&search_key).await?,
                 all_data.get(&search_key_int).cloned()
             );
 
@@ -932,8 +932,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn random_data() -> Result<()> {
+    #[tokio::test]
+    async fn random_data() -> Result<()> {
         // Generate random keys with exponential distribution, to
         // exercise the prefix compression
         const NUM_KEYS: usize = 100000;
@@ -960,19 +960,23 @@ mod tests {
         // Test get() operation on all the keys
         for (&key, &val) in all_data.iter() {
             let search_key = u128::to_be_bytes(key);
-            assert_eq!(reader.get(&search_key)?, Some(val));
+            assert_eq!(reader.get(&search_key).await?, Some(val));
         }
 
         // Test get() operations on random keys, most of which will not exist
         for _ in 0..100000 {
             let key_int = rand::thread_rng().gen::<u128>();
             let search_key = u128::to_be_bytes(key_int);
-            assert!(reader.get(&search_key)? == all_data.get(&key_int).cloned());
+            assert!(reader.get(&search_key).await? == all_data.get(&key_int).cloned());
         }
 
         // Test boundary cases
-        assert!(reader.get(&u128::to_be_bytes(u128::MIN))? == all_data.get(&u128::MIN).cloned());
-        assert!(reader.get(&u128::to_be_bytes(u128::MAX))? == all_data.get(&u128::MAX).cloned());
+        assert!(
+            reader.get(&u128::to_be_bytes(u128::MIN)).await? == all_data.get(&u128::MIN).cloned()
+        );
+        assert!(
+            reader.get(&u128::to_be_bytes(u128::MAX)).await? == all_data.get(&u128::MAX).cloned()
+        );
 
         Ok(())
     }
@@ -1014,7 +1018,7 @@ mod tests {
 
         // Test get() operation on all the keys
         for (key, val) in disk_btree_test_data::TEST_DATA {
-            assert_eq!(reader.get(&key)?, Some(val));
+            assert_eq!(reader.get(&key).await?, Some(val));
         }
 
         // Test full scan
