@@ -342,6 +342,7 @@ impl ComputeNode {
         let sk_connstrs: Vec<String> = pspec.safekeeper_connstrings.clone();
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
+            let id = connstr.clone();
             let connstr = format!("postgresql://no_user@{}", connstr);
             let options = format!(
                 "-c timeline_id={} tenant_id={}",
@@ -355,15 +356,15 @@ impl ComputeNode {
                 config.password(storage_auth_token);
             }
 
-            (connstr, config)
+            (id, config)
         });
 
         // Create task set to query all safekeepers
         let mut tasks = FuturesUnordered::new();
         let quorum = sk_configs.len() / 2 + 1;
-        for (connstr, config) in sk_configs {
+        for (id, config) in sk_configs {
             let timeout = tokio::time::Duration::from_millis(100);
-            let task = tokio::time::timeout(timeout, ping_safekeeper(connstr, config));
+            let task = tokio::time::timeout(timeout, ping_safekeeper(id, config));
             tasks.push(tokio::spawn(task));
         }
 
