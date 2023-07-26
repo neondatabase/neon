@@ -1403,7 +1403,12 @@ pub fn preinitialize_metrics() {
     // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
     BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
 
-    // Python tests need these. -- Imagine if we had "PageserverMetrics" instead of statics..
+    // Python tests need these.
+    //
+    // FIXME: make it so that we have no top level metrics as this fn will easily fall out of order:
+    // - global metrics reside in a Lazy<PageserverMetrics>
+    //   - access via crate::metrics::PS_METRICS.materialized_page_cache_hit.inc()
+    // - could move the statics into TimelineMetrics::new()?
 
     // counters
     [
