@@ -38,6 +38,12 @@ def test_threshold_based_eviction(
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.append(metrics_refused_log_line)
 
+    # these can happen whenever we run consumption metrics collection
+    env.pageserver.allowed_errors.append(r".*failed to calculate logical size at \S+: cancelled")
+    env.pageserver.allowed_errors.append(
+        r".*failed to calculate synthetic size for tenant \S+: failed to calculate some logical_sizes"
+    )
+
     tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
     assert isinstance(timeline_id, TimelineId)
 
