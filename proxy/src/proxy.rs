@@ -196,6 +196,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
 ) -> anyhow::Result<()> {
+    info!(
+        protocol = mode.protocol_label(),
+        "handling interactive connection from client"
+    );
+
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER
         .with_label_values(&[mode.protocol_label()])
