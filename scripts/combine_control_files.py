@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     build_tags = {}
     with open("build_tags.txt", "r") as f:
-        for line in f.readlines():
+        for line in f:
             ext, build_tag = line.strip().split(" ")
             build_tags[ext] = build_tag
 
