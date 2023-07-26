@@ -107,6 +107,18 @@ pub extern "C" fn sim_epoll_rcv(timeout: i64) -> Event {
                 any_message: anymessage_tag(&message),
             }
         }
+        NodeEvent::Internal(message) => {
+            // store message in thread local storage, C code should use
+            // sim_msg_* functions to access it.
+            MESSAGE_BUF.with(|cell| {
+                *cell.borrow_mut() = message.clone();
+            });
+            Event {
+                tag: EventTag::Internal,
+                tcp: 0,
+                any_message: anymessage_tag(&message),
+            }
+        }
         NodeEvent::WakeTimeout(_) => {
             // can't happen
             unreachable!()

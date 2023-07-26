@@ -87,6 +87,7 @@ pub enum EventTag {
     Accept,
     Closed,
     Message,
+    Internal,
 }
 
 #[repr(u8)]

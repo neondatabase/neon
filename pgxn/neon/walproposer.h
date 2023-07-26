@@ -46,6 +46,8 @@
  */
 #define WL_NO_EVENTS 0
 
+extern bool syncSafekeepers;
+
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;

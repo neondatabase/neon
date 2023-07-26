@@ -71,7 +71,7 @@
 #include "walproposer.h"
 #include "walproposer_utils.h"
 
-static bool syncSafekeepers = false;
+bool syncSafekeepers = false;
 
 char	   *wal_acceptors_list;
 int			wal_acceptor_reconnect_timeout;
@@ -350,8 +350,48 @@ void WalProposerCleanup()
 
 void WalProposerRust()
 {
+	struct stat stat_buf;
+
 	walprop_log(LOG, "WalProposerRust");
-	WalProposerSync(0, NULL);
+#if PG_VERSION_NUM < 150000
+	ThisTimeLineID = 1;
+#endif
+
+	/*
+	 * Initialize postmaster_alive_fds as WaitEventSet checks them.
+	 *
+	 * Copied from InitPostmasterDeathWatchHandle()
+	 */
+	if (pipe(postmaster_alive_fds) < 0)
+		ereport(FATAL,
+				(errcode_for_file_access(),
+					errmsg_internal("could not create pipe to monitor postmaster death: %m")));
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
+		ereport(FATAL,
+				(errcode_for_socket_access(),
+					errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
+
+	ChangeToDataDir();
+
+	/* Create pg_wal directory, if it doesn't exist */
+	if (stat(XLOGDIR, &stat_buf) != 0)
+	{
+		ereport(LOG, (errmsg("creating missing WAL directory \"%s\"", XLOGDIR)));
+		if (MakePGDirectory(XLOGDIR) < 0)
+		{
+			ereport(ERROR,
+					(errcode_for_file_access(),
+						errmsg("could not create directory \"%s\": %m",
+							   XLOGDIR)));
+			exit(1);
+		}
+	}
+
+	WalProposerInit(0, 0);
+
+	BackgroundWorkerUnblockSignals();
+
+	WalProposerStart();
 }
 
 /*
@@ -442,6 +482,7 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 	} else {
 		Assert(false);
 	}
+	// TODO: handle notification about new LSN available
 }
 #endif
 

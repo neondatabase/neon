@@ -380,6 +380,7 @@ pub enum NodeEvent {
     Accept(TCP),
     Closed(TCP),
     Message((AnyMessage, TCP)),
+    Internal(AnyMessage),
     WakeTimeout(u64),
     // TODO: close?
 }

@@ -115,6 +115,7 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("am_wal_proposer")
         .allowlist_var("neon_timeline_walproposer")
         .allowlist_var("neon_tenant_walproposer")
+        .allowlist_var("syncSafekeepers")
         .clang_arg(format!("-I{inc_server_path}"))
         .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.

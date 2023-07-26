@@ -10,7 +10,7 @@ use utils::{id::TenantTimelineId, logging, lsn::Lsn};
 use crate::{
     bindings::{
         neon_tenant_walproposer, neon_timeline_walproposer, wal_acceptor_connection_timeout,
-        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup,
+        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers,
     },
     c_context,
     simtest::safekeeper::run_server,
@@ -96,6 +96,7 @@ impl Test {
             unsafe {
                 WalProposerCleanup();
 
+                syncSafekeepers = true;
                 wal_acceptors_list = list.into_raw();
                 wal_acceptor_reconnect_timeout = 1000;
                 wal_acceptor_connection_timeout = 5000;
@@ -125,6 +126,52 @@ impl Test {
         let lsn = Lsn::from_str(&res.1)?;
         Ok(lsn)
     }
+
+    fn launch_walproposer(&self, lsn: Lsn) -> WalProposer {
+        let client_node = self.world.new_node();
+
+        // start the client thread
+        let guc = self.safekeepers_guc.clone();
+        let ttid = self.ttid.clone();
+        client_node.launch(move |_| {
+            let list = CString::new(guc).unwrap();
+
+            unsafe {
+                WalProposerCleanup();
+                
+                // TODO: set LSN to a variable
+
+                syncSafekeepers = false;
+                wal_acceptors_list = list.into_raw();
+                wal_acceptor_reconnect_timeout = 1000;
+                wal_acceptor_connection_timeout = 5000;
+                neon_tenant_walproposer =
+                    CString::new(ttid.tenant_id.to_string()).unwrap().into_raw();
+                neon_timeline_walproposer = CString::new(ttid.timeline_id.to_string())
+                    .unwrap()
+                    .into_raw();
+                WalProposerRust();
+            }
+        });
+
+        self.world.await_all();
+
+        WalProposer { 
+            node: client_node,
+        }
+    }
+}
+
+struct WalProposer {
+    node: Arc<Node>,
+}
+
+impl WalProposer {
+    fn gen_wal_record(&self) -> Lsn {
+        // TODO:
+
+        panic!("implement me")
+    }
 }
 
 #[test]
@@ -141,4 +188,21 @@ fn sync_empty_safekeepers() {
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
     println!("Sucessfully synced empty safekeepers at 0/0");
+}
+
+#[test]
+fn run_walproposer_generate_wal() {
+    logging::init(logging::LogFormat::Plain).unwrap();
+
+    let config = TestConfig::new();
+    let test = config.start(1337);
+
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    println!("Sucessfully synced empty safekeepers at 0/0");
+
+    let wp = test.launch_walproposer(lsn);
+    let rec1 = wp.gen_wal_record();
+
+    // TODO:
 }
