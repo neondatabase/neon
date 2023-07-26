@@ -201,12 +201,12 @@ impl S3Bucket {
     }
 
     fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
-        let mut full_path = self.prefix_in_bucket.clone().unwrap_or_default();
-        for segment in path.0.iter() {
-            full_path.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-            full_path.push_str(segment.to_str().unwrap_or_default());
+        assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let path_string = path.get_path().to_string_lossy().to_string();
+        match &self.prefix_in_bucket {
+            Some(prefix) => prefix.clone() + "/" + &path_string,
+            None => path_string,
         }
-        full_path
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
@@ -429,17 +429,9 @@ impl RemoteStorage for S3Bucket {
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
         // if prefix is none then download file `from`
-        let query_key = match &self.prefix_in_bucket {
-            Some(_) => self.relative_path_to_s3_object(from),
-            None => from
-                .get_path()
-                .to_str()
-                .expect("bad object name")
-                .to_string(),
-        };
         self.download_object(GetObjectRequest {
             bucket: self.bucket_name.clone(),
-            key: query_key,
+            key: self.relative_path_to_s3_object(from),
             range: None,
         })
         .await
