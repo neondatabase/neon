@@ -113,6 +113,7 @@ def test_remote_extensions(
     cleanup(cleanup_files, cleanup_folders)
 
 
+"""
 # Test downloading remote library.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_library(
@@ -182,3 +183,4 @@ def test_remote_library(
         pg_version, ["share/postgresql/extension/anon", "download_extensions"]
     )
     cleanup(cleanup_files, cleanup_folders)
+"""

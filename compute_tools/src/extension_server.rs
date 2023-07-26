@@ -131,6 +131,7 @@ pub async fn get_available_extensions(
     let public_extensions = ext_index_full["public_extensions"]
         .as_array()
         .expect("json err");
+    // TODO: maybe enabled_extensions should be a HashSet? probably doesn't matter
     let mut enabled_extensions = public_extensions
         .iter()
         .map(|x| x.as_str().expect("json err"))
