@@ -1397,7 +1397,8 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
-    // FIXME: make it so that we have no top level metrics as this fn will easily fall out of order:
+    // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
+    // order:
     // - global metrics reside in a Lazy<PageserverMetrics>
     //   - access via crate::metrics::PS_METRICS.materialized_page_cache_hit.inc()
     // - could move the statics into TimelineMetrics::new()?
