@@ -59,8 +59,7 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
     curl_easy_setopt(curl, CURLOPT_URL, compute_ctl_url);
-    // NOTE: 15L may be insufficient time for large extensions like postgis
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L /* seconds */);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L /* seconds */);
 
     if (curl)
     {

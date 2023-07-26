@@ -90,10 +90,17 @@ def test_remote_extensions(
             assert "anon" in all_extensions
             assert "kq_imcx" in all_extensions
 
-            # TODO: check that we cant't download custom extensions for other tenant ids
+            # postgis is on real s3 but not mock s3.
+            # it's kind of a big file, would rather not upload to github
+            if remote_storage_kind == RemoteStorageKind.REAL_S3:
+                assert "postgis" in all_extensions
+                # this is expected to break on my computer because I lack the necesary dependencies
+                try:
+                    cur.execute("CREATE EXTENSION postgis")
+                except Exception as err:
+                    log.info(f"(expected) error creating postgis extension: {err}")
 
-            # check that we can download private extension
-            # this is expected to fail because we don't have the pgcrypto extension
+            # this is expected to fail on my computer because I don't have the pgcrypto extension
             try:
                 cur.execute("CREATE EXTENSION anon")
             except Exception as err:
