@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info_span;
 use utils::bin_ser::SerializeError;
-use utils::fs_ext;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
@@ -271,14 +270,11 @@ pub fn save_metadata(
 
 #[derive(Error, Debug)]
 pub enum LoadMetadataError {
-    #[error("Got io error while reading metadata at {path}: {source}")]
-    Read { source: io::Error, path: Box<str> },
+    #[error(transparent)]
+    Read(#[from] io::Error),
 
-    #[error("Failed to decode metadata at {path}: {source}")]
-    Decode {
-        source: anyhow::Error,
-        path: Box<str>,
-    },
+    #[error(transparent)]
+    Decode(#[from] anyhow::Error),
 }
 
 pub fn load_metadata(
@@ -287,15 +283,9 @@ pub fn load_metadata(
     timeline_id: &TimelineId,
 ) -> Result<TimelineMetadata, LoadMetadataError> {
     let metadata_path = conf.metadata_path(tenant_id, timeline_id);
-    let metadata_bytes = std::fs::read(&metadata_path).map_err(|e| LoadMetadataError::Read {
-        source: e,
-        path: fs_ext::error_path(&metadata_path),
-    })?;
+    let metadata_bytes = std::fs::read(metadata_path)?;
 
-    TimelineMetadata::from_bytes(&metadata_bytes).map_err(|e| LoadMetadataError::Decode {
-        source: e,
-        path: fs_ext::error_path(&metadata_path),
-    })
+    Ok(TimelineMetadata::from_bytes(&metadata_bytes)?)
 }
 
 #[cfg(test)]

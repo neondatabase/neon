@@ -39,11 +39,6 @@ where
     fs_operation().or_else(ignore_not_found)
 }
 
-// Shortcut to be used when you want to include Path in the error type.
-pub fn error_path(p: &Path) -> Box<str> {
-    p.display().to_string().into_boxed_str()
-}
-
 #[cfg(test)]
 mod test {
     use std::path::PathBuf;

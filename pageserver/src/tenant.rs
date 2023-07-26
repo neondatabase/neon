@@ -883,9 +883,11 @@ impl Tenant {
                         timelines_to_resume_deletion.push((timeline_id, Some(metadata)))
                     }
                     Err(e) => match &e {
-                        LoadMetadataError::Read { source, .. } => {
-                            if source.kind() != io::ErrorKind::NotFound {
-                                return Err(anyhow::anyhow!(e));
+                        LoadMetadataError::Read(r) => {
+                            if r.kind() != io::ErrorKind::NotFound {
+                                return Err(anyhow::anyhow!(e)).with_context(|| {
+                                    format!("Failed to load metadata for timeline_id {timeline_id}")
+                                });
                             }
 
                             // If metadata doesnt exist it means that we've crashed without
@@ -900,7 +902,11 @@ impl Tenant {
                             // which can lead to running out of threads in blocing pool.
                             timelines_to_resume_deletion.push((timeline_id, None));
                         }
-                        _ => return Err(anyhow::anyhow!(e)),
+                        _ => {
+                            return Err(anyhow::anyhow!(e)).with_context(|| {
+                                format!("Failed to load metadata for timeline_id {timeline_id}")
+                            })
+                        }
                     },
                 }
             } else {
@@ -3823,7 +3829,7 @@ mod tests {
             .expect("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
-        let expected = "Failed to decode metadata at";
+        let expected = "failed to load metadata";
         assert!(
             message.contains(expected),
             "message '{message}' expected to contain {expected}"
