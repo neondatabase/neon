@@ -774,12 +774,14 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 FROM python:3.9-slim-bullseye AS generate-ext-index
 ARG PG_VERSION
 ARG BUILD_TAG
+RUN apt update && apt install -y zstd
+
 # copy the control files here
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/
 COPY --from=postgis-build /extensions/ /extensions/
 COPY scripts/combine_control_files.py ./combine_control_files.py
-RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG}
+RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG} --public_extensions="anon,postgis"
 
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
