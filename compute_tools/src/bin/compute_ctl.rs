@@ -197,7 +197,7 @@ fn main() -> Result<()> {
         state_changed: Condvar::new(),
         ext_remote_storage,
         ext_remote_paths: OnceLock::new(),
-        already_downloaded_extensions: Mutex::new(HashSet::new()),
+        started_to_download_extensions: Mutex::new(HashSet::new()),
         library_index: OnceLock::new(),
         build_tag,
     };

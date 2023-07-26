@@ -59,7 +59,7 @@ pub struct ComputeNode {
     // (key: extension name, value: path to extension archive in remote storage)
     pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
     pub library_index: OnceLock<HashMap<String, String>>,
-    pub already_downloaded_extensions: Mutex<HashSet<String>>,
+    pub started_to_download_extensions: Mutex<HashSet<String>>,
     pub build_tag: String,
 }
 
@@ -778,16 +778,18 @@ LIMIT 100",
                 }
 
                 {
-                    let mut already_downloaded_extensions =
-                        self.already_downloaded_extensions.lock().expect("bad lock");
-                    if already_downloaded_extensions.contains(&real_ext_name) {
+                    let mut started_to_download_extensions = self
+                        .started_to_download_extensions
+                        .lock()
+                        .expect("bad lock");
+                    if started_to_download_extensions.contains(&real_ext_name) {
                         info!(
                             "extension {:?} already exists, skipping download",
                             &ext_name
                         );
                         return Ok(());
                     } else {
-                        already_downloaded_extensions.insert(real_ext_name.clone());
+                        started_to_download_extensions.insert(real_ext_name.clone());
                     }
                 }
                 extension_server::download_extension(

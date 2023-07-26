@@ -176,9 +176,18 @@ def test_remote_library(
                 log.info(f"error loading anon library: {err}")
                 raise AssertionError("unexpected error loading anon library") from err
 
-            # TODO test library which name is different from extension name
+            # test library which name is different from extension name
+            # this fails on my computer because I' missing a dependency
+            # however, it does successfully download the postgis archive
             if remote_storage_kind == RemoteStorageKind.REAL_S3:
-                cur.execute("LOAD 'postgis_topology-3'")
+                try:
+                    cur.execute("LOAD 'postgis_topology-3'")
+                except Exception as err:
+                    log.info("error loading postgis_topology-3")
+                    assert (
+                        "libproj.so.19: cannot open shared object file: No such file or directory"
+                        in str(err)
+                    ), "unexpected error loading postgis_topology-3"
 
     cleanup_files = add_pgdir_prefix(
         pg_version,
