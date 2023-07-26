@@ -1395,15 +1395,7 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub fn preinitialize_metrics() {
-    // We want to alert on this metric increasing.
-    // Initialize it eagerly, so that our alert rule can distinguish absence of the metric from metric value 0.
-    assert_eq!(UNEXPECTED_ONDEMAND_DOWNLOADS.get(), 0);
-    UNEXPECTED_ONDEMAND_DOWNLOADS.reset();
-
-    // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
-    BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
-
-    // Python tests need these.
+    // Python tests need these and on some we do alerting.
     //
     // FIXME: make it so that we have no top level metrics as this fn will easily fall out of order:
     // - global metrics reside in a Lazy<PageserverMetrics>
@@ -1413,7 +1405,7 @@ pub fn preinitialize_metrics() {
     // counters
     [
         &MATERIALIZED_PAGE_CACHE_HIT,
-        &MATERIALIZED_PAGE_CACHE_HIT,
+        &MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
         &UNEXPECTED_ONDEMAND_DOWNLOADS,
         &WALRECEIVER_STARTED_CONNECTIONS,
         &WALRECEIVER_BROKER_UPDATES,
@@ -1424,6 +1416,11 @@ pub fn preinitialize_metrics() {
     .for_each(|c| {
         c.get();
     });
+
+    // countervecs
+    [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
+        .into_iter()
+        .for_each(|c| c.reset());
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();
