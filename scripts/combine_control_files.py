@@ -67,8 +67,8 @@ if __name__ == "__main__":
                 .split("\n")
             )
             for file in file_list:
-                if ".so" in file:
-                    lib_name = file.replace("lib/", "").replace(".so", "")
+                if file.endswith('.so') and file.startswith("lib/"):
+                    lib_name = file[4:-3]
                     library_index[lib_name] = extension.name.replace(".tar.zst", "")
 
     all_data = {
