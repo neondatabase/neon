@@ -1,8 +1,11 @@
+use std::ops::ControlFlow;
+
 use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
+    proxy::{try_wake, NUM_RETRIES_CONNECT},
     sasl, scram,
     stream::PqStream,
 };
@@ -48,7 +51,15 @@ pub(super) async fn authenticate(
         }
     };
 
-    let mut node = api.wake_compute(extra, creds).await?;
+    let mut num_retries = 0;
+    let mut node = loop {
+        num_retries += 1;
+        match try_wake(api, extra, creds).await? {
+            ControlFlow::Break(n) => break n,
+            ControlFlow::Continue(_) if num_retries < NUM_RETRIES_CONNECT => continue,
+            ControlFlow::Continue(e) => return Err(e.into()),
+        }
+    };
     if let Some(keys) = scram_keys {
         use tokio_postgres::config::AuthKeys;
         node.config.auth_keys(AuthKeys::ScramSha256(keys));
