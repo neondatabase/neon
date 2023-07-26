@@ -89,6 +89,7 @@ pub struct ParsedSpec {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub pageserver_connstr: String,
+    pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
 }
 
@@ -106,6 +107,17 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
+        let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
+            spec.cluster
+                .settings
+                .find("neon.safekeepers")
+                .ok_or("safekeeper connstrings should be provided")?
+                .split(',')
+                .map(|str| str.to_string())
+                .collect()
+        } else {
+            spec.safekeeper_connstrings.clone()
+        };
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
@@ -131,6 +143,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
+            safekeeper_connstrings,
             storage_auth_token,
             tenant_id,
             timeline_id,
@@ -322,7 +335,7 @@ impl ComputeNode {
             .as_ref()
             .expect("spec must be set")
             .clone();
-        let sk_connstrs: Vec<String> = pspec.spec.safekeeper_connstrings.clone();
+        let sk_connstrs: Vec<String> = pspec.safekeeper_connstrings.clone();
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
             let connstr = format!("postgresql://no_user@{}", connstr);
