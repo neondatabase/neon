@@ -202,7 +202,11 @@ impl S3Bucket {
 
     fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
-        let path_string = path.get_path().to_string_lossy().to_string();
+        let path_string = path
+            .get_path()
+            .to_string_lossy()
+            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
+            .to_string();
         match &self.prefix_in_bucket {
             Some(prefix) => prefix.clone() + "/" + &path_string,
             None => path_string,
