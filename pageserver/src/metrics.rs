@@ -1403,7 +1403,38 @@ pub fn preinitialize_metrics() {
     // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
     BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
 
-    // Python tests need these.
-    MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
-    MATERIALIZED_PAGE_CACHE_HIT.get();
+    // Python tests need these. -- Imagine if we had "PageserverMetrics" instead of statics..
+
+    // counters
+    [
+        &MATERIALIZED_PAGE_CACHE_HIT,
+        &MATERIALIZED_PAGE_CACHE_HIT,
+        &UNEXPECTED_ONDEMAND_DOWNLOADS,
+        &WALRECEIVER_STARTED_CONNECTIONS,
+        &WALRECEIVER_BROKER_UPDATES,
+        &WALRECEIVER_CANDIDATES_ADDED,
+        &WALRECEIVER_CANDIDATES_REMOVED,
+    ]
+    .into_iter()
+    .for_each(|c| {
+        c.get();
+    });
+
+    // gauges
+    WALRECEIVER_ACTIVE_MANAGERS.get();
+
+    // histograms
+    [
+        &READ_NUM_FS_LAYERS,
+        &RECONSTRUCT_TIME,
+        &WAIT_LSN_TIME,
+        &WAL_REDO_TIME,
+        &WAL_REDO_WAIT_TIME,
+        &WAL_REDO_RECORDS_HISTOGRAM,
+        &WAL_REDO_BYTES_HISTOGRAM,
+    ]
+    .into_iter()
+    .for_each(|h| {
+        h.start_timer().stop_and_discard();
+    });
 }
