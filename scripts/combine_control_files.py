@@ -4,6 +4,7 @@
 # for all extensions in extensions subdir.
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 """
@@ -60,9 +61,6 @@ if __name__ == "__main__":
                 "archive_path": f"{BUILD_TAG}/{pg_version}/extensions/{extension.name}.tar.zst",
             }
         elif extension.suffix == ".zst":
-            import subprocess
-            import os
-
             file_list = (
                 str(subprocess.check_output(["tar", "tf", str(extension)]), "utf-8")
                 .strip()
