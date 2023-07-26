@@ -955,22 +955,15 @@ jobs:
         version: [ v14, v15 ]
 
     env:
-      # While on transition period we extract public extensions from compute-node image and custom extensions from extensions image.
-      # Later all the extensions will be moved to extensions image.
-      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:latest
-      COMPUTE_NODE_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:latest
+      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
       AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ github.ref_name == 'release' && secrets.AWS_SECRET_KEY_PROD || secrets.AWS_SECRET_KEY_DEV }}
-      S3_BUCKETS: |
-        ${{ github.ref_name == 'release' &&
-          'neon-prod-extensions-ap-southeast-1 neon-prod-extensions-eu-central-1 neon-prod-extensions-us-east-1 neon-prod-extensions-us-east-2 neon-prod-extensions-us-west-2' ||
-          'neon-dev-extensions-eu-central-1 neon-dev-extensions-eu-west-1 neon-dev-extensions-us-east-2' }}
+      S3_BUCKETS: ${{ github.ref_name == 'release' && vars.S3_EXTENSIONS_BUCKETS_PROD || vars.S3_EXTENSIONS_BUCKETS_DEV }}
 
     steps:
       - name: Pull postgres-extensions image
         run: |
           docker pull ${EXTENSIONS_IMAGE}
-          docker pull ${COMPUTE_NODE_IMAGE}
 
       - name: Create postgres-extensions container
         id: create-container
@@ -978,46 +971,23 @@ jobs:
           EID=$(docker create ${EXTENSIONS_IMAGE} true)
           echo "EID=${EID}" >> $GITHUB_OUTPUT
 
-          CID=$(docker create ${COMPUTE_NODE_IMAGE} true)
-          echo "CID=${CID}" >> $GITHUB_OUTPUT
-
       - name: Extract postgres-extensions from container
         run: |
-          rm -rf ./extensions-to-upload ./custom-extensions # Just in case
+          rm -rf ./extensions-to-upload # Just in case
+          mkdir -p extensions-to-upload
 
-          # In compute image we have a bit different directory layout
-          mkdir -p extensions-to-upload/share
-          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension ./extensions-to-upload/share/extension
-          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/lib             ./extensions-to-upload/lib
-
-          # Delete Neon extensitons (they always present on compute-node image)
-          rm -rf ./extensions-to-upload/share/extension/neon*
-          rm -rf ./extensions-to-upload/lib/neon*
-
-          # Delete leftovers from the extension build step
-          rm -rf ./extensions-to-upload/lib/pgxs
-          rm -rf ./extensions-to-upload/lib/pkgconfig
-
-          docker cp ${{ steps.create-container.outputs.EID }}:/extensions ./custom-extensions
-          for EXT_NAME in $(ls ./custom-extensions); do
-            mkdir -p ./extensions-to-upload/${EXT_NAME}/share
-
-            mv ./custom-extensions/${EXT_NAME}/share/extension ./extensions-to-upload/${EXT_NAME}/share/extension
-            mv ./custom-extensions/${EXT_NAME}/lib             ./extensions-to-upload/${EXT_NAME}/lib
-          done
+          docker cp ${{ steps.create-container.outputs.EID }}:/extensions/ ./extensions-to-upload/
+          docker cp ${{ steps.create-container.outputs.EID }}:/ext_index.json ./extensions-to-upload/
 
       - name: Upload postgres-extensions to S3
-        # TODO: Reenable step after switching to the new extensions format (tar-gzipped + index.json)
-        if: false
         run: |
-          for BUCKET in $(echo ${S3_BUCKETS}); do
+          for BUCKET in $(echo ${S3_BUCKETS:-[]} | jq --raw-output '.[]'); do
             aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
           done
 
       - name: Cleanup
-        if: ${{ always() && (steps.create-container.outputs.CID || steps.create-container.outputs.EID) }}
+        if: ${{ always() && steps.create-container.outputs.EID }}
         run: |
-          docker rm ${{ steps.create-container.outputs.CID }} || true
           docker rm ${{ steps.create-container.outputs.EID }} || true
 
   deploy:
