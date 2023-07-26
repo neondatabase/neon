@@ -108,13 +108,17 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
         let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
-            spec.cluster
-                .settings
-                .find("neon.safekeepers")
-                .ok_or("safekeeper connstrings should be provided")?
-                .split(',')
-                .map(|str| str.to_string())
-                .collect()
+            if matches!(spec.mode, ComputeMode::Primary) {
+                spec.cluster
+                    .settings
+                    .find("neon.safekeepers")
+                    .ok_or("safekeeper connstrings should be provided")?
+                    .split(',')
+                    .map(|str| str.to_string())
+                    .collect()
+            } else {
+                vec![]
+            }
         } else {
             spec.safekeeper_connstrings.clone()
         };
@@ -351,15 +355,15 @@ impl ComputeNode {
                 config.password(storage_auth_token);
             }
 
-            config
+            (connstr, config)
         });
 
         // Create task set to query all safekeepers
         let mut tasks = FuturesUnordered::new();
         let quorum = sk_configs.len() / 2 + 1;
-        for config in sk_configs {
+        for (connstr, config) in sk_configs {
             let timeout = tokio::time::Duration::from_millis(100);
-            let task = tokio::time::timeout(timeout, ping_safekeeper(config));
+            let task = tokio::time::timeout(timeout, ping_safekeeper(connstr, config));
             tasks.push(tokio::spawn(task));
         }
 
