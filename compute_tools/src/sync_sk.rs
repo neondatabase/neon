@@ -15,12 +15,15 @@ pub struct TimelineStatusOkResponse {
     commit_lsn: Lsn,
 }
 
-/// Get a safekeeper's metadata for our timeline
-pub async fn ping_safekeeper(config: tokio_postgres::Config) -> Result<TimelineStatusResponse> {
+/// Get a safekeeper's metadata for our timeline. The id is only used for logging
+pub async fn ping_safekeeper(
+    id: String,
+    config: tokio_postgres::Config,
+) -> Result<TimelineStatusResponse> {
     // TODO add retries
 
     // Connect
-    info!("connecting to {:?}", config);
+    info!("connecting to {}", id);
     let (client, conn) = config.connect(tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -29,11 +32,11 @@ pub async fn ping_safekeeper(config: tokio_postgres::Config) -> Result<TimelineS
     });
 
     // Query
-    info!("querying {:?}", config);
+    info!("querying {}", id);
     let result = client.simple_query("TIMELINE_STATUS").await?;
 
     // Parse result
-    info!("done with {:?}", config);
+    info!("done with {}", id);
     if let postgres::SimpleQueryMessage::Row(row) = &result[0] {
         use std::str::FromStr;
         let response = TimelineStatusResponse::Ok(TimelineStatusOkResponse {
