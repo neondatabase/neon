@@ -193,6 +193,9 @@ fn main() -> Result<()> {
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
+
+        compute.prewarm_postgres()?;
+
         let mut state = compute.state.lock().unwrap();
         while state.status != ComputeStatus::ConfigurationPending {
             state = compute.state_changed.wait(state).unwrap();

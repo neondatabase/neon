@@ -532,6 +532,50 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Start and stop a postgres process to warm up the VM for startup.
+    pub fn prewarm_postgres(&self) -> Result<()> {
+        info!("prewarming");
+
+        // Create pgdata
+        let pgdata = "/home/bojan/tmp/prewarm_pgdata";
+        create_pgdata(pgdata)?;
+
+        // Run initdb to completion
+        info!("running initdb");
+        let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
+        Command::new(initdb_bin)
+            .args(["-D", pgdata])
+            .output()
+            .expect("cannot start initdb process");
+
+        // Write conf
+        use std::io::Write;
+        let conf_path = Path::new(pgdata).join("postgresql.conf");
+        let mut file = std::fs::File::create(conf_path)?;
+        writeln!(file, "shared_buffers=100MB")?;
+        writeln!(file, "port=51055")?;  // Nobody should be connecting
+        writeln!(file, "shared_preload_libraries = 'neon'")?;
+
+        // Start postgres
+        info!("starting postgres");
+        let mut pg = Command::new(&self.pgbin)
+            .args(["-D", pgdata])
+            .spawn()
+            .expect("cannot start postgres process");
+
+        // Stop it when it's ready
+        info!("waiting for postgres");
+        wait_for_postgres(&mut pg, Path::new(pgdata))?;
+        pg.kill()?;
+        info!("sent kill signal");
+        pg.wait()?;
+        info!("done prewarming");
+
+        // clean up
+        let _ok = fs::remove_dir_all(pgdata);
+        Ok(())
+    }
+
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip_all)]
