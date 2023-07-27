@@ -391,10 +391,10 @@ where
 
     #[allow(dead_code)]
     pub async fn dump(&self) -> Result<()> {
-        self.dump_recurse(self.root_blk, &[], 0)
+        self.dump_inner(self.root_blk, &[], 0)
     }
 
-    fn dump_recurse(&self, blknum: u32, path: &[u8], depth: usize) -> Result<()> {
+    fn dump_inner(&self, blknum: u32, path: &[u8], depth: usize) -> Result<()> {
         let blk = self.reader.read_blk(self.start_blk + blknum)?;
         let buf: &[u8] = blk.as_ref();
 
@@ -409,9 +409,8 @@ where
             node.suffix_len
         );
 
-        let mut idx = 0;
         let mut key_off = 0;
-        while idx < node.num_children {
+        for idx in 0..node.num_children {
             let key = &node.keys[key_off..key_off + node.suffix_len as usize];
             let val = node.value(idx as usize);
             print!("{:indent$}", "", indent = depth * 2 + 2);
@@ -419,9 +418,8 @@ where
 
             if node.level > 0 {
                 let child_path = [path, node.prefix].concat();
-                self.dump_recurse(val.to_blknum(), &child_path, depth + 1)?;
+                self.dump_inner(val.to_blknum(), &child_path, depth + 1)?;
             }
-            idx += 1;
             key_off += node.suffix_len as usize;
         }
         Ok(())
