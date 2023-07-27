@@ -976,7 +976,7 @@ impl<'a> DeltaValueIter<'a> {
 /// fashion.
 ///
 struct DeltaKeyIter {
-    all_keys: Vec<(DeltaKey, u64)>,
+    all_keys: Vec<(Key, Lsn, u64)>,
     next_idx: usize,
 }
 
@@ -984,17 +984,9 @@ impl Iterator for DeltaKeyIter {
     type Item = (Key, Lsn, u64);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next_idx < self.all_keys.len() {
-            let (delta_key, size) = &self.all_keys[self.next_idx];
-
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            self.next_idx += 1;
-            Some((key, lsn, *size))
-        } else {
-            None
-        }
+        let ret = *self.all_keys.get(self.next_idx)?;
+        self.next_idx += 1;
+        Some(ret)
     }
 }
 
@@ -1007,7 +999,7 @@ impl<'a> DeltaKeyIter {
             file,
         );
 
-        let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
+        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
@@ -1015,22 +1007,22 @@ impl<'a> DeltaKeyIter {
                 let delta_key = DeltaKey::from_slice(key);
                 let pos = BlobRef(value).pos();
                 if let Some(last) = all_keys.last_mut() {
-                    if last.0.key() == delta_key.key() {
+                    if last.0 == delta_key.key() {
                         return true;
                     } else {
                         // subtract offset of new key BLOB and first blob of this key
                         // to get total size if values associated with this key
-                        let first_pos = last.1;
-                        last.1 = pos - first_pos;
+                        let first_pos = last.2;
+                        last.2 = pos - first_pos;
                     }
                 }
-                all_keys.push((delta_key, pos));
+                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
                 true
             },
         )?;
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of layer
-            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
         }
         let iter = DeltaKeyIter {
             all_keys,
