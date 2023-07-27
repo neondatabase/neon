@@ -192,10 +192,10 @@ pub async fn handle(
     // isolation level and read only
     let txn_isolation_level = match headers.get(&TXN_ISOLATION_LEVEL) {
         Some(x) => Some(match x.as_bytes() {
-            b"serializable" => IsolationLevel::Serializable,
-            b"read-uncommitted" => IsolationLevel::ReadUncommitted,
-            b"read-committed" => IsolationLevel::ReadCommitted,
-            b"repeatable-read" => IsolationLevel::RepeatableRead,
+            b"Serializable" => IsolationLevel::Serializable,
+            b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
+            b"ReadCommitted" => IsolationLevel::ReadCommitted,
+            b"RepeatableRead" => IsolationLevel::RepeatableRead,
             _ => bail!("invalid isolation level"),
         }),
         None => None,
@@ -247,7 +247,13 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            Ok(json!({ "results": results }))
+            Ok(json!({
+                "results": results,
+                "options": {
+                    "isolationLevel": txn_isolation_level.map(|l| format!("{:?}", l)),
+                    "readOnly": txn_read_only
+                }
+            }))
         }
     };
 
