@@ -70,6 +70,7 @@ use std::str;
 use tar::Archive;
 use tokio::io::AsyncReadExt;
 use tracing::info;
+use tracing::log::warn;
 use zstd::stream::read::Decoder;
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
@@ -208,7 +209,15 @@ pub async fn download_extension(
             let old_file = file?.path();
             let new_file =
                 Path::new(&real_dir).join(old_file.file_name().context("error parsing file")?);
-            std::fs::rename(old_file, new_file)?;
+            info!("moving {old_file:?} to {new_file:?}");
+
+            // extension download failed: Directory not empty (os error 39)
+            match std::fs::rename(old_file, new_file) {
+                Ok(()) => info!("move succeeded"),
+                Err(e) => {
+                    warn!("move failed, probably because the extension already exists: {e}")
+                }
+            }
         }
     }
     Ok(())
