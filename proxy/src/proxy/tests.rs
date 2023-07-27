@@ -428,12 +428,12 @@ fn helper_create_cached_node_info() -> CachedNodeInfo {
     CachedNodeInfo::new_uncached(node)
 }
 
-fn helper_create_connect_info<'a>(
-    mechanism: &'a TestConnectMechanism,
+fn helper_create_connect_info(
+    mechanism: &TestConnectMechanism,
 ) -> (
     CachedNodeInfo,
     console::ConsoleReqExtra<'static>,
-    auth::BackendType<'a, ClientCredentials<'static>>,
+    auth::BackendType<'_, ClientCredentials<'static>>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {
