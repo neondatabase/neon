@@ -21,7 +21,7 @@ where
     R: BlockReader,
 {
     /// Read a blob into a new buffer.
-    pub fn read_blob(&mut self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
+    pub fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf)?;
         Ok(buf)
@@ -29,7 +29,7 @@ where
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
     pub fn read_blob_into_buf(
-        &mut self,
+        &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
     ) -> Result<(), std::io::Error> {

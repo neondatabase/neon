@@ -258,10 +258,10 @@ impl Layer for DeltaLayer {
 
         tree_reader.dump()?;
 
-        let mut cursor = file.block_cursor();
+        let cursor = file.block_cursor();
 
         // A subroutine to dump a single blob
-        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
+        let dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
             let buf = cursor.read_blob(blob_ref.pos())?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -343,7 +343,7 @@ impl Layer for DeltaLayer {
             })?;
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
-            let mut cursor = file.block_cursor();
+            let cursor = file.block_cursor();
             let mut buf = Vec::new();
             for (entry_lsn, pos) in offsets {
                 cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
