@@ -15,15 +15,17 @@ use utils::{
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind},
-    tenant::{remote_timeline_client, DeleteTimelineError},
+    tenant::{
+        metadata::TimelineMetadata,
+        remote_timeline_client::{
+            self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
+        },
+        CreateTimelineCause, DeleteTimelineError, Tenant,
+    },
     InitializationOrder,
 };
 
-use super::{
-    metadata::TimelineMetadata,
-    remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-    CreateTimelineCause, Tenant, Timeline,
-};
+use super::Timeline;
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {

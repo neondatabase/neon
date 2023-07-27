@@ -46,7 +46,6 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::config::TenantConf;
-use self::delete::DeleteTimelineFlow;
 use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
@@ -70,6 +69,7 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
 use crate::InitializationOrder;
 
+use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -117,7 +117,6 @@ mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
-pub mod delete;
 pub mod mgr;
 pub mod tasks;
 pub mod upload_queue;
