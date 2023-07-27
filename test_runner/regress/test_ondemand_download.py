@@ -712,10 +712,10 @@ def test_ondemand_download_failure_to_replace(
     env.pageserver.allowed_errors.append(actual_message)
 
     env.pageserver.allowed_errors.append(
-        ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info"
+        ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info.*"
     )
     # this might get to run and attempt on-demand, but not always
-    env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
+    env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'.*")
 
     # if the above returned, then we didn't have a livelock, and all is well
 
