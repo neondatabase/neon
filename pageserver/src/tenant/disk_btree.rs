@@ -391,36 +391,41 @@ where
 
     #[allow(dead_code)]
     pub async fn dump(&self) -> Result<()> {
-        self.dump_inner(self.root_blk, &[], 0)
-    }
+        let mut stack = Vec::new();
 
-    fn dump_inner(&self, blknum: u32, path: &[u8], depth: usize) -> Result<()> {
-        let blk = self.reader.read_blk(self.start_blk + blknum)?;
-        let buf: &[u8] = blk.as_ref();
+        stack.push((self.root_blk, String::new(), 0, 0, 0));
 
-        let node = OnDiskNode::<L>::deparse(buf)?;
+        while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
+            let blk = self.reader.read_blk(self.start_blk + blknum)?;
+            let buf: &[u8] = blk.as_ref();
+            let node = OnDiskNode::<L>::deparse(buf)?;
 
-        print!("{:indent$}", "", indent = depth * 2);
-        println!(
-            "blk #{}: path {}: prefix {}, suffix_len {}",
-            blknum,
-            hex::encode(path),
-            hex::encode(node.prefix),
-            node.suffix_len
-        );
+            if child_idx == 0 {
+                print!("{:indent$}", "", indent = depth * 2);
+                let path_prefix = stack
+                    .iter()
+                    .map(|(_blknum, path, ..)| path.as_str())
+                    .collect::<String>();
+                println!(
+                    "blk #{blknum}: path {path_prefix}{path}: prefix {}, suffix_len {}",
+                    hex::encode(node.prefix),
+                    node.suffix_len
+                );
+            }
 
-        let mut key_off = 0;
-        for idx in 0..node.num_children {
+            if child_idx + 1 < node.num_children {
+                let key_off = key_off + node.suffix_len as usize;
+                stack.push((blknum, path.clone(), depth, child_idx + 1, key_off));
+            }
             let key = &node.keys[key_off..key_off + node.suffix_len as usize];
-            let val = node.value(idx as usize);
+            let val = node.value(child_idx as usize);
+
             print!("{:indent$}", "", indent = depth * 2 + 2);
             println!("{}: {}", hex::encode(key), hex::encode(val.0));
 
             if node.level > 0 {
-                let child_path = [path, node.prefix].concat();
-                self.dump_inner(val.to_blknum(), &child_path, depth + 1)?;
+                stack.push((val.to_blknum(), hex::encode(node.prefix), depth + 1, 0, 0));
             }
-            key_off += node.suffix_len as usize;
         }
         Ok(())
     }
