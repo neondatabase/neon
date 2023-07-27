@@ -2,11 +2,13 @@ use std::{error, fmt, io};
 
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::{ErrorFields, ErrorResponseBody};
+use tokio_native_tls::native_tls;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 
 #[derive(Debug, PartialEq)]
 enum Kind {
     Io,
+    Tls,
     UnexpectedMessage,
     FromSql(usize),
     Closed,
@@ -21,7 +23,7 @@ struct ErrorInner {
 }
 
 /// An error communicating with the Postgres server.
-pub struct Error(Box<ErrorInner>);
+pub struct Error(ErrorInner);
 
 impl fmt::Debug for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -36,6 +38,7 @@ impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0.kind {
             Kind::Io => fmt.write_str("error communicating with the server")?,
+            Kind::Tls => fmt.write_str("error establishing tls")?,
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server")?,
             Kind::FromSql(idx) => write!(fmt, "error deserializing column {}", idx)?,
             Kind::Closed => fmt.write_str("connection closed")?,
@@ -53,6 +56,12 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         self.0.cause.as_ref().map(|e| &**e as _)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Self::io(value)
     }
 }
 
@@ -82,7 +91,7 @@ impl Error {
     }
 
     fn new(kind: Kind, cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {
-        Error(Box::new(ErrorInner { kind, cause }))
+        Error(ErrorInner { kind, cause })
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -105,6 +114,10 @@ impl Error {
         Error::new(Kind::UnexpectedMessage, None)
     }
 
+    pub(crate) fn expecting(expected: &str) -> Error {
+        Error::new(Kind::UnexpectedMessage, Some(expected.into()))
+    }
+
     pub(crate) fn parse(e: io::Error) -> Error {
         Error::new(Kind::Parse, Some(Box::new(e)))
     }
@@ -115,6 +128,10 @@ impl Error {
 
     pub(crate) fn io(e: io::Error) -> Error {
         Error::new(Kind::Io, Some(Box::new(e)))
+    }
+
+    pub(crate) fn tls(e: native_tls::Error) -> Error {
+        Error::new(Kind::Tls, Some(Box::new(e)))
     }
 }
 

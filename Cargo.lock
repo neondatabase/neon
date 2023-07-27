@@ -3074,6 +3074,7 @@ dependencies = [
  "thiserror",
  "tls-listener",
  "tokio",
+ "tokio-native-tls",
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls 0.23.4",

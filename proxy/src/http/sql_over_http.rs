@@ -26,17 +26,13 @@ use tokio_postgres::RowStream;
 use tokio_postgres::Statement;
 use url::Url;
 
-use crate::http::sql_over_http::codec::FrontendMessage;
-use crate::http::sql_over_http::connection::RequestMessages;
+use crate::pg_client;
+use crate::pg_client::codec::FrontendMessage;
+use crate::pg_client::connection;
+use crate::pg_client::connection::RequestMessages;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
-
-mod codec;
-mod connection;
-mod error;
-// mod prepare;
-// mod pg_type;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -374,75 +370,20 @@ async fn query_raw_txt<'a, St, T>(
     conn: &mut connection::Connection<St, T>,
     query: String,
     params: Vec<Option<String>>,
-) -> Result<Vec<Column>, error::Error>
+) -> Result<Vec<Column>, pg_client::error::Error>
 where
     St: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    use postgres_protocol::message::backend::Message;
-    use postgres_protocol::message::frontend;
-
-    let params_len = params.len();
     let params = params.into_iter();
 
-    {
-        let buf = &mut conn.buf;
-        // Parse, anonymous portal
-        frontend::parse("", query.as_str(), std::iter::empty(), buf)
-            .map_err(error::Error::encode)?;
-        // Bind, pass params as text, retrieve as binary
-        match frontend::bind(
-            "",                 // empty string selects the unnamed portal
-            "",                 // empty string selects the unnamed prepared statement
-            std::iter::empty(), // all parameters use the default format (text)
-            params,
-            |param, buf| match param {
-                Some(param) => {
-                    buf.put_slice(param.as_bytes());
-                    Ok(postgres_protocol::IsNull::No)
-                }
-                None => Ok(postgres_protocol::IsNull::Yes),
-            },
-            Some(0), // all text
-            buf,
-        ) {
-            Ok(()) => Ok(()),
-            Err(frontend::BindError::Conversion(e)) => Err(error::Error::encode(
-                std::io::Error::new(ErrorKind::Other, e),
-            )),
-            Err(frontend::BindError::Serialization(e)) => Err(error::Error::encode(e)),
-        }?;
-
-        // Describe portal to typecast results
-        frontend::describe(b'P', "", buf).map_err(error::Error::encode)?;
-        // Execute
-        frontend::execute("", 0, buf).map_err(error::Error::encode)?;
-        // Sync
-        frontend::sync(buf);
-    }
-
-    conn.send().await?;
-
-    // now read the responses
-
-    match conn.next_message().await? {
-        Message::ParseComplete => {}
-        _ => return Err(error::Error::unexpected_message()),
-    }
-    match conn.next_message().await? {
-        Message::BindComplete => {}
-        _ => return Err(error::Error::unexpected_message()),
-    }
-    let row_description = match conn.next_message().await? {
-        Message::RowDescription(body) => Some(body),
-        Message::NoData => None,
-        _ => return Err(error::Error::unexpected_message()),
-    };
+    conn.prepare_and_execute("", "", query.as_str(), params)?;
+    conn.sync().await?;
 
     let mut columns = vec![];
-    if let Some(row_description) = row_description {
-        let mut it = row_description.fields();
-        while let Some(field) = it.next().map_err(error::Error::parse)? {
+    if let Some((desc, rows)) = conn.stream_query_results().await? {
+        let mut it = desc.fields();
+        while let Some(field) = it.next().map_err(pg_client::error::Error::parse)? {
             let type_ = Type::from_oid(field.type_oid());
             // let column = Column::new(field.name().to_string(), type_, field);
             columns.push(Column {
@@ -451,8 +392,6 @@ where
             });
         }
     }
-
-    // let statement = Statement::new_text(&self.inner, "".to_owned(), parameters, columns);
 
     Ok(columns)
 }
@@ -515,7 +454,7 @@ fn pg_text_row_to_json2(
             let pg_value = range
                 .map(|r| {
                     std::str::from_utf8(&row.buffer()[r])
-                        .map_err(|e| error::Error::from_sql(e.into(), i))
+                        .map_err(|e| pg_client::error::Error::from_sql(e.into(), i))
                 })
                 .transpose()?;
             // let pg_value = row.as_text(i)?;
