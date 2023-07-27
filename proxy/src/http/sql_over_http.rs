@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -12,6 +13,7 @@ use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
+use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
 use url::Url;
 
@@ -37,6 +39,8 @@ const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
@@ -185,6 +189,19 @@ pub async fn handle(
     // Allow connection pooling only if explicitly requested
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
+    // isolation level and read only
+    let txn_isolation_level = match headers.get(&TXN_ISOLATION_LEVEL) {
+        Some(x) => Some(match x.as_bytes() {
+            b"serializable" => IsolationLevel::Serializable,
+            b"read-uncommitted" => IsolationLevel::ReadUncommitted,
+            b"read-committed" => IsolationLevel::ReadCommitted,
+            b"repeatable-read" => IsolationLevel::RepeatableRead,
+            _ => bail!("invalid isolation level"),
+        }),
+        None => None,
+    };
+    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
@@ -211,7 +228,14 @@ pub async fn handle(
         Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode).await,
         Payload::Batch(queries) => {
             let mut results = Vec::new();
-            let transaction = client.transaction().await?;
+            let mut builder = client.build_transaction();
+            if let Some(isolation_level) = txn_isolation_level {
+                builder = builder.isolation_level(isolation_level);
+            }
+            if txn_read_only {
+                builder = builder.read_only(true);
+            }
+            let transaction = builder.start().await?;
             for query in queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 match result {
