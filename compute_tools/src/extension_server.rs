@@ -144,6 +144,7 @@ pub async fn get_available_extensions(
     let library_index = ext_index_full.library_index;
     let all_extension_data = ext_index_full.extension_data;
 
+    info!("library_index {:?}", &library_index);
     info!("enabled_extensions: {:?}", enabled_extensions);
     let mut ext_remote_paths = HashMap::new();
     let mut file_create_tasks = Vec::new();
