@@ -26,7 +26,7 @@ use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
-use super::delete::DeleteTimelineFlow;
+use super::timeline::delete::DeleteTimelineFlow;
 
 /// The tenants known to the pageserver.
 /// The enum variants are used to distinguish the different states that the pageserver can be in.

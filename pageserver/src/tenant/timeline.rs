@@ -1,3 +1,4 @@
+pub mod delete;
 mod eviction_task;
 pub mod layer_manager;
 mod logical_size;
@@ -79,6 +80,7 @@ use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 
+use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
@@ -86,7 +88,6 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::delete::DeleteTimelineFlow;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
