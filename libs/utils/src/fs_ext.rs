@@ -24,6 +24,20 @@ pub async fn is_directory_empty(path: impl AsRef<Path>) -> anyhow::Result<bool> 
     Ok(dir.next_entry().await?.is_none())
 }
 
+pub async fn list_dir(path: impl AsRef<Path>) -> anyhow::Result<Vec<String>> {
+    let mut dir = tokio::fs::read_dir(&path)
+        .await
+        .context(format!("read_dir({})", path.as_ref().display()))?;
+
+    let mut content = vec![];
+    while let Some(next) = dir.next_entry().await? {
+        let file_name = next.file_name();
+        content.push(file_name.to_string_lossy().to_string());
+    }
+
+    Ok(content)
+}
+
 pub fn ignore_not_found(e: io::Error) -> io::Result<()> {
     if e.kind() == io::ErrorKind::NotFound {
         Ok(())
@@ -43,7 +57,7 @@ where
 mod test {
     use std::path::PathBuf;
 
-    use crate::fs_ext::is_directory_empty;
+    use crate::fs_ext::{is_directory_empty, list_dir};
 
     use super::ignore_absent_files;
 
@@ -108,5 +122,26 @@ mod test {
         ignore_absent_files(|| std::fs::remove_file(&file_path)).expect("should execute normally");
 
         assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn list_dir_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path();
+
+        assert!(list_dir(dir_path).await.unwrap().is_empty());
+
+        let file_path: PathBuf = dir_path.join("testfile");
+        let _ = std::fs::File::create(&file_path).unwrap();
+
+        assert_eq!(&list_dir(dir_path).await.unwrap(), &["testfile"]);
+
+        let another_dir_path: PathBuf = dir_path.join("testdir");
+        std::fs::create_dir(another_dir_path).unwrap();
+
+        let expected = &["testdir", "testfile"];
+        let mut actual = list_dir(dir_path).await.unwrap();
+        actual.sort();
+        assert_eq!(actual, expected);
     }
 }
