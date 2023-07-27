@@ -62,7 +62,7 @@ use utils::{
 
 use super::{
     AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
-    LayerKeyIter, PathOrConf, PersistentLayerDesc,
+    PathOrConf, PersistentLayerDesc,
 };
 
 ///
@@ -434,11 +434,11 @@ impl PersistentLayer for DeltaLayer {
         })
     }
 
-    fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load(LayerAccessKind::KeyIter, ctx)?;
-        Ok(Box::new(
-            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
-        ))
+    fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer keys")?;
+        inner.load_keys().context("Layer index is corrupted")
     }
 
     fn delete_resident_layer_file(&self) -> Result<()> {
@@ -1000,40 +1000,9 @@ impl<'a> DeltaValueIter<'a> {
         Ok(Some((*key, *lsn, val)))
     }
 }
-///
-/// Iterator over all keys stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold all keys.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
-struct DeltaKeyIter {
-    all_keys: Vec<(Key, Lsn, u64)>,
-    next_idx: usize,
-}
-
-impl Iterator for DeltaKeyIter {
-    type Item = (Key, Lsn, u64);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = *self.all_keys.get(self.next_idx)?;
-        self.next_idx += 1;
-        Some(ret)
-    }
-}
-
-impl<'a> DeltaKeyIter {
-    fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
-        Ok(DeltaKeyIter {
-            all_keys: inner.load_keys()?,
-            next_idx: 0,
-        })
-    }
-}
 
 #[cfg(test)]
 mod test {
-    use super::DeltaKeyIter;
     use super::DeltaLayer;
     use super::DeltaValueIter;
 
@@ -1045,6 +1014,5 @@ mod test {
         fn assert_send<T: Send>() {}
         assert_send::<DeltaLayer>();
         assert_send::<DeltaValueIter>();
-        assert_send::<DeltaKeyIter>();
     }
 }

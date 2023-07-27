@@ -384,9 +384,6 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
 /// Returned by [`PersistentLayer::iter`]
 pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
 
-/// Returned by [`PersistentLayer::key_iter`]
-pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
-
 /// Get a layer descriptor from a layer.
 pub trait AsLayerDesc {
     /// Get the layer descriptor.
@@ -430,9 +427,9 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
     /// Iterate through all keys and values stored in the layer
     fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
 
-    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
+    /// Loads all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
+    fn load_keys(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         panic!("Not implemented")
     }
 

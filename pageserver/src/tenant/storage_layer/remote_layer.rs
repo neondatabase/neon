@@ -21,7 +21,7 @@ use utils::{
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
     AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
-    LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -133,7 +133,7 @@ impl PersistentLayer for RemoteLayer {
         bail!("cannot iterate a remote layer");
     }
 
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
+    fn load_keys(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         bail!("cannot iterate a remote layer");
     }
 
