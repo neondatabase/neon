@@ -19,6 +19,9 @@ use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
 
 const WRITTEN_SIZE: &str = "written_size";
+/// Values will be the difference of the latest written_size (last_record_lsn) to what we
+/// previously sent.
+const WRITTEN_SIZE_DELTA: &str = "written_size_delta";
 const SYNTHETIC_STORAGE_SIZE: &str = "synthetic_storage_size";
 const RESIDENT_SIZE: &str = "resident_size";
 const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
@@ -166,14 +169,34 @@ pub async fn collect_metrics_iteration(
             if timeline.is_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
-                current_metrics.push((
-                    PageserverConsumptionMetricsKey {
-                        tenant_id,
-                        timeline_id: Some(timeline.timeline_id),
-                        metric: WRITTEN_SIZE,
-                    },
-                    timeline_written_size,
-                ));
+                let key = PageserverConsumptionMetricsKey {
+                    tenant_id,
+                    timeline_id: Some(timeline.timeline_id),
+                    metric: WRITTEN_SIZE,
+                };
+
+                // last_record_lsn can only go up, right now at least, TODO: #2592 or related
+                // features might change this.
+                //
+                // this will be None for the first item, do not send it then to avoid the need to
+                // filter out huge values from the stream of deltas.
+                let timeline_written_size_delta = cached_metrics
+                    .get(&key)
+                    .copied()
+                    .map(|prev| timeline_written_size - prev);
+
+                current_metrics.push((key, timeline_written_size));
+
+                if let Some(timeline_written_size_delta) = timeline_written_size_delta {
+                    current_metrics.push((
+                        PageserverConsumptionMetricsKey {
+                            tenant_id,
+                            timeline_id: Some(timeline.timeline_id),
+                            metric: WRITTEN_SIZE_DELTA,
+                        },
+                        timeline_written_size_delta,
+                    ));
+                }
 
                 let span = info_span!("collect_metrics_iteration", tenant_id = %timeline.tenant_id, timeline_id = %timeline.timeline_id);
                 match span.in_scope(|| timeline.get_current_logical_size(ctx)) {
