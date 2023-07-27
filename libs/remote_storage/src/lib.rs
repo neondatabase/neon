@@ -92,9 +92,8 @@ impl RemotePath {
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
     /// Lists all top level subdirectories for a given prefix
-    /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
-    /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
-    /// so this method doesnt need to.
+    /// `prefix` is relative to the global prefix.
+    /// Internally this method enriches the path with global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
