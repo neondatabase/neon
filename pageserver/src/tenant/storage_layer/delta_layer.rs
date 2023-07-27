@@ -893,6 +893,44 @@ impl Drop for DeltaLayerWriter {
     }
 }
 
+impl DeltaLayerInner {
+    fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value| {
+                let delta_key = DeltaKey::from_slice(key);
+                let pos = BlobRef(value).pos();
+                if let Some(last) = all_keys.last_mut() {
+                    if last.0 == delta_key.key() {
+                        return true;
+                    } else {
+                        // subtract offset of new key BLOB and first blob of this key
+                        // to get total size if values associated with this key
+                        let first_pos = last.2;
+                        last.2 = pos - first_pos;
+                    }
+                }
+                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
+                true
+            },
+        )?;
+        if let Some(last) = all_keys.last_mut() {
+            // Last key occupies all space till end of layer
+            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
+        }
+        Ok(all_keys)
+    }
+}
+
 ///
 /// Iterator over all key-value pairse stored in a delta layer
 ///
@@ -986,44 +1024,10 @@ impl Iterator for DeltaKeyIter {
 
 impl<'a> DeltaKeyIter {
     fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
-        let file = &inner.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
-                let pos = BlobRef(value).pos();
-                if let Some(last) = all_keys.last_mut() {
-                    if last.0 == delta_key.key() {
-                        return true;
-                    } else {
-                        // subtract offset of new key BLOB and first blob of this key
-                        // to get total size if values associated with this key
-                        let first_pos = last.2;
-                        last.2 = pos - first_pos;
-                    }
-                }
-                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
-                true
-            },
-        )?;
-        if let Some(last) = all_keys.last_mut() {
-            // Last key occupies all space till end of layer
-            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
-        }
-        let iter = DeltaKeyIter {
-            all_keys,
+        Ok(DeltaKeyIter {
+            all_keys: inner.load_keys()?,
             next_idx: 0,
-        };
-
-        Ok(iter)
+        })
     }
 }
 
