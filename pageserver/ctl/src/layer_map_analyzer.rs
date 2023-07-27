@@ -107,23 +107,25 @@ async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     // min-heap (reserve space for one more element added before eviction)
     let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
     let mut prev_key: Option<Key> = None;
-    tree_reader.visit(
-        &[0u8; DELTA_KEY_SIZE],
-        VisitDirection::Forwards,
-        |key, _value| {
-            let curr = Key::from_slice(&key[..KEY_SIZE]);
-            if let Some(prev) = prev_key {
-                if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
-                    heap.push(Hole(prev..curr));
-                    if heap.len() > max_holes {
-                        heap.pop(); // remove smallest hole
+    tree_reader
+        .visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, _value| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                if let Some(prev) = prev_key {
+                    if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
+                        heap.push(Hole(prev..curr));
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
+                        }
                     }
                 }
-            }
-            prev_key = Some(curr.next());
-            true
-        },
-    )?;
+                prev_key = Some(curr.next());
+                true
+            },
+        )
+        .await?;
     let mut holes = heap.into_vec();
     holes.sort_by_key(|hole| hole.0.start);
     Ok(holes)

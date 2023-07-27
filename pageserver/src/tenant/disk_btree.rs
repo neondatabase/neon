@@ -237,7 +237,8 @@ where
                 result = Some(value);
             }
             false
-        })?;
+        })
+        .await?;
         Ok(result)
     }
 
@@ -246,7 +247,7 @@ where
     /// will be called for every key >= 'search_key' (or <= 'search_key', if scanning
     /// backwards)
     ///
-    pub fn visit<V>(
+    pub async fn visit<V>(
         &self,
         search_key: &[u8; L],
         dir: VisitDirection,
@@ -798,10 +799,12 @@ mod tests {
             .collect();
 
         let mut data = Vec::new();
-        reader.visit(search_key, VisitDirection::Forwards, |key, value| {
-            data.push((key.to_vec(), value));
-            true
-        })?;
+        reader
+            .visit(search_key, VisitDirection::Forwards, |key, value| {
+                data.push((key.to_vec(), value));
+                true
+            })
+            .await?;
         assert_eq!(data, expected);
 
         // Test a backwards scan
@@ -812,16 +815,20 @@ mod tests {
             .collect();
         expected.reverse();
         let mut data = Vec::new();
-        reader.visit(search_key, VisitDirection::Backwards, |key, value| {
-            data.push((key.to_vec(), value));
-            true
-        })?;
+        reader
+            .visit(search_key, VisitDirection::Backwards, |key, value| {
+                data.push((key.to_vec(), value));
+                true
+            })
+            .await?;
         assert_eq!(data, expected);
 
         // Backward scan where nothing matches
-        reader.visit(b"aaaaaa", VisitDirection::Backwards, |key, value| {
-            panic!("found unexpected key {}: {}", hex::encode(key), value);
-        })?;
+        reader
+            .visit(b"aaaaaa", VisitDirection::Backwards, |key, value| {
+                panic!("found unexpected key {}: {}", hex::encode(key), value);
+            })
+            .await?;
 
         // Full scan
         let expected: Vec<(Vec<u8>, u64)> = all_data
@@ -829,10 +836,12 @@ mod tests {
             .map(|(key, value)| (key.to_vec(), *value))
             .collect();
         let mut data = Vec::new();
-        reader.visit(&[0u8; 6], VisitDirection::Forwards, |key, value| {
-            data.push((key.to_vec(), value));
-            true
-        })?;
+        reader
+            .visit(&[0u8; 6], VisitDirection::Forwards, |key, value| {
+                data.push((key.to_vec(), value));
+                true
+            })
+            .await?;
         assert_eq!(data, expected);
 
         Ok(())
@@ -886,7 +895,9 @@ mod tests {
 
             // Test a forward scan starting with this key
             result.lock().unwrap().clear();
-            reader.visit(&search_key, VisitDirection::Forwards, take_ten)?;
+            reader
+                .visit(&search_key, VisitDirection::Forwards, take_ten)
+                .await?;
             let expected = all_data
                 .range(search_key_int..)
                 .take(10)
@@ -896,7 +907,9 @@ mod tests {
 
             // And a backwards scan
             result.lock().unwrap().clear();
-            reader.visit(&search_key, VisitDirection::Backwards, take_ten)?;
+            reader
+                .visit(&search_key, VisitDirection::Backwards, take_ten)
+                .await?;
             let expected = all_data
                 .range(..=search_key_int)
                 .rev()
@@ -910,7 +923,9 @@ mod tests {
         let search_key = u64::to_be_bytes(0);
         limit.store(usize::MAX, Ordering::Relaxed);
         result.lock().unwrap().clear();
-        reader.visit(&search_key, VisitDirection::Forwards, take_ten)?;
+        reader
+            .visit(&search_key, VisitDirection::Forwards, take_ten)
+            .await?;
         let expected = all_data
             .iter()
             .map(|(&key, &val)| (key, val))
@@ -921,7 +936,9 @@ mod tests {
         let search_key = u64::to_be_bytes(u64::MAX);
         limit.store(usize::MAX, Ordering::Relaxed);
         result.lock().unwrap().clear();
-        reader.visit(&search_key, VisitDirection::Backwards, take_ten)?;
+        reader
+            .visit(&search_key, VisitDirection::Backwards, take_ten)
+            .await?;
         let expected = all_data
             .iter()
             .rev()
@@ -1023,10 +1040,12 @@ mod tests {
 
         // Test full scan
         let mut count = 0;
-        reader.visit(&[0u8; 26], VisitDirection::Forwards, |_key, _value| {
-            count += 1;
-            true
-        })?;
+        reader
+            .visit(&[0u8; 26], VisitDirection::Forwards, |_key, _value| {
+                count += 1;
+                true
+            })
+            .await?;
         assert_eq!(count, disk_btree_test_data::TEST_DATA.len());
 
         reader.dump().await?;

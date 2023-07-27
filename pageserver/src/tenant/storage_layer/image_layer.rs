@@ -175,10 +175,12 @@ impl Layer for ImageLayer {
 
         tree_reader.dump().await?;
 
-        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-            println!("key: {} offset {}", hex::encode(key), value);
-            true
-        })?;
+        tree_reader
+            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+                println!("key: {} offset {}", hex::encode(key), value);
+                true
+            })
+            .await?;
 
         Ok(())
     }
