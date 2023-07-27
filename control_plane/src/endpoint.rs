@@ -564,9 +564,7 @@ impl Endpoint {
                 }
                 Err(e) => {
                     if attempt == MAX_ATTEMPTS {
-                        return Err(e).context(
-                            "timed out waiting to connect to compute_ctl HTTP; last error: {e}",
-                        );
+                        return Err(e).context("timed out waiting to connect to compute_ctl HTTP");
                     }
                 }
             }
