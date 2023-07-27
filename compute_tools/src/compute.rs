@@ -537,7 +537,7 @@ impl ComputeNode {
         info!("prewarming");
 
         // Create pgdata
-        let pgdata = "/home/bojan/tmp/prewarm_pgdata";
+        let pgdata = "/home/bojan/tmp/prewarm_pgdata"; // TODO fix this
         create_pgdata(pgdata)?;
 
         // Run initdb to completion
@@ -552,7 +552,7 @@ impl ComputeNode {
         use std::io::Write;
         let conf_path = Path::new(pgdata).join("postgresql.conf");
         let mut file = std::fs::File::create(conf_path)?;
-        writeln!(file, "shared_buffers=100MB")?;
+        writeln!(file, "shared_buffers=100MB")?; // TODO is this the default?
         writeln!(file, "port=51055")?;  // Nobody should be connecting
         writeln!(file, "shared_preload_libraries = 'neon'")?;
 
