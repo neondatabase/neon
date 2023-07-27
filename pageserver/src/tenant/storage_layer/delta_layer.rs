@@ -256,7 +256,7 @@ impl Layer for DeltaLayer {
             file,
         );
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
         let mut cursor = file.block_cursor();
 

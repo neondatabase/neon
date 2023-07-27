@@ -390,7 +390,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub fn dump(&self) -> Result<()> {
+    pub async fn dump(&self) -> Result<()> {
         self.dump_recurse(self.root_blk, &[], 0)
     }
 
@@ -754,8 +754,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn basic() -> Result<()> {
+    #[tokio::test]
+    async fn basic() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
@@ -775,7 +775,7 @@ mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump()?;
+        reader.dump().await?;
 
         // Test the `get` function on all the keys.
         for (key, val) in all_data.iter() {
@@ -835,8 +835,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn lots_of_keys() -> Result<()> {
+    #[tokio::test]
+    async fn lots_of_keys() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
 
@@ -856,7 +856,7 @@ mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump()?;
+        reader.dump().await?;
 
         use std::sync::Mutex;
 
@@ -994,8 +994,8 @@ mod tests {
     ///
     /// This test contains a particular data set, see disk_btree_test_data.rs
     ///
-    #[test]
-    fn particular_data() -> Result<()> {
+    #[tokio::test]
+    async fn particular_data() -> Result<()> {
         // Build a tree from it
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);
@@ -1022,7 +1022,7 @@ mod tests {
         })?;
         assert_eq!(count, disk_btree_test_data::TEST_DATA.len());
 
-        reader.dump()?;
+        reader.dump().await?;
 
         Ok(())
     }
