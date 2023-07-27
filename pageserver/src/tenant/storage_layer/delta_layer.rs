@@ -901,7 +901,7 @@ impl Drop for DeltaLayerWriter {
 /// fashion.
 ///
 struct DeltaValueIter<'a> {
-    all_offsets: Vec<(DeltaKey, BlobRef)>,
+    all_offsets: Vec<(Key, Lsn, BlobRef)>,
     next_idx: usize,
     reader: BlockCursor<Adapter<'a>>,
 }
@@ -933,12 +933,13 @@ impl<'a> DeltaValueIter<'a> {
             file,
         );
 
-        let mut all_offsets: Vec<(DeltaKey, BlobRef)> = Vec::new();
+        let mut all_offsets: Vec<(Key, Lsn, BlobRef)> = Vec::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
             |key, value| {
-                all_offsets.push((DeltaKey::from_slice(key), BlobRef(value)));
+                let delta_key = DeltaKey::from_slice(key);
+                all_offsets.push((delta_key.key(), delta_key.lsn(), BlobRef(value)));
                 true
             },
         )?;
@@ -953,19 +954,12 @@ impl<'a> DeltaValueIter<'a> {
     }
 
     fn next_res(&mut self) -> Result<Option<(Key, Lsn, Value)>> {
-        if self.next_idx < self.all_offsets.len() {
-            let (delta_key, blob_ref) = &self.all_offsets[self.next_idx];
+        let Some((key, lsn, blob_ref)) = self.all_offsets.get(self.next_idx) else { return Ok(None) };
 
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            let buf = self.reader.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
-            self.next_idx += 1;
-            Ok(Some((key, lsn, val)))
-        } else {
-            Ok(None)
-        }
+        let buf = self.reader.read_blob(blob_ref.pos())?;
+        let val = Value::des(&buf)?;
+        self.next_idx += 1;
+        Ok(Some((*key, *lsn, val)))
     }
 }
 ///
