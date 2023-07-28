@@ -440,7 +440,7 @@ def check_neon_works(
 
     # TODO: Run pg_amcheck unconditionally after the next release
     try:
-        pg_bin.run(["psql", connstr, "--command", "CREATE EXTENSION amcheck"])
+        pg_bin.run(["psql", connstr, "--command", "CREATE EXTENSION IF NOT EXISTS amcheck"])
     except subprocess.CalledProcessError:
         log.info("Extension amcheck is not available, skipping pg_amcheck")
     else:
