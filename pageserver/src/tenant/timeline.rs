@@ -19,6 +19,7 @@ use pageserver_api::models::{
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -3515,7 +3516,15 @@ impl Timeline {
 
         let mut all_value_refs = Vec::new();
         for l in deltas_to_compact.iter() {
-            all_value_refs.extend(l.load_val_refs(ctx)?);
+            // TODO: replace this with an await once we fully go async
+            all_value_refs.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_val_refs(ctx),
+                )?,
+            );
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
@@ -3523,7 +3532,15 @@ impl Timeline {
 
         let mut all_keys = Vec::new();
         for l in deltas_to_compact.iter() {
-            all_keys.extend(l.load_keys(ctx)?);
+            // TODO: replace this with an await once we fully go async
+            all_keys.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_keys(ctx),
+                )?,
+            );
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.

@@ -614,7 +614,7 @@ impl DeltaLayer {
     /// Obtains all keys and value references stored in the layer
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+    pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .context("load delta layer")?;
@@ -622,7 +622,7 @@ impl DeltaLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .context("load delta layer keys")?;
