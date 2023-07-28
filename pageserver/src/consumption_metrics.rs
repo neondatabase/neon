@@ -44,7 +44,58 @@ struct Ids {
 pub struct PageserverConsumptionMetricsKey {
     pub tenant_id: TenantId,
     pub timeline_id: Option<TimelineId>,
+    // pub kind: EventType,
     pub metric: &'static str,
+}
+
+impl PageserverConsumptionMetricsKey {
+    const fn written_size(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: WRITTEN_SIZE,
+        }
+    }
+
+    const fn written_size_delta(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: WRITTEN_SIZE_DELTA,
+        }
+    }
+
+    const fn timeline_logical_size(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: Some(timeline_id),
+            metric: TIMELINE_LOGICAL_SIZE,
+        }
+    }
+
+    const fn remote_storage_size(tenant_id: TenantId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: None,
+            metric: REMOTE_STORAGE_SIZE,
+        }
+    }
+
+    const fn resident_size(tenant_id: TenantId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: None,
+            metric: RESIDENT_SIZE,
+        }
+    }
+
+    const fn synthetic_size(tenant_id: TenantId) -> Self {
+        PageserverConsumptionMetricsKey {
+            tenant_id,
+            timeline_id: None,
+            metric: SYNTHETIC_STORAGE_SIZE,
+        }
+    }
 }
 
 /// Main thread that serves metrics collection
@@ -169,11 +220,8 @@ pub async fn collect_metrics_iteration(
             if timeline.is_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
-                let key = PageserverConsumptionMetricsKey {
-                    tenant_id,
-                    timeline_id: Some(timeline.timeline_id),
-                    metric: WRITTEN_SIZE,
-                };
+                let key =
+                    PageserverConsumptionMetricsKey::written_size(tenant_id, timeline.timeline_id);
 
                 // last_record_lsn can only go up, right now at least, TODO: #2592 or related
                 // features might change this.
@@ -189,11 +237,10 @@ pub async fn collect_metrics_iteration(
 
                 if let Some(timeline_written_size_delta) = timeline_written_size_delta {
                     current_metrics.push((
-                        PageserverConsumptionMetricsKey {
+                        PageserverConsumptionMetricsKey::written_size_delta(
                             tenant_id,
-                            timeline_id: Some(timeline.timeline_id),
-                            metric: WRITTEN_SIZE_DELTA,
-                        },
+                            timeline.timeline_id,
+                        ),
                         timeline_written_size_delta,
                     ));
                 }
@@ -203,11 +250,10 @@ pub async fn collect_metrics_iteration(
                     // Only send timeline logical size when it is fully calculated.
                     Ok((size, is_exact)) if is_exact => {
                         current_metrics.push((
-                            PageserverConsumptionMetricsKey {
+                            PageserverConsumptionMetricsKey::timeline_logical_size(
                                 tenant_id,
-                                timeline_id: Some(timeline.timeline_id),
-                                metric: TIMELINE_LOGICAL_SIZE,
-                            },
+                                timeline.timeline_id,
+                            ),
                             size,
                         ));
                     }
@@ -229,11 +275,7 @@ pub async fn collect_metrics_iteration(
         match tenant.get_remote_size().await {
             Ok(tenant_remote_size) => {
                 current_metrics.push((
-                    PageserverConsumptionMetricsKey {
-                        tenant_id,
-                        timeline_id: None,
-                        metric: REMOTE_STORAGE_SIZE,
-                    },
+                    PageserverConsumptionMetricsKey::remote_storage_size(tenant_id),
                     tenant_remote_size,
                 ));
             }
@@ -246,11 +288,7 @@ pub async fn collect_metrics_iteration(
         }
 
         current_metrics.push((
-            PageserverConsumptionMetricsKey {
-                tenant_id,
-                timeline_id: None,
-                metric: RESIDENT_SIZE,
-            },
+            PageserverConsumptionMetricsKey::resident_size(tenant_id),
             tenant_resident_size,
         ));
 
@@ -261,11 +299,7 @@ pub async fn collect_metrics_iteration(
         if tenant_synthetic_size != 0 {
             // only send non-zeroes because otherwise these show up as errors in logs
             current_metrics.push((
-                PageserverConsumptionMetricsKey {
-                    tenant_id,
-                    timeline_id: None,
-                    metric: SYNTHETIC_STORAGE_SIZE,
-                },
+                PageserverConsumptionMetricsKey::synthetic_size(tenant_id),
                 tenant_synthetic_size,
             ));
         }
