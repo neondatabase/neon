@@ -690,10 +690,6 @@ def test_ondemand_download_failure_to_replace(
 
     pageserver_http = env.pageserver.http_client()
 
-    lsn = Lsn(pageserver_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
-
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
-
     # remove layers so that they will be redownloaded
     pageserver_http.tenant_detach(tenant_id)
     pageserver_http.tenant_attach(tenant_id)
