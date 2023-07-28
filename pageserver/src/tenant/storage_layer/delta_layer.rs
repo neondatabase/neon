@@ -894,6 +894,27 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
+    fn load_val_refs(&self) -> Result<Vec<(Key, Lsn, BlobRef)>> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        let mut all_offsets = Vec::<(Key, Lsn, BlobRef)>::new();
+        tree_reader.visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value| {
+                let delta_key = DeltaKey::from_slice(key);
+                all_offsets.push((delta_key.key(), delta_key.lsn(), BlobRef(value)));
+                true
+            },
+        )?;
+
+        Ok(all_offsets)
+    }
     fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
@@ -964,26 +985,8 @@ impl<'a> Iterator for DeltaValueIter<'a> {
 
 impl<'a> DeltaValueIter<'a> {
     fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
-        let file = &inner.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        let mut all_offsets: Vec<(Key, Lsn, BlobRef)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
-                all_offsets.push((delta_key.key(), delta_key.lsn(), BlobRef(value)));
-                true
-            },
-        )?;
-
         let iter = DeltaValueIter {
-            all_offsets,
+            all_offsets: inner.load_val_refs()?,
             next_idx: 0,
             reader: BlockCursor::new(Adapter(inner)),
         };
