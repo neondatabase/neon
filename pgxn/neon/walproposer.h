@@ -28,6 +28,12 @@
 										 errhidestmt(true), errhidecontext(true), internalerrposition(0)))
 #endif
 
+#ifdef SIMLIB
+extern uint64 sim_redo_start_lsn;
+#define GetRedoStartLsn() sim_redo_start_lsn
+extern XLogRecPtr sim_latest_available_lsn;
+#endif
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 

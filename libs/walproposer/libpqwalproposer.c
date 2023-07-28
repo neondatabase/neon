@@ -3,6 +3,10 @@
 #include "walproposer.h"
 #include "rust_bindings.h"
 
+// defined in walproposer.h
+uint64 sim_redo_start_lsn;
+XLogRecPtr sim_latest_available_lsn;
+
 /* Header in walproposer.h -- Wrapper struct to abstract away the libpq connection */
 struct WalProposerConn
 {
@@ -100,6 +104,18 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 {
 	uintptr_t len;
 	char *msg;
+	Event event;
+
+	event = sim_epoll_peek(0);
+	if (event.tcp != conn->tcp || event.tag != Message || event.any_message != Bytes)
+		return PG_ASYNC_READ_TRY_AGAIN;
+
+	event = sim_epoll_rcv(0);
+
+	walprop_log(INFO, "walprop_async_read, T: %d, tcp: %d, tag: %d", (int) event.tag, (int) event.tcp, (int) event.any_message);
+	Assert(event.tcp == conn->tcp);
+	Assert(event.tag == Message);
+	Assert(event.any_message == Bytes);
 	
 	msg = sim_msg_get_bytes(&len);
 	*buf = msg;
@@ -112,8 +128,10 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 PGAsyncWriteResult
 walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 {
-	walprop_log(INFO, "not implemented");
-    return PG_ASYNC_WRITE_FAIL;
+	walprop_log(INFO, "walprop_async_write");
+	sim_msg_set_bytes(buf, size);
+	sim_tcp_send(conn->tcp);
+    return PG_ASYNC_WRITE_SUCCESS;
 }
 
 /*
@@ -123,8 +141,29 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 bool
 walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size)
 {
-	walprop_log(INFO, "not implemented: walprop_blocking_write");
+	walprop_log(INFO, "walprop_blocking_write");
 	sim_msg_set_bytes(buf, size);
 	sim_tcp_send(conn->tcp);
     return true;
+}
+
+void
+sim_start_replication(XLogRecPtr startptr)
+{
+	walprop_log(INFO, "sim_start_replication: %X/%X", LSN_FORMAT_ARGS(startptr));
+	sim_latest_available_lsn = startptr;
+
+	for (;;)
+	{
+		XLogRecPtr endptr = sim_latest_available_lsn;
+
+		Assert(startptr <= endptr);
+		if (endptr > startptr)
+		{
+			WalProposerBroadcast(startptr, endptr);
+			startptr = endptr;
+		}
+
+		WalProposerPoll();
+	}
 }

@@ -12,6 +12,7 @@ enum AnyMessageTag {
   Just32,
   ReplCell,
   Bytes,
+  LSN,
 };
 typedef uint8_t AnyMessageTag;
 
@@ -23,6 +24,7 @@ enum EventTag {
   Accept,
   Closed,
   Message,
+  Internal,
 };
 typedef uint8_t EventTag;
 
@@ -55,6 +57,8 @@ void sim_tcp_send(int64_t tcp);
 
 struct Event sim_epoll_rcv(int64_t timeout);
 
+struct Event sim_epoll_peek(int64_t timeout);
+
 int64_t sim_now(void);
 
 void sim_exit(int32_t code, const uint8_t *msg);
@@ -68,6 +72,11 @@ AnyMessageTag sim_msg_tag(void);
  * Read AnyMessage::Just32 message.
  */
 void sim_msg_get_just_u32(uint32_t *val);
+
+/**
+ * Read AnyMessage::LSN message.
+ */
+void sim_msg_get_lsn(uint64_t *val);
 
 /**
  * Write AnyMessage::ReplCell message.

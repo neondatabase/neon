@@ -116,8 +116,10 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("neon_timeline_walproposer")
         .allowlist_var("neon_tenant_walproposer")
         .allowlist_var("syncSafekeepers")
+        .allowlist_var("sim_redo_start_lsn")
         .clang_arg(format!("-I{inc_server_path}"))
         .clang_arg(format!("-I{inc_pgxn_path}"))
+        .clang_arg(format!("-DSIMLIB"))
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.

@@ -340,6 +340,7 @@ void WalProposerCleanup()
 	n_connected = 0;
 	last_reconnect_attempt = 0;
 
+	walprop_shared = palloc(WalproposerShmemSize());
 	if (walprop_shared != NULL)
 	{
 		memset(walprop_shared, 0, WalproposerShmemSize());
@@ -459,14 +460,15 @@ WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos)
 int
 SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 {
-	Event event = sim_epoll_rcv(timeout);
+	Event event = sim_epoll_peek(timeout);
 	if (event.tag == Closed) {
+		sim_epoll_rcv(0);
 		// TODO: shutdown connection?
 		// walprop_log(LOG, "connection closed");
 		// ShutdownConnection(sk);
 		return 0;
-	} else if (event.tag == Message) {
-		Assert(event.any_message == Bytes);
+	} else if (event.tag == Message && event.any_message == Bytes) {
+		// !!! code must read the message
 		for (int i = 0; i < n_safekeepers; i++) {
 			if (safekeeper[i].conn && ((int64_t) walprop_socket(safekeeper[i].conn)) == event.tcp) {
 				*occurred_events = (WaitEvent) {
@@ -477,12 +479,18 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 			}
 		}
 		walprop_log(FATAL, "unknown tcp connection");
+	} else if (event.tag == Message && event.any_message == LSN) {
+		sim_epoll_rcv(0);
+		sim_msg_get_lsn(&sim_latest_available_lsn);
+		*occurred_events = (WaitEvent) {
+			.events = WL_LATCH_SET,
+		};
+		return 1;
 	} else if (event.tag == Timeout) {
 		return 0;
 	} else {
 		Assert(false);
 	}
-	// TODO: handle notification about new LSN available
 }
 #endif
 
@@ -2446,7 +2454,12 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 	if (!(AsyncRead(sk, &buf, &buf_size)))
 		return false;
 
-	/* parse it */
+	for (int i = 0; i < buf_size; i++) {
+		fprintf(stderr, "%02x", buf[i]);
+	}
+	fprintf(stderr, "\n");
+
+	/* parse it */  
 	s.data = buf;
 	s.len = buf_size;
 	s.cursor = 0;

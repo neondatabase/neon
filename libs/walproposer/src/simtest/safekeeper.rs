@@ -7,7 +7,7 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 use bytes::BytesMut;
 use hyper::Uri;
 use log::info;
-use safekeeper::{simlib::{node_os::NodeOs, network::TCP, world::NodeEvent, proto::AnyMessage}, safekeeper::{ProposerAcceptorMessage, ServerInfo, SafeKeeperState, UNKNOWN_SERVER_VERSION, SafeKeeper}, timeline::{TimelineError}, SafeKeeperConf};
+use safekeeper::{simlib::{node_os::NodeOs, network::TCP, world::NodeEvent, proto::AnyMessage}, safekeeper::{ProposerAcceptorMessage, ServerInfo, SafeKeeperState, UNKNOWN_SERVER_VERSION, SafeKeeper, AcceptorProposerMessage}, timeline::{TimelineError}, SafeKeeperConf};
 use utils::{id::{TenantTimelineId, NodeId}, lsn::Lsn};
 use anyhow::{Result, bail};
 
@@ -81,6 +81,7 @@ pub fn run_server(os: NodeOs) -> Result<()> {
                         println!("conn {:?} was closed, dropping msg {:?}", tcp, msg);
                     }
                 }
+                NodeEvent::Internal(_) => {}
                 NodeEvent::Closed(_) => {}
                 NodeEvent::WakeTimeout(_) => {}
             }
@@ -203,10 +204,20 @@ impl ConnState {
     /// Make safekeeper process a message and send a reply to the TCP
     fn process_sk_msg(&mut self, msg: &ProposerAcceptorMessage) -> Result<()> {
         let shared_state = self.tli.as_mut().unwrap();
-        let reply = shared_state.sk.process_msg(msg)?;
-        if let Some(reply) = reply {
+        let mut reply = shared_state.sk.process_msg(msg)?;
+        if let Some(reply) = &mut reply {
+            // // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
+            // if let AcceptorProposerMessage::AppendResponse(ref mut resp) = reply {
+            //     // TODO:
+            // }
+
+            println!("sending reply: {:?}", reply);
+
             let mut buf = BytesMut::with_capacity(128);
             reply.serialize(&mut buf)?;
+
+            println!("sending reply len={}: {}", buf.len(), hex::encode(&buf));
+
             self.tcp.send(AnyMessage::Bytes(buf.into()));
         }
         Ok(())

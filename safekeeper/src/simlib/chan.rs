@@ -45,9 +45,29 @@ impl<T: Clone> Chan<T> {
         }
     }
 
+    /// Same as `recv`, but doesn't take the message from the queue.
+    pub fn peek(&self) -> T {
+        // interrupt the receiver to prevent consuming everything at once
+        Park::yield_thread();
+
+        let mut queue = self.shared.queue.lock();
+        loop {
+            if let Some(t) = queue.front().cloned() {
+                return t;
+            }
+            self.shared.condvar.wait(&mut queue);
+        }
+    }
+
     /// Get a message from the front of the queue, or return `None` if the queue is empty.
     pub fn try_recv(&self) -> Option<T> {
         let mut queue = self.shared.queue.lock();
         queue.pop_front()
+    }
+
+    /// Clone a message from the front of the queue, or return `None` if the queue is empty.
+    pub fn try_peek(&self) -> Option<T> {
+        let queue = self.shared.queue.lock();
+        queue.front().cloned()
     }
 }

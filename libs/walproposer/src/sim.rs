@@ -127,6 +127,51 @@ pub extern "C" fn sim_epoll_rcv(timeout: i64) -> Event {
 }
 
 #[no_mangle]
+pub extern "C" fn sim_epoll_peek(timeout: i64) -> Event {
+    let event = os().epoll_peek(timeout);
+    let event = if let Some(event) = event {
+        event
+    } else {
+        return Event {
+            tag: EventTag::Timeout,
+            tcp: 0,
+            any_message: AnyMessageTag::None,
+        };
+    };
+
+    match event {
+        NodeEvent::Accept(tcp) => Event {
+            tag: EventTag::Accept,
+            tcp: tcp_save(tcp),
+            any_message: AnyMessageTag::None,
+        },
+        NodeEvent::Closed(tcp) => Event {
+            tag: EventTag::Closed,
+            tcp: tcp_save(tcp),
+            any_message: AnyMessageTag::None,
+        },
+        NodeEvent::Message((message, tcp)) => {
+            Event {
+                tag: EventTag::Message,
+                tcp: tcp_save(tcp),
+                any_message: anymessage_tag(&message),
+            }
+        }
+        NodeEvent::Internal(message) => {
+            Event {
+                tag: EventTag::Internal,
+                tcp: 0,
+                any_message: anymessage_tag(&message),
+            }
+        }
+        NodeEvent::WakeTimeout(_) => {
+            // can't happen
+            unreachable!()
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn sim_now() -> i64 {
     os().now() as i64
 }

@@ -90,6 +90,55 @@ impl NodeOs {
         }
     }
 
+    /// Same as epoll_recv, but does not remove the event from the queue.
+    pub fn epoll_peek(&self, timeout: i64) -> Option<NodeEvent> {
+        let epoll = self.epoll();
+
+        let ready_event = loop {
+            let event = epoll.try_peek();
+            if let Some(NodeEvent::WakeTimeout(_)) = event {
+                assert!(epoll.try_recv().is_some());
+                continue;
+            }
+            break event;
+        };
+
+        if let Some(event) = ready_event {
+            // return event if it's ready
+            return Some(event);
+        }
+
+        if timeout == 0 {
+            // poll, return immediately
+            return None;
+        }
+
+        // or wait for timeout
+
+        let rand_nonce = self.random(u64::MAX);
+        if timeout > 0 {
+            self.world.schedule(
+                timeout as u64,
+                SendMessageEvent::new(epoll.clone(), NodeEvent::WakeTimeout(rand_nonce)),
+            );
+        }
+
+        loop {
+            match epoll.peek() {
+                NodeEvent::WakeTimeout(nonce) if nonce == rand_nonce => {
+                    assert!(epoll.try_recv().is_some());
+                    return None;
+                }
+                NodeEvent::WakeTimeout(_) => {
+                    assert!(epoll.try_recv().is_some());
+                }
+                event => {
+                    return Some(event);
+                }
+            }
+        }
+    }
+
     /// Sleep for a given number of milliseconds.
     /// Currently matches the global virtual time, TODO may be good to
     /// introduce a separate clocks for each node.

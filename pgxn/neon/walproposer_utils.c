@@ -505,6 +505,8 @@ XLogWalPropClose(XLogRecPtr recptr)
 
 /* START of cloned functions from walsender.c */
 
+void sim_start_replication(XLogRecPtr startpoint);
+
 /*
  * Handle START_REPLICATION command.
  *
@@ -516,6 +518,11 @@ StartProposerReplication(StartReplicationCmd *cmd)
 {
 	XLogRecPtr	FlushPtr;
 	TimeLineID	currTLI;
+
+#ifdef SIMLIB
+	sim_start_replication(cmd->startpoint);
+	return;
+#endif
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)

@@ -10,7 +10,7 @@ use utils::{id::TenantTimelineId, logging, lsn::Lsn};
 use crate::{
     bindings::{
         neon_tenant_walproposer, neon_timeline_walproposer, wal_acceptor_connection_timeout,
-        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers,
+        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers, sim_redo_start_lsn,
     },
     c_context,
     simtest::safekeeper::run_server,
@@ -130,6 +130,13 @@ impl Test {
     fn launch_walproposer(&self, lsn: Lsn) -> WalProposer {
         let client_node = self.world.new_node();
 
+        let lsn = if lsn.0 == 0 {
+            // usual LSN after basebackup
+            Lsn(21623024)
+        } else {
+            lsn
+        };
+
         // start the client thread
         let guc = self.safekeepers_guc.clone();
         let ttid = self.ttid.clone();
@@ -138,9 +145,8 @@ impl Test {
 
             unsafe {
                 WalProposerCleanup();
-                
-                // TODO: set LSN to a variable
 
+                sim_redo_start_lsn = lsn.0;
                 syncSafekeepers = false;
                 wal_acceptors_list = list.into_raw();
                 wal_acceptor_reconnect_timeout = 1000;
@@ -159,6 +165,11 @@ impl Test {
         WalProposer { 
             node: client_node,
         }
+    }
+
+    fn poll_for_duration(&self, duration: u64) {
+        let time_limit = std::cmp::min(self.world.now() + duration, self.timeout);
+        while self.world.step() && self.world.now() < time_limit {}
     }
 }
 
@@ -202,7 +213,9 @@ fn run_walproposer_generate_wal() {
     println!("Sucessfully synced empty safekeepers at 0/0");
 
     let wp = test.launch_walproposer(lsn);
-    let rec1 = wp.gen_wal_record();
+    // let rec1 = wp.gen_wal_record();
+
+    test.poll_for_duration(3000);   
 
     // TODO:
 }

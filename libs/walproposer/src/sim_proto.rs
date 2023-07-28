@@ -8,6 +8,7 @@ pub(crate) fn anymessage_tag(msg: &AnyMessage) -> AnyMessageTag {
         AnyMessage::Just32(_) => AnyMessageTag::Just32,
         AnyMessage::ReplCell(_) => AnyMessageTag::ReplCell,
         AnyMessage::Bytes(_) => AnyMessageTag::Bytes,
+        AnyMessage::LSN(_) => AnyMessageTag::LSN,
     }
 }
 
@@ -29,6 +30,17 @@ pub extern "C" fn sim_msg_get_just_u32(val: &mut u32) {
             *val = *v;
         }
         _ => panic!("expected Just32 message"),
+    });
+}
+
+#[no_mangle]
+/// Read AnyMessage::LSN message.
+pub extern "C" fn sim_msg_get_lsn(val: &mut u64) {
+    MESSAGE_BUF.with(|cell| match &*cell.borrow() {
+        AnyMessage::LSN(v) => {
+            *val = *v;
+        }
+        _ => panic!("expected LSN message"),
     });
 }
 
@@ -98,4 +110,5 @@ pub enum AnyMessageTag {
     Just32,
     ReplCell,
     Bytes,
+    LSN,
 }
