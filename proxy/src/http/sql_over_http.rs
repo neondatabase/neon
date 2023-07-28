@@ -250,8 +250,8 @@ pub async fn handle(
             Ok(json!({
                 "results": results,
                 "options": {
-                    "isolationLevel": txn_isolation_level.map(|l| format!("{:?}", l)),
-                    "readOnly": txn_read_only
+                    "isolation_level": txn_isolation_level.map(|l| format!("{:?}", l)),
+                    "read_only": txn_read_only
                 }
             }))
         }
