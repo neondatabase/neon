@@ -2299,7 +2299,9 @@ HandleSafekeeperResponse(void)
 	{
 		/* Get ReplicationFeedback fields from the most advanced safekeeper */
 		GetLatestNeonFeedback(&quorumFeedback.rf);
+	#ifndef SIMLIB
 		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
+	#endif
 	}
 
 	if (minQuorumLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.ps_flushlsn)
@@ -2308,6 +2310,7 @@ HandleSafekeeperResponse(void)
 		if (minQuorumLsn > quorumFeedback.flushLsn)
 			quorumFeedback.flushLsn = minQuorumLsn;
 
+	#ifndef SIMLIB
 		/* advance the replication slot */
 		if (!syncSafekeepers)
 			ProcessStandbyReply(
@@ -2322,18 +2325,21 @@ HandleSafekeeperResponse(void)
 			 */
 								quorumFeedback.rf.ps_flushlsn,
 								GetCurrentTimestamp(), false);
+	#endif
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback);
 	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
 	{
 		quorumFeedback.hs = hsFeedback;
+	#ifndef SIMLIB
 		if (!syncSafekeepers)
 			ProcessStandbyHSFeedback(hsFeedback.ts,
 									 XidFromFullTransactionId(hsFeedback.xmin),
 									 EpochFromFullTransactionId(hsFeedback.xmin),
 									 XidFromFullTransactionId(hsFeedback.catalog_xmin),
 									 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+	#endif
 	}
 
 	/*
