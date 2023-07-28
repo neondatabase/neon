@@ -74,7 +74,7 @@ def upload_files(env):
     os.chdir("../../../..")
 
 
-# """
+"""
 # Test downloading remote extension.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_extensions(
@@ -193,9 +193,7 @@ def test_remote_library(
                         ), "unexpected error loading postgis_topology-3"
     finally:
         cleanup(pg_version)
-
-
-# """
+"""
 
 
 # Test extension downloading with mutliple connections to an endpoint.
@@ -209,7 +207,7 @@ def test_interrupted_extension(
         return None
 
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.REAL_S3,
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
         test_name="test_interrupted_extension",
         enable_remote_extensions=True,
     )
@@ -221,39 +219,53 @@ def test_interrupted_extension(
     assert env.ext_remote_storage is not None  # satisfy mypy
     assert env.remote_storage_client is not None  # satisfy mypy
 
+    # For MOCK_S3 we upload test files.
+    upload_files(env)
+
     endpoint = env.endpoints.create_start(
         "test_interrupted_extension",
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
+        config_lines=["log_min_messages=debug3"],
     )
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            # cur.execute("CREATE EXTENSION address_standardizer;")
-            cur.execute("CREATE EXTENSION address_standardizer_data_us;")
-            # execute query to ensure that it works
-            cur.execute(
-                "SELECT house_num, name, suftype, city, country, state, unit \
-                        FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-                        'One Rust Place, Boston, MA 02109');"
-            )
+            # # cur.execute("CREATE EXTENSION address_standardizer;")
+            # cur.execute("CREATE EXTENSION address_standardizer_data_us;")
+            # # execute query to ensure that it works
+            # cur.execute(
+            #     "SELECT house_num, name, suftype, city, country, state, unit \
+            #             FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
+            #             'One Rust Place, Boston, MA 02109');"
+            # )
+            cur.execute("CREATE extension pg_buffercache;")
+            cur.execute("SELECT * from pg_buffercache;")
+            log.info(cur.fetchall())
+
     # the endpoint is closed now
+    endpoint.stop()
     # remove postgis files locally
     cleanup(pg_version)
 
-    # # spin up compute node again (there are no postgis files available, because compute is stateless)
-    # endpoint = env.endpoints.create_start(
-    #     "test_remote_library",
-    #     tenant_id=tenant_id,
-    #     remote_ext_config=env.ext_remote_storage.to_string(),
-    # )
-    # # connect to postrgres and execute the query again
-    # with closing(endpoint.connect()) as conn:
-    #     with conn.cursor() as cur:
-    #         cur.execute("CREATE EXTENSION address_standardizer;")
-    #         cur.execute("CREATE EXTENSION address_standardizer_data_us;")
-    #         # execute query to ensure that it works
-    #         cur.execute(
-    #             "SELECT house_num, name, suftype, city, country, state, unit \
-    #                     FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-    #                     'One Rust Place, Boston, MA 02109');"
-    #         )
+    # spin up compute node again (there are no postgis files available, because compute is stateless)
+    endpoint = env.endpoints.create_start(
+        "test_interrupted_extension",
+        tenant_id=tenant_id,
+        remote_ext_config=env.ext_remote_storage.to_string(),
+        config_lines=["log_min_messages=debug3"],
+    )
+    # connect to postrgres and execute the query again
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            # cur.execute("CREATE EXTENSION address_standardizer;")
+            # cur.execute("CREATE EXTENSION address_standardizer_data_us;")
+            # # execute query to ensure that it works
+            # cur.execute(
+            #     "SELECT house_num, name, suftype, city, country, state, unit \
+            #             FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
+            #             'One Rust Place, Boston, MA 02109');"
+            # )
+            cur.execute("SELECT * from pg_buffercache;")
+            log.info(cur.fetchall())
+
+    cleanup(pg_version)
