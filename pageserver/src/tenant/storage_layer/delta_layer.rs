@@ -189,7 +189,7 @@ pub struct DeltaLayer {
 
     access_stats: LayerAccessStats,
 
-    inner: OnceCell<DeltaLayerInner>,
+    inner: OnceCell<Arc<DeltaLayerInner>>,
 }
 
 impl std::fmt::Debug for DeltaLayer {
@@ -510,7 +510,11 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, access_kind: LayerAccessKind, ctx: &RequestContext) -> Result<&DeltaLayerInner> {
+    fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<&Arc<DeltaLayerInner>> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
         // Quick exit if already loaded
@@ -519,7 +523,7 @@ impl DeltaLayer {
             .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
     }
 
-    fn load_inner(&self) -> Result<DeltaLayerInner> {
+    fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let file = VirtualFile::open(&path)
@@ -554,11 +558,11 @@ impl DeltaLayer {
 
         debug!("loaded from {}", &path.display());
 
-        Ok(DeltaLayerInner {
+        Ok(Arc::new(DeltaLayerInner {
             file,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
-        })
+        }))
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
