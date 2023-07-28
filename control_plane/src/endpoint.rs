@@ -313,7 +313,7 @@ impl Endpoint {
 
                 // TODO: use future host field from safekeeper spec
                 // Pass the list of safekeepers to the replica so that it can connect to any of them,
-                // whichever is availiable.
+                // whichever is available.
                 let sk_ports = self
                     .env
                     .safekeepers
@@ -420,7 +420,12 @@ impl Endpoint {
         Ok(())
     }
 
-    pub fn start(&self, auth_token: &Option<String>, safekeepers: Vec<NodeId>) -> Result<()> {
+    pub fn start(
+        &self,
+        auth_token: &Option<String>,
+        safekeepers: Vec<NodeId>,
+        remote_ext_config: Option<&String>,
+    ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
         }
@@ -488,6 +493,13 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
+            // TODO FIXME: This is a hack to test custom extensions locally.
+            // In test_download_extensions, we assume that the custom extension
+            // prefix is the tenant ID. So we set it here.
+            //
+            // The proper way to implement this is to pass the custom extension
+            // in spec, but we don't have a way to do that yet in the python tests.
+            custom_extensions: Some(vec!["kq_imcx".into()]),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -519,6 +531,11 @@ impl Endpoint {
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
+
+        if let Some(remote_ext_config) = remote_ext_config {
+            cmd.args(["--remote-ext-config", remote_ext_config]);
+        }
+
         let child = cmd.spawn()?;
 
         // Write down the pid so we can wait for it when we want to stop

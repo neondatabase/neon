@@ -31,7 +31,8 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, GenericRemoteStorage, RemotePath, RemoteStorage, S3Config,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
@@ -131,6 +132,39 @@ struct GetObjectRequest {
     key: String,
     range: Option<String>,
 }
+
+use crate::GenericRemoteStorage::AwsS3;
+// the regular download function adds a "/" to the start of file names in the
+// case of prefix="None", which breaks everything. Thus, the following function is necessary
+pub async fn better_download(
+    bucket: &GenericRemoteStorage,
+    from: &RemotePath,
+) -> Result<Download, DownloadError> {
+    if let AwsS3(bucket) = bucket {
+        // this is more expected behavior.
+        // prefix="" should result in a trailing slash
+        // wheras prefix=None should **NOT** result in a trailing slash
+        let query_key = match &bucket.prefix_in_bucket {
+            Some(_) => bucket.relative_path_to_s3_object(from),
+            None => from
+                .get_path()
+                .to_str()
+                .expect("bad object name")
+                .to_string(),
+        };
+
+        bucket
+            .download_object(GetObjectRequest {
+                bucket: bucket.bucket_name.clone(),
+                key: query_key,
+                range: None,
+            })
+            .await
+    } else {
+        panic!("this isn't supposed to happen");
+    }
+}
+
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
@@ -353,9 +387,16 @@ impl RemoteStorage for S3Bucket {
 
     /// See the doc for `RemoteStorage::list_files`
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let folder_name = folder
+        let mut folder_name = folder
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());
+
+        // remove leading "/" if one exists
+        if let Some(folder_name_slash) = folder_name.clone() {
+            if folder_name_slash.starts_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                folder_name = Some(folder_name_slash[1..].to_string());
+            }
+        }
 
         // AWS may need to break the response into several parts
         let mut continuation_token = None;

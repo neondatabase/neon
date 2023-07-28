@@ -9,6 +9,7 @@ pub mod http;
 #[macro_use]
 pub mod logger;
 pub mod compute;
+pub mod extension_server;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
