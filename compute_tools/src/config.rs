@@ -33,7 +33,11 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 }
 
 /// Create or completely rewrite configuration file specified by `path`
-pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
+pub fn write_postgres_conf(
+    path: &Path,
+    spec: &ComputeSpec,
+    extension_server_port: Option<u16>,
+) -> Result<()> {
     // File::create() destroys the file content if it exists.
     let mut file = File::create(path)?;
 
@@ -85,6 +89,10 @@ pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
         writeln!(file, "# Managed by compute_ctl: begin")?;
         write!(file, "{}", spec.cluster.settings.as_pg_settings())?;
         writeln!(file, "# Managed by compute_ctl: end")?;
+    }
+
+    if let Some(port) = extension_server_port {
+        writeln!(file, "neon.extension_server_port={}", port)?;
     }
 
     Ok(())

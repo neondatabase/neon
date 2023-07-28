@@ -35,7 +35,10 @@ _PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_walproposer();
+
 	InitControlPlaneConnector();
+
+	pg_init_extension_server();
 
         // Important: This must happen after other parts of the extension
         // are loaded, otherwise any settings to GUCs that were set before
