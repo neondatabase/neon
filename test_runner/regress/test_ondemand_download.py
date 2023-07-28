@@ -690,8 +690,6 @@ def test_ondemand_download_failure_to_replace(
 
     pageserver_http = env.pageserver.http_client()
 
-    time.sleep(1)
-
     # remove layers so that they will be redownloaded
     pageserver_http.tenant_detach(tenant_id)
     pageserver_http.tenant_attach(tenant_id)
@@ -707,17 +705,15 @@ def test_ondemand_download_failure_to_replace(
         # but should it be added back, we would wait for 15s here.
         pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=15)
 
-    time.sleep(1)
+    actual_message = ".* ERROR .*layermap-replace-notfound"
+    assert env.pageserver.log_contains(actual_message) is not None
+    env.pageserver.allowed_errors.append(actual_message)
 
-    def contains_allow(actual_message):
-        assert env.pageserver.log_contains(actual_message) is not None
-        env.pageserver.allowed_errors.append(actual_message)
-
-    contains_allow(".* ERROR .*layermap-replace-notfound")
-    contains_allow(
+    env.pageserver.allowed_errors.append(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info"
     )
-    contains_allow(".* ERROR .*Task 'initial size calculation'")
+    # this might get to run and attempt on-demand, but not always
+    env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
 
     # if the above returned, then we didn't have a livelock, and all is well
 
