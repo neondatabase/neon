@@ -603,7 +603,9 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
     cargo install --locked --version 0.7.3 cargo-pgx && \
-    /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+    /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config' && \
+    cargo install --locked --version 0.9.8 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
 
@@ -666,6 +668,28 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/801f84f08c6881c8aa30f405
 
 #########################################################################################
 #
+# Layer "pgml-build"
+# Compile "pgml" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pgml-pg-build
+
+RUN apt-get update && \
+    apt-get install -y libopenblas-dev python3 python3-pip python3-venv python3-virtualenv virtualenv && \
+    # it compiles on master only w/o errors. And tar archive doesn't containt a submodule
+    git clone --recurse-submodules https://github.com/postgresml/postgresml && \
+    cd postgresml/pgml-extension && \
+    sed -i 's/pgrx = "=0.9.8"/pgrx = { version = "0.9.8", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/pgml.control && \
+    virtualenv /pgml-venv && \
+    . /pgml-venv/bin/activate && \
+    pip install -r requirements.txt && \
+    pip install -r requirements-xformers.txt --no-dependencies
+
+#########################################################################################
+#
 # Layer "pg-pgx-ulid-build"
 # Compile "pgx_ulid" extension
 #
@@ -699,6 +723,8 @@ COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgml-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgml-pg-build /pgml-venv/ /pgml-venv/
 COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -805,6 +831,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     mkdir -p -m 777 /neon/cache
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=postgres-cleanup-layer --chown=postgres /pgml-venv /pgml-venv
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
 # Install:
@@ -816,6 +843,7 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # libxml2, libxslt1.1 for xml2
 # libzstd1 for zstd
 # libboost*, libfreetype6, and zlib1g for rdkit
+# libgomp1, libopenblas-base, and python* for pgml
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
@@ -830,6 +858,8 @@ RUN apt update &&  \
         libfreetype6 \
         libgeos-c1v5 \
         libgdal28 \
+        libgomp1 \
+        libopenblas-base \
         libproj19 \
         libprotobuf-c1 \
         libsfcgal1 \
@@ -839,6 +869,10 @@ RUN apt update &&  \
         libcurl4-openssl-dev \
         locales \
         procps \
+        python3 \
+        python3-venv \
+        python3-virtualenv \
+        virtualenv \
         zlib1g && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
