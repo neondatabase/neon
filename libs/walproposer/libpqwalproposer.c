@@ -117,10 +117,10 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 	Assert(event.tag == Message);
 	Assert(event.any_message == Bytes);
 	
-	msg = sim_msg_get_bytes(&len);
+	msg = (char*) sim_msg_get_bytes(&len);
 	*buf = msg;
 	*amount = len;
-	walprop_log(INFO, "walprop_async_read: %d", len);
+	walprop_log(INFO, "walprop_async_read: %d", (int) len);
 
     return PG_ASYNC_READ_SUCCESS;
 }

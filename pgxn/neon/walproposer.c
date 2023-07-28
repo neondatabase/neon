@@ -472,7 +472,7 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 		for (int i = 0; i < n_safekeepers; i++) {
 			if (safekeeper[i].conn && ((int64_t) walprop_socket(safekeeper[i].conn)) == event.tcp) {
 				*occurred_events = (WaitEvent) {
-					.events = WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE,
+					.events = WL_SOCKET_READABLE,
 				};
 				*sk = &safekeeper[i];
 				return 1;
@@ -559,6 +559,7 @@ WalProposerPoll(void)
 			 */
 			if (availableLsn != InvalidXLogRecPtr)
 			{
+				walprop_log(LOG, "no WAL generated during timeout, sending pool message");
 				BroadcastAppendRequest();
 			}
 

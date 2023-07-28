@@ -1,5 +1,5 @@
 use safekeeper::simlib::proto::{AnyMessage, ReplCell};
-use std::cell::RefCell;
+use std::{cell::RefCell, ffi::c_char};
 
 pub(crate) fn anymessage_tag(msg: &AnyMessage) -> AnyMessageTag {
     match msg {
@@ -58,13 +58,13 @@ pub extern "C" fn sim_msg_set_repl_cell(value: u32, client_id: u32, seqno: u32) 
 
 #[no_mangle]
 /// Write AnyMessage::Bytes message.
-pub extern "C" fn sim_msg_set_bytes(bytes: *const u8, len: usize) {
+pub extern "C" fn sim_msg_set_bytes(bytes: *const c_char, len: usize) {
     MESSAGE_BUF.with(|cell| {
         // copy bytes to a Rust Vec
-        let mut v = Vec::with_capacity(len);
+        let mut v: Vec<u8> = Vec::with_capacity(len);
         unsafe {
             v.set_len(len);
-            std::ptr::copy_nonoverlapping(bytes, v.as_mut_ptr(), len);
+            std::ptr::copy_nonoverlapping(bytes as *const u8, v.as_mut_ptr(), len);
         }
         *cell.borrow_mut() = AnyMessage::Bytes(v.into());
     });
@@ -72,12 +72,12 @@ pub extern "C" fn sim_msg_set_bytes(bytes: *const u8, len: usize) {
 
 #[no_mangle]
 /// Read AnyMessage::Bytes message.
-pub extern "C" fn sim_msg_get_bytes(len: *mut usize) -> *const u8 {
+pub extern "C" fn sim_msg_get_bytes(len: *mut usize) -> *const c_char {
     MESSAGE_BUF.with(|cell| match &*cell.borrow() {
         AnyMessage::Bytes(v) => {
             unsafe {
                 *len = v.len();
-                v.as_ptr()
+                v.as_ptr() as *const i8
             }
         }
         _ => panic!("expected Bytes message"),

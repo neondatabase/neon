@@ -17,15 +17,15 @@ use crate::{
 };
 
 struct TestConfig {
-    network: Arc<NetworkOptions>,
+    network: NetworkOptions,
     timeout: u64,
 }
 
 impl TestConfig {
     fn new() -> Self {
         Self {
-            network: Arc::new(NetworkOptions {
-                timeout: Some(1000),
+            network: NetworkOptions {
+                timeout: Some(2000),
                 connect_delay: Delay {
                     min: 1,
                     max: 5,
@@ -36,13 +36,13 @@ impl TestConfig {
                     max: 5,
                     fail_prob: 0.0,
                 },
-            }),
+            },
             timeout: 1_000 * 10,
         }
     }
 
     fn start(&self, seed: u64) -> Test {
-        let world = Arc::new(World::new(seed, self.network.clone(), c_context()));
+        let world = Arc::new(World::new(seed, Arc::new(self.network.clone()), c_context()));
         world.register_world();
 
         let servers = [world.new_node(), world.new_node(), world.new_node()];
@@ -205,7 +205,8 @@ fn sync_empty_safekeepers() {
 fn run_walproposer_generate_wal() {
     logging::init(logging::LogFormat::Plain).unwrap();
 
-    let config = TestConfig::new();
+    let mut config = TestConfig::new();
+    // config.network.timeout = Some(250);
     let test = config.start(1337);
 
     let lsn = test.sync_safekeepers().unwrap();

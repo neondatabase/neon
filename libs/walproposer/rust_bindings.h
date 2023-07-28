@@ -86,9 +86,9 @@ void sim_msg_set_repl_cell(uint32_t value, uint32_t client_id, uint32_t seqno);
 /**
  * Write AnyMessage::Bytes message.
  */
-void sim_msg_set_bytes(const uint8_t *bytes, uintptr_t len);
+void sim_msg_set_bytes(const char *bytes, uintptr_t len);
 
 /**
  * Read AnyMessage::Bytes message.
  */
-const uint8_t *sim_msg_get_bytes(uintptr_t *len);
+const char *sim_msg_get_bytes(uintptr_t *len);
