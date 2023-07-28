@@ -9,7 +9,7 @@ mod remote_layer;
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::repository::{Key, Value};
+use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
@@ -381,8 +381,8 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
-/// Returned by [`PersistentLayer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
+/// Returned by [`PersistentLayer::load_val_refs`]
+pub type ValueRef = delta_layer::ValueRef;
 
 /// Get a layer descriptor from a layer.
 pub trait AsLayerDesc {
@@ -425,7 +425,7 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
     fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
+    fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>>;
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer

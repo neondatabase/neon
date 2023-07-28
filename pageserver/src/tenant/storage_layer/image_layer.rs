@@ -57,9 +57,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{
-    AsLayerDesc, Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc,
-};
+use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLayerDesc};
 
 ///
 /// Header stored in the beginning of the file
@@ -255,8 +253,8 @@ impl PersistentLayer for ImageLayer {
         Some(self.path())
     }
 
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        unimplemented!();
+    fn load_val_refs(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, super::ValueRef)>> {
+        unimplemented!()
     }
 
     fn delete_resident_layer_file(&self) -> Result<()> {
