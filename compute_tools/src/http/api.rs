@@ -121,6 +121,37 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // download extension files from S3 on demand
+        (&Method::POST, route) if route.starts_with("/extension_server/") => {
+            info!("serving {:?} POST request", route);
+            info!("req.uri {:?}", req.uri());
+
+            let mut is_library = false;
+            if let Some(params) = req.uri().query() {
+                info!("serving {:?} POST request with params: {}", route, params);
+                if params == "is_library=true" {
+                    is_library = true;
+                } else {
+                    let mut resp = Response::new(Body::from("Wrong request parameters"));
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    return resp;
+                }
+            }
+
+            let filename = route.split('/').last().unwrap().to_string();
+            info!("serving /extension_server POST request, filename: {filename:?} is_library: {is_library}");
+
+            match compute.download_extension(&filename, is_library).await {
+                Ok(_) => Response::new(Body::from("OK")),
+                Err(e) => {
+                    error!("extension download failed: {}", e);
+                    let mut resp = Response::new(Body::from(e.to_string()));
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    resp
+                }
+            }
+        }
+
         // Return the `404 Not Found` for any other routes.
         _ => {
             let mut not_found = Response::new(Body::from("404 Not Found"));
