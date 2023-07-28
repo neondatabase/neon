@@ -21,7 +21,7 @@ use utils::id::{NodeId, TenantId, TimelineId};
 const WRITTEN_SIZE: &str = "written_size";
 /// Values will be the difference of the latest written_size (last_record_lsn) to what we
 /// previously sent.
-const WRITTEN_SIZE_DELTA: &str = "written_size_delta";
+const WRITTEN_SIZE_DELTA: &str = "written_size_delta_bytes";
 const SYNTHETIC_STORAGE_SIZE: &str = "synthetic_storage_size";
 const RESIDENT_SIZE: &str = "resident_size";
 const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
