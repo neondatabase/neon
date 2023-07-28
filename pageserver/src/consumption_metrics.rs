@@ -18,15 +18,6 @@ use std::time::Duration;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
 
-const WRITTEN_SIZE: &str = "written_size";
-/// Values will be the difference of the latest written_size (last_record_lsn) to what we
-/// previously sent.
-const WRITTEN_SIZE_DELTA: &str = "written_size_delta_bytes";
-const SYNTHETIC_STORAGE_SIZE: &str = "synthetic_storage_size";
-const RESIDENT_SIZE: &str = "resident_size";
-const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
-const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
-
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[serde_as]
@@ -53,15 +44,17 @@ impl PageserverConsumptionMetricsKey {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: WRITTEN_SIZE,
+            metric: "written_size",
         }
     }
 
+    /// Values will be the difference of the latest written_size (last_record_lsn) to what we
+    /// previously sent.
     const fn written_size_delta(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: WRITTEN_SIZE_DELTA,
+            metric: "written_size_delta_bytes",
         }
     }
 
@@ -69,7 +62,7 @@ impl PageserverConsumptionMetricsKey {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: TIMELINE_LOGICAL_SIZE,
+            metric: "timeline_logical_size",
         }
     }
 
@@ -77,7 +70,7 @@ impl PageserverConsumptionMetricsKey {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: REMOTE_STORAGE_SIZE,
+            metric: "remote_storage_size",
         }
     }
 
@@ -85,7 +78,7 @@ impl PageserverConsumptionMetricsKey {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: RESIDENT_SIZE,
+            metric: "resident_size",
         }
     }
 
@@ -93,7 +86,7 @@ impl PageserverConsumptionMetricsKey {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: SYNTHETIC_STORAGE_SIZE,
+            metric: "synthetic_storage_size",
         }
     }
 }
