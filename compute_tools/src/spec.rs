@@ -124,7 +124,7 @@ pub fn get_spec_from_control_plane(
 pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
     // File `postgresql.conf` is no longer included into `basebackup`, so just
     // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec)?;
+    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
 
     update_pg_hba(pgdata_path)?;
 

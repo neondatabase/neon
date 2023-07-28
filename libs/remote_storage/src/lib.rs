@@ -24,6 +24,7 @@ use tokio::io;
 use toml_edit::Item;
 use tracing::info;
 
+pub use self::s3_bucket::better_download;
 pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
@@ -63,6 +64,10 @@ impl RemotePath {
             "Path {relative_path:?} is not relative"
         );
         Ok(Self(relative_path.to_path_buf()))
+    }
+
+    pub fn from_string(relative_path: &str) -> anyhow::Result<Self> {
+        Self::new(Path::new(relative_path))
     }
 
     pub fn with_base(&self, base_path: &Path) -> PathBuf {
@@ -190,6 +195,20 @@ pub enum GenericRemoteStorage {
 }
 
 impl GenericRemoteStorage {
+    // A function for listing all the files in a "directory"
+    // Example:
+    // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
+    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        match self {
+            Self::LocalFs(s) => s.list_files(folder).await,
+            Self::AwsS3(s) => s.list_files(folder).await,
+            Self::Unreliable(s) => s.list_files(folder).await,
+        }
+    }
+
+    // lists common *prefixes*, if any of files
+    // Example:
+    // list_prefixes("foo123","foo567","bar123","bar432") = ["foo", "bar"]
     pub async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
@@ -198,14 +217,6 @@ impl GenericRemoteStorage {
             Self::LocalFs(s) => s.list_prefixes(prefix).await,
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
             Self::Unreliable(s) => s.list_prefixes(prefix).await,
-        }
-    }
-
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        match self {
-            Self::LocalFs(s) => s.list_files(folder).await,
-            Self::AwsS3(s) => s.list_files(folder).await,
-            Self::Unreliable(s) => s.list_files(folder).await,
         }
     }
 

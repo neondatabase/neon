@@ -32,3 +32,4 @@ utils.workspace = true
 
 compute_api.workspace = true
 workspace_hack.workspace = true
+tracing.workspace = true
