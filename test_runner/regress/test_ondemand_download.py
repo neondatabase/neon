@@ -704,8 +704,10 @@ def test_ondemand_download_failure_to_replace(
     # requesting details with non-incremental size should trigger a download of the only layer
     # this will need to be adjusted if an index for logical sizes is ever implemented
     with pytest.raises(PageserverApiException):
-        # error message is not useful
-        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=2)
+        # PageserverApiException is expected because of the failpoint (timeline_detail building does something)
+        # ReadTimeout can happen on our busy CI, but it should not, because there is no more busylooping
+        # but should it be added back, we would wait for 15s here.
+        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=15)
 
     actual_message = ".* ERROR .*layermap-replace-notfound"
     assert env.pageserver.log_contains(actual_message) is not None
