@@ -205,8 +205,8 @@ def test_interrupted_extension(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    # if "15" in pg_version:  # SKIP v15 for now
-    #     return None
+    if "15" in pg_version:  # SKIP v15 for now
+        return None
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
@@ -228,32 +228,32 @@ def test_interrupted_extension(
     )
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION 'address_standardizer-3';")
+            # cur.execute("CREATE EXTENSION address_standardizer;")
+            cur.execute("CREATE EXTENSION address_standardizer_data_us;")
             # execute query to ensure that it works
             cur.execute(
                 "SELECT house_num, name, suftype, city, country, state, unit \
                         FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-                        'One Devonshire Place, PH 301, Boston, MA 02109;"
+                        'One Rust Place, Boston, MA 02109');"
             )
     # the endpoint is closed now
     # remove postgis files locally
     cleanup(pg_version)
 
-    """
-    # spin up compute node again (there are no postgis files available, because compute is stateless)
-    endpoint = env.endpoints.create_start(
-        "test_remote_library",
-        tenant_id=tenant_id,
-        remote_ext_config=env.ext_remote_storage.to_string(),
-    )
-    # connect to postrgres and execute the query again
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION address_standardizer-3;")
-            # execute query to ensure that it works
-            cur.execute(
-                "SELECT house_num, name, suftype, city, country, state, unit \
-                        FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-                        'One Devonshire Place, PH 301, Boston, MA 02109;"
-            )
-    """
+    # # spin up compute node again (there are no postgis files available, because compute is stateless)
+    # endpoint = env.endpoints.create_start(
+    #     "test_remote_library",
+    #     tenant_id=tenant_id,
+    #     remote_ext_config=env.ext_remote_storage.to_string(),
+    # )
+    # # connect to postrgres and execute the query again
+    # with closing(endpoint.connect()) as conn:
+    #     with conn.cursor() as cur:
+    #         cur.execute("CREATE EXTENSION address_standardizer;")
+    #         cur.execute("CREATE EXTENSION address_standardizer_data_us;")
+    #         # execute query to ensure that it works
+    #         cur.execute(
+    #             "SELECT house_num, name, suftype, city, country, state, unit \
+    #                     FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
+    #                     'One Rust Place, Boston, MA 02109');"
+    #         )

@@ -151,19 +151,24 @@ pub async fn get_available_extensions(
     for extension in enabled_extensions {
         let ext_data = &all_extension_data[&extension];
         for (control_file, control_contents) in &ext_data.control_data {
+            let extension_name = control_file
+                .strip_suffix(".control")
+                .expect("control files must end in .control");
+            ext_remote_paths.insert(
+                extension_name.to_string(),
+                RemotePath::from_string(&ext_data.archive_path)?,
+            );
+
             let control_path = local_sharedir.join(control_file);
             info!("writing file {:?}{:?}", control_path, control_contents);
             file_create_tasks.push(tokio::fs::write(control_path, control_contents));
         }
-        ext_remote_paths.insert(
-            extension.to_string(),
-            RemotePath::from_string(&ext_data.archive_path)?,
-        );
     }
     let results = join_all(file_create_tasks).await;
     for result in results {
         result?;
     }
+    info!("ext_remote_paths {:?}", ext_remote_paths);
     Ok((ext_remote_paths, library_index))
 }
 
