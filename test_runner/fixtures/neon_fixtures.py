@@ -542,7 +542,7 @@ class S3Storage:
     access_key: str
     secret_key: str
     endpoint: Optional[str] = None
-    prefix_in_bucket: Optional[str] = None
+    prefix_in_bucket: Optional[str] = ""
 
     def access_env_vars(self) -> Dict[str, str]:
         return {
