@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import pytest
 import toml  # TODO: replace with tomllib for Python >= 3.11
@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     PortDistributor,
-    parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -63,7 +62,6 @@ def test_create_snapshot(
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
-    neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
@@ -276,14 +274,6 @@ def prepare_snapshot(
     pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
         pageserver_config["listen_pg_addr"]
     )
-    # since storage_broker these are overridden by neon_local during pageserver
-    # start; remove both to prevent unknown options during etcd ->
-    # storage_broker migration. TODO: remove once broker is released
-    pageserver_config.pop("broker_endpoint", None)
-    pageserver_config.pop("broker_endpoints", None)
-    etcd_broker_endpoints = [f"http://localhost:{port_distributor.get_port()}/"]
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
 
     # Older pageserver versions had just one `auth_type` setting. Now there
     # are separate settings for pg and http ports. We don't use authentication
@@ -301,20 +291,8 @@ def prepare_snapshot(
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
 
-    # Provide up/downgrade etcd <-> storage_broker to make forward/backward
-    # compatibility test happy. TODO: leave only the new part once broker is released.
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        # old etcd version
-        snapshot_config["etcd_broker"] = {
-            "etcd_binary_path": shutil.which("etcd"),
-            "broker_endpoints": etcd_broker_endpoints,
-        }
-        snapshot_config.pop("broker", None)
-    else:
-        # new storage_broker version
-        broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
-        snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
-        snapshot_config.pop("etcd_broker", None)
+    broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
+    snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
 
     snapshot_config["pageserver"]["listen_http_addr"] = port_distributor.replace_with_new_port(
         snapshot_config["pageserver"]["listen_http_addr"]
@@ -350,12 +328,6 @@ def prepare_snapshot(
     ), f"there're files referencing `test_create_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
 
 
-# get git SHA of neon binary
-def get_neon_version(neon_binpath: Path):
-    out = subprocess.check_output([neon_binpath / "neon_local", "--version"]).decode("utf-8")
-    return parse_project_git_version_output(out)
-
-
 def check_neon_works(
     repo_dir: Path,
     neon_target_binpath: Path,
@@ -381,7 +353,6 @@ def check_neon_works(
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
-    config.preserve_database_files = True
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
@@ -453,10 +424,15 @@ def check_neon_works(
     assert not initial_dump_differs, "initial dump differs"
 
 
-def dump_differs(first: Path, second: Path, output: Path) -> bool:
+def dump_differs(
+    first: Path, second: Path, output: Path, allowed_diffs: Optional[List[str]] = None
+) -> bool:
     """
     Runs diff(1) command on two SQL dumps and write the output to the given output file.
-    Returns True if the dumps differ, False otherwise.
+    The function supports allowed diffs, if the diff is in the allowed_diffs list, it's not considered as a difference.
+    See the example of it in https://github.com/neondatabase/neon/pull/4425/files#diff-15c5bfdd1d5cc1411b9221091511a60dd13a9edf672bdfbb57dd2ef8bb7815d6
+
+    Returns True if the dumps differ and produced diff is not allowed, False otherwise (in most cases we want it to return False).
     """
 
     with output.open("w") as stdout:
@@ -474,51 +450,30 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
 
     differs = res.returncode != 0
 
-    # TODO: Remove after https://github.com/neondatabase/neon/pull/4425 is merged, and a couple of releases are made
-    if differs:
-        with tempfile.NamedTemporaryFile(mode="w") as tmp:
-            tmp.write(PR4425_ALLOWED_DIFF)
-            tmp.flush()
+    allowed_diffs = allowed_diffs or []
+    if differs and len(allowed_diffs) > 0:
+        for allowed_diff in allowed_diffs:
+            with tempfile.NamedTemporaryFile(mode="w") as tmp:
+                tmp.write(allowed_diff)
+                tmp.flush()
 
-            allowed = subprocess.run(
-                [
-                    "diff",
-                    "--unified",  # Make diff output more readable
-                    r"--ignore-matching-lines=^---",  # Ignore diff headers
-                    r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
-                    "--ignore-matching-lines=^@@",  # Ignore diff blocks location
-                    "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
-                    "--ignore-matching-lines=^ --.*",  # Ignore the " --" lines for compatibility with PG14
-                    "--ignore-blank-lines",
-                    str(output),
-                    str(tmp.name),
-                ],
-            )
+                allowed = subprocess.run(
+                    [
+                        "diff",
+                        "--unified",  # Make diff output more readable
+                        r"--ignore-matching-lines=^---",  # Ignore diff headers
+                        r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
+                        "--ignore-matching-lines=^@@",  # Ignore diff blocks location
+                        "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
+                        "--ignore-matching-lines=^ --.*",  # Ignore SQL comments in diff
+                        "--ignore-blank-lines",
+                        str(output),
+                        str(tmp.name),
+                    ],
+                )
 
-            differs = allowed.returncode != 0
+                differs = allowed.returncode != 0
+                if not differs:
+                    break
 
     return differs
-
-
-PR4425_ALLOWED_DIFF = """
---- /tmp/test_output/test_backward_compatibility[release-pg15]/compatibility_snapshot/dump.sql 2023-06-08 18:12:45.000000000 +0000
-+++ /tmp/test_output/test_backward_compatibility[release-pg15]/dump.sql        2023-06-13 07:25:35.211733653 +0000
-@@ -13,12 +13,20 @@
-
- CREATE ROLE cloud_admin;
- ALTER ROLE cloud_admin WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
-+CREATE ROLE neon_superuser;
-+ALTER ROLE neon_superuser WITH NOSUPERUSER INHERIT CREATEROLE CREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;
-
- --
- -- User Configurations
- --
-
-
-+--
-+-- Role memberships
-+--
-+
-+GRANT pg_read_all_data TO neon_superuser GRANTED BY cloud_admin;
-+GRANT pg_write_all_data TO neon_superuser GRANTED BY cloud_admin;
-"""
