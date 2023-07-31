@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
+use hashbrown::HashMap;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
@@ -174,7 +175,7 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
     //
@@ -190,8 +191,10 @@ pub async fn handle(
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level and read only
-    let txn_isolation_level = match headers.get(&TXN_ISOLATION_LEVEL) {
-        Some(x) => Some(match x.as_bytes() {
+
+    let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
+    let txn_isolation_level = match txn_isolation_level_raw {
+        Some(ref x) => Some(match x.as_bytes() {
             b"Serializable" => IsolationLevel::Serializable,
             b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
             b"ReadCommitted" => IsolationLevel::ReadCommitted,
@@ -200,7 +203,9 @@ pub async fn handle(
         }),
         None => None,
     };
-    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+
+    let txn_read_only_raw = headers.get(&TXN_READ_ONLY).cloned();
+    let txn_read_only = txn_read_only_raw.as_ref() == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -225,7 +230,9 @@ pub async fn handle(
     // Now execute the query and return the result
     //
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode).await,
+        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+            .await
+            .map(|x| (x, HashMap::default())),
         Payload::Batch(queries) => {
             let mut results = Vec::new();
             let mut builder = client.build_transaction();
@@ -247,13 +254,14 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            Ok(json!({
-                "results": results,
-                "options": {
-                    "isolation_level": txn_isolation_level.map(|l| format!("{:?}", l)),
-                    "read_only": txn_read_only
-                }
-            }))
+            let mut headers = HashMap::default();
+            if let Some(txn_read_only_raw) = txn_read_only_raw {
+                headers.insert(TXN_READ_ONLY.clone(), txn_read_only_raw);
+            }
+            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            }
+            Ok((json!({ "results": results }), headers))
         }
     };
 

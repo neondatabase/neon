@@ -6,6 +6,7 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
+use hashbrown::HashMap;
 use hyper::{
     server::{
         accept,
@@ -205,7 +206,7 @@ async fn ws_handler(
             Ok(_) => StatusCode::OK,
             Err(_) => StatusCode::BAD_REQUEST,
         };
-        let json = match result {
+        let (json, headers) = match result {
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
@@ -216,7 +217,10 @@ async fn ws_handler(
                     },
                     None => Value::Null,
                 };
-                json!({ "message": message, "code": code })
+                (
+                    json!({ "message": message, "code": code }),
+                    HashMap::default(),
+                )
             }
         };
         json_response(status_code, json).map(|mut r| {
@@ -224,6 +228,9 @@ async fn ws_handler(
                 "Access-Control-Allow-Origin",
                 hyper::http::HeaderValue::from_static("*"),
             );
+            for (k, v) in headers {
+                r.headers_mut().insert(k, v);
+            }
             r
         })
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
