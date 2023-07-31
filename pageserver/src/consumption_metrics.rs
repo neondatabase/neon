@@ -97,14 +97,14 @@ impl PageserverConsumptionMetricsKey {
 
     /// Values will be the difference of the latest written_size (last_record_lsn) to what we
     /// previously sent.
-    const fn written_size_delta_bytes(
+    const fn written_size_delta(
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> IncrementalValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: "written_size_delta_bytes",
+            metric: "written_size_bytes_delta",
         }
         .incremental_values()
     }
@@ -303,7 +303,7 @@ pub async fn collect_metrics_iteration(
                             .0
                             .absolute_time()
                             .expect("never create EventType::Incremental for written_size");
-                        let key_value = PageserverConsumptionMetricsKey::written_size_delta_bytes(
+                        let key_value = PageserverConsumptionMetricsKey::written_size_delta(
                             tenant_id,
                             timeline.timeline_id,
                         )
