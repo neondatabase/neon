@@ -7,7 +7,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{mgr, LogicalSizeCalculationCause};
 use anyhow;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use pageserver_api::models::TenantState;
 use reqwest::Url;
@@ -35,59 +35,122 @@ struct Ids {
 pub struct PageserverConsumptionMetricsKey {
     pub tenant_id: TenantId,
     pub timeline_id: Option<TimelineId>,
-    // pub kind: EventType,
     pub metric: &'static str,
 }
 
 impl PageserverConsumptionMetricsKey {
-    const fn written_size(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+    const fn absolute_values(self) -> AbsoluteValueFactory {
+        AbsoluteValueFactory(self)
+    }
+    const fn incremental_values(self) -> IncrementalValueFactory {
+        IncrementalValueFactory(self)
+    }
+
+    fn is_written_size_delta(&self) -> bool {
+        // FIXME: maybe put these in an enum?
+        self.metric == "written_size"
+    }
+}
+
+/// Helper type which each individual metric kind can return to produce only absolute values.
+struct AbsoluteValueFactory(PageserverConsumptionMetricsKey);
+
+impl AbsoluteValueFactory {
+    fn now(self, val: u64) -> (PageserverConsumptionMetricsKey, (EventType, u64)) {
+        let key = self.0;
+        let time = Utc::now();
+        (key, (EventType::Absolute { time }, val))
+    }
+}
+
+/// Helper type which each individual metric kind can return to produce only incremental values.
+struct IncrementalValueFactory(PageserverConsumptionMetricsKey);
+
+impl IncrementalValueFactory {
+    #[allow(clippy::wrong_self_convention)]
+    fn from_previous_up_to(
+        self,
+        prev_end: DateTime<Utc>,
+        up_to: DateTime<Utc>,
+        val: u64,
+    ) -> (PageserverConsumptionMetricsKey, (EventType, u64)) {
+        let key = self.0;
+        // cannot assert prev_end < up_to because these are realtime clock based
+        (
+            key,
+            (
+                EventType::Incremental {
+                    start_time: prev_end,
+                    stop_time: up_to,
+                },
+                val,
+            ),
+        )
+    }
+}
+
+// the static part of a PageserverConsumptionMetricsKey
+impl PageserverConsumptionMetricsKey {
+    const fn written_size(tenant_id: TenantId, timeline_id: TimelineId) -> AbsoluteValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "written_size",
         }
+        .absolute_values()
     }
 
     /// Values will be the difference of the latest written_size (last_record_lsn) to what we
     /// previously sent.
-    const fn written_size_delta(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+    const fn written_size_delta_bytes(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> IncrementalValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "written_size_delta_bytes",
         }
+        .incremental_values()
     }
 
-    const fn timeline_logical_size(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+    const fn timeline_logical_size(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> AbsoluteValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "timeline_logical_size",
         }
+        .absolute_values()
     }
 
-    const fn remote_storage_size(tenant_id: TenantId) -> Self {
+    const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "remote_storage_size",
         }
+        .absolute_values()
     }
 
-    const fn resident_size(tenant_id: TenantId) -> Self {
+    const fn resident_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "resident_size",
         }
+        .absolute_values()
     }
 
-    const fn synthetic_size(tenant_id: TenantId) -> Self {
+    const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         PageserverConsumptionMetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "synthetic_storage_size",
         }
+        .absolute_values()
     }
 }
 
@@ -126,7 +189,7 @@ pub async fn collect_metrics(
         .timeout(DEFAULT_HTTP_REPORTING_TIMEOUT)
         .build()
         .expect("Failed to create http client with timeout");
-    let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
+    let mut cached_metrics = HashMap::new();
     let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
 
     loop {
@@ -168,13 +231,13 @@ pub async fn collect_metrics(
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
 pub async fn collect_metrics_iteration(
     client: &reqwest::Client,
-    cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, u64>,
+    cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, (EventType, u64)>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
     send_cached: bool,
 ) {
-    let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
+    let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, (EventType, u64))> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
@@ -213,42 +276,57 @@ pub async fn collect_metrics_iteration(
             if timeline.is_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());
 
-                let key =
-                    PageserverConsumptionMetricsKey::written_size(tenant_id, timeline.timeline_id);
+                let (key, written_size_now) =
+                    PageserverConsumptionMetricsKey::written_size(tenant_id, timeline.timeline_id)
+                        .now(timeline_written_size);
 
                 // last_record_lsn can only go up, right now at least, TODO: #2592 or related
                 // features might change this.
-                //
-                // this will be None for the first item, do not send it then to avoid the need to
-                // filter out huge values from the stream of deltas.
-                let timeline_written_size_delta = cached_metrics
-                    .get(&key)
-                    .copied()
-                    .map(|prev| timeline_written_size - prev);
 
-                current_metrics.push((key, timeline_written_size));
+                // by default, use the last sent written_size_delta_bytes as the basis for
+                // calculating the delta. if we don't yet have one, use the load time value.
+                let prev = cached_metrics.get(&key).map(|(prev_at, prev)| {
+                    let prev_at = prev_at
+                        .absolute_time()
+                        .expect("never create EventType::Incremental for written_size");
 
-                if let Some(timeline_written_size_delta) = timeline_written_size_delta {
-                    current_metrics.push((
-                        PageserverConsumptionMetricsKey::written_size_delta(
+                    (*prev_at, *prev)
+                });
+
+                // written_size_delta_bytes
+                current_metrics.extend(
+                    if let Some((prev_at, delta)) = prev.and_then(|(at, abs)| {
+                        written_size_now.1.checked_sub(abs).map(|delta| (at, delta))
+                    }) {
+                        let up_to = written_size_now
+                            .0
+                            .absolute_time()
+                            .expect("never create EventType::Incremental for written_size");
+                        let key_value = PageserverConsumptionMetricsKey::written_size_delta_bytes(
                             tenant_id,
                             timeline.timeline_id,
-                        ),
-                        timeline_written_size_delta,
-                    ));
-                }
+                        )
+                        .from_previous_up_to(prev_at, *up_to, delta);
+                        Some(key_value)
+                    } else {
+                        None
+                    },
+                );
+
+                // written_size
+                current_metrics.push((key, written_size_now));
 
                 let span = info_span!("collect_metrics_iteration", tenant_id = %timeline.tenant_id, timeline_id = %timeline.timeline_id);
                 match span.in_scope(|| timeline.get_current_logical_size(ctx)) {
                     // Only send timeline logical size when it is fully calculated.
                     Ok((size, is_exact)) if is_exact => {
-                        current_metrics.push((
+                        current_metrics.push(
                             PageserverConsumptionMetricsKey::timeline_logical_size(
                                 tenant_id,
                                 timeline.timeline_id,
-                            ),
-                            size,
-                        ));
+                            )
+                            .now(size),
+                        );
                     }
                     Ok((_, _)) => {}
                     Err(err) => {
@@ -267,10 +345,10 @@ pub async fn collect_metrics_iteration(
 
         match tenant.get_remote_size().await {
             Ok(tenant_remote_size) => {
-                current_metrics.push((
-                    PageserverConsumptionMetricsKey::remote_storage_size(tenant_id),
-                    tenant_remote_size,
-                ));
+                current_metrics.push(
+                    PageserverConsumptionMetricsKey::remote_storage_size(tenant_id)
+                        .now(tenant_remote_size),
+                );
             }
             Err(err) => {
                 error!(
@@ -280,10 +358,9 @@ pub async fn collect_metrics_iteration(
             }
         }
 
-        current_metrics.push((
-            PageserverConsumptionMetricsKey::resident_size(tenant_id),
-            tenant_resident_size,
-        ));
+        current_metrics.push(
+            PageserverConsumptionMetricsKey::resident_size(tenant_id).now(tenant_resident_size),
+        );
 
         // Note that this metric is calculated in a separate bgworker
         // Here we only use cached value, which may lag behind the real latest one
@@ -291,19 +368,25 @@ pub async fn collect_metrics_iteration(
 
         if tenant_synthetic_size != 0 {
             // only send non-zeroes because otherwise these show up as errors in logs
-            current_metrics.push((
-                PageserverConsumptionMetricsKey::synthetic_size(tenant_id),
-                tenant_synthetic_size,
-            ));
+            current_metrics.push(
+                PageserverConsumptionMetricsKey::synthetic_size(tenant_id)
+                    .now(tenant_synthetic_size),
+            );
         }
     }
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
     // See: https://github.com/neondatabase/neon/issues/3485
     if !send_cached {
-        current_metrics.retain(|(curr_key, curr_val)| match cached_metrics.get(curr_key) {
-            Some(val) => val != curr_val,
-            None => true,
+        current_metrics.retain(|(curr_key, (_, curr_val))| {
+            if curr_key.is_written_size_delta() {
+                true
+            } else {
+                match cached_metrics.get(curr_key) {
+                    Some((_, val)) => val != curr_val,
+                    None => true,
+                }
+            }
         });
     }
 
@@ -322,8 +405,8 @@ pub async fn collect_metrics_iteration(
         chunk_to_send.clear();
 
         // enrich metrics with type,timestamp and idempotency key before sending
-        chunk_to_send.extend(chunk.iter().map(|(curr_key, curr_val)| Event {
-            kind: EventType::Absolute { time: Utc::now() },
+        chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
+            kind: *when,
             metric: curr_key.metric,
             idempotency_key: idempotency_key(node_id.to_string()),
             value: *curr_val,
