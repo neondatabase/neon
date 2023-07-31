@@ -72,6 +72,7 @@ pub struct RemoteExtensionMetrics {
     num_ext_downloaded: u64,
     largest_ext_size: u64,
     total_ext_download_size: u64,
+    prep_extensions_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -757,6 +758,7 @@ impl ComputeNode {
             state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
             state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
             state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
+            state.metrics.prep_extensions_ms = remote_ext_metrics.prep_extensions_ms;
             info!(
                 "Loading shared_preload_libraries took {:?}ms",
                 library_load_time
@@ -999,6 +1001,7 @@ LIMIT 100",
                 num_ext_downloaded: 0,
                 largest_ext_size: 0,
                 total_ext_download_size: 0,
+                prep_extensions_ms: 0,
             });
         }
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
@@ -1035,7 +1038,14 @@ LIMIT 100",
         }
 
         info!("Download ext_index.json, find the extension paths");
+        let prep_ext_start_time = Utc::now();
         self.prepare_external_extensions(compute_state).await?;
+        let prep_ext_time_delta = Utc::now()
+            .signed_duration_since(prep_ext_start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        info!("Prepare extensions took {prep_ext_time_delta}ms");
 
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
         let mut download_tasks = Vec::new();
@@ -1048,6 +1058,7 @@ LIMIT 100",
             num_ext_downloaded: 0,
             largest_ext_size: 0,
             total_ext_download_size: 0,
+            prep_extensions_ms: prep_ext_time_delta,
         };
         for result in results {
             let download_size = result?;
