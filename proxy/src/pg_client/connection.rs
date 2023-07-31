@@ -7,7 +7,8 @@ use futures::{Sink, StreamExt};
 use futures::{SinkExt, Stream};
 use postgres_protocol::authentication;
 use postgres_protocol::message::backend::{
-    BackendKeyDataBody, DataRowBody, Message, ReadyForQueryBody, RowDescriptionBody,
+    BackendKeyDataBody, CommandCompleteBody, DataRowBody, Message, ReadyForQueryBody,
+    RowDescriptionBody,
 };
 use postgres_protocol::message::frontend;
 use std::collections::{HashMap, VecDeque};
@@ -311,48 +312,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
         self.raw.send().await
     }
 
-    /// returns None if there's no row data
-    /// returns Some with the row description and a row stream if there is row data
-    pub async fn stream_query_results(
-        &mut self,
-    ) -> Result<
-        Option<(
-            RowDescriptionBody,
-            impl Stream<Item = Result<DataRowBody, Error>> + '_,
-        )>,
-        Error,
-    > {
+    pub async fn wait_for_prepare(&mut self) -> Result<Option<RowDescriptionBody>, Error> {
         let Message::ParseComplete = self.raw.next_message().await? else { return Err(Error::expecting("parse")) };
         let Message::BindComplete = self.raw.next_message().await? else { return Err(Error::expecting("bind")) };
         match self.raw.next_message().await? {
-            Message::RowDescription(desc) => {
-                struct RowStream<'a, S, T> {
-                    raw: &'a mut RawConnection<S, T>,
-                }
-                impl<S, T> Unpin for RowStream<'_, S, T> {}
-
-                impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Stream
-                    for RowStream<'_, S, T>
-                {
-                    type Item = Result<DataRowBody, Error>;
-
-                    fn poll_next(
-                        mut self: Pin<&mut Self>,
-                        cx: &mut Context<'_>,
-                    ) -> Poll<Option<Self::Item>> {
-                        match ready!(self.raw.poll_read(cx)?) {
-                            Message::DataRow(row) => Poll::Ready(Some(Ok(row))),
-                            Message::CommandComplete(_) => Poll::Ready(None),
-                            _ => Poll::Ready(Some(Err(Error::expecting("command completion")))),
-                        }
-                    }
-                }
-
-                Ok(Some((desc, RowStream { raw: &mut self.raw })))
-            }
+            Message::RowDescription(desc) => Ok(QueryResult::Rows {
+                row_stream: RowStream::Stream(&mut self.raw),
+                row_description: desc,
+            }),
             Message::NoData => {
-                let Message::CommandComplete(_) = self.raw.next_message().await? else { return Err(Error::expecting("command completion")) };
-                Ok(None)
+                let Message::CommandComplete(tag) = self.raw.next_message().await? else { return Err(Error::expecting("command completion")) };
+                Ok(QueryResult::NoRows(tag))
+            }
+            _ => Err(Error::expecting("query results")),
+        }
+    }
+    pub async fn stream_query_results(&mut self) -> Result<RowStream<'_, S, T>, Error> {
+        let Message::ParseComplete = self.raw.next_message().await? else { return Err(Error::expecting("parse")) };
+        let Message::BindComplete = self.raw.next_message().await? else { return Err(Error::expecting("bind")) };
+        match self.raw.next_message().await? {
+            Message::RowDescription(desc) => Ok(QueryResult::Rows {
+                row_stream: RowStream::Stream(&mut self.raw),
+                row_description: desc,
+            }),
+            Message::NoData => {
+                let Message::CommandComplete(tag) = self.raw.next_message().await? else { return Err(Error::expecting("command completion")) };
+                Ok(QueryResult::NoRows(tag))
             }
             _ => Err(Error::expecting("query results")),
         }
@@ -364,6 +349,49 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
                 Message::ReadyForQuery(b) => break Ok(b),
                 _ => continue,
             }
+        }
+    }
+}
+
+// pub enum QueryResult<'a, S, T> {
+//     NoRows(CommandCompleteBody),
+//     Rows {
+//         row_description: RowDescriptionBody,
+//         row_stream: RowStream<'a, S, T>,
+//     },
+// }
+
+pub enum RowStream<'a, S, T> {
+    Stream(&'a mut RawConnection<S, T>),
+    Complete(CommandCompleteBody),
+}
+impl<S, T> Unpin for RowStream<'_, S, T> {}
+
+impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Stream
+    for RowStream<'_, S, T>
+{
+    type Item = Result<DataRowBody, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut *self {
+            RowStream::Stream(raw) => match ready!(raw.poll_read(cx)?) {
+                Message::DataRow(row) => Poll::Ready(Some(Ok(row))),
+                Message::CommandComplete(tag) => {
+                    *self = Self::Complete(tag);
+                    Poll::Ready(None)
+                }
+                _ => Poll::Ready(Some(Err(Error::expecting("command completion")))),
+            },
+            RowStream::Complete(_) => Poll::Ready(None),
+        }
+    }
+}
+
+impl<S, T> RowStream<'_, S, T> {
+    pub fn tag(self) -> CommandCompleteBody {
+        match self {
+            RowStream::Stream(_) => panic!("should not get tag unless row stream is exhausted"),
+            RowStream::Complete(tag) => tag,
         }
     }
 }

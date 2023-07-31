@@ -364,13 +364,13 @@ async fn query_to_json<T: GenericClient>(
     }))
 }
 
-/// Pass text directly to the Postgres backend to allow it to sort out typing itself and
-/// to save a roundtrip
-async fn query_raw_txt<'a, St, T>(
+async fn query_raw_txt_as_json<'a, St, T>(
     conn: &mut connection::Connection<St, T>,
     query: String,
     params: Vec<Option<String>>,
-) -> Result<Vec<Column>, pg_client::error::Error>
+    raw_output: bool,
+    array_mode: bool,
+) -> Result<Value, pg_client::error::Error>
 where
     St: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
@@ -380,20 +380,70 @@ where
     conn.prepare_and_execute("", "", query.as_str(), params)?;
     conn.sync().await?;
 
-    let mut columns = vec![];
-    if let Some((desc, rows)) = conn.stream_query_results().await? {
-        let mut it = desc.fields();
-        while let Some(field) = it.next().map_err(pg_client::error::Error::parse)? {
-            let type_ = Type::from_oid(field.type_oid());
-            // let column = Column::new(field.name().to_string(), type_, field);
-            columns.push(Column {
-                name: field.name().to_string(),
-                type_,
-            });
-        }
-    }
+    let mut fields = vec![];
+    let mut rows = vec![];
+    let command_tag = match conn.stream_query_results().await? {
+        connection::QueryResult::NoRows(tag) => tag,
+        connection::QueryResult::Rows {
+            row_description,
+            mut row_stream,
+        } => {
+            let mut columns = vec![];
+            let mut it = row_description.fields();
+            while let Some(field) = it.next().map_err(pg_client::error::Error::parse)? {
+                fields.push(json!({
+                    "name": Value::String(field.name().to_owned()),
+                    "dataTypeID": Value::Number(field.type_oid().into()),
+                    "tableID": field.table_oid(),
+                    "columnID": field.column_id(),
+                    "dataTypeSize": field.type_size(),
+                    "dataTypeModifier": field.type_modifier(),
+                    "format": "text",
+                }));
 
-    Ok(columns)
+                let type_ = Type::from_oid(field.type_oid());
+                // let column = Column::new(field.name().to_string(), type_, field);
+                columns.push(Column {
+                    name: field.name().to_string(),
+                    type_,
+                });
+            }
+
+            let mut curret_size = 0;
+            while let Some(row) = row_stream.next().await.transpose()? {
+                curret_size += row.buffer().len();
+                if curret_size > MAX_RESPONSE_SIZE {
+                    todo!()
+                    // return Err(anyhow::anyhow!("response too large"));
+                }
+
+                rows.push(pg_text_row_to_json2(&row, &columns, raw_output, array_mode).unwrap());
+            }
+
+            row_stream.tag()
+        }
+    };
+
+    let command_tag = command_tag.tag()?;
+    let mut command_tag_split = command_tag.split(' ');
+    let command_tag_name = command_tag_split.next().unwrap_or_default();
+    let command_tag_count = if command_tag_name == "INSERT" {
+        // INSERT returns OID first and then number of rows
+        command_tag_split.nth(1)
+    } else {
+        // other commands return number of rows (if any)
+        command_tag_split.next()
+    }
+    .and_then(|s| s.parse::<i64>().ok());
+
+    // resulting JSON format is based on the format of node-postgres result
+    Ok(json!({
+        "command": command_tag_name,
+        "rowCount": command_tag_count,
+        "rows": rows,
+        "fields": fields,
+        "rowAsArray": array_mode,
+    }))
 }
 
 struct Column {
