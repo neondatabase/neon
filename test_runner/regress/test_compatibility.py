@@ -301,8 +301,8 @@ def prepare_snapshot(
         snapshot_config["pageserver"]["listen_pg_addr"]
     )
     for sk in snapshot_config["safekeepers"]:
-        sk["http_port"] = port_distributor.replace_with_new_port(sk["http_port"])
-        sk["pg_port"] = port_distributor.replace_with_new_port(sk["pg_port"])
+        for param in ("http_port", "pg_port", "pg_tenant_only_port"):
+            sk[param] = port_distributor.replace_with_new_port(sk[param])
 
     if pg_distrib_dir:
         snapshot_config["pg_distrib_dir"] = str(pg_distrib_dir)
