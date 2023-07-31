@@ -129,14 +129,6 @@ impl PersistentLayer for RemoteLayer {
         None
     }
 
-    fn load_val_refs(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, super::ValueRef)>> {
-        bail!("cannot load value refs of a remote layer");
-    }
-
-    fn load_keys(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
-        bail!("cannot load keys of a remote layer");
-    }
-
     fn delete_resident_layer_file(&self) -> Result<()> {
         bail!("remote layer has no layer file");
     }

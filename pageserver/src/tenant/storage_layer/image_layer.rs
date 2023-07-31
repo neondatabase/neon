@@ -253,10 +253,6 @@ impl PersistentLayer for ImageLayer {
         Some(self.path())
     }
 
-    fn load_val_refs(&self, _ctx: &RequestContext) -> Result<Vec<(Key, Lsn, super::ValueRef)>> {
-        unimplemented!()
-    }
-
     fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;

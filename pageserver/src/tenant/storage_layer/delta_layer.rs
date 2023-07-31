@@ -424,20 +424,6 @@ impl PersistentLayer for DeltaLayer {
         Some(self.path())
     }
 
-    fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .context("load delta layer")?;
-        DeltaLayerInner::load_val_refs(inner).context("Layer index is corrupted")
-    }
-
-    fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .context("load delta layer keys")?;
-        inner.load_keys().context("Layer index is corrupted")
-    }
-
     fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
@@ -623,6 +609,24 @@ impl DeltaLayer {
             &self.desc.timeline_id,
             &self.layer_name(),
         )
+    }
+
+    /// Obtains all keys and value references stored in the layer
+    ///
+    /// The value can be obtained via the [`ValueRef::load`] function.
+    pub fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer")?;
+        DeltaLayerInner::load_val_refs(inner).context("Layer index is corrupted")
+    }
+
+    /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    pub fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer keys")?;
+        inner.load_keys().context("Layer index is corrupted")
     }
 }
 
