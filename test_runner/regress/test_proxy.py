@@ -324,7 +324,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
         [
             ("select 42 as answer", None),
         ],
-        True
+        True,
     )
     assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
     assert headers["Neon-Batch-Read-Only"] == "true"
