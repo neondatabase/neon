@@ -225,6 +225,7 @@ pub async fn download_extension(
             }
         }
     }
+    info!("done moving extension {ext_name}");
     Ok(())
 }
 
