@@ -302,7 +302,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 #[test]
 fn connect_compute_total_wait() {
     let mut total_wait = tokio::time::Duration::ZERO;
-    for num_retries in 0..10 {
+    for num_retries in 1..10 {
         total_wait += retry_after(num_retries);
     }
     assert!(total_wait < tokio::time::Duration::from_secs(12));

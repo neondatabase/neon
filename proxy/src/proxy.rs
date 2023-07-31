@@ -540,14 +540,9 @@ impl ShouldRetry for compute::ConnectionError {
     }
 }
 
-pub fn retry_after(num_retries: u32) -> time::Duration {
-    match num_retries {
-        0 => time::Duration::ZERO,
-        _ => {
-            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
-            BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries)
-        }
-    }
+fn retry_after(num_retries: u32) -> time::Duration {
+    // 1.5 seems to be an ok growth factor heuristic
+    BASE_RETRY_WAIT_DURATION.mul_f64(1.5_f64.powi(num_retries as i32))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
