@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::Serialize;
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]
