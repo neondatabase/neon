@@ -257,13 +257,6 @@ def prepare_snapshot(
         shutil.rmtree(repo_dir / "pgdatadirs")
     os.mkdir(repo_dir / "endpoints")
 
-    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
-    # them anymore, but old versions did.
-    for tenant in (repo_dir / "tenants").glob("*"):
-        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
-        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
-            shutil.rmtree(wal_redo_dir)
-
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
@@ -275,10 +268,8 @@ def prepare_snapshot(
         pageserver_config["listen_pg_addr"]
     )
 
-    # Older pageserver versions had just one `auth_type` setting. Now there
-    # are separate settings for pg and http ports. We don't use authentication
-    # in compatibility tests so just remove authentication related settings.
-    pageserver_config.pop("auth_type", None)
+    # We don't use authentication in compatibility tests
+    # so just remove authentication related settings.
     pageserver_config.pop("pg_auth_type", None)
     pageserver_config.pop("http_auth_type", None)
 
