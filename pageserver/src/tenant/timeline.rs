@@ -1600,7 +1600,7 @@ impl Timeline {
             if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
-                    warn!(
+                    info!(
                         "found future image layer {} on timeline {} disk_consistent_lsn is {}",
                         imgfilename, self.timeline_id, disk_consistent_lsn
                     );
@@ -1632,7 +1632,7 @@ impl Timeline {
                 // is 102, then it might not have been fully flushed to disk
                 // before crash.
                 if deltafilename.lsn_range.end > disk_consistent_lsn + 1 {
-                    warn!(
+                    info!(
                         "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
                         deltafilename, self.timeline_id, disk_consistent_lsn
                     );
@@ -1774,7 +1774,7 @@ impl Timeline {
             match remote_layer_name {
                 LayerFileName::Image(imgfilename) => {
                     if imgfilename.lsn > up_to_date_disk_consistent_lsn {
-                        warn!(
+                        info!(
                         "found future image layer {} on timeline {} remote_consistent_lsn is {}",
                         imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
@@ -1799,7 +1799,7 @@ impl Timeline {
                     // is 102, then it might not have been fully flushed to disk
                     // before crash.
                     if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
-                        warn!(
+                        info!(
                             "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
                             deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
                         );
