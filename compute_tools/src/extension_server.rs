@@ -118,12 +118,15 @@ pub async fn get_available_extensions(
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download ext_index.json from: {:?}", &index_path);
 
-    let mut download = better_download(remote_storage, &index_path).await?;
+    // TODO: this download is ~3KB. but it takes like 400ms. why? later
+    // downloads which are much larger take much less time
+    let mut download = remote_storage.download(&index_path).await?;
     let mut ext_idx_buffer = Vec::new();
     download
         .download_stream
         .read_to_end(&mut ext_idx_buffer)
         .await?;
+    info!("ext_index downloaded");
 
     #[derive(Debug, serde::Deserialize)]
     struct Index {
@@ -180,7 +183,7 @@ pub async fn download_extension(
     pgbin: &str,
 ) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
-    let mut download = better_download(remote_storage, ext_path).await?;
+    let mut download = remote_storage.download(ext_path).await?;
     let mut download_buffer = Vec::new();
     download
         .download_stream

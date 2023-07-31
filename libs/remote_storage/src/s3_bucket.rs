@@ -31,8 +31,7 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, GenericRemoteStorage, RemotePath, RemoteStorage, S3Config,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
@@ -131,38 +130,6 @@ struct GetObjectRequest {
     bucket: String,
     key: String,
     range: Option<String>,
-}
-
-use crate::GenericRemoteStorage::AwsS3;
-// the regular download function adds a "/" to the start of file names in the
-// case of prefix="None", which breaks everything. Thus, the following function is necessary
-pub async fn better_download(
-    bucket: &GenericRemoteStorage,
-    from: &RemotePath,
-) -> Result<Download, DownloadError> {
-    if let AwsS3(bucket) = bucket {
-        // this is more expected behavior.
-        // prefix="" should result in a trailing slash
-        // wheras prefix=None should **NOT** result in a trailing slash
-        let query_key = match &bucket.prefix_in_bucket {
-            Some(_) => bucket.relative_path_to_s3_object(from),
-            None => from
-                .get_path()
-                .to_str()
-                .expect("bad object name")
-                .to_string(),
-        };
-
-        bucket
-            .download_object(GetObjectRequest {
-                bucket: bucket.bucket_name.clone(),
-                key: query_key,
-                range: None,
-            })
-            .await
-    } else {
-        panic!("this isn't supposed to happen");
-    }
 }
 
 impl S3Bucket {
