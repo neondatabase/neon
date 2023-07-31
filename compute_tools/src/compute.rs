@@ -898,6 +898,12 @@ LIMIT 100",
                 }
 
                 {
+                    // TODO:
+                    // started_to_download_extensions maybe should store archive paths rather than extension names...
+                    // because right now if you try to download the same archive multiple times
+                    // you will get the same archive downloaded multiple times
+                    // but, this is not such an easy fix.
+                    // because now requests should maybe pause and wait if someone else started making the download
                     let mut started_to_download_extensions = self
                         .started_to_download_extensions
                         .lock()
