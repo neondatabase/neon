@@ -76,7 +76,10 @@ pub struct ComputeMetrics {
     pub start_postgres_ms: u64,
     pub config_ms: u64,
     pub total_startup_ms: u64,
-    pub load_libraries_ms: u64,
+    pub load_ext_ms: u64,
+    pub num_ext_downloaded: u64,
+    pub largest_ext_size: u64, // these are measured in bytes
+    pub total_ext_download_size: u64,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.

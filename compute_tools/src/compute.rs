@@ -66,6 +66,14 @@ pub struct ComputeNode {
     pub build_tag: String,
 }
 
+// store some metrics about download size that might impact startup time
+#[derive(Clone, Debug)]
+pub struct RemoteExtensionMetrics {
+    num_ext_downloaded: u64,
+    largest_ext_size: u64,
+    total_ext_download_size: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
@@ -737,7 +745,7 @@ impl ComputeNode {
         // remote shared_preload_libraries before postgres start (if any)
         {
             let library_load_start_time = Utc::now();
-            self.prepare_preload_libraries(&compute_state)?;
+            let remote_ext_metrics = self.prepare_preload_libraries(&compute_state)?;
 
             let library_load_time = Utc::now()
                 .signed_duration_since(library_load_start_time)
@@ -745,11 +753,15 @@ impl ComputeNode {
                 .unwrap()
                 .as_millis() as u64;
             let mut state = self.state.lock().unwrap();
-            state.metrics.load_libraries_ms = library_load_time;
+            state.metrics.load_ext_ms = library_load_time;
+            state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
+            state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
+            state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
             info!(
                 "Loading shared_preload_libraries took {:?}ms",
                 library_load_time
             );
+            info!("{:?}", remote_ext_metrics);
         }
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
@@ -927,7 +939,8 @@ LIMIT 100",
         Ok(())
     }
 
-    pub async fn download_extension(&self, ext_name: &str, is_library: bool) -> Result<()> {
+    // download an archive, unzip and place files in correct locations
+    pub async fn download_extension(&self, ext_name: &str, is_library: bool) -> Result<u64> {
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
@@ -957,7 +970,7 @@ LIMIT 100",
                             "extension {:?} already exists, skipping download",
                             &ext_name
                         );
-                        return Ok(());
+                        return Ok(0);
                     } else {
                         started_to_download_extensions.insert(real_ext_name.clone());
                     }
@@ -977,9 +990,16 @@ LIMIT 100",
     }
 
     #[tokio::main]
-    pub async fn prepare_preload_libraries(&self, compute_state: &ComputeState) -> Result<()> {
+    pub async fn prepare_preload_libraries(
+        &self,
+        compute_state: &ComputeState,
+    ) -> Result<RemoteExtensionMetrics> {
         if self.ext_remote_storage.is_none() {
-            return Ok(());
+            return Ok(RemoteExtensionMetrics {
+                num_ext_downloaded: 0,
+                largest_ext_size: 0,
+                total_ext_download_size: 0,
+            });
         }
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
@@ -1023,9 +1043,19 @@ LIMIT 100",
             download_tasks.push(self.download_extension(library, true));
         }
         let results = join_all(download_tasks).await;
+
+        let mut remote_ext_metrics = RemoteExtensionMetrics {
+            num_ext_downloaded: 0,
+            largest_ext_size: 0,
+            total_ext_download_size: 0,
+        };
         for result in results {
-            result?; // propogate any errors
+            let download_size = result?;
+            remote_ext_metrics.num_ext_downloaded += 1;
+            remote_ext_metrics.largest_ext_size =
+                std::cmp::max(remote_ext_metrics.largest_ext_size, download_size);
+            remote_ext_metrics.total_ext_download_size += download_size;
         }
-        Ok(())
+        Ok(remote_ext_metrics)
     }
 }
