@@ -347,11 +347,6 @@ async fn connect_to_compute_once(
         .await
 }
 
-enum ConnectionState<E> {
-    Cached(console::CachedNodeInfo),
-    Invalid(compute::ConnCfg, E),
-}
-
 #[async_trait]
 pub trait ConnectMechanism {
     type Connection;
@@ -407,70 +402,67 @@ where
 
     mechanism.update_connect_config(&mut node_info.config);
 
-    let mut num_retries = 0;
-    let mut state = ConnectionState::<M::ConnectError>::Cached(node_info);
+    // try once
+    let (config, err) = match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
+        Ok(res) => return Ok(res),
+        Err(e) => {
+            error!(error = ?e, "could not connect to compute node");
+            (invalidate_cache(node_info), e)
+        }
+    };
 
-    loop {
-        match state {
-            ConnectionState::Invalid(config, err) => {
-                info!("compute node's state has likely changed; requesting a wake-up");
+    let mut num_retries = 1;
 
-                let wake_res = match creds {
-                    auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
-                    auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
-                    // nothing to do?
-                    auth::BackendType::Link(_) => return Err(err.into()),
-                    // test backend
-                    auth::BackendType::Test(x) => x.wake_compute(),
-                };
+    // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
+    info!("compute node's state has likely changed; requesting a wake-up");
+    let node_info = loop {
+        let wake_res = match creds {
+            auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
+            // nothing to do?
+            auth::BackendType::Link(_) => return Err(err.into()),
+            // test backend
+            auth::BackendType::Test(x) => x.wake_compute(),
+        };
 
-                match handle_try_wake(wake_res) {
-                    // there was an error communicating with the control plane
-                    Err(e) => return Err(e.into()),
-                    // failed to wake up but we can continue to retry
-                    Ok(ControlFlow::Continue(_)) => {
-                        state = ConnectionState::Invalid(config, err);
-                        let wait_duration = retry_after(num_retries);
-                        num_retries += 1;
-
-                        info!(num_retries, "retrying wake compute");
-                        time::sleep(wait_duration).await;
-                        continue;
-                    }
-                    // successfully woke up a compute node and can break the wakeup loop
-                    Ok(ControlFlow::Break(mut node_info)) => {
-                        node_info.config.reuse_password(&config);
-                        mechanism.update_connect_config(&mut node_info.config);
-                        state = ConnectionState::Cached(node_info)
-                    }
-                }
+        match handle_try_wake(wake_res, num_retries)? {
+            // failed to wake up but we can continue to retry
+            ControlFlow::Continue(_) => {}
+            // successfully woke up a compute node and can break the wakeup loop
+            ControlFlow::Break(mut node_info) => {
+                node_info.config.reuse_password(&config);
+                mechanism.update_connect_config(&mut node_info.config);
+                break node_info;
             }
-            ConnectionState::Cached(node_info) => {
-                match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
-                    Ok(res) => return Ok(res),
-                    Err(e) => {
-                        error!(error = ?e, "could not connect to compute node");
-                        if !e.should_retry(num_retries) {
-                            return Err(e.into());
-                        }
+        }
 
-                        // after the first connect failure,
-                        // we should invalidate the cache and wake up a new compute node
-                        if num_retries == 0 {
-                            state = ConnectionState::Invalid(invalidate_cache(node_info), e);
-                        } else {
-                            state = ConnectionState::Cached(node_info);
-                        }
+        let wait_duration = retry_after(num_retries);
+        num_retries += 1;
 
-                        let wait_duration = retry_after(num_retries);
-                        num_retries += 1;
+        time::sleep(wait_duration).await;
+        info!(num_retries, "retrying wake compute");
+    };
 
-                        info!(num_retries, "retrying wake compute");
-                        time::sleep(wait_duration).await;
-                    }
+    // now that we have a new node, try connect to it repeatedly.
+    // this can error for a few reasons, for instance:
+    // * DNS connection settings haven't quite propagated yet
+    info!("wake_compute success. attempting to connect");
+    loop {
+        match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
+            Ok(res) => return Ok(res),
+            Err(e) => {
+                error!(error = ?e, "could not connect to compute node");
+                if !e.should_retry(num_retries) {
+                    return Err(e.into());
                 }
             }
         }
+
+        let wait_duration = retry_after(num_retries);
+        num_retries += 1;
+
+        time::sleep(wait_duration).await;
+        info!(num_retries, "retrying connect_once");
     }
 }
 
@@ -478,12 +470,15 @@ where
 /// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
 /// * Returns Ok(Break(node)) if the wakeup succeeded
 /// * Returns Err(e) if there was an error
-fn handle_try_wake(
+pub fn handle_try_wake(
     result: Result<console::CachedNodeInfo, WakeComputeError>,
+    num_retries: u32,
 ) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     match result {
         Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.could_retry() => Ok(ControlFlow::Continue(err)),
+            WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {
+                Ok(ControlFlow::Continue(err))
+            }
             _ => Err(err),
         },
         // Ready to try again.
@@ -491,22 +486,10 @@ fn handle_try_wake(
     }
 }
 
-/// Attempts to wake up the compute node.
-pub async fn try_wake(
-    api: &impl console::Api,
-    extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::ClientCredentials<'_>,
-) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    info!("compute node's state has likely changed; requesting a wake-up");
-    handle_try_wake(api.wake_compute(extra, creds).await)
-}
-
 pub trait ShouldRetry {
     fn could_retry(&self) -> bool;
     fn should_retry(&self, num_retries: u32) -> bool {
         match self {
-            // retry all errors at least once
-            _ if num_retries == 0 => true,
             _ if num_retries >= NUM_RETRIES_CONNECT => false,
             err => err.could_retry(),
         }
@@ -558,14 +541,9 @@ impl ShouldRetry for compute::ConnectionError {
     }
 }
 
-pub fn retry_after(num_retries: u32) -> time::Duration {
-    match num_retries {
-        0 => time::Duration::ZERO,
-        _ => {
-            // 3/2 = 1.5 which seems to be an ok growth factor heuristic
-            BASE_RETRY_WAIT_DURATION * 3_u32.pow(num_retries) / 2_u32.pow(num_retries)
-        }
-    }
+fn retry_after(num_retries: u32) -> time::Duration {
+    // 1.5 seems to be an ok growth factor heuristic
+    BASE_RETRY_WAIT_DURATION.mul_f64(1.5_f64.powi(num_retries as i32))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
