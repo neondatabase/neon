@@ -178,7 +178,7 @@ pub async fn download_extension(
     ext_path: &RemotePath,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
-) -> Result<()> {
+) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
     let mut download = better_download(remote_storage, ext_path).await?;
     let mut download_buffer = Vec::new();
@@ -186,6 +186,8 @@ pub async fn download_extension(
         .download_stream
         .read_to_end(&mut download_buffer)
         .await?;
+    let download_size = download_buffer.len() as u64;
+    warn!("TODO: decompressing into memory can be avoided");
     let mut decoder = Decoder::new(download_buffer.as_slice())?;
     let mut decompress_buffer = Vec::new();
     decoder.read_to_end(&mut decompress_buffer)?;
@@ -226,7 +228,7 @@ pub async fn download_extension(
         }
     }
     info!("done moving extension {ext_name}");
-    Ok(())
+    Ok(download_size)
 }
 
 // This function initializes the necessary structs to use remote storage (should be fairly cheap)

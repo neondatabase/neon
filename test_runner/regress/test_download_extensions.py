@@ -106,6 +106,7 @@ def test_remote_extensions(
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
         # config_lines=["log_min_messages=debug3"],
+        config_lines=["shared_preload_libraries='kq_imcx,neon'"],
     )
     try:
         with closing(endpoint.connect()) as conn:
