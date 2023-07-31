@@ -24,7 +24,6 @@ use tokio::io;
 use toml_edit::Item;
 use tracing::info;
 
-pub use self::s3_bucket::better_download;
 pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
