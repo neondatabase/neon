@@ -45,11 +45,6 @@ impl PageserverConsumptionMetricsKey {
     const fn incremental_values(self) -> IncrementalValueFactory {
         IncrementalValueFactory(self)
     }
-
-    fn is_written_size_delta(&self) -> bool {
-        // FIXME: maybe put these in an enum?
-        self.metric == "written_size"
-    }
 }
 
 /// Helper type which each individual metric kind can return to produce only absolute values.
@@ -384,8 +379,10 @@ pub async fn collect_metrics_iteration(
     // Filter metrics, unless we want to send all metrics, including cached ones.
     // See: https://github.com/neondatabase/neon/issues/3485
     if !send_cached {
-        current_metrics.retain(|(curr_key, (_, curr_val))| {
-            if curr_key.is_written_size_delta() {
+        current_metrics.retain(|(curr_key, (kind, curr_val))| {
+            if kind.is_incremental() {
+                // incremental values (currently only written_size_delta) should not get any cache
+                // deduplication because they will be used by upstream for "is still alive."
                 true
             } else {
                 match cached_metrics.get(curr_key) {

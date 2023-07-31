@@ -25,6 +25,10 @@ impl EventType {
             _ => None,
         }
     }
+
+    pub fn is_incremental(&self) -> bool {
+        matches!(self, EventType::Incremental { .. })
+    }
 }
 
 #[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
