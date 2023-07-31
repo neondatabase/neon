@@ -270,13 +270,18 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
             data=json.dumps(list(map(lambda x: {"query": x[0], "params": x[1] or []}, queries))),
-            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Batch-Isolation-Level": "Serializable",
+                "Neon-Batch-Read-Only": "true",
+            },
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
         assert response.status_code == 200
-        return response.json()["results"]
+        return response.json()["results"], response.headers
 
-    result = qq(
+    result, headers = qq(
         [
             ("select 42 as answer", None),
             ("select $1 as answer", [42]),
@@ -290,6 +295,9 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
             ("drop table t", None),
         ]
     )
+
+    assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
+    assert headers["Neon-Batch-Read-Only"] == "true"
 
     assert result[0]["rows"] == [{"answer": 42}]
     assert result[1]["rows"] == [{"answer": "42"}]

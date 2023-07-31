@@ -255,9 +255,10 @@ pub async fn handle(
             }
             transaction.commit().await?;
             let mut headers = HashMap::default();
-            if let Some(txn_read_only_raw) = txn_read_only_raw {
-                headers.insert(TXN_READ_ONLY.clone(), txn_read_only_raw);
-            }
+            headers.insert(
+                TXN_READ_ONLY.clone(),
+                HeaderValue::try_from(txn_read_only.to_string())?,
+            );
             if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
                 headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
             }
