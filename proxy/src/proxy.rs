@@ -424,11 +424,9 @@ where
                     auth::BackendType::Test(x) => x.wake_compute(),
                 };
 
-                match handle_try_wake(wake_res) {
-                    // there was an error communicating with the control plane
-                    Err(e) => return Err(e.into()),
+                match handle_try_wake(wake_res, num_retries)? {
                     // failed to wake up but we can continue to retry
-                    Ok(ControlFlow::Continue(_)) => {
+                    ControlFlow::Continue(_) => {
                         state = ConnectionState::Invalid(config, err);
                         let wait_duration = retry_after(num_retries);
                         num_retries += 1;
@@ -438,7 +436,7 @@ where
                         continue;
                     }
                     // successfully woke up a compute node and can break the wakeup loop
-                    Ok(ControlFlow::Break(mut node_info)) => {
+                    ControlFlow::Break(mut node_info) => {
                         node_info.config.reuse_password(&config);
                         mechanism.update_connect_config(&mut node_info.config);
                         state = ConnectionState::Cached(node_info)
@@ -478,27 +476,20 @@ where
 /// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
 /// * Returns Ok(Break(node)) if the wakeup succeeded
 /// * Returns Err(e) if there was an error
-fn handle_try_wake(
+pub fn handle_try_wake(
     result: Result<console::CachedNodeInfo, WakeComputeError>,
+    num_retries: u32,
 ) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     match result {
         Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.could_retry() => Ok(ControlFlow::Continue(err)),
+            WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {
+                Ok(ControlFlow::Continue(err))
+            }
             _ => Err(err),
         },
         // Ready to try again.
         Ok(new) => Ok(ControlFlow::Break(new)),
     }
-}
-
-/// Attempts to wake up the compute node.
-pub async fn try_wake(
-    api: &impl console::Api,
-    extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::ClientCredentials<'_>,
-) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    info!("compute node's state has likely changed; requesting a wake-up");
-    handle_try_wake(api.wake_compute(extra, creds).await)
 }
 
 pub trait ShouldRetry {

@@ -5,7 +5,7 @@ use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
-    proxy::{try_wake, NUM_RETRIES_CONNECT},
+    proxy::handle_try_wake,
     sasl, scram,
     stream::PqStream,
 };
@@ -53,11 +53,11 @@ pub(super) async fn authenticate(
 
     let mut num_retries = 0;
     let mut node = loop {
-        num_retries += 1;
-        match try_wake(api, extra, creds).await? {
+        info!("compute node's state has likely changed; requesting a wake-up");
+        let wake_res = api.wake_compute(extra, creds).await;
+        match handle_try_wake(wake_res, num_retries)? {
+            ControlFlow::Continue(_) => num_retries += 1,
             ControlFlow::Break(n) => break n,
-            ControlFlow::Continue(_) if num_retries < NUM_RETRIES_CONNECT => continue,
-            ControlFlow::Continue(e) => return Err(e.into()),
         }
     };
     if let Some(keys) = scram_keys {
