@@ -2653,11 +2653,6 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    #[cfg(test)]
-    pub(crate) fn advance_to_lsn_in_test(&self, new_lsn: Lsn) {
-        self.finish_write(new_lsn);
-    }
-
     async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
