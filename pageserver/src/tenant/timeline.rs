@@ -294,6 +294,10 @@ pub struct Timeline {
     /// Completion shared between all timelines loaded during startup; used to delay heavier
     /// background tasks until some logical sizes have been calculated.
     initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
+
+    /// Load or creation time information about the disk_consistent_lsn and when the loading
+    /// happened. Used for consumption metrics.
+    pub(crate) loaded_at: (Lsn, SystemTime),
 }
 
 pub struct WalReceiverInfo {
@@ -1403,6 +1407,8 @@ impl Timeline {
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
+
+                loaded_at: (disk_consistent_lsn, SystemTime::now()),
 
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::Serialize;
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]
@@ -15,6 +15,32 @@ pub enum EventType {
         start_time: DateTime<Utc>,
         stop_time: DateTime<Utc>,
     },
+}
+
+impl EventType {
+    pub fn absolute_time(&self) -> Option<&DateTime<Utc>> {
+        use EventType::*;
+        match self {
+            Absolute { time } => Some(time),
+            _ => None,
+        }
+    }
+
+    pub fn incremental_timerange(&self) -> Option<std::ops::Range<&DateTime<Utc>>> {
+        // these can most likely be thought of as Range or RangeFull
+        use EventType::*;
+        match self {
+            Incremental {
+                start_time,
+                stop_time,
+            } => Some(start_time..stop_time),
+            _ => None,
+        }
+    }
+
+    pub fn is_incremental(&self) -> bool {
+        matches!(self, EventType::Incremental { .. })
+    }
 }
 
 #[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
