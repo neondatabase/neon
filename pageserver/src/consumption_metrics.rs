@@ -285,19 +285,25 @@ pub async fn collect_metrics_iteration(
 
                 // by default, use the last sent written_size_delta_bytes as the basis for
                 // calculating the delta. if we don't yet have one, use the load time value.
-                let prev = cached_metrics.get(&key).map(|(prev_at, prev)| {
-                    let prev_at = prev_at
-                        .absolute_time()
-                        .expect("never create EventType::Incremental for written_size");
+                let prev = cached_metrics
+                    .get(&key)
+                    .map(|(prev_at, prev)| {
+                        let prev_at = prev_at
+                            .absolute_time()
+                            .expect("never create EventType::Incremental for written_size");
 
-                    (*prev_at, *prev)
-                });
+                        (*prev_at, *prev)
+                    })
+                    .unwrap_or_else(|| {
+                        // if we don't have a previous point of comparison, compare to the load time
+                        // lsn.
+                        let (disk_consistent_lsn, loaded_at) = &timeline.loaded_at;
+                        (DateTime::from(*loaded_at), disk_consistent_lsn.0)
+                    });
 
                 // written_size_delta_bytes
                 current_metrics.extend(
-                    if let Some((prev_at, delta)) = prev.and_then(|(at, abs)| {
-                        written_size_now.1.checked_sub(abs).map(|delta| (at, delta))
-                    }) {
+                    if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
                         let up_to = written_size_now
                             .0
                             .absolute_time()
@@ -306,7 +312,7 @@ pub async fn collect_metrics_iteration(
                             tenant_id,
                             timeline.timeline_id,
                         )
-                        .from_previous_up_to(prev_at, *up_to, delta);
+                        .from_previous_up_to(prev.0, *up_to, delta);
                         Some(key_value)
                     } else {
                         None
