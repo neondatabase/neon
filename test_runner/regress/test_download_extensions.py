@@ -253,12 +253,62 @@ def test_extension_download_after_restart(
     cleanup(pg_version)
 
 
-# TODO later: figure out what was going wrong with this:
-# cur.execute("CREATE EXTENSION address_standardizer;")
-# cur.execute("CREATE EXTENSION address_standardizer_data_us;")
-# # execute query to ensure that it works
-# cur.execute(
-#     "SELECT house_num, name, suftype, city, country, state, unit \
-#             FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-#             'One Rust Place, Boston, MA 02109');"
-# )
+# here we test a complex extension
+def test_multiple_extensions_one_archive(
+    neon_env_builder: NeonEnvBuilder,
+    pg_version: PgVersion,
+):
+    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
+        return None
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.REAL_S3,
+        test_name="test_multiple_extensions_one_archive",
+        enable_remote_extensions=True,
+    )
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+    tenant_id, _ = env.neon_cli.create_tenant()
+    env.neon_cli.create_timeline("test_multiple_extensions_one_archive", tenant_id=tenant_id)
+
+    assert env.ext_remote_storage is not None  # satisfy mypy
+    assert env.remote_storage_client is not None  # satisfy mypy
+
+    endpoint = env.endpoints.create_start(
+        "test_multiple_extensions_one_archive",
+        tenant_id=tenant_id,
+        remote_ext_config=env.ext_remote_storage.to_string(),
+    )
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            # TODO later: figure out what was going wrong with this:
+            cur.execute("CREATE EXTENSION address_standardizer;")
+            cur.execute("CREATE EXTENSION address_standardizer_data_us;")
+            # execute query to ensure that it works
+            cur.execute(
+                "SELECT house_num, name, suftype, city, country, state, unit \
+                        FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
+                        'One Rust Place, Boston, MA 02109');"
+            )
+            log.info(cur.fetchall())
+
+    # remove postgis files locally
+    cleanup(pg_version)
+
+
+# TODO: this complex example reveals a possible "inneficiency":
+# both calls will download the extension
+
+# proposed solution:
+# A: don't worry about it
+# B:
+# 1st request sets started_download = true
+# this request sets download_completed = true if it succeeds
+# subsequent requests hang and repeatedly check download_completed until it gets set or until they timeout
+# 3 seconds afterthe started_download = true was set some thread checks if download_completed was set. if not, then it sets started_download back to false
+
+
+# TODO later: investigate download timeouts
+# Test extension downloading with mutliple connections to an endpoint.
+# this test only supports real s3 becuase postgis is too large an extension to
+# put in our github repo
