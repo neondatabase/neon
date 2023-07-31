@@ -274,7 +274,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
                 "Content-Type": "application/sql",
                 "Neon-Connection-String": connstr,
                 "Neon-Batch-Isolation-Level": "Serializable",
-                "Neon-Batch-Read-Only": "true" if read_only else None,
+                "Neon-Batch-Read-Only": "true" if read_only else "false",
             },
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
