@@ -605,7 +605,141 @@ mod tests {
     use std::{collections::HashMap, convert::Infallible};
 
     use pageserver_api::models::TenantState;
-    use utils::{id::TimelineId, lsn::Lsn};
+    use std::time::SystemTime;
+    use utils::{
+        id::{TenantId, TimelineId},
+        lsn::Lsn,
+    };
+
+    use crate::consumption_metrics::PageserverConsumptionMetricsKey;
+
+    use super::TimelineSnapshot;
+    use chrono::{DateTime, Utc};
+
+    #[test]
+    fn startup_collected_timeline_metrics_before_advancing() {
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+
+        let mut metrics = Vec::new();
+        let cache = HashMap::new();
+
+        let initdb_lsn = Lsn(0x10000);
+        let disk_consistent_lsn = Lsn(initdb_lsn.0 * 2);
+
+        let snap = TimelineSnapshot {
+            loaded_at: (disk_consistent_lsn, SystemTime::now()),
+            last_record_lsn: disk_consistent_lsn,
+            current_exact_logical_size: Some(0x42000),
+        };
+
+        let now = DateTime::<Utc>::from(SystemTime::now());
+
+        snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+        assert_eq!(
+            metrics,
+            &[
+                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
+                    .from_previous_up_to(snap.loaded_at.1.into(), now, 0),
+                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
+                    .at(now, disk_consistent_lsn.0),
+                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
+                    .at(now, 0x42000)
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_collected_timeline_metrics_second_round() {
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+
+        let now = SystemTime::now();
+        let before = now - std::time::Duration::from_secs(5);
+        let init = now - std::time::Duration::from_secs(15);
+
+        let now = DateTime::<Utc>::from(now);
+        let before = DateTime::<Utc>::from(before);
+
+        let initdb_lsn = Lsn(0x10000);
+        let disk_consistent_lsn = Lsn(initdb_lsn.0 * 2);
+
+        let mut metrics = Vec::new();
+        let cache =
+            HashMap::from([
+                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
+                    .at(before, disk_consistent_lsn.0),
+            ]);
+
+        let snap = TimelineSnapshot {
+            loaded_at: (disk_consistent_lsn, init),
+            last_record_lsn: disk_consistent_lsn,
+            current_exact_logical_size: Some(0x42000),
+        };
+
+        snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+        assert_eq!(
+            metrics,
+            &[
+                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
+                    .from_previous_up_to(before, now, 0),
+                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
+                    .at(now, disk_consistent_lsn.0),
+                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
+                    .at(now, 0x42000)
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+
+        let now = SystemTime::now();
+        let just_before = now - std::time::Duration::from_secs(1);
+        let before = now - std::time::Duration::from_secs(5);
+        let init = now - std::time::Duration::from_secs(15);
+
+        let now = DateTime::<Utc>::from(now);
+        let just_before = DateTime::<Utc>::from(just_before);
+        let before = DateTime::<Utc>::from(before);
+
+        let initdb_lsn = Lsn(0x10000);
+        let disk_consistent_lsn = Lsn(initdb_lsn.0 * 2);
+
+        let mut metrics = Vec::new();
+        let cache = HashMap::from([
+            // at t=before was the last time the last_record_lsn changed
+            PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
+                .at(before, disk_consistent_lsn.0),
+            // end time of this event is used for the next ones
+            PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
+                .from_previous_up_to(before, just_before, 0),
+        ]);
+
+        let snap = TimelineSnapshot {
+            loaded_at: (disk_consistent_lsn, init),
+            last_record_lsn: disk_consistent_lsn,
+            current_exact_logical_size: Some(0x42000),
+        };
+
+        snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+        assert_eq!(
+            metrics,
+            &[
+                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
+                    .from_previous_up_to(just_before, now, 0),
+                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
+                    .at(now, disk_consistent_lsn.0),
+                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
+                    .at(now, 0x42000)
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn written_size_bytes_delta_while_last_record_lsn_advances() {
