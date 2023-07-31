@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
+use hashbrown::HashMap;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
@@ -12,6 +14,7 @@ use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
+use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
 use url::Url;
 
@@ -37,6 +40,8 @@ const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
@@ -170,7 +175,7 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
     //
@@ -184,6 +189,23 @@ pub async fn handle(
 
     // Allow connection pooling only if explicitly requested
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+
+    // isolation level and read only
+
+    let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
+    let txn_isolation_level = match txn_isolation_level_raw {
+        Some(ref x) => Some(match x.as_bytes() {
+            b"Serializable" => IsolationLevel::Serializable,
+            b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
+            b"ReadCommitted" => IsolationLevel::ReadCommitted,
+            b"RepeatableRead" => IsolationLevel::RepeatableRead,
+            _ => bail!("invalid isolation level"),
+        }),
+        None => None,
+    };
+
+    let txn_read_only_raw = headers.get(&TXN_READ_ONLY).cloned();
+    let txn_read_only = txn_read_only_raw.as_ref() == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -208,10 +230,19 @@ pub async fn handle(
     // Now execute the query and return the result
     //
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode).await,
+        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+            .await
+            .map(|x| (x, HashMap::default())),
         Payload::Batch(queries) => {
             let mut results = Vec::new();
-            let transaction = client.transaction().await?;
+            let mut builder = client.build_transaction();
+            if let Some(isolation_level) = txn_isolation_level {
+                builder = builder.isolation_level(isolation_level);
+            }
+            if txn_read_only {
+                builder = builder.read_only(true);
+            }
+            let transaction = builder.start().await?;
             for query in queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 match result {
@@ -223,7 +254,15 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            Ok(json!({ "results": results }))
+            let mut headers = HashMap::default();
+            headers.insert(
+                TXN_READ_ONLY.clone(),
+                HeaderValue::try_from(txn_read_only.to_string())?,
+            );
+            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            }
+            Ok((json!({ "results": results }), headers))
         }
     };
 
