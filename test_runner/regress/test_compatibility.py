@@ -257,28 +257,15 @@ def prepare_snapshot(
         shutil.rmtree(repo_dir / "pgdatadirs")
     os.mkdir(repo_dir / "endpoints")
 
-    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
-    # them anymore, but old versions did.
-    for tenant in (repo_dir / "tenants").glob("*"):
-        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
-        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
-            shutil.rmtree(wal_redo_dir)
-
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
     pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
-    pageserver_config["listen_http_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_http_addr"]
-    )
-    pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_pg_addr"]
-    )
+    for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
+        pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])
 
-    # Older pageserver versions had just one `auth_type` setting. Now there
-    # are separate settings for pg and http ports. We don't use authentication
-    # in compatibility tests so just remove authentication related settings.
-    pageserver_config.pop("auth_type", None)
+    # We don't use authentication in compatibility tests
+    # so just remove authentication related settings.
     pageserver_config.pop("pg_auth_type", None)
     pageserver_config.pop("http_auth_type", None)
 
@@ -290,19 +277,16 @@ def prepare_snapshot(
 
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
-
-    broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
-    snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
-
-    snapshot_config["pageserver"]["listen_http_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_http_addr"]
-    )
-    snapshot_config["pageserver"]["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_pg_addr"]
+    for param in ("listen_http_addr", "listen_pg_addr"):
+        snapshot_config["pageserver"][param] = port_distributor.replace_with_new_port(
+            snapshot_config["pageserver"][param]
+        )
+    snapshot_config["broker"]["listen_addr"] = port_distributor.replace_with_new_port(
+        snapshot_config["broker"]["listen_addr"]
     )
     for sk in snapshot_config["safekeepers"]:
-        sk["http_port"] = port_distributor.replace_with_new_port(sk["http_port"])
-        sk["pg_port"] = port_distributor.replace_with_new_port(sk["pg_port"])
+        for param in ("http_port", "pg_port", "pg_tenant_only_port"):
+            sk[param] = port_distributor.replace_with_new_port(sk[param])
 
     if pg_distrib_dir:
         snapshot_config["pg_distrib_dir"] = str(pg_distrib_dir)
