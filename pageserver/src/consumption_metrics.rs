@@ -300,13 +300,13 @@ pub async fn collect_metrics_iteration(
                                 .end
                         });
 
-                // by default, use the last sent written_size_delta_bytes as the basis for
+                // by default, use the last sent written_size as the basis for
                 // calculating the delta. if we don't yet have one, use the load time value.
                 let prev = cached_metrics
                     .get(&key)
                     .map(|(prev_at, prev)| {
                         // use the prev time from our last incremental update, or default to latest
-                        // absolute update
+                        // absolute update on the first round.
                         let prev_at = prev_at
                             .absolute_time()
                             .expect("never create EventType::Incremental for written_size");
