@@ -82,6 +82,10 @@ impl IncrementalValueFactory {
             ),
         )
     }
+
+    fn key(&self) -> &PageserverConsumptionMetricsKey {
+        &self.0
+    }
 }
 
 // the static part of a PageserverConsumptionMetricsKey
@@ -278,15 +282,35 @@ pub async fn collect_metrics_iteration(
                 // last_record_lsn can only go up, right now at least, TODO: #2592 or related
                 // features might change this.
 
+                let written_size_delta_key = PageserverConsumptionMetricsKey::written_size_delta(
+                    tenant_id,
+                    timeline.timeline_id,
+                );
+
+                // use this when available, because in a stream of incremental values, it will be
+                // accurate where as when last_record_lsn stops moving, we will only cache the last
+                // one of those.
+                let last_stop_time =
+                    cached_metrics
+                        .get(written_size_delta_key.key())
+                        .map(|(until, _val)| {
+                            until
+                                .incremental_timerange()
+                                .expect("never create EventType::Absolute for written_size_delta")
+                                .end
+                        });
+
                 // by default, use the last sent written_size_delta_bytes as the basis for
                 // calculating the delta. if we don't yet have one, use the load time value.
                 let prev = cached_metrics
                     .get(&key)
                     .map(|(prev_at, prev)| {
+                        // use the prev time from our last incremental update, or default to latest
+                        // absolute update
                         let prev_at = prev_at
                             .absolute_time()
                             .expect("never create EventType::Incremental for written_size");
-
+                        let prev_at = last_stop_time.unwrap_or(prev_at);
                         (*prev_at, *prev)
                     })
                     .unwrap_or_else(|| {
@@ -303,11 +327,8 @@ pub async fn collect_metrics_iteration(
                             .0
                             .absolute_time()
                             .expect("never create EventType::Incremental for written_size");
-                        let key_value = PageserverConsumptionMetricsKey::written_size_delta(
-                            tenant_id,
-                            timeline.timeline_id,
-                        )
-                        .from_previous_up_to(prev.0, *up_to, delta);
+                        let key_value =
+                            written_size_delta_key.from_previous_up_to(prev.0, *up_to, delta);
                         Some(key_value)
                     } else {
                         None

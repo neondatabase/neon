@@ -26,6 +26,18 @@ impl EventType {
         }
     }
 
+    pub fn incremental_timerange(&self) -> Option<std::ops::Range<&DateTime<Utc>>> {
+        // these can most likely be thought of as Range or RangeFull
+        use EventType::*;
+        match self {
+            Incremental {
+                start_time,
+                stop_time,
+            } => Some(start_time..stop_time),
+            _ => None,
+        }
+    }
+
     pub fn is_incremental(&self) -> bool {
         matches!(self, EventType::Incremental { .. })
     }
