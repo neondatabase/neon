@@ -3,9 +3,10 @@
 //!
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use serde::Serialize;
 
-#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd,
+)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]
@@ -43,7 +44,7 @@ impl EventType {
     }
 }
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(serde::Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Event<Extra> {
     #[serde(flatten)]
     #[serde(rename = "type")]

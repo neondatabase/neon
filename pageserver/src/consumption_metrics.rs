@@ -5,15 +5,16 @@
 //!
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::{mgr, LogicalSizeCalculationCause};
+use crate::tenant::mgr::GetTenantError;
+use crate::tenant::{mgr, LogicalSizeCalculationCause, Tenant};
 use anyhow;
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use pageserver_api::models::TenantState;
 use reqwest::Url;
-use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -21,7 +22,8 @@ use utils::id::{NodeId, TenantId, TimelineId};
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[serde_as]
-#[derive(Serialize, Debug)]
+#[derive(serde::Serialize, Debug)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 struct Ids {
     #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
@@ -206,7 +208,14 @@ pub async fn collect_metrics(
                     prev_iteration_time = std::time::Instant::now();
                 }
 
-                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
+                let tenants = match crate::tenant::mgr::list_tenants().await {
+                    Ok(tenants) => tenants,
+                    Err(e) => { warn!("failed to get tenants: {e:#}"); continue; }
+                };
+
+                let active_only = |tenant_id| crate::tenant::mgr::get_tenant(tenant_id, true);
+
+                collect_metrics_iteration(&tenants, &active_only, &client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
 
                 crate::tenant::tasks::warn_when_period_overrun(
                     tick_at.elapsed(),
@@ -228,36 +237,34 @@ pub async fn collect_metrics(
 ///
 /// TODO
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
-pub async fn collect_metrics_iteration(
+pub async fn collect_metrics_iteration<F, Fut>(
+    tenants: &[(TenantId, TenantState)],
+    get_tenant: F,
     client: &reqwest::Client,
     cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, (EventType, u64)>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
     send_cached: bool,
-) {
+) where
+    F: Fn(TenantId) -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<Tenant>, GetTenantError>>,
+{
     let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, (EventType, u64))> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
     );
 
-    // get list of tenants
-    let tenants = match mgr::list_tenants().await {
-        Ok(tenants) => tenants,
-        Err(err) => {
-            error!("failed to list tenants: {:?}", err);
-            return;
-        }
-    };
-
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
-        if tenant_state != TenantState::Active {
+        if tenant_state != &TenantState::Active {
             continue;
         }
 
-        let tenant = match mgr::get_tenant(tenant_id, true).await {
+        let tenant_id = *tenant_id;
+
+        let tenant = match get_tenant(tenant_id).await {
             Ok(tenant) => tenant,
             Err(err) => {
                 // It is possible that tenant was deleted between
@@ -320,7 +327,7 @@ pub async fn collect_metrics_iteration(
                         (DateTime::from(*loaded_at), disk_consistent_lsn.0)
                     });
 
-                // written_size_delta_bytes
+                // written_size_bytes_delta
                 current_metrics.extend(
                     if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
                         let up_to = written_size_now
@@ -533,6 +540,218 @@ pub async fn calculate_synthetic_size_worker(
                     "consumption_metrics_synthetic_size_worker",
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, convert::Infallible};
+
+    use pageserver_api::models::TenantState;
+    use utils::{id::TimelineId, lsn::Lsn};
+
+    #[tokio::test]
+    async fn written_size_bytes_delta_while_last_record_lsn_advances() {
+        use consumption_metrics::EventType;
+        use hyper::body::to_bytes;
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Request, Response};
+        use tokio::net::TcpListener;
+        use tokio::sync::mpsc;
+
+        // Just a wrapper around a slice of events
+        // to deserialize it as `{"events" : [ ] }
+        #[derive(serde::Deserialize)]
+        struct EventChunkOwned {
+            pub events: Vec<EventOwned>,
+        }
+
+        #[allow(dead_code)]
+        #[derive(serde::Deserialize, Debug)]
+        struct EventOwned {
+            #[serde(flatten)]
+            #[serde(rename = "type")]
+            kind: EventType,
+            metric: String,
+            idempotency_key: String,
+            value: u64,
+            #[serde(flatten)]
+            extra: super::Ids,
+        }
+
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let make_svc = make_service_fn(move |_| {
+            let tx = tx.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+                    let tx = tx.clone();
+                    async move {
+                        let body = to_bytes(req.into_body()).await.unwrap();
+                        let events: EventChunkOwned = serde_json::from_slice(&body).unwrap();
+                        tx.send(events).await.map_err(|_| ()).unwrap();
+                        Ok::<_, Infallible>(Response::new(Body::empty()))
+                    }
+                }))
+            }
+        });
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            hyper::Server::from_tcp(tcp.into_std().unwrap())
+                .unwrap()
+                .serve(make_svc)
+                .await
+        });
+
+        let harness = crate::tenant::harness::TenantHarness::create(
+            "written_size_bytes_delta_while_last_record_lsn_advances",
+        )
+        .unwrap();
+
+        let (tenant, ctx) = harness.load().await;
+        let timeline_id = TimelineId::generate();
+
+        let timeline = tenant
+            // initdb lsn is not updated to any place where one would expect to find it
+            // initdb lsn cannot be zero or unaligned however
+            .create_test_timeline(timeline_id, Lsn(8), 14, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(tenant.list_timelines().len(), 1);
+
+        assert_eq!(
+            Lsn(8),
+            timeline.get_disk_consistent_lsn(),
+            "set by create_test_timeline"
+        );
+        assert_eq!(
+            Lsn(0),
+            timeline.loaded_at.0,
+            "sadly not set by create_test_timeline, or put in metadata"
+        );
+
+        timeline.advance_to_lsn_in_test(Lsn(8));
+        assert_eq!(Lsn(8), timeline.get_last_record_lsn());
+
+        let client = reqwest::ClientBuilder::new().build().unwrap();
+        let mut cache = HashMap::new();
+
+        let mut url = reqwest::Url::parse("http://127.0.0.1/does_not_matter").unwrap();
+        url.set_port(Some(addr.port())).unwrap();
+
+        let tenants = [(tenant.tenant_id(), TenantState::Active)];
+        let get_tenant = |tenant_id| {
+            assert_eq!(tenant_id, tenant.tenant_id());
+            futures::future::ready(Ok(tenant.clone()))
+        };
+
+        // Helper to avoid typing all this everytime.
+        macro_rules! just_one_iteration {
+            () => {{
+                super::collect_metrics_iteration(
+                    &tenants,
+                    &get_tenant,
+                    &client,
+                    &mut cache,
+                    &url,
+                    utils::id::NodeId(123),
+                    &ctx,
+                    false,
+                )
+                .await;
+            }};
+        }
+
+        just_one_iteration!();
+
+        let last_timerange = {
+            let events = rx.recv().await.unwrap();
+
+            let event = events
+                .events
+                .iter()
+                .find(|e| e.metric == "written_size_bytes_delta")
+                .unwrap();
+
+            assert_eq!(
+                8, event.value,
+                "create_test_timeline creates one starting at zero, we've since advanced"
+            );
+            let timerange_now = event.kind.incremental_timerange().unwrap();
+            assert_eq!(
+                timerange_now.start,
+                &chrono::DateTime::<chrono::Utc>::from(timeline.loaded_at.1)
+            );
+            assert!(timerange_now.start <= timerange_now.end);
+            timerange_now.start.to_owned()..timerange_now.end.to_owned()
+        };
+
+        just_one_iteration!();
+
+        let last_timerange = {
+            let events = rx.recv().await.unwrap();
+
+            let event = events
+                .events
+                .iter()
+                .find(|e| e.metric == "written_size_bytes_delta")
+                .unwrap();
+            assert_eq!(0, event.value);
+            assert_eq!(timeline.tenant_id, event.extra.tenant_id);
+            assert_eq!(Some(timeline.timeline_id), event.extra.timeline_id);
+            let timerange_now = event.kind.incremental_timerange().unwrap();
+            assert_eq!(&last_timerange.end, timerange_now.start);
+            assert!(timerange_now.start <= timerange_now.end);
+            timerange_now.start.to_owned()..timerange_now.end.to_owned()
+        };
+
+        timeline.advance_to_lsn_in_test(Lsn(16));
+
+        just_one_iteration!();
+
+        let last_timerange = {
+            let events = rx.recv().await.unwrap();
+
+            let event = events
+                .events
+                .iter()
+                .find(|e| e.metric == "written_size_bytes_delta")
+                .unwrap();
+            assert_eq!(8, event.value);
+            assert_eq!(timeline.tenant_id, event.extra.tenant_id);
+            assert_eq!(Some(timeline.timeline_id), event.extra.timeline_id);
+            let timerange_now = event.kind.incremental_timerange().unwrap();
+            assert_eq!(&last_timerange.end, timerange_now.start);
+            assert!(timerange_now.start <= timerange_now.end);
+            timerange_now.start.to_owned()..timerange_now.end.to_owned()
+        };
+
+        let mut last_timerange = last_timerange;
+
+        for _ in 0..10 {
+            just_one_iteration!();
+
+            last_timerange = {
+                let events = rx.recv().await.unwrap();
+
+                let event = events
+                    .events
+                    .iter()
+                    .find(|e| e.metric == "written_size_bytes_delta")
+                    .expect("the event should keep appearing even if delta is zero");
+                assert_eq!(0, event.value);
+                assert_eq!(timeline.tenant_id, event.extra.tenant_id);
+                assert_eq!(Some(timeline.timeline_id), event.extra.timeline_id);
+                let timerange_now = event.kind.incremental_timerange().unwrap();
+                assert_eq!(&last_timerange.end, timerange_now.start);
+                assert!(timerange_now.start <= timerange_now.end);
+                timerange_now.start.to_owned()..timerange_now.end.to_owned()
+            };
         }
     }
 }
