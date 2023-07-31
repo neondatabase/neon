@@ -439,13 +439,14 @@ where
         let wait_duration = retry_after(num_retries);
         num_retries += 1;
 
-        info!(num_retries, "retrying wake compute");
         time::sleep(wait_duration).await;
+        info!(num_retries, "retrying wake compute");
     };
 
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:
     // * DNS connection settings haven't quite propagated yet
+    info!("wake_compute success. attempting to connect");
     loop {
         match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
             Ok(res) => return Ok(res),
@@ -460,8 +461,8 @@ where
         let wait_duration = retry_after(num_retries);
         num_retries += 1;
 
-        info!(num_retries, "retrying wake compute");
         time::sleep(wait_duration).await;
+        info!(num_retries, "retrying connect_once");
     }
 }
 
