@@ -198,7 +198,7 @@ fn main() -> Result<()> {
         //      this compute node while it's busy prewarming. It's not too
         //      bad because it's just 100ms and unlikely, but it's an
         //      avoidable problem.
-        compute.prewarm_postgres()?;
+        // compute.prewarm_postgres()?;
 
         let mut state = compute.state.lock().unwrap();
         while state.status != ComputeStatus::ConfigurationPending {
