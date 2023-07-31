@@ -33,7 +33,7 @@
 //!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000"}
 //! ```
 //!
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::panic;
 use std::path::Path;

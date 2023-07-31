@@ -74,7 +74,6 @@ def upload_files(env):
     os.chdir("../../../..")
 
 
-"""
 # Test downloading remote extension.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 def test_remote_extensions(
@@ -253,7 +252,6 @@ def test_extension_download_after_restart(
             log.info(cur.fetchall())
 
     cleanup(pg_version)
-"""
 
 
 # here we test a complex extension
@@ -295,15 +293,3 @@ def test_multiple_extensions_one_archive(
             log.info(cur.fetchall())
 
     cleanup(pg_version)
-
-
-# TODO: this complex example reveals a possible "inneficiency":
-# both calls will download the extension
-# proposed solution:
-# A: don't worry about it
-# B:
-# 1st request sets started_download = true
-# this request sets download_completed = true if it succeeds
-# subsequent requests hang and repeatedly check download_completed until it gets set or until they timeout
-# 3 seconds afterthe started_download = true was set some thread checks if download_completed was set. if not, then it sets started_download back to false
-# TODO later: investigate download timeouts

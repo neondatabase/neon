@@ -942,7 +942,7 @@ LIMIT 100",
                 if download_completed {
                     info!("extension already downloaded, skipping re-download");
                     return Ok(0);
-                } else if start_time_delta < 3 && !first_try {
+                } else if start_time_delta < 3000 && !first_try {
                     info!("download {ext_archive_name} already started, hanging untill completion or timeout");
                     let mut interval =
                         tokio::time::interval(tokio::time::Duration::from_millis(500));
