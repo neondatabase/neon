@@ -17,6 +17,16 @@ pub enum EventType {
     },
 }
 
+impl EventType {
+    pub fn absolute_time(&self) -> Option<&DateTime<Utc>> {
+        use EventType::*;
+        match self {
+            Absolute { time } => Some(time),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Event<Extra> {
     #[serde(flatten)]
