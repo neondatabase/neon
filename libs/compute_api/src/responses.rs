@@ -80,6 +80,7 @@ pub struct ComputeMetrics {
     pub num_ext_downloaded: u64,
     pub largest_ext_size: u64, // these are measured in bytes
     pub total_ext_download_size: u64,
+    pub prep_extensions_ms: u64,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
