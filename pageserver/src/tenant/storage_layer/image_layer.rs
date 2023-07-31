@@ -175,7 +175,7 @@ impl Layer for ImageLayer {
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
         tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
             println!("key: {} offset {}", hex::encode(key), value);
