@@ -312,8 +312,7 @@ async fn collect_metrics_iteration(
                 }
             }
 
-            let timeline_resident_size = timeline.resident_physical_size();
-            tenant_resident_size += timeline_resident_size;
+            tenant_resident_size += timeline.resident_physical_size();
         }
 
         current_metrics
