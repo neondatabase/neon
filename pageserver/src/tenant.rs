@@ -673,20 +673,19 @@ impl Tenant {
         Ok(())
     }
 
-    /// get size of all remote timelines
+    /// Get sum of all remote timelines sizes
     ///
     /// This function relies on the index_part instead of listing the remote storage
-    ///
-    pub async fn get_remote_size(&self) -> anyhow::Result<u64> {
+    pub fn remote_size(&self) -> u64 {
         let mut size = 0;
 
-        for timeline in self.list_timelines().iter() {
+        for timeline in self.list_timelines() {
             if let Some(remote_client) = &timeline.remote_client {
                 size += remote_client.get_remote_physical_size();
             }
         }
 
-        Ok(size)
+        size
     }
 
     #[instrument(skip_all, fields(timeline_id=%timeline_id))]
@@ -2984,7 +2983,7 @@ impl Tenant {
             .set(size);
     }
 
-    pub fn get_cached_synthetic_size(&self) -> u64 {
+    pub fn cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
     }
 }

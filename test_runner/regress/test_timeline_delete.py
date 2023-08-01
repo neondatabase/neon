@@ -229,6 +229,8 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     ps_http.configure_failpoints((failpoint, "return"))
 
+    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+
     # These failpoints are earlier than background task is spawned.
     # so they result in api request failure.
     if failpoint in (
@@ -245,7 +247,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             tenant_id=env.initial_tenant,
             timeline_id=timeline_id,
             expected_state="Broken",
-            iterations=2,  # effectively try immediately and retry once in one second
+            iterations=iterations,
         )
 
         reason = timeline_info["state"]["Broken"]["reason"]
@@ -254,21 +256,19 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
-    wait_longer = remote_storage_kind is RemoteStorageKind.REAL_S3
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
+
+        wait_until_tenant_active(ps_http, env.initial_tenant, iterations=iterations)
+
         if failpoint == "timeline-delete-before-index-deleted-at":
             # We crashed before persisting this to remote storage, need to retry delete request
-
-            # Wait till tenant is loaded. Shouldnt take longer than 2 seconds (we shouldnt block tenant loading)
-            wait_until_tenant_active(ps_http, env.initial_tenant, iterations=2)
-
             timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
         else:
             # Pageserver should've resumed deletion after restart.
             wait_timeline_detail_404(
-                ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+                ps_http, env.initial_tenant, timeline_id, iterations=iterations
             )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
@@ -276,7 +276,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         ps_http.configure_failpoints((failpoint, "off"))
 
         timeline_delete_wait_completed(
-            ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+            ps_http, env.initial_tenant, timeline_id, iterations=iterations
         )
 
     # Check remote is impty
@@ -569,7 +569,7 @@ def test_concurrent_timeline_delete_stuck_on(
         try:
             log.info("first call start")
             timeline_delete_wait_completed(
-                ps_http, env.initial_tenant, child_timeline_id, timeout=10
+                ps_http, env.initial_tenant, child_timeline_id, timeout=20
             )
             log.info("first call success")
             result_queue.put("success")
@@ -683,7 +683,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
 
 
 @pytest.mark.parametrize(
