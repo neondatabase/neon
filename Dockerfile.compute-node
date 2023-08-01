@@ -50,6 +50,8 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control
 
+RUN for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql ; do echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO PUBLIC;' >> $file ; done
+
 #########################################################################################
 #
 # Layer "postgis-build"
