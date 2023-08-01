@@ -300,19 +300,9 @@ async fn collect_metrics_iteration(
             tenant_resident_size += timeline_resident_size;
         }
 
-        match tenant.get_remote_size().await {
-            Ok(tenant_remote_size) => {
-                current_metrics.push(
-                    MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant_remote_size),
-                );
-            }
-            Err(err) => {
-                error!(
-                    "failed to get remote size for tenant {}: {err:?}",
-                    tenant_id
-                );
-            }
-        }
+        current_metrics.push(
+            MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant.get_remote_size()),
+        );
 
         current_metrics
             .push(MetricsKey::resident_size(tenant_id).at(Utc::now(), tenant_resident_size));
