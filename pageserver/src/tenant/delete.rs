@@ -185,10 +185,8 @@ async fn cleanup_remaining_fs_traces(
 /// 7. Cleanup remaining fs traces, tenant dir, config, timelines dir, local delete mark
 /// It is resumable from any step in case a crash/restart occurs.
 /// There are three entrypoints to the process:
-/// 1. [`DeleteTimelineFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTimelineFlow::resume`] is called during restarts when local or remote deletion marks are still there.
-/// 3. [`DeleteTimelineFlow::cleanup_remaining_fs_traces_after_timeline_deletion`] is used when we deleted remote
-/// index but still have local metadata, timeline directory and delete mark.
+/// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
+/// 2. [`DeleteTenantFlow::resume`] is called during restarts when local or remote deletion marks are still there.
 /// Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
