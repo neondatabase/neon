@@ -569,7 +569,7 @@ pub async fn calculate_synthetic_size_worker(
             _ = task_mgr::shutdown_watcher() => {
                 return Ok(());
             },
-        tick_at = ticker.tick() => {
+            tick_at = ticker.tick() => {
 
                 let tenants = match mgr::list_tenants().await {
                     Ok(tenants) => tenants,
