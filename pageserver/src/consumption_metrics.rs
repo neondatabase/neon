@@ -426,6 +426,10 @@ pub async fn collect_metrics_iteration(
     }
 }
 
+/// Internal type to make timeline metric production testable.
+///
+/// As this value type contains all of the information needed from a timeline to produce the
+/// metrics, it can easily be created with different values in test.
 struct TimelineSnapshot {
     loaded_at: (Lsn, SystemTime),
     last_record_lsn: Lsn,
@@ -433,6 +437,9 @@ struct TimelineSnapshot {
 }
 
 impl TimelineSnapshot {
+    /// Collect the metrics from an actual timeline.
+    ///
+    /// Fails currently only when [`Timeline::get_current_logical_size`] fails.
     fn collect(
         t: &Arc<crate::tenant::Timeline>,
         ctx: &RequestContext,
@@ -465,6 +472,7 @@ impl TimelineSnapshot {
         }
     }
 
+    /// Produce the timeline consumption metrics into the `metrics` argument.
     fn to_metrics(
         &self,
         tenant_id: TenantId,
