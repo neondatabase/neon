@@ -200,7 +200,7 @@ impl DeleteTenantFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    // NOTE: static Lazy is only needed for background part.
+    // NOTE: static needed for background part.
     #[instrument(skip_all, fields(%tenant_id))]
     pub(crate) async fn run(
         conf: &'static PageServerConf,

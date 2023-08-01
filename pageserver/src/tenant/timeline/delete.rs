@@ -220,21 +220,13 @@ async fn delete_local_layer_files(
         };
 
         let r = if metadata.is_dir() {
-            // There shouldnt be any directories inside timeline dir as of current layout.
+            warn!(path=%entry.path().display(), "unexpected directory under timeline dir");
             tokio::fs::remove_dir(entry.path()).await
         } else {
             tokio::fs::remove_file(entry.path()).await
         };
 
         if let Err(e) = r {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                warn!(
-                    timeline_dir=?local_timeline_directory,
-                    path=?entry.path().display(),
-                    "got not found err while removing timeline dir, proceeding anyway"
-                );
-                continue;
-            }
             anyhow::bail!(anyhow::anyhow!(
                 "Failed to remove: {}. Error: {e}",
                 entry.path().display()

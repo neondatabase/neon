@@ -848,10 +848,10 @@ impl Tenant {
                     }
                 };
 
-                let background_jobs_can_start =
-                    init_order.as_ref().map(|x| &x.background_jobs_can_start);
-
                 if let Some(deletion) = pending_deletion {
+                    // as we are no longer loading, signal completion by dropping
+                    // the completion while we resume deletion
+                    drop(_completion);
                     match DeleteTenantFlow::resume(
                         deletion,
                         &tenant_clone,
@@ -868,6 +868,9 @@ impl Tenant {
                         Ok(()) => return Ok(()),
                     }
                 }
+
+                let background_jobs_can_start =
+                    init_order.as_ref().map(|x| &x.background_jobs_can_start);
 
                 match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
