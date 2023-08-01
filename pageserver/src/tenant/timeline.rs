@@ -528,7 +528,7 @@ impl Timeline {
         size
     }
 
-    pub fn get_resident_physical_size(&self) -> u64 {
+    pub fn resident_physical_size(&self) -> u64 {
         self.metrics.resident_physical_size_gauge.get()
     }
 

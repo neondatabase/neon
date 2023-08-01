@@ -296,20 +296,19 @@ async fn collect_metrics_iteration(
                 }
             }
 
-            let timeline_resident_size = timeline.get_resident_physical_size();
+            let timeline_resident_size = timeline.resident_physical_size();
             tenant_resident_size += timeline_resident_size;
         }
 
-        current_metrics.push(
-            MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant.get_remote_size()),
-        );
+        current_metrics
+            .push(MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant.remote_size()));
 
         current_metrics
             .push(MetricsKey::resident_size(tenant_id).at(Utc::now(), tenant_resident_size));
 
         // Note that this metric is calculated in a separate bgworker
         // Here we only use cached value, which may lag behind the real latest one
-        let tenant_synthetic_size = tenant.get_cached_synthetic_size();
+        let tenant_synthetic_size = tenant.cached_synthetic_size();
 
         if tenant_synthetic_size != 0 {
             // only send non-zeroes because otherwise these show up as errors in logs
