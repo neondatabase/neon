@@ -440,6 +440,8 @@ impl TimelineSnapshot {
     /// Collect the metrics from an actual timeline.
     ///
     /// Fails currently only when [`Timeline::get_current_logical_size`] fails.
+    ///
+    /// [`Timeline::get_current_logical_size`]: crate::tenant::Timeline::get_current_logical_size
     fn collect(
         t: &Arc<crate::tenant::Timeline>,
         ctx: &RequestContext,
