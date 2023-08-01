@@ -448,7 +448,11 @@ impl TimelineSnapshot {
     ) -> anyhow::Result<Option<Self>> {
         use anyhow::Context;
 
-        if t.is_active() {
+        if !t.is_active() {
+            // no collection for broken or stopping needed, we will still keep the cached values
+            // though at the caller.
+            Ok(None)
+        } else {
             let loaded_at = t.loaded_at;
             let last_record_lsn = t.get_last_record_lsn();
 
@@ -469,8 +473,6 @@ impl TimelineSnapshot {
                 last_record_lsn,
                 current_exact_logical_size,
             }))
-        } else {
-            Ok(None)
         }
     }
 
