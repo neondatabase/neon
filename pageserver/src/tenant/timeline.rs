@@ -294,6 +294,10 @@ pub struct Timeline {
     /// Completion shared between all timelines loaded during startup; used to delay heavier
     /// background tasks until some logical sizes have been calculated.
     initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
+
+    /// Load or creation time information about the disk_consistent_lsn and when the loading
+    /// happened. Used for consumption metrics.
+    pub(crate) loaded_at: (Lsn, SystemTime),
 }
 
 pub struct WalReceiverInfo {
@@ -1404,6 +1408,8 @@ impl Timeline {
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
 
+                loaded_at: (disk_consistent_lsn, SystemTime::now()),
+
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
@@ -1600,7 +1606,7 @@ impl Timeline {
             if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
-                    warn!(
+                    info!(
                         "found future image layer {} on timeline {} disk_consistent_lsn is {}",
                         imgfilename, self.timeline_id, disk_consistent_lsn
                     );
@@ -1632,7 +1638,7 @@ impl Timeline {
                 // is 102, then it might not have been fully flushed to disk
                 // before crash.
                 if deltafilename.lsn_range.end > disk_consistent_lsn + 1 {
-                    warn!(
+                    info!(
                         "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
                         deltafilename, self.timeline_id, disk_consistent_lsn
                     );
@@ -1774,7 +1780,7 @@ impl Timeline {
             match remote_layer_name {
                 LayerFileName::Image(imgfilename) => {
                     if imgfilename.lsn > up_to_date_disk_consistent_lsn {
-                        warn!(
+                        info!(
                         "found future image layer {} on timeline {} remote_consistent_lsn is {}",
                         imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
                     );
@@ -1799,7 +1805,7 @@ impl Timeline {
                     // is 102, then it might not have been fully flushed to disk
                     // before crash.
                     if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
-                        warn!(
+                        info!(
                             "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
                             deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
                         );
@@ -3507,7 +3513,13 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| -> Result<_> {
+                Ok(l.clone()
+                    .downcast_delta_layer()
+                    .expect("delta layer")
+                    .load_keys(ctx)?
+                    .into_iter())
+            }),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 < b.0),
         )? {
             if let Some(prev_key) = prev {
@@ -3543,25 +3555,31 @@ impl Timeline {
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
         let all_values_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.iter(ctx)),
+            deltas_to_compact.iter().map(|l| -> Result<_> {
+                Ok(l.clone()
+                    .downcast_delta_layer()
+                    .expect("delta layer")
+                    .load_val_refs(ctx)?
+                    .into_iter())
+            }),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
-                    if let Ok((a_key, a_lsn, _)) = a {
-                        if let Ok((b_key, b_lsn, _)) = b {
-                            (a_key, a_lsn) < (b_key, b_lsn)
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
+                    let (a_key, a_lsn, _) = a;
+                    let (b_key, b_lsn, _) = b;
+                    (a_key, a_lsn) < (b_key, b_lsn)
                 })
             },
         )?;
 
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| -> Result<_> {
+                Ok(l.clone()
+                    .downcast_delta_layer()
+                    .expect("delta layer")
+                    .load_keys(ctx)?
+                    .into_iter())
+            }),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
@@ -3623,8 +3641,8 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        for x in all_values_iter {
-            let (key, lsn, value) = x?;
+        for (key, lsn, value_ref) in all_values_iter {
+            let value = value_ref.load()?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {

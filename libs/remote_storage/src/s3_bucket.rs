@@ -200,13 +200,17 @@ impl S3Bucket {
         )
     }
 
-    fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
-        let mut full_path = self.prefix_in_bucket.clone().unwrap_or_default();
-        for segment in path.0.iter() {
-            full_path.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-            full_path.push_str(segment.to_str().unwrap_or_default());
+    pub fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
+        assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let path_string = path
+            .get_path()
+            .to_string_lossy()
+            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
+            .to_string();
+        match &self.prefix_in_bucket {
+            Some(prefix) => prefix.clone() + "/" + &path_string,
+            None => path_string,
         }
-        full_path
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
@@ -427,10 +431,12 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        // if prefix is not none then download file `prefix/from`
+        // if prefix is none then download file `from`
         self.download_object(GetObjectRequest {
             bucket: self.bucket_name.clone(),
             key: self.relative_path_to_s3_object(from),
-            ..GetObjectRequest::default()
+            range: None,
         })
         .await
     }
@@ -521,5 +527,65 @@ impl RemoteStorage for S3Bucket {
                 e
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+
+    use crate::{RemotePath, S3Bucket, S3Config};
+
+    #[test]
+    fn relative_path() {
+        let all_paths = vec!["", "some/path", "some/path/"];
+        let all_paths: Vec<RemotePath> = all_paths
+            .iter()
+            .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
+            .collect();
+        let prefixes = [
+            None,
+            Some(""),
+            Some("test/prefix"),
+            Some("test/prefix/"),
+            Some("/test/prefix/"),
+        ];
+        let expected_outputs = vec![
+            vec!["", "some/path", "some/path"],
+            vec!["/", "/some/path", "/some/path"],
+            vec![
+                "test/prefix/",
+                "test/prefix/some/path",
+                "test/prefix/some/path",
+            ],
+            vec![
+                "test/prefix/",
+                "test/prefix/some/path",
+                "test/prefix/some/path",
+            ],
+            vec![
+                "test/prefix/",
+                "test/prefix/some/path",
+                "test/prefix/some/path",
+            ],
+        ];
+
+        for (prefix_idx, prefix) in prefixes.iter().enumerate() {
+            let config = S3Config {
+                bucket_name: "bucket".to_owned(),
+                bucket_region: "region".to_owned(),
+                prefix_in_bucket: prefix.map(str::to_string),
+                endpoint: None,
+                concurrency_limit: NonZeroUsize::new(100).unwrap(),
+                max_keys_per_list_response: Some(5),
+            };
+            let storage = S3Bucket::new(&config).expect("remote storage init");
+            for (test_path_idx, test_path) in all_paths.iter().enumerate() {
+                let result = storage.relative_path_to_s3_object(test_path);
+                let expected = expected_outputs[prefix_idx][test_path_idx];
+                assert_eq!(result, expected);
+            }
+        }
     }
 }

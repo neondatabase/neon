@@ -151,7 +151,7 @@ impl Layer for InMemoryLayer {
             return Ok(());
         }
 
-        let mut cursor = inner.file.block_cursor();
+        let cursor = inner.file.block_cursor();
         let mut buf = Vec::new();
         for (key, vec_map) in inner.index.iter() {
             for (lsn, pos) in vec_map.as_slice() {
@@ -196,7 +196,7 @@ impl Layer for InMemoryLayer {
 
         let inner = self.inner.read().unwrap();
 
-        let mut reader = inner.file.block_cursor();
+        let reader = inner.file.block_cursor();
 
         // Scan the page versions backwards, starting from `lsn`.
         if let Some(vec_map) = inner.index.get(&key) {
@@ -354,7 +354,7 @@ impl InMemoryLayer {
 
         let mut buf = Vec::new();
 
-        let mut cursor = inner.file.block_cursor();
+        let cursor = inner.file.block_cursor();
 
         let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         keys.sort_by_key(|k| k.0);

@@ -390,39 +390,42 @@ where
     }
 
     #[allow(dead_code)]
-    pub fn dump(&self) -> Result<()> {
-        self.dump_recurse(self.root_blk, &[], 0)
-    }
+    pub async fn dump(&self) -> Result<()> {
+        let mut stack = Vec::new();
 
-    fn dump_recurse(&self, blknum: u32, path: &[u8], depth: usize) -> Result<()> {
-        let blk = self.reader.read_blk(self.start_blk + blknum)?;
-        let buf: &[u8] = blk.as_ref();
+        stack.push((self.root_blk, String::new(), 0, 0, 0));
 
-        let node = OnDiskNode::<L>::deparse(buf)?;
+        while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
+            let blk = self.reader.read_blk(self.start_blk + blknum)?;
+            let buf: &[u8] = blk.as_ref();
+            let node = OnDiskNode::<L>::deparse(buf)?;
 
-        print!("{:indent$}", "", indent = depth * 2);
-        println!(
-            "blk #{}: path {}: prefix {}, suffix_len {}",
-            blknum,
-            hex::encode(path),
-            hex::encode(node.prefix),
-            node.suffix_len
-        );
+            if child_idx == 0 {
+                print!("{:indent$}", "", indent = depth * 2);
+                let path_prefix = stack
+                    .iter()
+                    .map(|(_blknum, path, ..)| path.as_str())
+                    .collect::<String>();
+                println!(
+                    "blk #{blknum}: path {path_prefix}{path}: prefix {}, suffix_len {}",
+                    hex::encode(node.prefix),
+                    node.suffix_len
+                );
+            }
 
-        let mut idx = 0;
-        let mut key_off = 0;
-        while idx < node.num_children {
+            if child_idx + 1 < node.num_children {
+                let key_off = key_off + node.suffix_len as usize;
+                stack.push((blknum, path.clone(), depth, child_idx + 1, key_off));
+            }
             let key = &node.keys[key_off..key_off + node.suffix_len as usize];
-            let val = node.value(idx as usize);
+            let val = node.value(child_idx as usize);
+
             print!("{:indent$}", "", indent = depth * 2 + 2);
             println!("{}: {}", hex::encode(key), hex::encode(val.0));
 
             if node.level > 0 {
-                let child_path = [path, node.prefix].concat();
-                self.dump_recurse(val.to_blknum(), &child_path, depth + 1)?;
+                stack.push((val.to_blknum(), hex::encode(node.prefix), depth + 1, 0, 0));
             }
-            idx += 1;
-            key_off += node.suffix_len as usize;
         }
         Ok(())
     }
@@ -754,8 +757,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn basic() -> Result<()> {
+    #[tokio::test]
+    async fn basic() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 6>::new(&mut disk);
 
@@ -775,7 +778,7 @@ mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump()?;
+        reader.dump().await?;
 
         // Test the `get` function on all the keys.
         for (key, val) in all_data.iter() {
@@ -835,8 +838,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn lots_of_keys() -> Result<()> {
+    #[tokio::test]
+    async fn lots_of_keys() -> Result<()> {
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 8>::new(&mut disk);
 
@@ -856,7 +859,7 @@ mod tests {
 
         let reader = DiskBtreeReader::new(0, root_offset, disk);
 
-        reader.dump()?;
+        reader.dump().await?;
 
         use std::sync::Mutex;
 
@@ -994,8 +997,8 @@ mod tests {
     ///
     /// This test contains a particular data set, see disk_btree_test_data.rs
     ///
-    #[test]
-    fn particular_data() -> Result<()> {
+    #[tokio::test]
+    async fn particular_data() -> Result<()> {
         // Build a tree from it
         let mut disk = TestDisk::new();
         let mut writer = DiskBtreeBuilder::<_, 26>::new(&mut disk);
@@ -1022,7 +1025,7 @@ mod tests {
         })?;
         assert_eq!(count, disk_btree_test_data::TEST_DATA.len());
 
-        reader.dump()?;
+        reader.dump().await?;
 
         Ok(())
     }

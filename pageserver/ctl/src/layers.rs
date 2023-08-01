@@ -68,7 +68,7 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
             true
         },
     )?;
-    let mut cursor = BlockCursor::new(&file);
+    let cursor = BlockCursor::new(&file);
     for (k, v) in all {
         let value = cursor.read_blob(v.pos())?;
         println!("key:{} value_len:{}", k, value.len());

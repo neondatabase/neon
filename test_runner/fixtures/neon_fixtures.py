@@ -542,7 +542,7 @@ class S3Storage:
     access_key: str
     secret_key: str
     endpoint: Optional[str] = None
-    prefix_in_bucket: Optional[str] = None
+    prefix_in_bucket: Optional[str] = ""
 
     def access_env_vars(self) -> Dict[str, str]:
         return {
@@ -1511,6 +1511,7 @@ class NeonCli(AbstractNeonCli):
         safekeepers: Optional[List[int]] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        branch_name: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1524,8 +1525,11 @@ class NeonCli(AbstractNeonCli):
             args.append(f"--lsn={lsn}")
         args.extend(["--pg-port", str(pg_port)])
         args.extend(["--http-port", str(http_port)])
+
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
+        if branch_name is not None:
+            args.extend(["--branch-name", branch_name])
         if endpoint_id is not None:
             args.append(endpoint_id)
 

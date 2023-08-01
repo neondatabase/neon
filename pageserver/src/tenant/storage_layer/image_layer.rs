@@ -57,9 +57,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{
-    AsLayerDesc, Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc,
-};
+use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLayerDesc};
 
 ///
 /// Header stored in the beginning of the file
@@ -175,7 +173,7 @@ impl Layer for ImageLayer {
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
         tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
             println!("key: {} offset {}", hex::encode(key), value);
@@ -253,10 +251,6 @@ impl AsLayerDesc for ImageLayer {
 impl PersistentLayer for ImageLayer {
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
-    }
-
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        unimplemented!();
     }
 
     fn delete_resident_layer_file(&self) -> Result<()> {

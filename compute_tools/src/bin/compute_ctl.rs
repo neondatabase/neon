@@ -193,6 +193,13 @@ fn main() -> Result<()> {
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
+
+        // TODO this can stall startups in the unlikely event that we bind
+        //      this compute node while it's busy prewarming. It's not too
+        //      bad because it's just 100ms and unlikely, but it's an
+        //      avoidable problem.
+        compute.prewarm_postgres()?;
+
         let mut state = compute.state.lock().unwrap();
         while state.status != ComputeStatus::ConfigurationPending {
             state = compute.state_changed.wait(state).unwrap();

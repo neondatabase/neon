@@ -61,8 +61,8 @@ use utils::{
 };
 
 use super::{
-    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
-    LayerKeyIter, PathOrConf, PersistentLayerDesc,
+    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, PathOrConf,
+    PersistentLayerDesc,
 };
 
 ///
@@ -189,7 +189,7 @@ pub struct DeltaLayer {
 
     access_stats: LayerAccessStats,
 
-    inner: OnceCell<DeltaLayerInner>,
+    inner: OnceCell<Arc<DeltaLayerInner>>,
 }
 
 impl std::fmt::Debug for DeltaLayer {
@@ -256,12 +256,12 @@ impl Layer for DeltaLayer {
             file,
         );
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
-        let mut cursor = file.block_cursor();
+        let cursor = file.block_cursor();
 
         // A subroutine to dump a single blob
-        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
+        let dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
             let buf = cursor.read_blob(blob_ref.pos())?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -343,7 +343,7 @@ impl Layer for DeltaLayer {
             })?;
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
-            let mut cursor = file.block_cursor();
+            let cursor = file.block_cursor();
             let mut buf = Vec::new();
             for (entry_lsn, pos) in offsets {
                 cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
@@ -424,23 +424,6 @@ impl PersistentLayer for DeltaLayer {
         Some(self.path())
     }
 
-    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .context("load delta layer")?;
-        Ok(match DeltaValueIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err))),
-        })
-    }
-
-    fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load(LayerAccessKind::KeyIter, ctx)?;
-        Ok(Box::new(
-            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
-        ))
-    }
-
     fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
@@ -510,7 +493,11 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, access_kind: LayerAccessKind, ctx: &RequestContext) -> Result<&DeltaLayerInner> {
+    fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<&Arc<DeltaLayerInner>> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
         // Quick exit if already loaded
@@ -519,7 +506,7 @@ impl DeltaLayer {
             .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
     }
 
-    fn load_inner(&self) -> Result<DeltaLayerInner> {
+    fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let file = VirtualFile::open(&path)
@@ -554,11 +541,11 @@ impl DeltaLayer {
 
         debug!("loaded from {}", &path.display());
 
-        Ok(DeltaLayerInner {
+        Ok(Arc::new(DeltaLayerInner {
             file,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
-        })
+        }))
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -622,6 +609,24 @@ impl DeltaLayer {
             &self.desc.timeline_id,
             &self.layer_name(),
         )
+    }
+
+    /// Obtains all keys and value references stored in the layer
+    ///
+    /// The value can be obtained via the [`ValueRef::load`] function.
+    pub fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer")?;
+        DeltaLayerInner::load_val_refs(inner).context("Layer index is corrupted")
+    }
+
+    /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    pub fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer keys")?;
+        inner.load_keys().context("Layer index is corrupted")
     }
 }
 
@@ -893,121 +898,41 @@ impl Drop for DeltaLayerWriter {
     }
 }
 
-///
-/// Iterator over all key-value pairse stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold the offsets of all key value pairs.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
-struct DeltaValueIter<'a> {
-    all_offsets: Vec<(DeltaKey, BlobRef)>,
-    next_idx: usize,
-    reader: BlockCursor<Adapter<'a>>,
-}
-
-struct Adapter<'a>(&'a DeltaLayerInner);
-
-impl<'a> BlockReader for Adapter<'a> {
-    type BlockLease = PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        self.0.file.read_blk(blknum)
-    }
-}
-
-impl<'a> Iterator for DeltaValueIter<'a> {
-    type Item = Result<(Key, Lsn, Value)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_res().transpose()
-    }
-}
-
-impl<'a> DeltaValueIter<'a> {
-    fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
-        let file = &inner.file;
+impl DeltaLayerInner {
+    fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+        let file = &this.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
+            this.index_start_blk,
+            this.index_root_blk,
             file,
         );
 
-        let mut all_offsets: Vec<(DeltaKey, BlobRef)> = Vec::new();
+        let mut all_offsets = Vec::<(Key, Lsn, ValueRef)>::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
             |key, value| {
-                all_offsets.push((DeltaKey::from_slice(key), BlobRef(value)));
+                let delta_key = DeltaKey::from_slice(key);
+                let val_ref = ValueRef {
+                    blob_ref: BlobRef(value),
+                    reader: BlockCursor::new(Adapter(this.clone())),
+                };
+                all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
                 true
             },
         )?;
 
-        let iter = DeltaValueIter {
-            all_offsets,
-            next_idx: 0,
-            reader: BlockCursor::new(Adapter(inner)),
-        };
-
-        Ok(iter)
+        Ok(all_offsets)
     }
-
-    fn next_res(&mut self) -> Result<Option<(Key, Lsn, Value)>> {
-        if self.next_idx < self.all_offsets.len() {
-            let (delta_key, blob_ref) = &self.all_offsets[self.next_idx];
-
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            let buf = self.reader.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
-            self.next_idx += 1;
-            Ok(Some((key, lsn, val)))
-        } else {
-            Ok(None)
-        }
-    }
-}
-///
-/// Iterator over all keys stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold all keys.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
-struct DeltaKeyIter {
-    all_keys: Vec<(DeltaKey, u64)>,
-    next_idx: usize,
-}
-
-impl Iterator for DeltaKeyIter {
-    type Item = (Key, Lsn, u64);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next_idx < self.all_keys.len() {
-            let (delta_key, size) = &self.all_keys[self.next_idx];
-
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            self.next_idx += 1;
-            Some((key, lsn, *size))
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> DeltaKeyIter {
-    fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
-        let file = &inner.file;
+    fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
+        let file = &self.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
+            self.index_start_blk,
+            self.index_root_blk,
             file,
         );
 
-        let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
+        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
         tree_reader.visit(
             &[0u8; DELTA_KEY_SIZE],
             VisitDirection::Forwards,
@@ -1015,46 +940,48 @@ impl<'a> DeltaKeyIter {
                 let delta_key = DeltaKey::from_slice(key);
                 let pos = BlobRef(value).pos();
                 if let Some(last) = all_keys.last_mut() {
-                    if last.0.key() == delta_key.key() {
+                    if last.0 == delta_key.key() {
                         return true;
                     } else {
                         // subtract offset of new key BLOB and first blob of this key
                         // to get total size if values associated with this key
-                        let first_pos = last.1;
-                        last.1 = pos - first_pos;
+                        let first_pos = last.2;
+                        last.2 = pos - first_pos;
                     }
                 }
-                all_keys.push((delta_key, pos));
+                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
                 true
             },
         )?;
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of layer
-            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
         }
-        let iter = DeltaKeyIter {
-            all_keys,
-            next_idx: 0,
-        };
-
-        Ok(iter)
+        Ok(all_keys)
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::DeltaKeyIter;
-    use super::DeltaLayer;
-    use super::DeltaValueIter;
+/// Reference to an on-disk value
+pub struct ValueRef {
+    blob_ref: BlobRef,
+    reader: BlockCursor<Adapter>,
+}
 
-    // We will soon need the iters to be send in the compaction code.
-    // Cf https://github.com/neondatabase/neon/pull/4462#issuecomment-1587398883
-    // Cf https://github.com/neondatabase/neon/issues/4471
-    #[test]
-    fn is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<DeltaLayer>();
-        assert_send::<DeltaValueIter>();
-        assert_send::<DeltaKeyIter>();
+impl ValueRef {
+    /// Loads the value from disk
+    pub fn load(&self) -> Result<Value> {
+        let buf = self.reader.read_blob(self.blob_ref.pos())?;
+        let val = Value::des(&buf)?;
+        Ok(val)
+    }
+}
+
+struct Adapter(Arc<DeltaLayerInner>);
+
+impl BlockReader for Adapter {
+    type BlockLease = PageReadGuard<'static>;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+        self.0.file.read_blk(blknum)
     }
 }
