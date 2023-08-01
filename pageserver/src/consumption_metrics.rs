@@ -34,10 +34,10 @@ struct Ids {
 
 /// Key that uniquely identifies the object, this metric describes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PageserverConsumptionMetricsKey {
-    pub tenant_id: TenantId,
-    pub timeline_id: Option<TimelineId>,
-    pub metric: &'static str,
+struct PageserverConsumptionMetricsKey {
+    tenant_id: TenantId,
+    timeline_id: Option<TimelineId>,
+    metric: &'static str,
 }
 
 impl PageserverConsumptionMetricsKey {
@@ -233,7 +233,7 @@ pub async fn collect_metrics(
 ///
 /// TODO
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
-pub async fn collect_metrics_iteration(
+async fn collect_metrics_iteration(
     client: &reqwest::Client,
     cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, (EventType, u64)>,
     metric_collection_endpoint: &reqwest::Url,
