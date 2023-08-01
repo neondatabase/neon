@@ -3520,22 +3520,6 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
 
-        let mut all_value_refs = Vec::new();
-        for l in deltas_to_compact.iter() {
-            // TODO: replace this with an await once we fully go async
-            all_value_refs.extend(
-                Handle::current().block_on(
-                    l.clone()
-                        .downcast_delta_layer()
-                        .expect("delta layer")
-                        .load_val_refs(ctx),
-                )?,
-            );
-        }
-        // The current stdlib sorting implementation is designed in a way where it is
-        // particularly fast where the slice is made up of sorted sub-ranges.
-        all_value_refs.sort_by_key(|(key, _lsn, _value_ref)| *key);
-
         let mut all_keys = Vec::new();
         for l in deltas_to_compact.iter() {
             // TODO: replace this with an await once we fully go async
@@ -3550,9 +3534,9 @@ impl Timeline {
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_keys.sort_by_key(|(key, _lsn, _size)| *key);
+        all_keys.sort_by_key(|(key, _lsn, _size, _value_ref)| *key);
 
-        for (next_key, _next_lsn, _size) in all_keys.iter() {
+        for (next_key, _next_lsn, _size, _value_ref) in all_keys.iter() {
             let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -3586,10 +3570,10 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = all_value_refs.into_iter();
+        let all_values_iter = all_keys.iter();
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys.into_iter();
+        let mut all_keys_iter = all_keys.iter();
 
         stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
@@ -3643,7 +3627,7 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        for (key, lsn, value_ref) in all_values_iter {
+        for &(key, lsn, _size, ref value_ref) in all_values_iter {
             let value = value_ref.load()?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
@@ -3655,7 +3639,8 @@ impl Timeline {
                     dup_end_lsn = Lsn::INVALID;
                 }
                 // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
+                for &(next_key, next_lsn, next_size, ref _next_value_ref) in all_keys_iter.by_ref()
+                {
                     next_key_size = next_size;
                     if key != next_key {
                         if dup_end_lsn.is_valid() {
