@@ -656,9 +656,7 @@ mod tests {
         let tenant_id = TenantId::generate();
         let timeline_id = TimelineId::generate();
 
-        let now = SystemTime::now();
-        let before = now - std::time::Duration::from_secs(5);
-        let init = now - std::time::Duration::from_secs(15);
+        let [now, before, init] = time_backwards();
 
         let now = DateTime::<Utc>::from(now);
         let before = DateTime::<Utc>::from(before);
@@ -699,10 +697,7 @@ mod tests {
         let tenant_id = TenantId::generate();
         let timeline_id = TimelineId::generate();
 
-        let now = SystemTime::now();
-        let just_before = now - std::time::Duration::from_secs(1);
-        let before = now - std::time::Duration::from_secs(5);
-        let init = now - std::time::Duration::from_secs(15);
+        let [now, just_before, before, init] = time_backwards();
 
         let now = DateTime::<Utc>::from(now);
         let just_before = DateTime::<Utc>::from(just_before);
@@ -740,5 +735,15 @@ mod tests {
                     .at(now, 0x42000)
             ]
         );
+    }
+
+    fn time_backwards<const N: usize>() -> [std::time::SystemTime; N] {
+        let mut times = [std::time::SystemTime::UNIX_EPOCH; N];
+        times[0] = std::time::SystemTime::now();
+        for behind in 1..N {
+            times[behind] = times[0] - std::time::Duration::from_secs(behind as u64);
+        }
+
+        times
     }
 }
