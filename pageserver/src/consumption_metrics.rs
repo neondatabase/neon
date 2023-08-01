@@ -324,12 +324,12 @@ async fn collect_metrics_iteration(
 
         // Note that this metric is calculated in a separate bgworker
         // Here we only use cached value, which may lag behind the real latest one
-        let tenant_synthetic_size = tenant.cached_synthetic_size();
+        let synthetic_size = tenant.cached_synthetic_size();
 
-        if tenant_synthetic_size != 0 {
+        if synthetic_size != 0 {
             // only send non-zeroes because otherwise these show up as errors in logs
             current_metrics
-                .push(MetricsKey::synthetic_size(tenant_id).at(Utc::now(), tenant_synthetic_size));
+                .push(MetricsKey::synthetic_size(tenant_id).at(Utc::now(), synthetic_size));
         }
     }
 
