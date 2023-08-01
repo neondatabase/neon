@@ -201,9 +201,6 @@ def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
-        return None
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
         test_name="test_multiple_extensions_one_archive",

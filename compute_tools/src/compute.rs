@@ -60,6 +60,7 @@ pub struct ComputeNode {
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     // (key: extension name, value: path to extension archive in remote storage)
     pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
+    // (key: library name, value: name of extension containing this library)
     pub library_index: OnceLock<HashMap<String, String>>,
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
@@ -1007,8 +1008,9 @@ LIMIT 100",
                     // based on the timeout of the download function
                 }
 
-                // if extension hasn't been downloaded before or recently
-                // started downloading then we download it here
+                // if extension hasn't been downloaded before or the previous
+                // attempt to download was at least HANG_TIMEOUT ms ago
+                // then we try to download it here
                 info!("downloading new extension {ext_archive_name}");
 
                 let download_size = extension_server::download_extension(

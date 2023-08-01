@@ -36,25 +36,46 @@ Note that build number cannot be part of prefix because we might need extensions
 from other build numbers.
 
 ext_index.json stores the control files and location of extension archives
+It also stores a list of public extensions and a library_index
 
-We do not duplicate extension.tar.zst files.
-We only upload a new one if it is updated.
+We don't need to duplicate extension.tar.zst files.
+We only need to upload a new one if it is updated.
+(Although currently we just upload every time anyways, hopefully will change
+this sometime)
+
 *access* is controlled by spec
 
 More specifically, here is an example ext_index.json
 {
-  "embedding": {
-    "control_data": {
-      "embedding.control": "comment = 'hnsw index' \ndefault_version = '0.1.0' \nmodule_pathname = '$libdir/embedding' \nrelocatable = true \ntrusted = true"
+    "public_extensions": [
+        "anon",
+        "pg_buffercache"
+    ],
+    "library_index": {
+        "anon": "anon",
+        "kq_imcx": "kq_imcx",
+        "pg_buffercache": "pg_buffercache"
     },
-    "archive_path": "5623261088/v15/extensions/embedding.tar.zst"
-  },
-  "anon": {
-    "control_data": {
-      "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
-    },
-    "archive_path": "5615261079/v15/extensions/anon.tar.zst"
-  }
+    "extension_data": {
+        "pg_buffercache": {
+            "control_data": {
+                "pg_buffercache.control": "# pg_buffercache extension \ncomment = 'examine the shared buffer cache' \ndefault_version = '1.3' \nmodule_pathname = '$libdir/pg_buffercache' \nrelocatable = true \ntrusted=true"
+            },
+            "archive_path": "5670669815/v14/extensions/pg_buffercache.tar.zst"
+        },
+        "kq_imcx": {
+            "control_data": {
+                "kq_imcx.control": "# This file is generated content from add_postgresql_extension.\n# No point in modifying it, it will be overwritten anyway.\n\n# Default version, always set\ndefault_version = '0.1'\n\n# Module pathname generated from target shared library name. Use\n# MODULE_PATHNAME in script file.\nmodule_pathname = '$libdir/kq_imcx.so'\n\n# Comment for extension. Set using COMMENT option. Can be set in\n# script file as well.\ncomment = 'ketteQ In-Memory Calendar Extension (IMCX)'\n\n# Encoding for script file. Set using ENCODING option.\n#encoding = ''\n\n# Required extensions. Set using REQUIRES option (multi-valued).\n#requires = ''\ntrusted = true\n"
+            },
+            "archive_path": "5670669815/v14/extensions/kq_imcx.tar.zst"
+        },
+        "anon": {
+            "control_data": {
+                "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+            },
+            "archive_path": "5670669815/v14/extensions/anon.tar.zst"
+        }
+    }
 }
 */
 use anyhow::Context;
@@ -104,8 +125,8 @@ pub fn get_pg_version(pgbin: &str) -> String {
 }
 
 // download control files for enabled_extensions
-// return the paths in s3 to the archives containing the actual extension files
-// for use in creating the extension
+// return Hashmaps converting library names to extension names (library_index)
+// and specifying the remote path to the archive for each extension name
 pub async fn get_available_extensions(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
@@ -118,8 +139,6 @@ pub async fn get_available_extensions(
     let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
     info!("download ext_index.json from: {:?}", &index_path);
 
-    // TODO: this download is ~3KB. but it takes like 400ms. why? later
-    // downloads which are much larger take much less time
     let mut download = remote_storage.download(&index_path).await?;
     let mut ext_idx_buffer = Vec::new();
     download
@@ -190,6 +209,7 @@ pub async fn download_extension(
         .read_to_end(&mut download_buffer)
         .await?;
     let download_size = download_buffer.len() as u64;
+    // it's unclear whether it is more performant to decompress into memory or not
     warn!("TODO: decompressing into memory can be avoided");
     let mut decoder = Decoder::new(download_buffer.as_slice())?;
     let mut decompress_buffer = Vec::new();

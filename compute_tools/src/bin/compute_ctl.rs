@@ -30,7 +30,7 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000"}
+//!             -r {"bucket": "neon-dev-extensions-eu-central-1", "region": "eu-central-1"}
 //! ```
 //!
 use std::collections::HashMap;
