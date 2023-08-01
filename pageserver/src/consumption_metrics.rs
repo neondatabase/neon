@@ -23,7 +23,7 @@ use utils::lsn::Lsn;
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[serde_as]
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone, Copy)]
 struct Ids {
     #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
@@ -378,17 +378,14 @@ async fn collect_metrics_iteration(
             },
         }));
 
-        let chunk_json = serde_json::value::to_raw_value(&EventChunk {
-            events: &chunk_to_send,
-        })
-        .expect("PageserverConsumptionMetric should not fail serialization");
-
         const MAX_RETRIES: u32 = 3;
 
         for attempt in 0..MAX_RETRIES {
             let res = client
                 .post(metric_collection_endpoint.clone())
-                .json(&chunk_json)
+                .json(&EventChunk {
+                    events: (&chunk_to_send).into(),
+                })
                 .send()
                 .await;
 

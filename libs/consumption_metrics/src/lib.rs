@@ -71,6 +71,6 @@ pub const CHUNK_SIZE: usize = 1000;
 // Just a wrapper around a slice of events
 // to serialize it as `{"events" : [ ] }
 #[derive(serde::Serialize)]
-pub struct EventChunk<'a, T> {
-    pub events: &'a [T],
+pub struct EventChunk<'a, T: Clone> {
+    pub events: std::borrow::Cow<'a, [T]>,
 }
