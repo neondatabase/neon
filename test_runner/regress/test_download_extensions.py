@@ -201,6 +201,10 @@ def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
+    if RemoteStorageKind.REAL_S3 not in available_s3_storages():
+        log.info("skipping test because real s3 not enabled")
+        return None
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
         test_name="test_multiple_extensions_one_archive",
