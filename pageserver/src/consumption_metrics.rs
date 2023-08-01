@@ -34,13 +34,13 @@ struct Ids {
 
 /// Key that uniquely identifies the object, this metric describes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PageserverConsumptionMetricsKey {
+struct MetricsKey {
     tenant_id: TenantId,
     timeline_id: Option<TimelineId>,
     metric: &'static str,
 }
 
-impl PageserverConsumptionMetricsKey {
+impl MetricsKey {
     const fn absolute_values(self) -> AbsoluteValueFactory {
         AbsoluteValueFactory(self)
     }
@@ -50,21 +50,17 @@ impl PageserverConsumptionMetricsKey {
 }
 
 /// Helper type which each individual metric kind can return to produce only absolute values.
-struct AbsoluteValueFactory(PageserverConsumptionMetricsKey);
+struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    fn at(
-        self,
-        time: DateTime<Utc>,
-        val: u64,
-    ) -> (PageserverConsumptionMetricsKey, (EventType, u64)) {
+    fn at(self, time: DateTime<Utc>, val: u64) -> (MetricsKey, (EventType, u64)) {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
     }
 }
 
 /// Helper type which each individual metric kind can return to produce only incremental values.
-struct IncrementalValueFactory(PageserverConsumptionMetricsKey);
+struct IncrementalValueFactory(MetricsKey);
 
 impl IncrementalValueFactory {
     #[allow(clippy::wrong_self_convention)]
@@ -73,7 +69,7 @@ impl IncrementalValueFactory {
         prev_end: DateTime<Utc>,
         up_to: DateTime<Utc>,
         val: u64,
-    ) -> (PageserverConsumptionMetricsKey, (EventType, u64)) {
+    ) -> (MetricsKey, (EventType, u64)) {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
         (
@@ -88,15 +84,15 @@ impl IncrementalValueFactory {
         )
     }
 
-    fn key(&self) -> &PageserverConsumptionMetricsKey {
+    fn key(&self) -> &MetricsKey {
         &self.0
     }
 }
 
-// the static part of a PageserverConsumptionMetricsKey
-impl PageserverConsumptionMetricsKey {
+// the static part of a MetricsKey
+impl MetricsKey {
     const fn written_size(tenant_id: TenantId, timeline_id: TimelineId) -> AbsoluteValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "written_size",
@@ -110,7 +106,7 @@ impl PageserverConsumptionMetricsKey {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> IncrementalValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "written_size_bytes_delta",
@@ -122,7 +118,7 @@ impl PageserverConsumptionMetricsKey {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> AbsoluteValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
             metric: "timeline_logical_size",
@@ -131,7 +127,7 @@ impl PageserverConsumptionMetricsKey {
     }
 
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "remote_storage_size",
@@ -140,7 +136,7 @@ impl PageserverConsumptionMetricsKey {
     }
 
     const fn resident_size(tenant_id: TenantId) -> AbsoluteValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "resident_size",
@@ -149,7 +145,7 @@ impl PageserverConsumptionMetricsKey {
     }
 
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
-        PageserverConsumptionMetricsKey {
+        MetricsKey {
             tenant_id,
             timeline_id: None,
             metric: "synthetic_storage_size",
@@ -235,13 +231,13 @@ pub async fn collect_metrics(
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
 async fn collect_metrics_iteration(
     client: &reqwest::Client,
-    cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, (EventType, u64)>,
+    cached_metrics: &mut HashMap<MetricsKey, (EventType, u64)>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
     send_cached: bool,
 ) {
-    let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, (EventType, u64))> = Vec::new();
+    let mut current_metrics: Vec<(MetricsKey, (EventType, u64))> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
@@ -307,8 +303,7 @@ async fn collect_metrics_iteration(
         match tenant.get_remote_size().await {
             Ok(tenant_remote_size) => {
                 current_metrics.push(
-                    PageserverConsumptionMetricsKey::remote_storage_size(tenant_id)
-                        .at(Utc::now(), tenant_remote_size),
+                    MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant_remote_size),
                 );
             }
             Err(err) => {
@@ -319,10 +314,8 @@ async fn collect_metrics_iteration(
             }
         }
 
-        current_metrics.push(
-            PageserverConsumptionMetricsKey::resident_size(tenant_id)
-                .at(Utc::now(), tenant_resident_size),
-        );
+        current_metrics
+            .push(MetricsKey::resident_size(tenant_id).at(Utc::now(), tenant_resident_size));
 
         // Note that this metric is calculated in a separate bgworker
         // Here we only use cached value, which may lag behind the real latest one
@@ -330,10 +323,8 @@ async fn collect_metrics_iteration(
 
         if tenant_synthetic_size != 0 {
             // only send non-zeroes because otherwise these show up as errors in logs
-            current_metrics.push(
-                PageserverConsumptionMetricsKey::synthetic_size(tenant_id)
-                    .at(Utc::now(), tenant_synthetic_size),
-            );
+            current_metrics
+                .push(MetricsKey::synthetic_size(tenant_id).at(Utc::now(), tenant_synthetic_size));
         }
     }
 
@@ -482,20 +473,18 @@ impl TimelineSnapshot {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         now: DateTime<Utc>,
-        metrics: &mut Vec<(PageserverConsumptionMetricsKey, (EventType, u64))>,
-        cache: &HashMap<PageserverConsumptionMetricsKey, (EventType, u64)>,
+        metrics: &mut Vec<(MetricsKey, (EventType, u64))>,
+        cache: &HashMap<MetricsKey, (EventType, u64)>,
     ) {
         let timeline_written_size = u64::from(self.last_record_lsn);
 
         let (key, written_size_now) =
-            PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                .at(now, timeline_written_size);
+            MetricsKey::written_size(tenant_id, timeline_id).at(now, timeline_written_size);
 
         // last_record_lsn can only go up, right now at least, TODO: #2592 or related
         // features might change this.
 
-        let written_size_delta_key =
-            PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id);
+        let written_size_delta_key = MetricsKey::written_size_delta(tenant_id, timeline_id);
 
         // use this when available, because in a stream of incremental values, it will be
         // accurate where as when last_record_lsn stops moving, we will only cache the last
@@ -547,10 +536,7 @@ impl TimelineSnapshot {
         metrics.push((key, written_size_now));
 
         if let Some(size) = self.current_exact_logical_size {
-            metrics.push(
-                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
-                    .at(now, size),
-            );
+            metrics.push(MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, size));
         }
     }
 }
@@ -616,7 +602,7 @@ mod tests {
         lsn::Lsn,
     };
 
-    use crate::consumption_metrics::PageserverConsumptionMetricsKey;
+    use crate::consumption_metrics::MetricsKey;
 
     use super::TimelineSnapshot;
     use chrono::{DateTime, Utc};
@@ -645,12 +631,13 @@ mod tests {
         assert_eq!(
             metrics,
             &[
-                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
-                    .from_previous_up_to(snap.loaded_at.1.into(), now, 0),
-                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                    .at(now, disk_consistent_lsn.0),
-                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
-                    .at(now, 0x42000)
+                MetricsKey::written_size_delta(tenant_id, timeline_id).from_previous_up_to(
+                    snap.loaded_at.1.into(),
+                    now,
+                    0
+                ),
+                MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
+                MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
             ]
         );
     }
@@ -669,11 +656,9 @@ mod tests {
         let disk_consistent_lsn = Lsn(initdb_lsn.0 * 2);
 
         let mut metrics = Vec::new();
-        let cache =
-            HashMap::from([
-                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                    .at(before, disk_consistent_lsn.0),
-            ]);
+        let cache = HashMap::from([
+            MetricsKey::written_size(tenant_id, timeline_id).at(before, disk_consistent_lsn.0)
+        ]);
 
         let snap = TimelineSnapshot {
             loaded_at: (disk_consistent_lsn, init),
@@ -686,12 +671,10 @@ mod tests {
         assert_eq!(
             metrics,
             &[
-                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
+                MetricsKey::written_size_delta(tenant_id, timeline_id)
                     .from_previous_up_to(before, now, 0),
-                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                    .at(now, disk_consistent_lsn.0),
-                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
-                    .at(now, 0x42000)
+                MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
+                MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
             ]
         );
     }
@@ -713,11 +696,13 @@ mod tests {
         let mut metrics = Vec::new();
         let cache = HashMap::from([
             // at t=before was the last time the last_record_lsn changed
-            PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                .at(before, disk_consistent_lsn.0),
+            MetricsKey::written_size(tenant_id, timeline_id).at(before, disk_consistent_lsn.0),
             // end time of this event is used for the next ones
-            PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
-                .from_previous_up_to(before, just_before, 0),
+            MetricsKey::written_size_delta(tenant_id, timeline_id).from_previous_up_to(
+                before,
+                just_before,
+                0,
+            ),
         ]);
 
         let snap = TimelineSnapshot {
@@ -731,12 +716,13 @@ mod tests {
         assert_eq!(
             metrics,
             &[
-                PageserverConsumptionMetricsKey::written_size_delta(tenant_id, timeline_id)
-                    .from_previous_up_to(just_before, now, 0),
-                PageserverConsumptionMetricsKey::written_size(tenant_id, timeline_id)
-                    .at(now, disk_consistent_lsn.0),
-                PageserverConsumptionMetricsKey::timeline_logical_size(tenant_id, timeline_id)
-                    .at(now, 0x42000)
+                MetricsKey::written_size_delta(tenant_id, timeline_id).from_previous_up_to(
+                    just_before,
+                    now,
+                    0
+                ),
+                MetricsKey::written_size(tenant_id, timeline_id).at(now, disk_consistent_lsn.0),
+                MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0x42000)
             ]
         );
     }
