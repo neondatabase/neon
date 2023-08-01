@@ -420,7 +420,7 @@ mod tests {
             blobs.push((pos, data));
         }
 
-        let mut cursor = BlockCursor::new(&file);
+        let cursor = BlockCursor::new(&file);
         for (pos, expected) in blobs {
             let actual = cursor.read_blob(pos)?;
             assert_eq!(actual, expected);

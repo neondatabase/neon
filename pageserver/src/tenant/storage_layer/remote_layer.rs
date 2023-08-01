@@ -20,8 +20,8 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter,
-    LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -127,14 +127,6 @@ impl AsLayerDesc for RemoteLayer {
 impl PersistentLayer for RemoteLayer {
     fn local_path(&self) -> Option<PathBuf> {
         None
-    }
-
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        bail!("cannot iterate a remote layer");
-    }
-
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        bail!("cannot iterate a remote layer");
     }
 
     fn delete_resident_layer_file(&self) -> Result<()> {
