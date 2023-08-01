@@ -45,7 +45,10 @@ def cleanup(pg_version):
             os.remove(file)
             log.info(f"removed file {file}")
         except Exception as err:
-            log.info(f"error removing file {file}: {err}")
+            log.info(
+                f"skipping remove of file {file} because it doesn't exist.\
+                      this may be expected or unexpected depending on the test {err}"
+            )
 
     cleanup_folders = [SHARE_DIR / Path("anon"), PGDIR / Path("download_extensions")]
     for folder in cleanup_folders:
@@ -53,7 +56,10 @@ def cleanup(pg_version):
             shutil.rmtree(folder)
             log.info(f"removed folder {folder}")
         except Exception as err:
-            log.info(f"error removing folder {folder}: {err}")
+            log.info(
+                f"skipping remove of folder {folder} because it doesn't exist.\
+                      this may be expected or unexpected depending on the test {err}"
+            )
 
 
 def upload_files(env):
@@ -128,6 +134,9 @@ def test_remote_extensions(
                         cur.execute("CREATE EXTENSION postgis")
                     except Exception as err:
                         log.info(f"(expected) error creating postgis extension: {err}")
+                        # we do not check the error, so this is basically a NO-OP
+                        # however checking the log you can make sure that it worked
+                        # and also get valuable information about how long loading the extension took
 
                 # this is expected to fail on my computer because I don't have the pgcrypto extension
                 try:
@@ -189,7 +198,7 @@ def test_remote_library(
                         cur.execute("LOAD 'postgis_topology-3'")
                     except Exception as err:
                         log.info("error loading postgis_topology-3")
-                        assert "cannot open shared object file: No such file or directory" in str(
+                        assert "No such file or directory" in str(
                             err
                         ), "unexpected error loading postgis_topology-3"
     finally:
