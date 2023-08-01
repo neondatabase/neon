@@ -940,7 +940,7 @@ LIMIT 100",
                     .as_millis() as u64;
 
                 // how long to wait for extension download if it was started by another process
-                const HANG_TIMEOUT = 3000;// milliseconds
+                const HANG_TIMEOUT: u64 = 3000;// milliseconds
 
                 if download_completed {
                     info!("extension already downloaded, skipping re-download");
