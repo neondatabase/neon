@@ -44,8 +44,12 @@ fn remote_tenant_delete_mark_path(
     conf: &PageServerConf,
     tenant_id: &TenantId,
 ) -> anyhow::Result<RemotePath> {
-    let tenant_remote_path =
-        RemotePath::new(&conf.tenant_path(tenant_id)).context("tenant path")?;
+    let tenant_remote_path = conf
+        .tenant_path(tenant_id)
+        .strip_prefix(&conf.workdir)
+        .context("Failed to strip workdir prefix")
+        .and_then(RemotePath::new)
+        .context("tenant path")?;
     Ok(tenant_remote_path.join(Path::new("deleted")))
 }
 
