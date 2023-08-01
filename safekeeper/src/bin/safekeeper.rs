@@ -234,7 +234,10 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
                 listen_pg_addr_tenant_only
             );
             let listener = tcp_listener::bind(listen_pg_addr_tenant_only.clone()).map_err(|e| {
-                error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+                error!(
+                    "failed to bind to address {}: {}",
+                    listen_pg_addr_tenant_only, e
+                );
                 e
             })?;
             Some(listener)

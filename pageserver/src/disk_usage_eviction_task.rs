@@ -545,12 +545,12 @@ async fn collect_eviction_candidates(
         // We could be better here, e.g., sum of all L0 layers + most recent L1 layer.
         // That's what's typically used by the various background loops.
         //
-        // The default can be overriden with a fixed value in the tenant conf.
+        // The default can be overridden with a fixed value in the tenant conf.
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             debug!(
                 tenant_id=%tenant.tenant_id(),
-                overriden_size=s,
+                overridden_size=s,
                 "using overridden min resident size for tenant"
             );
             s

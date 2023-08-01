@@ -33,7 +33,8 @@ use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
+    TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 pub mod defaults {
@@ -598,6 +599,17 @@ impl PageServerConf {
         path_with_suffix_extension(
             self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
+        )
+    }
+
+    pub fn timeline_delete_mark_file_path(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> PathBuf {
+        path_with_suffix_extension(
+            self.timeline_path(&tenant_id, &timeline_id),
+            TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
 

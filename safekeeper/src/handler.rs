@@ -11,6 +11,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
@@ -45,6 +46,7 @@ enum SafekeeperPostgresCommand {
     StartWalPush,
     StartReplication { start_lsn: Lsn },
     IdentifySystem,
+    TimelineStatus,
     JSONCtrl { cmd: AppendLogicalMessage },
 }
 
@@ -64,6 +66,8 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
+    } else if cmd.starts_with("TIMELINE_STATUS") {
+        Ok(SafekeeperPostgresCommand::TimelineStatus)
     } else if cmd.starts_with("JSON_CTRL") {
         let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
         Ok(SafekeeperPostgresCommand::JSONCtrl {
@@ -78,6 +82,7 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     match cmd {
         SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
+        SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
         SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
@@ -219,6 +224,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     .await
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+            SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
                 handle_json_ctrl(self, pgb, cmd).await
             }
@@ -261,6 +267,38 @@ impl SafekeeperPostgresHandler {
             .as_ref()
             .expect("claims presence already checked");
         check_permission(claims, tenant_id)
+    }
+
+    async fn handle_timeline_status<IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+    ) -> Result<(), QueryError> {
+        // Get timeline, handling "not found" error
+        let tli = match GlobalTimelines::get(self.ttid) {
+            Ok(tli) => Ok(Some(tli)),
+            Err(TimelineError::NotFound(_)) => Ok(None),
+            Err(e) => Err(QueryError::Other(e.into())),
+        }?;
+
+        // Write row description
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[
+            RowDescriptor::text_col(b"flush_lsn"),
+            RowDescriptor::text_col(b"commit_lsn"),
+        ]))?;
+
+        // Write row if timeline exists
+        if let Some(tli) = tli {
+            let (inmem, _state) = tli.get_state().await;
+            let flush_lsn = tli.get_flush_lsn().await;
+            let commit_lsn = inmem.commit_lsn;
+            pgb.write_message_noflush(&BeMessage::DataRow(&[
+                Some(flush_lsn.to_string().as_bytes()),
+                Some(commit_lsn.to_string().as_bytes()),
+            ]))?;
+        }
+
+        pgb.write_message_noflush(&BeMessage::CommandComplete(b"TIMELINE_STATUS"))?;
+        Ok(())
     }
 
     ///

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
+use hashbrown::HashMap;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
@@ -11,6 +13,8 @@ use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
+use tokio_postgres::GenericClient;
+use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
 use url::Url;
 
@@ -23,12 +27,21 @@ struct QueryData {
     params: Vec<serde_json::Value>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Payload {
+    Single(QueryData),
+    Batch(Vec<QueryData>),
+}
+
 pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
@@ -162,7 +175,7 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
     //
@@ -176,6 +189,23 @@ pub async fn handle(
 
     // Allow connection pooling only if explicitly requested
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+
+    // isolation level and read only
+
+    let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
+    let txn_isolation_level = match txn_isolation_level_raw {
+        Some(ref x) => Some(match x.as_bytes() {
+            b"Serializable" => IsolationLevel::Serializable,
+            b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
+            b"ReadCommitted" => IsolationLevel::ReadCommitted,
+            b"RepeatableRead" => IsolationLevel::RepeatableRead,
+            _ => bail!("invalid isolation level"),
+        }),
+        None => None,
+    };
+
+    let txn_read_only_raw = headers.get(&TXN_READ_ONLY).cloned();
+    let txn_read_only = txn_read_only_raw.as_ref() == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -192,15 +222,70 @@ pub async fn handle(
     // Read the query and query params from the request body
     //
     let body = hyper::body::to_bytes(request.into_body()).await?;
-    let QueryData { query, params } = serde_json::from_slice(&body)?;
-    let query_params = json_to_pg_text(params)?;
+    let payload: Payload = serde_json::from_slice(&body)?;
+
+    let mut client = conn_pool.get(&conn_info, !allow_pool).await?;
 
     //
     // Now execute the query and return the result
     //
-    let client = conn_pool.get(&conn_info, !allow_pool).await?;
+    let result = match payload {
+        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+            .await
+            .map(|x| (x, HashMap::default())),
+        Payload::Batch(queries) => {
+            let mut results = Vec::new();
+            let mut builder = client.build_transaction();
+            if let Some(isolation_level) = txn_isolation_level {
+                builder = builder.isolation_level(isolation_level);
+            }
+            if txn_read_only {
+                builder = builder.read_only(true);
+            }
+            let transaction = builder.start().await?;
+            for query in queries {
+                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                match result {
+                    Ok(r) => results.push(r),
+                    Err(e) => {
+                        transaction.rollback().await?;
+                        return Err(e);
+                    }
+                }
+            }
+            transaction.commit().await?;
+            let mut headers = HashMap::default();
+            headers.insert(
+                TXN_READ_ONLY.clone(),
+                HeaderValue::try_from(txn_read_only.to_string())?,
+            );
+            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            }
+            Ok((json!({ "results": results }), headers))
+        }
+    };
 
-    let row_stream = client.query_raw_txt(query, query_params).await?;
+    if allow_pool {
+        // return connection to the pool
+        tokio::task::spawn(async move {
+            let _ = conn_pool.put(&conn_info, client).await;
+        });
+    }
+
+    result
+}
+
+async fn query_to_json<T: GenericClient>(
+    client: &T,
+    data: QueryData,
+    raw_output: bool,
+    array_mode: bool,
+) -> anyhow::Result<Value> {
+    let query_params = json_to_pg_text(data.params)?;
+    let row_stream = client
+        .query_raw_txt::<String, _>(data.query, query_params)
+        .await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -255,13 +340,6 @@ pub async fn handle(
         .iter()
         .map(|row| pg_text_row_to_json(row, raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
-
-    if allow_pool {
-        // return connection to the pool
-        tokio::task::spawn(async move {
-            let _ = conn_pool.put(&conn_info, client).await;
-        });
-    }
 
     // resulting JSON format is based on the format of node-postgres result
     Ok(json!({

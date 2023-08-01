@@ -109,6 +109,8 @@ pub const TEMP_FILE_SUFFIX: &str = "___temp";
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
 pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
+pub const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
+
 /// A marker file to prevent pageserver from loading a certain tenant on restart.
 /// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
 /// `ignore` management API command, that expects the ignored tenant to be properly loaded
@@ -123,13 +125,28 @@ pub fn is_temporary(path: &Path) -> bool {
     }
 }
 
-pub fn is_uninit_mark(path: &Path) -> bool {
+fn ends_with_suffix(path: &Path, suffix: &str) -> bool {
     match path.file_name() {
-        Some(name) => name
-            .to_string_lossy()
-            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        Some(name) => name.to_string_lossy().ends_with(suffix),
         None => false,
     }
+}
+
+pub fn is_uninit_mark(path: &Path) -> bool {
+    ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
+}
+
+pub fn is_delete_mark(path: &Path) -> bool {
+    ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
+}
+
+fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
+    if let Some(e) = e.io_error() {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return true;
+        }
+    }
+    false
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by

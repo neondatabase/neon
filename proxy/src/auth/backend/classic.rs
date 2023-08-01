@@ -1,8 +1,11 @@
+use std::ops::ControlFlow;
+
 use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
+    proxy::handle_try_wake,
     sasl, scram,
     stream::PqStream,
 };
@@ -48,7 +51,16 @@ pub(super) async fn authenticate(
         }
     };
 
-    let mut node = api.wake_compute(extra, creds).await?;
+    info!("compute node's state has likely changed; requesting a wake-up");
+    let mut num_retries = 0;
+    let mut node = loop {
+        let wake_res = api.wake_compute(extra, creds).await;
+        match handle_try_wake(wake_res, num_retries)? {
+            ControlFlow::Continue(_) => num_retries += 1,
+            ControlFlow::Break(n) => break n,
+        }
+        info!(num_retries, "retrying wake compute");
+    };
     if let Some(keys) = scram_keys {
         use tokio_postgres::config::AuthKeys;
         node.config.auth_keys(AuthKeys::ScramSha256(keys));

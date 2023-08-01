@@ -2,13 +2,9 @@ use std::{collections::hash_map::Entry, fs, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use tracing::{error, info, info_span, warn};
-use utils::{crashsafe, id::TimelineId, lsn::Lsn};
+use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
 
-use crate::{
-    context::RequestContext,
-    import_datadir,
-    tenant::{ignore_absent_files, Tenant},
-};
+use crate::{context::RequestContext, import_datadir, tenant::Tenant};
 
 use super::Timeline;
 
@@ -141,7 +137,7 @@ impl Drop for UninitializedTimeline<'_> {
 
 pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
     let timeline_path = &uninit_mark.timeline_path;
-    match ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
+    match fs_ext::ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
         Ok(()) => {
             info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
         }
@@ -185,7 +181,7 @@ impl TimelineUninitMark {
         let uninit_mark_parent = uninit_mark_file
             .parent()
             .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
+        fs_ext::ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
             format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
         })?;
         crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;

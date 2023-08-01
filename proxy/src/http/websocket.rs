@@ -6,6 +6,7 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
+use hashbrown::HashMap;
 use hyper::{
     server::{
         accept,
@@ -181,13 +182,15 @@ async fn ws_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
+        info!(session_id = ?session_id, "performing websocket upgrade");
+
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         tokio::spawn(async move {
             if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
             {
-                error!("error in websocket connection: {e:?}");
+                error!(session_id = ?session_id, "error in websocket connection: {e:?}");
             }
         });
 
@@ -203,7 +206,7 @@ async fn ws_handler(
             Ok(_) => StatusCode::OK,
             Err(_) => StatusCode::BAD_REQUEST,
         };
-        let json = match result {
+        let (json, headers) = match result {
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
@@ -214,7 +217,10 @@ async fn ws_handler(
                     },
                     None => Value::Null,
                 };
-                json!({ "message": message, "code": code })
+                (
+                    json!({ "message": message, "code": code }),
+                    HashMap::default(),
+                )
             }
         };
         json_response(status_code, json).map(|mut r| {
@@ -222,6 +228,9 @@ async fn ws_handler(
                 "Access-Control-Allow-Origin",
                 hyper::http::HeaderValue::from_static("*"),
             );
+            for (k, v) in headers {
+                r.headers_mut().insert(k, v);
+            }
             r
         })
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {

@@ -14,6 +14,7 @@ pub mod errors {
     use crate::{
         error::{io_error, UserFacingError},
         http,
+        proxy::ShouldRetry,
     };
     use thiserror::Error;
 
@@ -68,6 +69,24 @@ pub mod errors {
                     _ => REQUEST_FAILED.to_owned(),
                 },
                 _ => REQUEST_FAILED.to_owned(),
+            }
+        }
+    }
+
+    impl ShouldRetry for ApiError {
+        fn could_retry(&self) -> bool {
+            match self {
+                // retry some transport errors
+                Self::Transport(io) => io.could_retry(),
+                // retry some temporary failures because the compute was in a bad state
+                // (bad request can be returned when the endpoint was in transition)
+                Self::Console {
+                    status: http::StatusCode::BAD_REQUEST | http::StatusCode::LOCKED,
+                    ..
+                } => true,
+                // retry server errors
+                Self::Console { status, .. } if status.is_server_error() => true,
+                _ => false,
             }
         }
     }

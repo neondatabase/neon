@@ -38,6 +38,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
+use once_cell::sync::OnceCell;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,6 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
 use tracing::*;
 
 use utils::{
@@ -117,7 +117,7 @@ pub struct ImageLayer {
 
     access_stats: LayerAccessStats,
 
-    inner: RwLock<ImageLayerInner>,
+    inner: OnceCell<ImageLayerInner>,
 }
 
 impl std::fmt::Debug for ImageLayer {
@@ -134,21 +134,17 @@ impl std::fmt::Debug for ImageLayer {
 }
 
 pub struct ImageLayerInner {
-    /// If false, the 'index' has not been loaded into memory yet.
-    loaded: bool,
-
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
 
-    /// Reader object for reading blocks from the file. (None if not loaded yet)
-    file: Option<FileBlockReader<VirtualFile>>,
+    /// Reader object for reading blocks from the file.
+    file: FileBlockReader<VirtualFile>,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImageLayerInner")
-            .field("loaded", &self.loaded)
             .field("index_start_blk", &self.index_start_blk)
             .field("index_root_blk", &self.index_root_blk)
             .finish()
@@ -175,11 +171,11 @@ impl Layer for ImageLayer {
         }
 
         let inner = self.load(LayerAccessKind::Dump, ctx)?;
-        let file = inner.file.as_ref().unwrap();
+        let file = &inner.file;
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
         tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
             println!("key: {} offset {}", hex::encode(key), value);
@@ -203,7 +199,7 @@ impl Layer for ImageLayer {
 
         let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
-        let file = inner.file.as_ref().unwrap();
+        let file = &inner.file;
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
@@ -322,52 +318,26 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
-        &self,
-        access_kind: LayerAccessKind,
-        ctx: &RequestContext,
-    ) -> Result<RwLockReadGuard<ImageLayerInner>> {
+    fn load(&self, access_kind: LayerAccessKind, ctx: &RequestContext) -> Result<&ImageLayerInner> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
         loop {
-            // Quick exit if already loaded
-            let inner = self.inner.read().unwrap();
-            if inner.loaded {
+            if let Some(inner) = self.inner.get() {
                 return Ok(inner);
             }
-
-            // Need to open the file and load the metadata. Upgrade our lock to
-            // a write lock. (Or rather, release and re-lock in write mode.)
-            drop(inner);
-            let mut inner = self.inner.write().unwrap();
-            if !inner.loaded {
-                self.load_inner(&mut inner).with_context(|| {
-                    format!("Failed to load image layer {}", self.path().display())
-                })?
-            } else {
-                // Another thread loaded it while we were not holding the lock.
-            }
-
-            // We now have the file open and loaded. There's no function to do
-            // that in the std library RwLock, so we have to release and re-lock
-            // in read mode. (To be precise, the lock guard was moved in the
-            // above call to `load_inner`, so it's already been released). And
-            // while we do that, another thread could unload again, so we have
-            // to re-check and retry if that happens.
-            drop(inner);
+            self.inner
+                .get_or_try_init(|| self.load_inner())
+                .with_context(|| format!("Failed to load image layer {}", self.path().display()))?;
         }
     }
 
-    fn load_inner(&self, inner: &mut ImageLayerInner) -> Result<()> {
+    fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
         // Open the file if it's not open already.
-        if inner.file.is_none() {
-            let file = VirtualFile::open(&path)
-                .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-            inner.file = Some(FileBlockReader::new(file));
-        }
-        let file = inner.file.as_mut().unwrap();
+        let file = VirtualFile::open(&path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+        let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0)?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
@@ -395,10 +365,11 @@ impl ImageLayer {
             }
         }
 
-        inner.index_start_blk = actual_summary.index_start_blk;
-        inner.index_root_blk = actual_summary.index_root_blk;
-        inner.loaded = true;
-        Ok(())
+        Ok(ImageLayerInner {
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+            file,
+        })
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -422,12 +393,7 @@ impl ImageLayer {
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
             access_stats,
-            inner: RwLock::new(ImageLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
+            inner: OnceCell::new(),
         }
     }
 
@@ -454,12 +420,7 @@ impl ImageLayer {
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(ImageLayerInner {
-                file: None,
-                loaded: false,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
+            inner: OnceCell::new(),
         })
     }
 
@@ -620,12 +581,7 @@ impl ImageLayerWriterInner {
             desc,
             lsn: self.lsn,
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(ImageLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk,
-                index_root_blk,
-            }),
+            inner: OnceCell::new(),
         };
 
         // fsync the file

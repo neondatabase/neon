@@ -8,9 +8,11 @@ use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use postgres::{Client, NoTls};
 use tokio_postgres;
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -21,6 +23,7 @@ use utils::measured_stream::MeasuredReader;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
+use crate::sync_sk::{check_if_synced, ping_safekeeper};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -86,6 +89,7 @@ pub struct ParsedSpec {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub pageserver_connstr: String,
+    pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
 }
 
@@ -103,6 +107,21 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
+        let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
+            if matches!(spec.mode, ComputeMode::Primary) {
+                spec.cluster
+                    .settings
+                    .find("neon.safekeepers")
+                    .ok_or("safekeeper connstrings should be provided")?
+                    .split(',')
+                    .map(|str| str.to_string())
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            spec.safekeeper_connstrings.clone()
+        };
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
@@ -128,6 +147,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         Ok(ParsedSpec {
             spec,
             pageserver_connstr,
+            safekeeper_connstrings,
             storage_auth_token,
             tenant_id,
             timeline_id,
@@ -309,6 +329,102 @@ impl ComputeNode {
         Ok(())
     }
 
+    pub async fn check_safekeepers_synced_async(
+        &self,
+        compute_state: &ComputeState,
+    ) -> Result<Option<Lsn>> {
+        // Construct a connection config for each safekeeper
+        let pspec: ParsedSpec = compute_state
+            .pspec
+            .as_ref()
+            .expect("spec must be set")
+            .clone();
+        let sk_connstrs: Vec<String> = pspec.safekeeper_connstrings.clone();
+        let sk_configs = sk_connstrs.into_iter().map(|connstr| {
+            // Format connstr
+            let id = connstr.clone();
+            let connstr = format!("postgresql://no_user@{}", connstr);
+            let options = format!(
+                "-c timeline_id={} tenant_id={}",
+                pspec.timeline_id, pspec.tenant_id
+            );
+
+            // Construct client
+            let mut config = tokio_postgres::Config::from_str(&connstr).unwrap();
+            config.options(&options);
+            if let Some(storage_auth_token) = pspec.storage_auth_token.clone() {
+                config.password(storage_auth_token);
+            }
+
+            (id, config)
+        });
+
+        // Create task set to query all safekeepers
+        let mut tasks = FuturesUnordered::new();
+        let quorum = sk_configs.len() / 2 + 1;
+        for (id, config) in sk_configs {
+            let timeout = tokio::time::Duration::from_millis(100);
+            let task = tokio::time::timeout(timeout, ping_safekeeper(id, config));
+            tasks.push(tokio::spawn(task));
+        }
+
+        // Get a quorum of responses or errors
+        let mut responses = Vec::new();
+        let mut join_errors = Vec::new();
+        let mut task_errors = Vec::new();
+        let mut timeout_errors = Vec::new();
+        while let Some(response) = tasks.next().await {
+            match response {
+                Ok(Ok(Ok(r))) => responses.push(r),
+                Ok(Ok(Err(e))) => task_errors.push(e),
+                Ok(Err(e)) => timeout_errors.push(e),
+                Err(e) => join_errors.push(e),
+            };
+            if responses.len() >= quorum {
+                break;
+            }
+            if join_errors.len() + task_errors.len() + timeout_errors.len() >= quorum {
+                break;
+            }
+        }
+
+        // In case of error, log and fail the check, but don't crash.
+        // We're playing it safe because these errors could be transient
+        // and we don't yet retry. Also being careful here allows us to
+        // be backwards compatible with safekeepers that don't have the
+        // TIMELINE_STATUS API yet.
+        if responses.len() < quorum {
+            error!(
+                "failed sync safekeepers check {:?} {:?} {:?}",
+                join_errors, task_errors, timeout_errors
+            );
+            return Ok(None);
+        }
+
+        Ok(check_if_synced(responses))
+    }
+
+    // Fast path for sync_safekeepers. If they're already synced we get the lsn
+    // in one roundtrip. If not, we should do a full sync_safekeepers.
+    pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
+        let start_time = Utc::now();
+
+        // Run actual work with new tokio runtime
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create rt");
+        let result = rt.block_on(self.check_safekeepers_synced_async(compute_state));
+
+        // Record runtime
+        self.state.lock().unwrap().metrics.sync_sk_check_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        result
+    }
+
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
     #[instrument(skip_all)]
@@ -371,10 +487,14 @@ impl ComputeNode {
         // cannot sync safekeepers.
         let lsn = match spec.mode {
             ComputeMode::Primary => {
-                info!("starting safekeepers syncing");
-                let lsn = self
-                    .sync_safekeepers(pspec.storage_auth_token.clone())
-                    .with_context(|| "failed to sync safekeepers")?;
+                info!("checking if safekeepers are synced");
+                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
+                    lsn
+                } else {
+                    info!("starting safekeepers syncing");
+                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                        .with_context(|| "failed to sync safekeepers")?
+                };
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
@@ -409,6 +529,50 @@ impl ComputeNode {
             }
         }
 
+        Ok(())
+    }
+
+    /// Start and stop a postgres process to warm up the VM for startup.
+    pub fn prewarm_postgres(&self) -> Result<()> {
+        info!("prewarming");
+
+        // Create pgdata
+        let pgdata = &format!("{}.warmup", self.pgdata);
+        create_pgdata(pgdata)?;
+
+        // Run initdb to completion
+        info!("running initdb");
+        let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
+        Command::new(initdb_bin)
+            .args(["-D", pgdata])
+            .output()
+            .expect("cannot start initdb process");
+
+        // Write conf
+        use std::io::Write;
+        let conf_path = Path::new(pgdata).join("postgresql.conf");
+        let mut file = std::fs::File::create(conf_path)?;
+        writeln!(file, "shared_buffers=65536")?;
+        writeln!(file, "port=51055")?; // Nobody should be connecting
+        writeln!(file, "shared_preload_libraries = 'neon'")?;
+
+        // Start postgres
+        info!("starting postgres");
+        let mut pg = Command::new(&self.pgbin)
+            .args(["-D", pgdata])
+            .spawn()
+            .expect("cannot start postgres process");
+
+        // Stop it when it's ready
+        info!("waiting for postgres");
+        wait_for_postgres(&mut pg, Path::new(pgdata))?;
+        pg.kill()?;
+        info!("sent kill signal");
+        pg.wait()?;
+        info!("done prewarming");
+
+        // clean up
+        let _ok = fs::remove_dir_all(pgdata);
         Ok(())
     }
 

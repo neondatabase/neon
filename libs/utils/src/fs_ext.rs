@@ -24,11 +24,28 @@ pub async fn is_directory_empty(path: impl AsRef<Path>) -> anyhow::Result<bool> 
     Ok(dir.next_entry().await?.is_none())
 }
 
+pub fn ignore_not_found(e: io::Error) -> io::Result<()> {
+    if e.kind() == io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
+
+pub fn ignore_absent_files<F>(fs_operation: F) -> io::Result<()>
+where
+    F: Fn() -> io::Result<()>,
+{
+    fs_operation().or_else(ignore_not_found)
+}
+
 #[cfg(test)]
 mod test {
     use std::path::PathBuf;
 
     use crate::fs_ext::is_directory_empty;
+
+    use super::ignore_absent_files;
 
     #[test]
     fn is_empty_dir() {
@@ -74,5 +91,22 @@ mod test {
         // do it again on a path, we know to be nonexistent
         std::fs::remove_file(&file_path).unwrap();
         assert!(is_directory_empty(file_path).await.is_err());
+    }
+
+    #[test]
+    fn ignore_absent_files_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path();
+
+        let file_path: PathBuf = dir_path.join("testfile");
+
+        ignore_absent_files(|| std::fs::remove_file(&file_path)).expect("should execute normally");
+
+        let f = std::fs::File::create(&file_path).unwrap();
+        drop(f);
+
+        ignore_absent_files(|| std::fs::remove_file(&file_path)).expect("should execute normally");
+
+        assert!(!file_path.exists());
     }
 }
