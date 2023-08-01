@@ -270,23 +270,9 @@ where
         V: FnMut(&[u8], u64) -> bool,
     {
         // Locate the node.
-        let blk = self.reader.read_blk(self.start_blk + node_blknum)?;
+        let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
 
-        // Search all entries on this node
-        self.search_node(blk.as_ref(), search_key, dir, visitor)
-    }
-
-    fn search_node<V>(
-        &self,
-        node_buf: &[u8],
-        search_key: &[u8; L],
-        dir: VisitDirection,
-        visitor: &mut V,
-    ) -> Result<bool>
-    where
-        V: FnMut(&[u8], u64) -> bool,
-    {
-        let node = OnDiskNode::deparse(node_buf)?;
+        let node = OnDiskNode::deparse(node_buf.as_ref())?;
         let prefix_len = node.prefix_len as usize;
         let suffix_len = node.suffix_len as usize;
 
