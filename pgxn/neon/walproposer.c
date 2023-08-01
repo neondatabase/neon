@@ -51,6 +51,9 @@
 #include "libpq/pqformat.h"
 #include "replication/slot.h"
 #include "replication/walreceiver.h"
+#if PG_VERSION_NUM >= 160000
+#include "replication/walsender_private.h"
+#endif
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
@@ -191,7 +194,7 @@ pg_init_walproposer(void)
 /*
  * Entry point for `postgres --sync-safekeepers`.
  */
-void
+PGDLLEXPORT void
 WalProposerSync(int argc, char *argv[])
 {
 	struct stat stat_buf;
@@ -315,7 +318,7 @@ nwp_shmem_startup_hook(void)
 /*
  * WAL proposer bgworker entry point.
  */
-void
+PGDLLEXPORT void
 WalProposerMain(Datum main_arg)
 {
 #if PG_VERSION_NUM >= 150000
@@ -388,9 +391,19 @@ WalProposerPoll(void)
 		WaitEvent	event;
 		TimestampTz now = GetCurrentTimestamp();
 
+#if PG_MAJORVERSION_NUM >= 16
+		if (WalSndCtl != NULL)
+			ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+#endif
+
 		rc = WaitEventSetWait(waitEvents, TimeToReconnect(now),
 							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
 		sk = (Safekeeper *) event.user_data;
+
+#if PG_MAJORVERSION_NUM >= 16
+		if (WalSndCtl != NULL)
+			ConditionVariableCancelSleep();
+#endif
 
 		/*
 		 * If the event contains something that one of our safekeeper states

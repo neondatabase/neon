@@ -191,7 +191,7 @@ enter_seccomp_mode(void)
  * backend processes. Some initialization was done in CallExtMain
  * already.
  */
-void
+PGDLLEXPORT void
 WalRedoMain(int argc, char *argv[])
 {
 	int			firstchar;
@@ -304,6 +304,9 @@ WalRedoMain(int argc, char *argv[])
 	 */
 	MemoryContextSwitchTo(MessageContext);
 	initStringInfo(&input_message);
+#if PG_MAJORVERSION_NUM >= 16
+	MyBackendType = B_BACKEND;
+#endif
 
 	for (;;)
 	{

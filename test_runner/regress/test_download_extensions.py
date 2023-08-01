@@ -258,7 +258,7 @@ def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    if "15" in pg_version:  # SKIP v15 for now because test set only has extension built for v14
+    if "v14" not in pg_version:  # SKIP v15 for now because test set only has extension built for v14
         return None
 
     neon_env_builder.enable_remote_storage(

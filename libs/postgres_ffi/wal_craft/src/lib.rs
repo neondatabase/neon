@@ -249,11 +249,18 @@ fn craft_internal<C: postgres::GenericClient>(
     let (mut intermediate_lsns, last_lsn) = f(client, initial_lsn)?;
     let last_lsn = match last_lsn {
         None => client.pg_current_wal_insert_lsn()?,
-        Some(last_lsn) => match last_lsn.cmp(&client.pg_current_wal_insert_lsn()?) {
-            Ordering::Less => bail!("Some records were inserted after the crafted WAL"),
-            Ordering::Equal => last_lsn,
-            Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
-        },
+        Some(last_lsn) => {
+            let insert_lsn = client.pg_current_wal_insert_lsn()?;
+            match last_lsn.cmp(&insert_lsn) {
+                Ordering::Less => bail!(
+                    "Some records were inserted after the crafted WAL: {} vs {}",
+                    last_lsn,
+                    insert_lsn
+                ),
+                Ordering::Equal => last_lsn,
+                Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
+            }
+        }
     };
     if !intermediate_lsns.starts_with(&[initial_lsn]) {
         intermediate_lsns.insert(0, initial_lsn);
@@ -362,8 +369,9 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
         );
         ensure!(
             u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ == XLOG_SIZE_OF_XLOG_SHORT_PHD,
-            "XLOG_SWITCH message ended not on page boundary: {}",
-            after_xlog_switch
+            "XLOG_SWITCH message ended not on page boundary: {}, offset = {}",
+            after_xlog_switch,
+            u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ
         );
         Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
     }

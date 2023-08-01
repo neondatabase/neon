@@ -323,7 +323,14 @@ where
                 .timeline
                 .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
-            ensure!(img.len() == 512);
+            ensure!(
+                img.len()
+                    == match self.timeline.pg_version {
+                        14 | 15 => 512,
+                        16 => 524,
+                        it => bail!("Unknown PG version {}", it),
+                    }
+            );
             Some(img)
         } else {
             None

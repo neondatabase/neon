@@ -1742,6 +1742,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	const PGAlignedBlock buffer = {0};
 	BlockNumber curblocknum = blocknum;
 	int			remblocks = nblocks;
+	XLogRecPtr	lsn = 0;
 
 	/*
 	 * If a relation manages to grow to 2^32-1 blocks, refuse to extend it any
@@ -1755,14 +1756,39 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 						   relpath(reln->smgr_rlocator, forkNum),
 						   InvalidBlockNumber)));
 
+	/* Don't log any pages if we're not allowed to do so. */
+	if (!XLogInsertAllowed())
+		return;
+
 	while (remblocks > 0)
 	{
-		neon_wallog_page(reln, forkNum, curblocknum, buffer.data, true);
-		lfc_write(InfoFromSMgrRel(reln), forkNum, curblocknum, buffer.data);
+		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);
 
-		remblocks--;
-		curblocknum++;
+		XLogBeginInsert();
+
+		for (int i = 0; i < count; i++)
+			XLogRegisterBlock(i, &InfoFromSMgrRel(reln), forkNum, blocknum + i,
+							  (char *) buffer.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+
+		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
+
+		for (int i = 0; i < count; i++)
+		{
+			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
+									  blocknum + i);
+		}
+
+		blocknum += count;
+		remblocks -= count;
 	}
+
+	Assert(lsn != 0);
+
+	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
+	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
+
+	XLogFlush(lsn);
 }
 #endif
 
