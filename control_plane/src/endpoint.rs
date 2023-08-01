@@ -493,13 +493,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            // TODO FIXME: This is a hack to test custom extensions locally.
-            // In test_download_extensions, we assume that the custom extension
-            // prefix is the tenant ID. So we set it here.
-            //
-            // The proper way to implement this is to pass the custom extension
-            // in spec, but we don't have a way to do that yet in the python tests.
-            custom_extensions: Some(vec!["kq_imcx".into()]),
+            custom_extensions: Some(vec![]),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

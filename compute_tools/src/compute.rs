@@ -13,6 +13,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use postgres::{Client, NoTls};
+use regex::Regex;
 use tokio;
 use tokio_postgres;
 use tracing::{error, info, instrument, warn};
@@ -949,11 +950,15 @@ LIMIT 100",
             Some(remote_storage) => {
                 let mut real_ext_name = ext_name.to_string();
                 if is_library {
-                    real_ext_name = real_ext_name.replace(".so", "");
+                    // sometimes library names might have a suffix like
+                    // library.so or library.so.3. We strip this off
+                    // because library_index is based on the name without the file extension
+                    let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
+                    let lib_raw_name = strip_lib_suffix.replace(&real_ext_name, "").to_string();
                     real_ext_name = self
                         .library_index
                         .get()
-                        .expect("must have already downloaded the library_index")[&real_ext_name]
+                        .expect("must have already downloaded the library_index")[&lib_raw_name]
                         .clone();
                 }
 
