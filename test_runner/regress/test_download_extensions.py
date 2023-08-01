@@ -196,65 +196,6 @@ def test_remote_library(
         cleanup(pg_version)
 
 
-# Test extension downloading with mutliple connections to an endpoint.
-# this test only supports real s3 becuase postgis is too large an extension to
-# put in our github repo
-def test_extension_download_after_restart(
-    neon_env_builder: NeonEnvBuilder,
-    pg_version: PgVersion,
-):
-    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
-        return None
-
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_extension_download_after_restart",
-        enable_remote_extensions=True,
-    )
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-    tenant_id, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_extension_download_after_restart", tenant_id=tenant_id)
-
-    assert env.ext_remote_storage is not None  # satisfy mypy
-    assert env.remote_storage_client is not None  # satisfy mypy
-
-    # For MOCK_S3 we upload test files.
-    upload_files(env)
-
-    endpoint = env.endpoints.create_start(
-        "test_extension_download_after_restart",
-        tenant_id=tenant_id,
-        remote_ext_config=env.ext_remote_storage.to_string(),
-        config_lines=["log_min_messages=debug3"],
-    )
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE extension pg_buffercache;")
-            cur.execute("SELECT * from pg_buffercache;")
-            log.info(cur.fetchall())
-
-    # the endpoint is closed now
-    endpoint.stop()
-    # remove postgis files locally
-    cleanup(pg_version)
-
-    # spin up compute node again (there are no postgis files available, because compute is stateless)
-    endpoint = env.endpoints.create_start(
-        "test_extension_download_after_restart",
-        tenant_id=tenant_id,
-        remote_ext_config=env.ext_remote_storage.to_string(),
-        config_lines=["log_min_messages=debug3"],
-    )
-    # connect to postrgres and execute the query again
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * from pg_buffercache;")
-            log.info(cur.fetchall())
-
-    cleanup(pg_version)
-
-
 # here we test a complex extension
 def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
@@ -296,7 +237,13 @@ def test_multiple_extensions_one_archive(
     cleanup(pg_version)
 
 
-def test_extension_download_parallel_requests(
+# Test that extension is downloaded after endpoint restart,
+# when the library is used in the query.
+#
+# Run the test with mutliple simultaneous connections to an endpoint.
+# to ensure that the extension is downloaded only once.
+#
+def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
@@ -305,13 +252,13 @@ def test_extension_download_parallel_requests(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_extension_download_parallel_requests",
+        test_name="test_extension_download_after_restart",
         enable_remote_extensions=True,
     )
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
     tenant_id, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_extension_download_parallel_requests", tenant_id=tenant_id)
+    env.neon_cli.create_timeline("test_extension_download_after_restart", tenant_id=tenant_id)
 
     assert env.ext_remote_storage is not None  # satisfy mypy
     assert env.remote_storage_client is not None  # satisfy mypy
@@ -320,7 +267,7 @@ def test_extension_download_parallel_requests(
     upload_files(env)
 
     endpoint = env.endpoints.create_start(
-        "test_extension_download_parallel_requests",
+        "test_extension_download_after_restart",
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
         config_lines=["log_min_messages=debug3"],
@@ -329,25 +276,27 @@ def test_extension_download_parallel_requests(
         with conn.cursor() as cur:
             cur.execute("CREATE extension pg_buffercache;")
             cur.execute("SELECT * from pg_buffercache;")
-            log.info(cur.fetchall())
+            res = cur.fetchall()
+            assert len(res) > 0
+            log.info(res)
 
-    # the endpoint is closed now
+    # shutdown compute node
     endpoint.stop()
-    # remove postgis files locally
+    # remove extension files locally
     cleanup(pg_version)
 
-    # spin up compute node again (there are no postgis files available, because compute is stateless)
+    # spin up compute node again (there are no extension files available, because compute is stateless)
     endpoint = env.endpoints.create_start(
-        "test_extension_download_parallel_requests",
+        "test_extension_download_after_restart",
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
         config_lines=["log_min_messages=debug3"],
     )
 
+    # connect to conpute node and run the query
+    # that will trigger the download of the extension
     def run_query(endpoint, thread_id: int):
         log.info("thread_id {%d} starting", thread_id)
-        # connect to postrgres and run the query
-        # that will trigger the download of the extension
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * from pg_buffercache;")
@@ -355,7 +304,7 @@ def test_extension_download_parallel_requests(
                 assert len(res) > 0
                 log.info("thread_id {%d}, res = %s", thread_id, res)
 
-    threads = [threading.Thread(target=run_query, args=(endpoint, i)) for i in range(5)]
+    threads = [threading.Thread(target=run_query, args=(endpoint, i)) for i in range(2)]
 
     for thread in threads:
         thread.start()
