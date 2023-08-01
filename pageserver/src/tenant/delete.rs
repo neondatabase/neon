@@ -23,6 +23,8 @@ use super::{
     tree_sort_timelines, DeleteTimelineError, Tenant,
 };
 
+const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u8 = 3;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTenantError {
     #[error("GetTenant {0}")]
@@ -266,13 +268,23 @@ impl DeleteTenantFlow {
         if let Some(remote_storage) = remote_storage {
             let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
 
-            match remote_storage.download(&remote_mark_path).await {
-                Ok(_) => return Ok(acquire(tenant)),
-                Err(e) => {
-                    if matches!(e, DownloadError::NotFound) {
-                        return Ok(None);
+            let attempt = 1;
+            loop {
+                match remote_storage.download(&remote_mark_path).await {
+                    Ok(_) => return Ok(acquire(tenant)),
+                    Err(e) => {
+                        if matches!(e, DownloadError::NotFound) {
+                            return Ok(None);
+                        }
+                        if attempt > SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS {
+                            return Err(anyhow::anyhow!(e))?;
+                        }
+
+                        warn!(
+                            "failed to fetch tenant deletion mark at {} attempt {}",
+                            &remote_mark_path, attempt
+                        )
                     }
-                    return Err(anyhow::anyhow!(e))?;
                 }
             }
         }

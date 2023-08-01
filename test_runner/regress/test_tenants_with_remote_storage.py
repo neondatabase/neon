@@ -144,6 +144,11 @@ def test_tenants_attached_after_download(
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
+    # Thats because of UnreliableWrapper's injected failures
+    env.pageserver.allowed_errors.append(
+        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
+    )
+
     for checkpoint_number in range(1, 3):
         with endpoint.cursor() as cur:
             cur.execute(
