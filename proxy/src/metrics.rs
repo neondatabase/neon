@@ -11,7 +11,6 @@ const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
-///
 /// Key that uniquely identifies the object, this metric describes.
 /// Currently, endpoint_id is enough, but this may change later,
 /// so keep it in a named struct.
@@ -19,8 +18,7 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// Both the proxy and the ingestion endpoint will live in the same region (or cell)
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
-///
-#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Serialize, Debug, Clone)]
 pub struct Ids {
     pub endpoint_id: String,
     pub branch_id: String,
@@ -149,7 +147,7 @@ async fn collect_metrics_iteration(
                     stop_time: *curr_time,
                 },
                 metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname.to_owned()),
+                idempotency_key: idempotency_key(hostname),
                 value,
                 extra: Ids {
                     endpoint_id: curr_key.endpoint_id.clone(),
@@ -167,12 +165,11 @@ async fn collect_metrics_iteration(
     // Send metrics.
     // Split into chunks of 1000 metrics to avoid exceeding the max request size
     for chunk in metrics_to_send.chunks(CHUNK_SIZE) {
-        let chunk_json = serde_json::value::to_raw_value(&EventChunk { events: chunk })
-            .expect("ProxyConsumptionMetric should not fail serialization");
-
         let res = client
             .post(metric_collection_endpoint.clone())
-            .json(&chunk_json)
+            .json(&EventChunk {
+                events: chunk.into(),
+            })
             .send()
             .await;
 
