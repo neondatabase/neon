@@ -57,7 +57,7 @@ pub struct Event<Extra> {
     pub extra: Extra,
 }
 
-pub fn idempotency_key(node_id: String) -> String {
+pub fn idempotency_key(node_id: &str) -> String {
     format!(
         "{}-{}-{:04}",
         Utc::now(),

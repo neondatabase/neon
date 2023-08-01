@@ -149,7 +149,7 @@ async fn collect_metrics_iteration(
                     stop_time: *curr_time,
                 },
                 metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname.to_owned()),
+                idempotency_key: idempotency_key(hostname),
                 value,
                 extra: Ids {
                     endpoint_id: curr_key.endpoint_id.clone(),

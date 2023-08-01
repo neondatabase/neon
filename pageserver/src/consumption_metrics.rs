@@ -361,6 +361,8 @@ async fn collect_metrics_iteration(
 
     let mut chunk_to_send: Vec<Event<Ids>> = Vec::with_capacity(CHUNK_SIZE);
 
+    let node_id = node_id.to_string();
+
     for chunk in chunks {
         chunk_to_send.clear();
 
@@ -368,7 +370,7 @@ async fn collect_metrics_iteration(
         chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
             kind: *when,
             metric: curr_key.metric,
-            idempotency_key: idempotency_key(node_id.to_string()),
+            idempotency_key: idempotency_key(&node_id),
             value: *curr_val,
             extra: Ids {
                 tenant_id: curr_key.tenant_id,
