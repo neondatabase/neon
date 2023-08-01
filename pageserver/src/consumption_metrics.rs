@@ -91,6 +91,9 @@ impl IncrementalValueFactory {
 
 // the static part of a MetricsKey
 impl MetricsKey {
+    /// Absolute value of [`Timeline::get_last_record_lsn`].
+    ///
+    /// [`Timeline::get_last_record_lsn`]: crate::tenant::Timeline::get_last_record_lsn
     const fn written_size(tenant_id: TenantId, timeline_id: TimelineId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -100,8 +103,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
-    /// Values will be the difference of the latest written_size (last_record_lsn) to what we
-    /// previously sent.
+    /// Values will be the difference of the latest [`MetricsKey::written_size`] to what we
+    /// previously sent, starting from the previously sent incremental time range ending at the
+    /// latest absolute measurement.
     const fn written_size_delta(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -114,6 +118,9 @@ impl MetricsKey {
         .incremental_values()
     }
 
+    /// Exact [`Timeline::get_current_logical_size`].
+    ///
+    /// [`Timeline::get_current_logical_size`]: crate::tenant::Timeline::get_current_logical_size
     const fn timeline_logical_size(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -126,6 +133,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
+    /// [`Tenant::remote_size`]
+    ///
+    /// [`Tenant::remote_size`]: crate::tenant::Tenant::remote_size
     const fn remote_storage_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -135,6 +145,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
+    /// Sum of [`Timeline::resident_physical_size`] for each `Tenant`.
+    ///
+    /// [`Timeline::resident_physical_size`]: crate::tenant::Timeline::resident_physical_size
     const fn resident_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
@@ -144,6 +157,9 @@ impl MetricsKey {
         .absolute_values()
     }
 
+    /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
+    ///
+    /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
