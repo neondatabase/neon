@@ -638,7 +638,7 @@ async fn tenant_delete_handler(
     let state = get_state(&request);
 
     mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_id)
-        .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
+        .instrument(info_span!("tenant_delete_handler", %tenant_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
