@@ -131,7 +131,6 @@ struct GetObjectRequest {
     key: String,
     range: Option<String>,
 }
-
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
