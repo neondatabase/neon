@@ -201,7 +201,7 @@ impl DeleteTenantFlow {
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
     // NOTE: static Lazy is only needed for background part.
-    #[instrument(skip(conf, tenants, remote_storage), fields(%tenant_id))]
+    #[instrument(skip_all, fields(%tenant_id))]
     pub(crate) async fn run(
         conf: &'static PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
