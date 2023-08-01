@@ -185,6 +185,14 @@ fn main() -> Result<()> {
     };
     let compute = Arc::new(compute_node);
 
+    // If this is a pooled VM, prewarm before starting HTTP server and becoming
+    // available for binding. Prewarming helps postgres start quicker later,
+    // because QEMU will already have it's memory allocated from the host, and
+    // the necessary binaries will alreaady be cached.
+    if !spec_set {
+        compute.prewarm_postgres()?;
+    }
+
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
     let _http_handle =
@@ -193,12 +201,6 @@ fn main() -> Result<()> {
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
-
-        // TODO this can stall startups in the unlikely event that we bind
-        //      this compute node while it's busy prewarming. It's not too
-        //      bad because it's just 100ms and unlikely, but it's an
-        //      avoidable problem.
-        compute.prewarm_postgres()?;
 
         let mut state = compute.state.lock().unwrap();
         while state.status != ComputeStatus::ConfigurationPending {
