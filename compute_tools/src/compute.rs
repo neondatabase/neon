@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -62,7 +61,8 @@ pub struct ComputeNode {
     // (key: extension name, value: path to extension archive in remote storage)
     pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
     pub library_index: OnceLock<HashMap<String, String>>,
-    pub started_to_download_extensions: Mutex<HashSet<String>>,
+    // key: ext_archive_name, value: started download time, download_completed?
+    pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
 }
 
@@ -956,37 +956,73 @@ LIMIT 100",
                         .clone();
                 }
 
+                let ext_path = &self
+                    .ext_remote_paths
+                    .get()
+                    .expect("error accessing ext_remote_paths")[&real_ext_name];
+                let ext_archive_name = ext_path.object_name().expect("bad path");
+
+                let mut first_try = false;
+                if !self
+                    .ext_download_progress
+                    .read()
+                    .expect("lock err")
+                    .contains_key(ext_archive_name)
                 {
-                    // TODO:
-                    // started_to_download_extensions maybe should store archive paths rather than extension names...
-                    // because right now if you try to download the same archive multiple times
-                    // you will get the same archive downloaded multiple times
-                    // but, this is not such an easy fix.
-                    // because now requests should maybe pause and wait if someone else started making the download
-                    let mut started_to_download_extensions = self
-                        .started_to_download_extensions
-                        .lock()
-                        .expect("bad lock");
-                    if started_to_download_extensions.contains(&real_ext_name) {
-                        info!(
-                            "extension {:?} already exists, skipping download",
-                            &ext_name
-                        );
-                        return Ok(0);
-                    } else {
-                        started_to_download_extensions.insert(real_ext_name.clone());
-                    }
+                    self.ext_download_progress
+                        .write()
+                        .expect("lock err")
+                        .insert(ext_archive_name.to_string(), (Utc::now(), false));
+                    first_try = true;
                 }
-                extension_server::download_extension(
+                let (download_start, download_completed) =
+                    self.ext_download_progress.read().expect("lock err")[ext_archive_name];
+                let start_time_delta = Utc::now()
+                    .signed_duration_since(download_start)
+                    .to_std()
+                    .unwrap()
+                    .as_millis() as u64;
+
+                // how long to wait for extension download if it was started by another process
+                const HANG_TIMEOUT: u64 = 3000; // milliseconds
+
+                if download_completed {
+                    info!("extension already downloaded, skipping re-download");
+                    return Ok(0);
+                } else if start_time_delta < HANG_TIMEOUT && !first_try {
+                    info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
+                    let mut interval =
+                        tokio::time::interval(tokio::time::Duration::from_millis(500));
+                    loop {
+                        info!("waiting for download");
+                        interval.tick().await;
+                        let (_, download_completed_now) =
+                            self.ext_download_progress.read().expect("lock")[ext_archive_name];
+                        if download_completed_now {
+                            info!("download finished by whoever else downloaded it");
+                            return Ok(0);
+                        }
+                    }
+                    // NOTE: the above loop will get terminated
+                    // based on the timeout of the download function
+                }
+
+                // if extension hasn't been downloaded before or recently
+                // started downloading then we download it here
+                info!("downloading new extension {ext_archive_name}");
+
+                let download_size = extension_server::download_extension(
                     &real_ext_name,
-                    &self
-                        .ext_remote_paths
-                        .get()
-                        .expect("error accessing ext_remote_paths")[&real_ext_name],
+                    ext_path,
                     remote_storage,
                     &self.pgbin,
                 )
-                .await
+                .await;
+                self.ext_download_progress
+                    .write()
+                    .expect("bad lock")
+                    .insert(ext_archive_name.to_string(), (download_start, true));
+                download_size
             }
         }
     }

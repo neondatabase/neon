@@ -33,12 +33,12 @@
 //!             -r {"bucket": "my-bucket", "region": "eu-central-1", "endpoint": "http:://localhost:9000"}
 //! ```
 //!
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -197,7 +197,7 @@ fn main() -> Result<()> {
         state_changed: Condvar::new(),
         ext_remote_storage,
         ext_remote_paths: OnceLock::new(),
-        started_to_download_extensions: Mutex::new(HashSet::new()),
+        ext_download_progress: RwLock::new(HashMap::new()),
         library_index: OnceLock::new(),
         build_tag,
     };

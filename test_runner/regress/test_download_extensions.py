@@ -1,5 +1,6 @@
 import os
 import shutil
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -195,9 +196,53 @@ def test_remote_library(
         cleanup(pg_version)
 
 
-# Test extension downloading with mutliple connections to an endpoint.
-# this test only supports real s3 becuase postgis is too large an extension to
-# put in our github repo
+# here we test a complex extension
+def test_multiple_extensions_one_archive(
+    neon_env_builder: NeonEnvBuilder,
+    pg_version: PgVersion,
+):
+    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
+        return None
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.REAL_S3,
+        test_name="test_multiple_extensions_one_archive",
+        enable_remote_extensions=True,
+    )
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+    tenant_id, _ = env.neon_cli.create_tenant()
+    env.neon_cli.create_timeline("test_multiple_extensions_one_archive", tenant_id=tenant_id)
+
+    assert env.ext_remote_storage is not None  # satisfy mypy
+    assert env.remote_storage_client is not None  # satisfy mypy
+
+    endpoint = env.endpoints.create_start(
+        "test_multiple_extensions_one_archive",
+        tenant_id=tenant_id,
+        remote_ext_config=env.ext_remote_storage.to_string(),
+    )
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION address_standardizer;")
+            cur.execute("CREATE EXTENSION address_standardizer_data_us;")
+            # execute query to ensure that it works
+            cur.execute(
+                "SELECT house_num, name, suftype, city, country, state, unit \
+                        FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
+                        'One Rust Place, Boston, MA 02109');"
+            )
+            log.info(cur.fetchall())
+
+    cleanup(pg_version)
+
+
+# Test that extension is downloaded after endpoint restart,
+# when the library is used in the query.
+#
+# Run the test with mutliple simultaneous connections to an endpoint.
+# to ensure that the extension is downloaded only once.
+#
 def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
@@ -231,85 +276,39 @@ def test_extension_download_after_restart(
         with conn.cursor() as cur:
             cur.execute("CREATE extension pg_buffercache;")
             cur.execute("SELECT * from pg_buffercache;")
-            log.info(cur.fetchall())
+            res = cur.fetchall()
+            assert len(res) > 0
+            log.info(res)
 
-    # the endpoint is closed now
+    # shutdown compute node
     endpoint.stop()
-    # remove postgis files locally
+    # remove extension files locally
     cleanup(pg_version)
 
-    # spin up compute node again (there are no postgis files available, because compute is stateless)
+    # spin up compute node again (there are no extension files available, because compute is stateless)
     endpoint = env.endpoints.create_start(
         "test_extension_download_after_restart",
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
         config_lines=["log_min_messages=debug3"],
     )
-    # connect to postrgres and execute the query again
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * from pg_buffercache;")
-            log.info(cur.fetchall())
+
+    # connect to conpute node and run the query
+    # that will trigger the download of the extension
+    def run_query(endpoint, thread_id: int):
+        log.info("thread_id {%d} starting", thread_id)
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * from pg_buffercache;")
+                res = cur.fetchall()
+                assert len(res) > 0
+                log.info("thread_id {%d}, res = %s", thread_id, res)
+
+    threads = [threading.Thread(target=run_query, args=(endpoint, i)) for i in range(2)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
     cleanup(pg_version)
-
-
-# here we test a complex extension
-def test_multiple_extensions_one_archive(
-    neon_env_builder: NeonEnvBuilder,
-    pg_version: PgVersion,
-):
-    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
-        return None
-
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.REAL_S3,
-        test_name="test_multiple_extensions_one_archive",
-        enable_remote_extensions=True,
-    )
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-    tenant_id, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_multiple_extensions_one_archive", tenant_id=tenant_id)
-
-    assert env.ext_remote_storage is not None  # satisfy mypy
-    assert env.remote_storage_client is not None  # satisfy mypy
-
-    endpoint = env.endpoints.create_start(
-        "test_multiple_extensions_one_archive",
-        tenant_id=tenant_id,
-        remote_ext_config=env.ext_remote_storage.to_string(),
-    )
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            # TODO later: figure out what was going wrong with this:
-            cur.execute("CREATE EXTENSION address_standardizer;")
-            cur.execute("CREATE EXTENSION address_standardizer_data_us;")
-            # execute query to ensure that it works
-            cur.execute(
-                "SELECT house_num, name, suftype, city, country, state, unit \
-                        FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
-                        'One Rust Place, Boston, MA 02109');"
-            )
-            log.info(cur.fetchall())
-
-    # remove postgis files locally
-    cleanup(pg_version)
-
-
-# TODO: this complex example reveals a possible "inneficiency":
-# both calls will download the extension
-
-# proposed solution:
-# A: don't worry about it
-# B:
-# 1st request sets started_download = true
-# this request sets download_completed = true if it succeeds
-# subsequent requests hang and repeatedly check download_completed until it gets set or until they timeout
-# 3 seconds afterthe started_download = true was set some thread checks if download_completed was set. if not, then it sets started_download back to false
-
-
-# TODO later: investigate download timeouts
-# Test extension downloading with mutliple connections to an endpoint.
-# this test only supports real s3 becuase postgis is too large an extension to
-# put in our github repo
