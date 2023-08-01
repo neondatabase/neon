@@ -939,11 +939,14 @@ LIMIT 100",
                     .unwrap()
                     .as_millis() as u64;
 
+                // how long to wait for extension download if it was started by another process
+                const HANG_TIMEOUT = 3000;// milliseconds
+
                 if download_completed {
                     info!("extension already downloaded, skipping re-download");
                     return Ok(0);
-                } else if start_time_delta < 3000 && !first_try {
-                    info!("download {ext_archive_name} already started, hanging untill completion or timeout");
+                } else if start_time_delta < HANG_TIMEOUT && !first_try {
+                    info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
                     let mut interval =
                         tokio::time::interval(tokio::time::Duration::from_millis(500));
                     loop {
