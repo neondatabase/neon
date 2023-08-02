@@ -230,10 +230,9 @@ def timeline_delete_wait_completed(
 def wait_tenant_status_404(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
-    wait_longer: bool = False,
+    iterations: int,
 ):
     last_exc = None
-    iterations = 10 if wait_longer else 2
     for _ in range(iterations):
         time.sleep(0.250)
         try:
@@ -252,7 +251,7 @@ def wait_tenant_status_404(
 def tenant_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
-    wait_longer: bool = False,  # Use when running with RemoteStorageKind.REAL_S3
+    iterations: int,
 ):
     pageserver_http.tenant_delete(tenant_id=tenant_id)
-    wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, wait_longer=wait_longer)
+    wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
