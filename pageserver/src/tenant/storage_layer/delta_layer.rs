@@ -242,7 +242,7 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
         println!(
             "index_start_blk: {}, root {}",
@@ -317,7 +317,9 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+            let inner = self
+                .load(LayerAccessKind::GetValueReconstructData, ctx)
+                .await?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = &inner.file;
@@ -497,7 +499,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
+    async fn load(
         &self,
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
@@ -621,6 +623,7 @@ impl DeltaLayer {
     pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer")?;
         DeltaLayerInner::load_val_refs(inner)
             .await
@@ -631,6 +634,7 @@ impl DeltaLayer {
     pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer keys")?;
         DeltaLayerInner::load_keys(inner)
             .await

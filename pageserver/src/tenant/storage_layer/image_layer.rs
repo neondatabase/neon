@@ -168,7 +168,7 @@ impl Layer for ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
         let file = &inner.file;
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -197,7 +197,9 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+        let inner = self
+            .load(LayerAccessKind::GetValueReconstructData, ctx)
+            .await?;
 
         let file = &inner.file;
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -314,7 +316,11 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, access_kind: LayerAccessKind, ctx: &RequestContext) -> Result<&ImageLayerInner> {
+    async fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<&ImageLayerInner> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
         loop {
