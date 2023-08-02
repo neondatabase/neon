@@ -7,15 +7,14 @@ import pytest
 import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 

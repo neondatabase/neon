@@ -25,12 +25,9 @@ from fixtures.neon_fixtures import (
     PgBin,
     PgProtocol,
     PortDistributor,
-    RemoteStorageKind,
-    RemoteStorageUsers,
     Safekeeper,
     SafekeeperHttpClient,
     SafekeeperPort,
-    available_remote_storages,
 )
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -38,6 +35,11 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    RemoteStorageUsers,
+    available_remote_storages,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 

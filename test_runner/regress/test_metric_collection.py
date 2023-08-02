@@ -14,10 +14,10 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     NeonProxy,
     PortDistributor,
-    RemoteStorageKind,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import query_scalar
 from pytest_httpserver import HTTPServer
