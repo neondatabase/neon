@@ -13,7 +13,7 @@ pub struct PasswordHackPayload {
 impl PasswordHackPayload {
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         // The format is `project=<utf-8>;<password-bytes>`.
-        let mut iter = bytes.splitn_str(2, [';', '$']);
+        let mut iter = bytes.splitn_str(2, &[';', '$']);
         let endpoint = iter.next()?.to_str().ok()?;
         let endpoint = parse_endpoint_param(endpoint)?.to_owned();
         let password = iter.next()?.to_owned();
