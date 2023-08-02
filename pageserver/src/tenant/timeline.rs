@@ -697,6 +697,9 @@ impl Timeline {
                 Err(CompactionError::DownloadRequired(rls)) => {
                     anyhow::bail!("Compaction requires downloading multiple times (last was {} layers), possibly battling against eviction", rls.len())
                 }
+                Err(CompactionError::ShuttingDown) => {
+                    return Ok(());
+                }
                 Err(CompactionError::Other(e)) => {
                     return Err(e);
                 }
@@ -778,7 +781,8 @@ impl Timeline {
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         if self.is_stopping() {
-            return Err(anyhow::anyhow!("timeline is Stopping").into());
+            trace!("Dropping out of compaction on timeline shutdown");
+            return Err(CompactionError::ShuttingDown);
         }
 
         let target_file_size = self.get_checkpoint_distance();
@@ -3235,6 +3239,8 @@ enum CompactionError {
     /// This should not happen repeatedly, but will be retried once by top-level
     /// `Timeline::compact`.
     DownloadRequired(Vec<Arc<RemoteLayer>>),
+    /// The timeline or pageserver is shutting down
+    ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     Other(anyhow::Error),
 }
