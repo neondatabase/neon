@@ -15,10 +15,10 @@ from typing import Any, List, Optional
 
 import psycopg2
 import pytest
+from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
-    NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,

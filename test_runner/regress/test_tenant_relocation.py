@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
+from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
-    NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
 )
