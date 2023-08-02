@@ -330,27 +330,27 @@ where
                 }
             }
         } else {
-            let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
+            let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
                 Ok(idx) => {
                     // Exact match. That's the first entry to return, and walk
-                    // backwards from there. (The loop below starts from 'idx -
-                    // 1', so add one here to compensate.)
-                    idx + 1
+                    // backwards from there.
+                    idx
                 }
                 Err(idx) => {
                     // No exact match. The binary search returned the index of the
                     // first key that's > search_key. Back off by one, and walk
-                    // backwards from there. (The loop below starts from idx - 1,
-                    // so we don't need to subtract one here)
-                    idx
+                    // backwards from there.
+                    if let Some(idx) = idx.checked_sub(1) {
+                        idx
+                    } else {
+                        return Ok(false);
+                    }
                 }
             };
 
-            // idx points to the first match + 1 now. Keep going from there.
-            let mut key_off = idx * suffix_len;
-            while idx > 0 {
-                idx -= 1;
-                key_off -= suffix_len;
+            // idx points to the first match now. Keep going from there.
+            for idx in (0..=idx).rev() {
+                let key_off = idx * suffix_len;
                 let suffix = &node.keys[key_off..key_off + suffix_len];
                 keybuf[prefix_len..].copy_from_slice(suffix);
                 let value = node.value(idx);
