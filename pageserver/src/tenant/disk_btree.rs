@@ -257,21 +257,8 @@ where
     where
         V: FnMut(&[u8], u64) -> bool,
     {
-        self.search_recurse(self.root_blk, search_key, dir, &mut visitor)
-    }
-
-    fn search_recurse<V>(
-        &self,
-        node_blknum: u32,
-        search_key: &[u8; L],
-        dir: VisitDirection,
-        visitor: &mut V,
-    ) -> Result<bool>
-    where
-        V: FnMut(&[u8], u64) -> bool,
-    {
         let mut stack = Vec::new();
-        stack.push((node_blknum, None));
+        stack.push((self.root_blk, None));
         while let Some((node_blknum, opt_iter)) = stack.pop() {
             // Locate the node.
             let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
