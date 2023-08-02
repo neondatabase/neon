@@ -47,7 +47,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:
@@ -177,7 +177,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h
@@ -319,7 +319,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:
@@ -410,7 +410,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:
@@ -495,7 +495,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:

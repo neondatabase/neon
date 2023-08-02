@@ -26,7 +26,7 @@ env:
 jobs:
   tag:
     runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:5878368743
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -55,7 +55,7 @@ jobs:
   check-codestyle-python:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:
@@ -87,7 +87,7 @@ jobs:
   check-codestyle-rust:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
 
     steps:
@@ -153,7 +153,7 @@ jobs:
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
     strategy:
       fail-fast: false
@@ -350,7 +350,7 @@ jobs:
   regress-tests:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     needs: [ build-neon ]
@@ -388,7 +388,7 @@ jobs:
   benchmarks:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     needs: [ build-neon ]
@@ -420,7 +420,7 @@ jobs:
   create-test-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
@@ -460,7 +460,7 @@ jobs:
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:5878368743
       options: --init
     needs: [ regress-tests ]
     strategy:
@@ -547,7 +547,7 @@ jobs:
   trigger-e2e-tests:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:5878368743
       options: --init
     needs: [ promote-images, tag ]
     steps:
@@ -1028,7 +1028,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:5878368743
       options: --init
     needs: [ promote-images, tag, regress-tests ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
