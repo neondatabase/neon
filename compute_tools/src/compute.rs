@@ -1,16 +1,20 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use postgres::{Client, NoTls};
+use regex::Regex;
+use tokio;
 use tokio_postgres;
 use tracing::{error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -20,10 +24,12 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use crate::config;
+use remote_storage::{GenericRemoteStorage, RemotePath};
+
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
+use crate::{config, extension_server};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -31,6 +37,7 @@ pub struct ComputeNode {
     pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
+    pub pgversion: String,
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -50,6 +57,24 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
+    ///  the S3 bucket that we search for extensions in
+    pub ext_remote_storage: Option<GenericRemoteStorage>,
+    // (key: extension name, value: path to extension archive in remote storage)
+    pub ext_remote_paths: OnceLock<HashMap<String, RemotePath>>,
+    // (key: library name, value: name of extension containing this library)
+    pub library_index: OnceLock<HashMap<String, String>>,
+    // key: ext_archive_name, value: started download time, download_completed?
+    pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
+    pub build_tag: String,
+}
+
+// store some metrics about download size that might impact startup time
+#[derive(Clone, Debug)]
+pub struct RemoteExtensionMetrics {
+    num_ext_downloaded: u64,
+    largest_ext_size: u64,
+    total_ext_download_size: u64,
+    prep_extensions_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -473,14 +498,22 @@ impl ComputeNode {
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
-    pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+    pub fn prepare_pgdata(
+        &self,
+        compute_state: &ComputeState,
+        extension_server_port: u16,
+    ) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
+        config::write_postgres_conf(
+            &pgdata_path.join("postgresql.conf"),
+            &pspec.spec,
+            Some(extension_server_port),
+        )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
@@ -670,7 +703,7 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
         self.pg_reload_conf(&mut client)?;
@@ -700,7 +733,7 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(&self) -> Result<std::process::Child> {
+    pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -711,7 +744,31 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
-        self.prepare_pgdata(&compute_state)?;
+        // This part is sync, because we need to download
+        // remote shared_preload_libraries before postgres start (if any)
+        {
+            let library_load_start_time = Utc::now();
+            let remote_ext_metrics = self.prepare_preload_libraries(&compute_state)?;
+
+            let library_load_time = Utc::now()
+                .signed_duration_since(library_load_start_time)
+                .to_std()
+                .unwrap()
+                .as_millis() as u64;
+            let mut state = self.state.lock().unwrap();
+            state.metrics.load_ext_ms = library_load_time;
+            state.metrics.num_ext_downloaded = remote_ext_metrics.num_ext_downloaded;
+            state.metrics.largest_ext_size = remote_ext_metrics.largest_ext_size;
+            state.metrics.total_ext_download_size = remote_ext_metrics.total_ext_download_size;
+            state.metrics.prep_extensions_ms = remote_ext_metrics.prep_extensions_ms;
+            info!(
+                "Loading shared_preload_libraries took {:?}ms",
+                library_load_time
+            );
+            info!("{:?}", remote_ext_metrics);
+        }
+
+        self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
         let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
@@ -858,5 +915,201 @@ LIMIT 100",
         } else {
             "{{\"pg_stat_statements\": []}}".to_string()
         }
+    }
+
+    // If remote extension storage is configured,
+    // download extension control files
+    pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+        if let Some(ref ext_remote_storage) = self.ext_remote_storage {
+            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+            let spec = &pspec.spec;
+            let custom_ext = spec.custom_extensions.clone().unwrap_or(Vec::new());
+            info!("custom extensions: {:?}", &custom_ext);
+            let (ext_remote_paths, library_index) = extension_server::get_available_extensions(
+                ext_remote_storage,
+                &self.pgbin,
+                &self.pgversion,
+                &custom_ext,
+                &self.build_tag,
+            )
+            .await?;
+            self.ext_remote_paths
+                .set(ext_remote_paths)
+                .expect("this is the only time we set ext_remote_paths");
+            self.library_index
+                .set(library_index)
+                .expect("this is the only time we set library_index");
+        }
+        Ok(())
+    }
+
+    // download an archive, unzip and place files in correct locations
+    pub async fn download_extension(&self, ext_name: &str, is_library: bool) -> Result<u64> {
+        match &self.ext_remote_storage {
+            None => anyhow::bail!("No remote extension storage"),
+            Some(remote_storage) => {
+                let mut real_ext_name = ext_name.to_string();
+                if is_library {
+                    // sometimes library names might have a suffix like
+                    // library.so or library.so.3. We strip this off
+                    // because library_index is based on the name without the file extension
+                    let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
+                    let lib_raw_name = strip_lib_suffix.replace(&real_ext_name, "").to_string();
+                    real_ext_name = self
+                        .library_index
+                        .get()
+                        .expect("must have already downloaded the library_index")[&lib_raw_name]
+                        .clone();
+                }
+
+                let ext_path = &self
+                    .ext_remote_paths
+                    .get()
+                    .expect("error accessing ext_remote_paths")[&real_ext_name];
+                let ext_archive_name = ext_path.object_name().expect("bad path");
+
+                let mut first_try = false;
+                if !self
+                    .ext_download_progress
+                    .read()
+                    .expect("lock err")
+                    .contains_key(ext_archive_name)
+                {
+                    self.ext_download_progress
+                        .write()
+                        .expect("lock err")
+                        .insert(ext_archive_name.to_string(), (Utc::now(), false));
+                    first_try = true;
+                }
+                let (download_start, download_completed) =
+                    self.ext_download_progress.read().expect("lock err")[ext_archive_name];
+                let start_time_delta = Utc::now()
+                    .signed_duration_since(download_start)
+                    .to_std()
+                    .unwrap()
+                    .as_millis() as u64;
+
+                // how long to wait for extension download if it was started by another process
+                const HANG_TIMEOUT: u64 = 3000; // milliseconds
+
+                if download_completed {
+                    info!("extension already downloaded, skipping re-download");
+                    return Ok(0);
+                } else if start_time_delta < HANG_TIMEOUT && !first_try {
+                    info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
+                    let mut interval =
+                        tokio::time::interval(tokio::time::Duration::from_millis(500));
+                    loop {
+                        info!("waiting for download");
+                        interval.tick().await;
+                        let (_, download_completed_now) =
+                            self.ext_download_progress.read().expect("lock")[ext_archive_name];
+                        if download_completed_now {
+                            info!("download finished by whoever else downloaded it");
+                            return Ok(0);
+                        }
+                    }
+                    // NOTE: the above loop will get terminated
+                    // based on the timeout of the download function
+                }
+
+                // if extension hasn't been downloaded before or the previous
+                // attempt to download was at least HANG_TIMEOUT ms ago
+                // then we try to download it here
+                info!("downloading new extension {ext_archive_name}");
+
+                let download_size = extension_server::download_extension(
+                    &real_ext_name,
+                    ext_path,
+                    remote_storage,
+                    &self.pgbin,
+                )
+                .await;
+                self.ext_download_progress
+                    .write()
+                    .expect("bad lock")
+                    .insert(ext_archive_name.to_string(), (download_start, true));
+                download_size
+            }
+        }
+    }
+
+    #[tokio::main]
+    pub async fn prepare_preload_libraries(
+        &self,
+        compute_state: &ComputeState,
+    ) -> Result<RemoteExtensionMetrics> {
+        if self.ext_remote_storage.is_none() {
+            return Ok(RemoteExtensionMetrics {
+                num_ext_downloaded: 0,
+                largest_ext_size: 0,
+                total_ext_download_size: 0,
+                prep_extensions_ms: 0,
+            });
+        }
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
+
+        info!("parse shared_preload_libraries from spec.cluster.settings");
+        let mut libs_vec = Vec::new();
+        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+            libs_vec = libs
+                .split(&[',', '\'', ' '])
+                .filter(|s| *s != "neon" && !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        info!("parse shared_preload_libraries from provided postgresql.conf");
+        // that is used in neon_local and python tests
+        if let Some(conf) = &spec.cluster.postgresql_conf {
+            let conf_lines = conf.split('\n').collect::<Vec<&str>>();
+            let mut shared_preload_libraries_line = "";
+            for line in conf_lines {
+                if line.starts_with("shared_preload_libraries") {
+                    shared_preload_libraries_line = line;
+                }
+            }
+            let mut preload_libs_vec = Vec::new();
+            if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
+                preload_libs_vec = libs
+                    .split(&[',', '\'', ' '])
+                    .filter(|s| *s != "neon" && !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            libs_vec.extend(preload_libs_vec);
+        }
+
+        info!("Download ext_index.json, find the extension paths");
+        let prep_ext_start_time = Utc::now();
+        self.prepare_external_extensions(compute_state).await?;
+        let prep_ext_time_delta = Utc::now()
+            .signed_duration_since(prep_ext_start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+        info!("Prepare extensions took {prep_ext_time_delta}ms");
+
+        info!("Downloading to shared preload libraries: {:?}", &libs_vec);
+        let mut download_tasks = Vec::new();
+        for library in &libs_vec {
+            download_tasks.push(self.download_extension(library, true));
+        }
+        let results = join_all(download_tasks).await;
+
+        let mut remote_ext_metrics = RemoteExtensionMetrics {
+            num_ext_downloaded: 0,
+            largest_ext_size: 0,
+            total_ext_download_size: 0,
+            prep_extensions_ms: prep_ext_time_delta,
+        };
+        for result in results {
+            let download_size = result?;
+            remote_ext_metrics.num_ext_downloaded += 1;
+            remote_ext_metrics.largest_ext_size =
+                std::cmp::max(remote_ext_metrics.largest_ext_size, download_size);
+            remote_ext_metrics.total_ext_download_size += download_size;
+        }
+        Ok(remote_ext_metrics)
     }
 }

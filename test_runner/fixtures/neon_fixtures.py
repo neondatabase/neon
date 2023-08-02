@@ -530,6 +530,16 @@ def available_remote_storages() -> List[RemoteStorageKind]:
     return remote_storages
 
 
+def available_s3_storages() -> List[RemoteStorageKind]:
+    remote_storages = [RemoteStorageKind.MOCK_S3]
+    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
+        remote_storages.append(RemoteStorageKind.REAL_S3)
+        log.info("Enabling real s3 storage for tests")
+    else:
+        log.info("Using mock implementations to test remote storage")
+    return remote_storages
+
+
 @dataclass
 class LocalFsStorage:
     root: Path
@@ -549,6 +559,16 @@ class S3Storage:
             "AWS_ACCESS_KEY_ID": self.access_key,
             "AWS_SECRET_ACCESS_KEY": self.secret_key,
         }
+
+    def to_string(self) -> str:
+        return json.dumps(
+            {
+                "bucket": self.bucket_name,
+                "region": self.bucket_region,
+                "endpoint": self.endpoint,
+                "prefix": self.prefix_in_bucket,
+            }
+        )
 
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
@@ -616,10 +636,12 @@ class NeonEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
+        self.ext_remote_storage: Optional[S3Storage] = None
+        self.remote_storage_client: Optional[Any] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
-        self.mock_s3_server = mock_s3_server
+        self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
@@ -667,15 +689,24 @@ class NeonEnvBuilder:
         remote_storage_kind: RemoteStorageKind,
         test_name: str,
         force_enable: bool = True,
+        enable_remote_extensions: bool = False,
     ):
         if remote_storage_kind == RemoteStorageKind.NOOP:
             return
         elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
             self.enable_local_fs_remote_storage(force_enable=force_enable)
         elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
-            self.enable_mock_s3_remote_storage(bucket_name=test_name, force_enable=force_enable)
+            self.enable_mock_s3_remote_storage(
+                bucket_name=test_name,
+                force_enable=force_enable,
+                enable_remote_extensions=enable_remote_extensions,
+            )
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
-            self.enable_real_s3_remote_storage(test_name=test_name, force_enable=force_enable)
+            self.enable_real_s3_remote_storage(
+                test_name=test_name,
+                force_enable=force_enable,
+                enable_remote_extensions=enable_remote_extensions,
+            )
         else:
             raise RuntimeError(f"Unknown storage type: {remote_storage_kind}")
 
@@ -689,11 +720,18 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
-    def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True):
+    def enable_mock_s3_remote_storage(
+        self,
+        bucket_name: str,
+        force_enable: bool = True,
+        enable_remote_extensions: bool = False,
+    ):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
         Starts up the mock server, if that does not run yet.
         Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
+
+        Also creates the bucket for extensions, self.ext_remote_storage bucket
         """
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         mock_endpoint = self.mock_s3_server.endpoint()
@@ -714,9 +752,25 @@ class NeonEnvBuilder:
             bucket_region=mock_region,
             access_key=self.mock_s3_server.access_key(),
             secret_key=self.mock_s3_server.secret_key(),
+            prefix_in_bucket="pageserver",
         )
 
-    def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True):
+        if enable_remote_extensions:
+            self.ext_remote_storage = S3Storage(
+                bucket_name=bucket_name,
+                endpoint=mock_endpoint,
+                bucket_region=mock_region,
+                access_key=self.mock_s3_server.access_key(),
+                secret_key=self.mock_s3_server.secret_key(),
+                prefix_in_bucket="ext",
+            )
+
+    def enable_real_s3_remote_storage(
+        self,
+        test_name: str,
+        force_enable: bool = True,
+        enable_remote_extensions: bool = False,
+    ):
         """
         Sets up configuration to use real s3 endpoint without mock server
         """
@@ -756,6 +810,15 @@ class NeonEnvBuilder:
             prefix_in_bucket=self.remote_storage_prefix,
         )
 
+        if enable_remote_extensions:
+            self.ext_remote_storage = S3Storage(
+                bucket_name="neon-dev-extensions-eu-central-1",
+                bucket_region="eu-central-1",
+                access_key=access_key,
+                secret_key=secret_key,
+                prefix_in_bucket=None,
+            )
+
     def cleanup_local_storage(self):
         if self.preserve_database_files:
             return
@@ -789,6 +852,7 @@ class NeonEnvBuilder:
         # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
         # so this line effectively a no-op
         assert isinstance(self.remote_storage, S3Storage)
+        assert self.remote_storage_client is not None
 
         if self.keep_remote_storage_contents:
             log.info("keep_remote_storage_contents skipping remote storage cleanup")
@@ -918,6 +982,8 @@ class NeonEnv:
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
+        self.remote_storage_client = config.remote_storage_client
+        self.ext_remote_storage = config.ext_remote_storage
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1505,6 +1571,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         branch_name: Optional[str] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1514,6 +1581,8 @@ class NeonCli(AbstractNeonCli):
             "--pg-version",
             self.env.pg_version,
         ]
+        if remote_ext_config is not None:
+            args.extend(["--remote-ext-config", remote_ext_config])
         if lsn is not None:
             args.append(f"--lsn={lsn}")
         args.extend(["--pg-port", str(pg_port)])
@@ -2375,7 +2444,7 @@ class Endpoint(PgProtocol):
 
         return self
 
-    def start(self) -> "Endpoint":
+    def start(self, remote_ext_config: Optional[str] = None) -> "Endpoint":
         """
         Start the Postgres instance.
         Returns self.
@@ -2391,6 +2460,7 @@ class Endpoint(PgProtocol):
             http_port=self.http_port,
             tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
+            remote_ext_config=remote_ext_config,
         )
         self.running = True
 
@@ -2480,6 +2550,7 @@ class Endpoint(PgProtocol):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -2494,7 +2565,7 @@ class Endpoint(PgProtocol):
             config_lines=config_lines,
             hot_standby=hot_standby,
             lsn=lsn,
-        ).start()
+        ).start(remote_ext_config=remote_ext_config)
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
@@ -2528,6 +2599,7 @@ class EndpointFactory:
         lsn: Optional[Lsn] = None,
         hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -2544,6 +2616,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
+            remote_ext_config=remote_ext_config,
         )
 
     def create(
