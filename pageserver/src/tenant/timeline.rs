@@ -3573,7 +3573,23 @@ impl Timeline {
         let all_values_iter = all_keys.iter();
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys.iter();
+        let mut all_keys_iter = all_keys
+            .iter()
+            .map(|(key, lsn, size, _value_ref)| (*key, *lsn, *size))
+            .coalesce(|mut prev, cur| {
+                // Coalesce keys that belong to the same key pair.
+                // This ensures that compaction doesn't put them
+                // into different layer files.
+                // Still limit this by the target file size,
+                // so that we keep the size of the files in
+                // check.
+                if prev.0 == cur.0 && prev.2 < target_file_size {
+                    prev.2 += cur.2;
+                    Ok(prev)
+                } else {
+                    Err((prev, cur))
+                }
+            });
 
         stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
@@ -3639,8 +3655,7 @@ impl Timeline {
                     dup_end_lsn = Lsn::INVALID;
                 }
                 // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                for &(next_key, next_lsn, next_size, ref _next_value_ref) in all_keys_iter.by_ref()
-                {
+                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
                     next_key_size = next_size;
                     if key != next_key {
                         if dup_end_lsn.is_valid() {
