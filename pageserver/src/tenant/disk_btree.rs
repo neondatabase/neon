@@ -284,7 +284,7 @@ where
 
         if dir == VisitDirection::Forwards {
             // Locate the first match
-            let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
+            let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
                 Ok(idx) => idx,
                 Err(idx) => {
                     if node.level == 0 {
@@ -311,8 +311,8 @@ where
                 }
             };
             // idx points to the first match now. Keep going from there
-            let mut key_off = idx * suffix_len;
-            while idx < node.num_children as usize {
+            for idx in idx..node.num_children.into() {
+                let key_off = idx * suffix_len;
                 let suffix = &node.keys[key_off..key_off + suffix_len];
                 keybuf[prefix_len..].copy_from_slice(suffix);
                 let value = node.value(idx);
@@ -328,8 +328,6 @@ where
                         return Ok(false);
                     }
                 }
-                idx += 1;
-                key_off += suffix_len;
             }
         } else {
             let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
