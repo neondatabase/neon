@@ -38,7 +38,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use once_cell::sync::OnceCell;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -48,6 +47,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -329,11 +329,12 @@ impl ImageLayer {
             }
             self.inner
                 .get_or_try_init(|| self.load_inner())
+                .await
                 .with_context(|| format!("Failed to load image layer {}", self.path().display()))?;
         }
     }
 
-    fn load_inner(&self) -> Result<ImageLayerInner> {
+    async fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
         // Open the file if it's not open already.
