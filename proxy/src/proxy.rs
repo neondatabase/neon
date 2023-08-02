@@ -23,7 +23,7 @@ use tokio::{
     time,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info, info_span, warn, Instrument};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
@@ -101,21 +101,20 @@ pub async fn task_main(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (socket, peer_addr) = accept_result?;
-                info!("accepted postgres client connection from {peer_addr}");
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
                 connections.spawn(
                     async move {
-                        info!("spawned a task for {peer_addr}");
+                        info!(?session_id, "accepted postgres client connection");
 
                         socket
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp)
-                        .await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
                     }
+                    .instrument(info_span!("", %peer_addr))
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
                         error!(?session_id, "per-client task finished with an error: {e:#}");
@@ -425,11 +424,17 @@ where
             auth::BackendType::Test(x) => x.wake_compute(),
         };
 
-        match handle_try_wake(wake_res, num_retries)? {
+        match handle_try_wake(wake_res, num_retries) {
+            Err(e) => {
+                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                return Err(e.into());
+            }
             // failed to wake up but we can continue to retry
-            ControlFlow::Continue(_) => {}
+            Ok(ControlFlow::Continue(e)) => {
+                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+            }
             // successfully woke up a compute node and can break the wakeup loop
-            ControlFlow::Break(mut node_info) => {
+            Ok(ControlFlow::Break(mut node_info)) => {
                 node_info.config.reuse_password(&config);
                 mechanism.update_connect_config(&mut node_info.config);
                 break node_info;
@@ -440,7 +445,6 @@ where
         num_retries += 1;
 
         time::sleep(wait_duration).await;
-        info!(num_retries, "retrying wake compute");
     };
 
     // now that we have a new node, try connect to it repeatedly.
@@ -451,10 +455,12 @@ where
         match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
             Ok(res) => return Ok(res),
             Err(e) => {
-                error!(error = ?e, "could not connect to compute node");
-                if !e.should_retry(num_retries) {
+                let retriable = e.should_retry(num_retries);
+                if !retriable {
+                    error!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
                     return Err(e.into());
                 }
+                warn!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
             }
         }
 
@@ -462,7 +468,6 @@ where
         num_retries += 1;
 
         time::sleep(wait_duration).await;
-        info!(num_retries, "retrying connect_once");
     }
 }
 
