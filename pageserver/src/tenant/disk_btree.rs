@@ -368,9 +368,6 @@ where
                         return Ok(false);
                     }
                 }
-                if idx == 0 {
-                    break;
-                }
             }
         }
         Ok(true)
