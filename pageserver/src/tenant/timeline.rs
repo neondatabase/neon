@@ -3290,10 +3290,10 @@ struct CompactLevel0Phase1StatsBuilder {
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
+    read_lock_held_key_sort_micros: DurationRecorder,
     read_lock_held_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
-    prepare_iterators_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
     level0_deltas_count: Option<usize>,
     new_deltas_count: Option<usize>,
@@ -3310,10 +3310,10 @@ struct CompactLevel0Phase1Stats {
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
+    read_lock_held_key_sort_micros: RecordedDuration,
     read_lock_held_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
-    prepare_iterators_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
     level0_deltas_count: usize,
     new_deltas_count: usize,
@@ -3340,6 +3340,10 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_held_spawn_blocking_startup_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
+            read_lock_held_key_sort_micros: value
+                .read_lock_held_key_sort_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
             read_lock_held_prerequisites_micros: value
                 .read_lock_held_prerequisites_micros
                 .into_recorded()
@@ -3352,10 +3356,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_drop_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_drop_micros not set"))?,
-            prepare_iterators_micros: value
-                .prepare_iterators_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow!("prepare_iterators_micros not set"))?,
             write_layer_files_micros: value
                 .write_layer_files_micros
                 .into_recorded()
@@ -3536,6 +3536,8 @@ impl Timeline {
         // particularly fast where the slice is made up of sorted sub-ranges.
         all_keys.sort_by_key(|(key, _lsn, _size, _value_ref)| *key);
 
+        stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
+
         for (next_key, _next_lsn, _size, _value_ref) in all_keys.iter() {
             let next_key = *next_key;
             if let Some(prev_key) = prev {
@@ -3560,8 +3562,7 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
-        stats.read_lock_held_compute_holes_micros =
-            stats.read_lock_held_prerequisites_micros.till_now();
+        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
@@ -3590,8 +3591,6 @@ impl Timeline {
                     Err((prev, cur))
                 }
             });
-
-        stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -3753,7 +3752,7 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
-        stats.write_layer_files_micros = stats.prepare_iterators_micros.till_now();
+        stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
 
