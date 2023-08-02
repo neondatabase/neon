@@ -921,14 +921,10 @@ impl DeltaLayerInner {
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
-                        if last.0 == delta_key.key() {
-                            return true;
-                        } else {
-                            // subtract offset of new key BLOB and first blob of this key
-                            // to get total size if values associated with this key
-                            let first_pos = last.2;
-                            last.2 = pos - first_pos;
-                        }
+                        // subtract offset of new key BLOB and first blob of this key
+                        // to get total size of values associated with this key
+                        let first_pos = last.2;
+                        last.2 = pos - first_pos;
                     }
                     all_keys.push((delta_key.key(), delta_key.lsn(), pos, val_ref));
                     true
