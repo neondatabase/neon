@@ -20,6 +20,7 @@
 //!
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
+use either::Either;
 use hex;
 use std::{cmp::Ordering, io, result};
 use thiserror::Error;
@@ -282,7 +283,7 @@ where
         keybuf.extend(node.prefix);
         keybuf.resize(prefix_len + suffix_len, 0);
 
-        if dir == VisitDirection::Forwards {
+        let iter = if dir == VisitDirection::Forwards {
             // Locate the first match
             let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
                 Ok(idx) => idx,
@@ -310,25 +311,7 @@ where
                     }
                 }
             };
-            // idx points to the first match now. Keep going from there
-            for idx in idx..node.num_children.into() {
-                let key_off = idx * suffix_len;
-                let suffix = &node.keys[key_off..key_off + suffix_len];
-                keybuf[prefix_len..].copy_from_slice(suffix);
-                let value = node.value(idx);
-                #[allow(clippy::collapsible_if)]
-                if node.level == 0 {
-                    // leaf
-                    if !visitor(&keybuf, value.to_u64()) {
-                        return Ok(false);
-                    }
-                } else {
-                    #[allow(clippy::collapsible_if)]
-                    if !self.search_recurse(value.to_blknum(), search_key, dir, visitor)? {
-                        return Ok(false);
-                    }
-                }
-            }
+            Either::Left(idx..node.num_children.into())
         } else {
             let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
                 Ok(idx) => {
@@ -347,24 +330,25 @@ where
                     }
                 }
             };
+            Either::Right((0..=idx).rev())
+        };
 
-            // idx points to the first match now. Keep going from there.
-            for idx in (0..=idx).rev() {
-                let key_off = idx * suffix_len;
-                let suffix = &node.keys[key_off..key_off + suffix_len];
-                keybuf[prefix_len..].copy_from_slice(suffix);
-                let value = node.value(idx);
+        // idx points to the first match now. Keep going from there
+        for idx in iter {
+            let key_off = idx * suffix_len;
+            let suffix = &node.keys[key_off..key_off + suffix_len];
+            keybuf[prefix_len..].copy_from_slice(suffix);
+            let value = node.value(idx);
+            #[allow(clippy::collapsible_if)]
+            if node.level == 0 {
+                // leaf
+                if !visitor(&keybuf, value.to_u64()) {
+                    return Ok(false);
+                }
+            } else {
                 #[allow(clippy::collapsible_if)]
-                if node.level == 0 {
-                    // leaf
-                    if !visitor(&keybuf, value.to_u64()) {
-                        return Ok(false);
-                    }
-                } else {
-                    #[allow(clippy::collapsible_if)]
-                    if !self.search_recurse(value.to_blknum(), search_key, dir, visitor)? {
-                        return Ok(false);
-                    }
+                if !self.search_recurse(value.to_blknum(), search_key, dir, visitor)? {
+                    return Ok(false);
                 }
             }
         }
