@@ -93,7 +93,6 @@ def test_remote_extensions(
         test_name="test_remote_extensions",
         enable_remote_extensions=True,
     )
-    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_remote_extensions", tenant_id=tenant_id)
@@ -127,7 +126,9 @@ def test_remote_extensions(
                 # it's kind of a big file, would rather not upload to github
                 if remote_storage_kind == RemoteStorageKind.REAL_S3:
                     assert "postgis" in all_extensions
-                    # this is expected to break on my computer because I lack the necesary dependencies
+                    # this may fail locally if dependency is missing
+                    # we don't really care about the error,
+                    # we just want to make sure it downloaded
                     try:
                         cur.execute("CREATE EXTENSION postgis")
                     except Exception as err:
@@ -158,7 +159,6 @@ def test_remote_library(
         test_name="test_remote_library",
         enable_remote_extensions=True,
     )
-    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_remote_library", tenant_id=tenant_id)
@@ -189,7 +189,7 @@ def test_remote_library(
                     raise AssertionError("unexpected error loading anon library") from err
 
                 # test library which name is different from extension name
-                # this fails on my computer because I' missing a dependency
+                # this may fail locally if dependency is missing
                 # however, it does successfully download the postgis archive
                 if remote_storage_kind == RemoteStorageKind.REAL_S3:
                     try:
@@ -203,21 +203,22 @@ def test_remote_library(
         cleanup(pg_version)
 
 
-# here we test a complex extension
+# Here we test a complex extension
+# which has multiple extensions in one archive
+# using postgis as an example
+@pytest.mark.skipif(
+    RemoteStorageKind.REAL_S3 not in available_s3_storages(),
+    reason="skipping test because real s3 not enabled",
+)
 def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    if RemoteStorageKind.REAL_S3 not in available_s3_storages():
-        log.info("skipping test because real s3 not enabled")
-        return None
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
         test_name="test_multiple_extensions_one_archive",
         enable_remote_extensions=True,
     )
-    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_multiple_extensions_one_archive", tenant_id=tenant_id)
@@ -240,7 +241,9 @@ def test_multiple_extensions_one_archive(
                         FROM standardize_address('us_lex', 'us_gaz', 'us_rules', \
                         'One Rust Place, Boston, MA 02109');"
             )
-            log.info(cur.fetchall())
+            res = cur.fetchall()
+            log.info(res)
+            assert len(res) > 0
 
     cleanup(pg_version)
 
@@ -255,7 +258,7 @@ def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    if "15" in pg_version:  # SKIP v15 for now because I only built the extension for v14
+    if "15" in pg_version:  # SKIP v15 for now because test set only has extension built for v14
         return None
 
     neon_env_builder.enable_remote_storage(
@@ -263,7 +266,6 @@ def test_extension_download_after_restart(
         test_name="test_extension_download_after_restart",
         enable_remote_extensions=True,
     )
-    neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
     tenant_id, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_extension_download_after_restart", tenant_id=tenant_id)
@@ -301,7 +303,7 @@ def test_extension_download_after_restart(
         config_lines=["log_min_messages=debug3"],
     )
 
-    # connect to conpute node and run the query
+    # connect to compute node and run the query
     # that will trigger the download of the extension
     def run_query(endpoint, thread_id: int):
         log.info("thread_id {%d} starting", thread_id)

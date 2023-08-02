@@ -203,7 +203,7 @@ pub async fn download_extension(
         .await?;
     let download_size = download_buffer.len() as u64;
     // it's unclear whether it is more performant to decompress into memory or not
-    warn!("TODO: decompressing into memory can be avoided");
+    // TODO: decompressing into memory can be avoided
     let mut decoder = Decoder::new(download_buffer.as_slice())?;
     let mut decompress_buffer = Vec::new();
     decoder.read_to_end(&mut decompress_buffer)?;
@@ -247,7 +247,7 @@ pub async fn download_extension(
     Ok(download_size)
 }
 
-// This function initializes the necessary structs to use remote storage (should be fairly cheap)
+// This function initializes the necessary structs to use remote storage
 pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRemoteStorage> {
     #[derive(Debug, serde::Deserialize)]
     struct RemoteExtJson {
