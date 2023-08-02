@@ -1,23 +1,23 @@
 use super::codec::{BackendMessages, FrontendMessage, PostgresCodec};
 use super::error::Error;
+use super::prepare::TypeinfoPreparedQueries;
 use bytes::{BufMut, BytesMut};
-use fallible_iterator::FallibleIterator;
 use futures::channel::mpsc;
 use futures::{Sink, StreamExt};
 use futures::{SinkExt, Stream};
-use postgres_protocol::authentication;
+use hashbrown::HashMap;
+use postgres_protocol::Oid;
 use postgres_protocol::message::backend::{
     BackendKeyDataBody, CommandCompleteBody, DataRowBody, Message, ReadyForQueryBody,
     RowDescriptionBody,
 };
 use postgres_protocol::message::frontend;
-use std::collections::{HashMap, VecDeque};
+use tokio_postgres::types::Type;
+use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_native_tls::{native_tls, TlsConnector, TlsStream};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::maybe_tls_stream::MaybeTlsStream;
 use tokio_util::codec::Framed;
 
@@ -41,105 +41,7 @@ pub struct RawConnection<S, T> {
     pub buf: BytesMut,
 }
 
-// enum MaybeTlsStream {
-//     NoTls(TcpStream),
-//     Tls(TlsStream<TcpStream>),
-// }
-
-// impl Unpin for MaybeTlsStream {}
-
-// impl AsyncRead for MaybeTlsStream {
-//     fn poll_read(
-//         self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         buf: &mut tokio::io::ReadBuf<'_>,
-//     ) -> Poll<std::io::Result<()>> {
-//         match self.get_mut() {
-//             MaybeTlsStream::NoTls(no_tls) => Pin::new(no_tls).poll_read(cx, buf),
-//             MaybeTlsStream::Tls(tls) => Pin::new(tls).poll_read(cx, buf),
-//         }
-//     }
-// }
-// impl AsyncWrite for MaybeTlsStream {
-//     fn poll_write(
-//         self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         buf: &[u8],
-//     ) -> Poll<Result<usize, std::io::Error>> {
-//         match self.get_mut() {
-//             MaybeTlsStream::NoTls(no_tls) => Pin::new(no_tls).poll_write(cx, buf),
-//             MaybeTlsStream::Tls(tls) => Pin::new(tls).poll_write(cx, buf),
-//         }
-//     }
-
-//     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-//         match self.get_mut() {
-//             MaybeTlsStream::NoTls(no_tls) => Pin::new(no_tls).poll_flush(cx),
-//             MaybeTlsStream::Tls(tls) => Pin::new(tls).poll_flush(cx),
-//         }
-//     }
-
-//     fn poll_shutdown(
-//         self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//     ) -> Poll<Result<(), std::io::Error>> {
-//         match self.get_mut() {
-//             MaybeTlsStream::NoTls(no_tls) => Pin::new(no_tls).poll_shutdown(cx),
-//             MaybeTlsStream::Tls(tls) => Pin::new(tls).poll_shutdown(cx),
-//         }
-//     }
-
-//     fn poll_write_vectored(
-//         self: Pin<&mut Self>,
-//         cx: &mut Context<'_>,
-//         bufs: &[std::io::IoSlice<'_>],
-//     ) -> Poll<Result<usize, std::io::Error>> {
-//         match self.get_mut() {
-//             MaybeTlsStream::NoTls(no_tls) => Pin::new(no_tls).poll_write_vectored(cx, bufs),
-//             MaybeTlsStream::Tls(tls) => Pin::new(tls).poll_write_vectored(cx, bufs),
-//         }
-//     }
-
-//     fn is_write_vectored(&self) -> bool {
-//         match self {
-//             MaybeTlsStream::NoTls(no_tls) => no_tls.is_write_vectored(),
-//             MaybeTlsStream::Tls(tls) => tls.is_write_vectored(),
-//         }
-//     }
-// }
-
 impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> RawConnection<S, T> {
-    // pub(crate) async fn connect(
-    //     mut stream: TcpStream,
-    //     tls_domain: Option<&str>,
-    // ) -> Result<RawConnection<S, T>, Error> {
-    //     let mut buf = BytesMut::new();
-
-    //     let stream = if let Some(tls_domain) = tls_domain {
-    //         frontend::ssl_request(&mut buf);
-    //         stream
-    //             .write_all_buf(&mut buf.split().freeze())
-    //             .await
-    //             .unwrap();
-    //         let bit = stream.read_u8().await.map_err(Error::io)?;
-    //         if bit != b'S' {
-    //             return Err(Error::closed());
-    //         }
-
-    //         let tls = native_tls::TlsConnector::new().map_err(Error::tls)?;
-    //         let tls = TlsConnector::from(tls)
-    //             .connect(tls_domain, stream)
-    //             .await
-    //             .map_err(Error::tls)?;
-
-    //         MaybeTlsStream::Tls(tls)
-    //     } else {
-    //         MaybeTlsStream::Raw(stream)
-    //     };
-
-    //     Ok(RawConnection::new(Framed::new(stream, PostgresCodec), buf))
-    // }
-
     pub fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
         buf: BytesMut,
@@ -193,8 +95,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> RawCo
 }
 
 pub struct Connection<S, T> {
-    raw: RawConnection<S, T>,
-    key: BackendKeyDataBody,
+    stmt_counter: usize,
+    pub typeinfo: Option<TypeinfoPreparedQueries>,
+    pub typecache: HashMap<Oid, Type>,
+    pub raw: RawConnection<S, T>,
+    // key: BackendKeyDataBody,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Connection<S, T> {
@@ -263,19 +168,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
     //     Ok(Self { raw, key })
     // }
 
-    pub fn prepare_and_execute(
-        &mut self,
-        portal: &str,
-        name: &str,
-        query: &str,
-        params: impl IntoIterator<Item = Option<impl AsRef<str>>>,
-    ) -> std::io::Result<()> {
-        self.prepare(name, query)?;
-        self.execute(portal, name, params)
+    // pub fn prepare_and_execute(
+    //     &mut self,
+    //     portal: &str,
+    //     name: &str,
+    //     query: &str,
+    //     params: impl IntoIterator<Item = Option<impl AsRef<str>>>,
+    // ) -> std::io::Result<()> {
+    //     self.prepare(name, query)?;
+    //     self.execute(portal, name, params)
+    // }
+
+    pub fn statement_name(&mut self) -> String {
+        self.stmt_counter += 1;
+        format!("s{}", self.stmt_counter)
     }
 
-    pub fn prepare(&mut self, name: &str, query: &str) -> std::io::Result<()> {
-        frontend::parse(name, query, std::iter::empty(), &mut self.raw.buf)
+    pub async fn prepare(&mut self, name: &str, query: &str) -> Result<RowDescriptionBody, Error> {
+        frontend::parse(name, query, std::iter::empty(), &mut self.raw.buf)?;
+        frontend::describe(b'S', name, &mut self.raw.buf)?;
+        self.sync().await?;
+        self.wait_for_prepare().await
     }
 
     pub fn execute(
@@ -303,7 +216,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
             frontend::BindError::Conversion(e) => std::io::Error::new(std::io::ErrorKind::Other, e),
             frontend::BindError::Serialization(io) => io,
         })?;
-        frontend::describe(b'P', portal, &mut self.raw.buf)?;
         frontend::execute(portal, 0, &mut self.raw.buf)
     }
 
@@ -312,35 +224,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
         self.raw.send().await
     }
 
-    pub async fn wait_for_prepare(&mut self) -> Result<Option<RowDescriptionBody>, Error> {
+    pub async fn wait_for_prepare(&mut self) -> Result<RowDescriptionBody, Error> {
         let Message::ParseComplete = self.raw.next_message().await? else { return Err(Error::expecting("parse")) };
-        let Message::BindComplete = self.raw.next_message().await? else { return Err(Error::expecting("bind")) };
-        match self.raw.next_message().await? {
-            Message::RowDescription(desc) => Ok(QueryResult::Rows {
-                row_stream: RowStream::Stream(&mut self.raw),
-                row_description: desc,
-            }),
-            Message::NoData => {
-                let Message::CommandComplete(tag) = self.raw.next_message().await? else { return Err(Error::expecting("command completion")) };
-                Ok(QueryResult::NoRows(tag))
-            }
-            _ => Err(Error::expecting("query results")),
-        }
+        let Message::ParameterDescription(_) = self.raw.next_message().await? else { return Err(Error::expecting("param description")) };
+        let Message::RowDescription(desc) = self.raw.next_message().await? else { return Err(Error::expecting("row description")) };
+
+        self.wait_for_ready().await?;
+
+        Ok(desc)
     }
+
     pub async fn stream_query_results(&mut self) -> Result<RowStream<'_, S, T>, Error> {
-        let Message::ParseComplete = self.raw.next_message().await? else { return Err(Error::expecting("parse")) };
+        // let Message::ParseComplete = self.raw.next_message().await? else { return Err(Error::expecting("parse")) };
         let Message::BindComplete = self.raw.next_message().await? else { return Err(Error::expecting("bind")) };
-        match self.raw.next_message().await? {
-            Message::RowDescription(desc) => Ok(QueryResult::Rows {
-                row_stream: RowStream::Stream(&mut self.raw),
-                row_description: desc,
-            }),
-            Message::NoData => {
-                let Message::CommandComplete(tag) = self.raw.next_message().await? else { return Err(Error::expecting("command completion")) };
-                Ok(QueryResult::NoRows(tag))
-            }
-            _ => Err(Error::expecting("query results")),
-        }
+        Ok(RowStream::Stream(&mut self.raw))
     }
 
     pub async fn wait_for_ready(&mut self) -> Result<ReadyForQueryBody, Error> {
@@ -352,14 +249,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
         }
     }
 }
-
-// pub enum QueryResult<'a, S, T> {
-//     NoRows(CommandCompleteBody),
-//     Rows {
-//         row_description: RowDescriptionBody,
-//         row_stream: RowStream<'a, S, T>,
-//     },
-// }
 
 pub enum RowStream<'a, S, T> {
     Stream(&'a mut RawConnection<S, T>),

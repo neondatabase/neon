@@ -30,6 +30,7 @@ use crate::pg_client;
 use crate::pg_client::codec::FrontendMessage;
 use crate::pg_client::connection;
 use crate::pg_client::connection::RequestMessages;
+use crate::pg_client::prepare::TypeinfoPreparedQueries;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -370,60 +371,59 @@ async fn query_raw_txt_as_json<'a, St, T>(
     params: Vec<Option<String>>,
     raw_output: bool,
     array_mode: bool,
-) -> Result<Value, pg_client::error::Error>
+) -> anyhow::Result<Value>
 where
-    St: AsyncRead + AsyncWrite + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
+    St: AsyncRead + AsyncWrite + Unpin + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let params = params.into_iter();
 
-    conn.prepare_and_execute("", "", query.as_str(), params)?;
-    conn.sync().await?;
+    let stmt_name = conn.statement_name();
+    let row_description = conn.prepare(&stmt_name, &query).await?;
 
     let mut fields = vec![];
+    let mut columns = vec![];
+    let mut it = row_description.fields();
+    while let Some(field) = it.next().map_err(pg_client::error::Error::parse)? {
+        fields.push(json!({
+            "name": Value::String(field.name().to_owned()),
+            "dataTypeID": Value::Number(field.type_oid().into()),
+            "tableID": field.table_oid(),
+            "columnID": field.column_id(),
+            "dataTypeSize": field.type_size(),
+            "dataTypeModifier": field.type_modifier(),
+            "format": "text",
+        }));
+
+        let type_ = match Type::from_oid(field.type_oid()) {
+            Some(t) => t,
+            None => TypeinfoPreparedQueries::get_type(conn, field.type_oid()).await?,
+        };
+
+        columns.push(Column {
+            name: field.name().to_string(),
+            type_,
+        });
+    }
+
+    conn.execute("", &stmt_name, params)?;
+    conn.sync().await?;
+
     let mut rows = vec![];
-    let command_tag = match conn.stream_query_results().await? {
-        connection::QueryResult::NoRows(tag) => tag,
-        connection::QueryResult::Rows {
-            row_description,
-            mut row_stream,
-        } => {
-            let mut columns = vec![];
-            let mut it = row_description.fields();
-            while let Some(field) = it.next().map_err(pg_client::error::Error::parse)? {
-                fields.push(json!({
-                    "name": Value::String(field.name().to_owned()),
-                    "dataTypeID": Value::Number(field.type_oid().into()),
-                    "tableID": field.table_oid(),
-                    "columnID": field.column_id(),
-                    "dataTypeSize": field.type_size(),
-                    "dataTypeModifier": field.type_modifier(),
-                    "format": "text",
-                }));
 
-                let type_ = Type::from_oid(field.type_oid());
-                // let column = Column::new(field.name().to_string(), type_, field);
-                columns.push(Column {
-                    name: field.name().to_string(),
-                    type_,
-                });
-            }
+    let mut row_stream = conn.stream_query_results().await?;
 
-            let mut curret_size = 0;
-            while let Some(row) = row_stream.next().await.transpose()? {
-                curret_size += row.buffer().len();
-                if curret_size > MAX_RESPONSE_SIZE {
-                    todo!()
-                    // return Err(anyhow::anyhow!("response too large"));
-                }
-
-                rows.push(pg_text_row_to_json2(&row, &columns, raw_output, array_mode).unwrap());
-            }
-
-            row_stream.tag()
+    let mut curret_size = 0;
+    while let Some(row) = row_stream.next().await.transpose()? {
+        curret_size += row.buffer().len();
+        if curret_size > MAX_RESPONSE_SIZE {
+            return Err(anyhow::anyhow!("response too large"));
         }
-    };
 
+        rows.push(pg_text_row_to_json2(&row, &columns, raw_output, array_mode).unwrap());
+    }
+
+    let command_tag = row_stream.tag();
     let command_tag = command_tag.tag()?;
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
@@ -448,7 +448,7 @@ where
 
 struct Column {
     name: String,
-    type_: Option<Type>,
+    type_: Type,
 }
 
 //
@@ -468,7 +468,7 @@ pub fn pg_text_row_to_json(
                 None => Value::Null,
             }
         } else {
-            pg_text_to_json(pg_value, Some(column.type_()))?
+            pg_text_to_json(pg_value, column.type_())?
         };
         Ok((name, json_value))
     });
@@ -514,7 +514,7 @@ fn pg_text_row_to_json2(
                     None => Value::Null,
                 }
             } else {
-                pg_text_to_json(pg_value, column.type_.as_ref())?
+                pg_text_to_json(pg_value, &column.type_)?
             };
             Ok((name, json_value))
         });
@@ -536,22 +536,19 @@ fn pg_text_row_to_json2(
 //
 // Convert postgres text-encoded value to JSON value
 //
-pub fn pg_text_to_json(
-    pg_value: Option<&str>,
-    pg_type: Option<&Type>,
-) -> Result<Value, anyhow::Error> {
+pub fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, anyhow::Error> {
     if let Some(val) = pg_value {
-        if let Some(Kind::Array(elem_type)) = pg_type.map(|t| t.kind()) {
-            return pg_array_parse(val, Some(elem_type));
+        if let Kind::Array(elem_type) = pg_type.kind() {
+            return pg_array_parse(val, &elem_type);
         }
 
         match pg_type {
-            Some(&Type::BOOL) => Ok(Value::Bool(val == "t")),
-            Some(&Type::INT2 | &Type::INT4) => {
+            &Type::BOOL => Ok(Value::Bool(val == "t")),
+            &Type::INT2 | &Type::INT4 => {
                 let val = val.parse::<i32>()?;
                 Ok(Value::Number(serde_json::Number::from(val)))
             }
-            Some(&Type::FLOAT4 | &Type::FLOAT8) => {
+            &Type::FLOAT4 | &Type::FLOAT8 => {
                 let fval = val.parse::<f64>()?;
                 let num = serde_json::Number::from_f64(fval);
                 if let Some(num) = num {
@@ -563,7 +560,7 @@ pub fn pg_text_to_json(
                     Ok(Value::String(val.to_string()))
                 }
             }
-            Some(&Type::JSON | &Type::JSONB) => Ok(serde_json::from_str(val)?),
+            &Type::JSON | &Type::JSONB => Ok(serde_json::from_str(val)?),
             _ => Ok(Value::String(val.to_string())),
         }
     } else {
@@ -578,13 +575,13 @@ pub fn pg_text_to_json(
 // values. Unlike postgres we don't check that all nested arrays have the same
 // dimensions, we just return them as is.
 //
-fn pg_array_parse(pg_array: &str, elem_type: Option<&Type>) -> Result<Value, anyhow::Error> {
+fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, anyhow::Error> {
     _pg_array_parse(pg_array, elem_type, false).map(|(v, _)| v)
 }
 
 fn _pg_array_parse(
     pg_array: &str,
-    elem_type: Option<&Type>,
+    elem_type: &Type,
     nested: bool,
 ) -> Result<(Value, usize), anyhow::Error> {
     let mut pg_array_chr = pg_array.char_indices();
@@ -605,7 +602,7 @@ fn _pg_array_parse(
     fn push_checked(
         entry: &mut String,
         entries: &mut Vec<Value>,
-        elem_type: Option<&Type>,
+        elem_type: &Type,
     ) -> Result<(), anyhow::Error> {
         if !entry.is_empty() {
             // While in usual postgres response we get nulls as None and everything else
@@ -731,43 +728,34 @@ mod tests {
     #[test]
     fn test_atomic_types_parse() {
         assert_eq!(
-            pg_text_to_json(Some("foo"), Some(&Type::TEXT)).unwrap(),
+            pg_text_to_json(Some("foo"), &Type::TEXT).unwrap(),
             json!("foo")
         );
+        assert_eq!(pg_text_to_json(None, &Type::TEXT).unwrap(), json!(null));
+        assert_eq!(pg_text_to_json(Some("42"), &Type::INT4).unwrap(), json!(42));
+        assert_eq!(pg_text_to_json(Some("42"), &Type::INT2).unwrap(), json!(42));
         assert_eq!(
-            pg_text_to_json(None, Some(&Type::TEXT)).unwrap(),
-            json!(null)
-        );
-        assert_eq!(
-            pg_text_to_json(Some("42"), Some(&Type::INT4)).unwrap(),
-            json!(42)
-        );
-        assert_eq!(
-            pg_text_to_json(Some("42"), Some(&Type::INT2)).unwrap(),
-            json!(42)
-        );
-        assert_eq!(
-            pg_text_to_json(Some("42"), Some(&Type::INT8)).unwrap(),
+            pg_text_to_json(Some("42"), &Type::INT8).unwrap(),
             json!("42")
         );
         assert_eq!(
-            pg_text_to_json(Some("42.42"), Some(&Type::FLOAT8)).unwrap(),
+            pg_text_to_json(Some("42.42"), &Type::FLOAT8).unwrap(),
             json!(42.42)
         );
         assert_eq!(
-            pg_text_to_json(Some("42.42"), Some(&Type::FLOAT4)).unwrap(),
+            pg_text_to_json(Some("42.42"), &Type::FLOAT4).unwrap(),
             json!(42.42)
         );
         assert_eq!(
-            pg_text_to_json(Some("NaN"), Some(&Type::FLOAT4)).unwrap(),
+            pg_text_to_json(Some("NaN"), &Type::FLOAT4).unwrap(),
             json!("NaN")
         );
         assert_eq!(
-            pg_text_to_json(Some("Infinity"), Some(&Type::FLOAT4)).unwrap(),
+            pg_text_to_json(Some("Infinity"), &Type::FLOAT4).unwrap(),
             json!("Infinity")
         );
         assert_eq!(
-            pg_text_to_json(Some("-Infinity"), Some(&Type::FLOAT4)).unwrap(),
+            pg_text_to_json(Some("-Infinity"), &Type::FLOAT4).unwrap(),
             json!("-Infinity")
         );
 
@@ -777,7 +765,7 @@ mod tests {
         assert_eq!(
             pg_text_to_json(
                 Some(r#"{"s":"str","n":42,"f":4.2,"a":[null,3,"a"]}"#),
-                Some(&Type::JSONB)
+                &Type::JSONB
             )
             .unwrap(),
             json
@@ -787,7 +775,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_text() {
         fn pt(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, Some(&Type::TEXT)).unwrap()
+            pg_array_parse(pg_arr, &Type::TEXT).unwrap()
         }
         assert_eq!(
             pt(r#"{"aa\"\\\,a",cha,"bbbb"}"#),
@@ -810,7 +798,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_bool() {
         fn pb(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, Some(&Type::BOOL)).unwrap()
+            pg_array_parse(pg_arr, &Type::BOOL).unwrap()
         }
         assert_eq!(pb(r#"{t,f,t}"#), json!([true, false, true]));
         assert_eq!(pb(r#"{{t,f,t}}"#), json!([[true, false, true]]));
@@ -827,7 +815,7 @@ mod tests {
     #[test]
     fn test_pg_array_parse_numbers() {
         fn pn(pg_arr: &str, ty: &Type) -> Value {
-            pg_array_parse(pg_arr, Some(ty)).unwrap()
+            pg_array_parse(pg_arr, ty).unwrap()
         }
         assert_eq!(pn(r#"{1,2,3}"#, &Type::INT4), json!([1, 2, 3]));
         assert_eq!(pn(r#"{1,2,3}"#, &Type::INT2), json!([1, 2, 3]));
@@ -855,7 +843,7 @@ mod tests {
     #[test]
     fn test_pg_array_with_decoration() {
         fn p(pg_arr: &str) -> Value {
-            pg_array_parse(pg_arr, Some(&Type::INT2)).unwrap()
+            pg_array_parse(pg_arr, &Type::INT2).unwrap()
         }
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
