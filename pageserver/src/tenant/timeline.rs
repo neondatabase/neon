@@ -3757,8 +3757,6 @@ impl Timeline {
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
 
-        drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
-
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
             .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
         {
