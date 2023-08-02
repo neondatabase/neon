@@ -6,7 +6,7 @@ use std::fmt;
 use std::{collections::HashMap, sync::Arc};
 use tokio::time;
 
-use crate::{auth, console};
+use crate::{auth, console, pg_client};
 use crate::{compute, config};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
@@ -41,8 +41,10 @@ impl fmt::Display for ConnInfo {
     }
 }
 
+type PgConn =
+    pg_client::connection::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>;
 struct ConnPoolEntry {
-    conn: tokio_postgres::Client,
+    conn: PgConn,
     _last_access: std::time::Instant,
 }
 
@@ -78,12 +80,8 @@ impl GlobalConnPool {
         })
     }
 
-    pub async fn get(
-        &self,
-        conn_info: &ConnInfo,
-        force_new: bool,
-    ) -> anyhow::Result<tokio_postgres::Client> {
-        let mut client: Option<tokio_postgres::Client> = None;
+    pub async fn get(&self, conn_info: &ConnInfo, force_new: bool) -> anyhow::Result<PgConn> {
+        let mut client: Option<PgConn> = None;
 
         if !force_new {
             let pool = self.get_endpoint_pool(&conn_info.hostname).await;
@@ -114,11 +112,7 @@ impl GlobalConnPool {
         }
     }
 
-    pub async fn put(
-        &self,
-        conn_info: &ConnInfo,
-        client: tokio_postgres::Client,
-    ) -> anyhow::Result<()> {
+    pub async fn put(&self, conn_info: &ConnInfo, client: PgConn) -> anyhow::Result<()> {
         let pool = self.get_endpoint_pool(&conn_info.hostname).await;
 
         // return connection to the pool
@@ -191,7 +185,7 @@ struct TokioMechanism<'a> {
 
 #[async_trait]
 impl ConnectMechanism for TokioMechanism<'_> {
-    type Connection = tokio_postgres::Client;
+    type Connection = PgConn;
     type ConnectError = tokio_postgres::Error;
     type Error = anyhow::Error;
 
@@ -213,7 +207,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
+) -> anyhow::Result<PgConn> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
 
@@ -251,7 +245,7 @@ async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
     timeout: time::Duration,
-) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+) -> Result<PgConn, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
     let (client, connection) = config
@@ -263,11 +257,13 @@ async fn connect_to_compute_once(
         .connect(tokio_postgres::NoTls)
         .await?;
 
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });
+    let stream = connection.stream.into_inner();
 
-    Ok(client)
+    // tokio::spawn(async move {
+    //     if let Err(e) = connection.await {
+    //         error!("connection error: {}", e);
+    //     }
+    // });
+
+    Ok(PgConn::new(stream))
 }

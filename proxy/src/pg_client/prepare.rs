@@ -156,6 +156,7 @@ impl TypeinfoPreparedQueries {
             todo!()
         };
 
+        let row = row.map_err(Error::db)?;
         let b = row.buffer();
         let mut ranges = row.ranges();
 
@@ -231,6 +232,8 @@ impl TypeinfoPreparedQueries {
         let mut stream = c.stream_query_results().await?;
         let mut variants = Vec::new();
         while let Some(row) = stream.next().await.transpose()? {
+            let row = row.map_err(Error::db)?;
+
             let variant: String = read_column(row.buffer(), &Type::NAME, &mut row.ranges())?;
             variants.push(variant);
         }
@@ -269,6 +272,8 @@ impl TypeinfoPreparedQueries {
         let mut stream = c.stream_query_results().await?;
         let mut fields = Vec::new();
         while let Some(row) = stream.next().await.transpose()? {
+            let row = row.map_err(Error::db)?;
+
             let mut ranges = row.ranges();
             let name: String = read_column(row.buffer(), &Type::NAME, &mut ranges)?;
             let oid: Oid = read_column(row.buffer(), &Type::OID, &mut ranges)?;

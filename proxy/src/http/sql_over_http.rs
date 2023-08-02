@@ -12,6 +12,7 @@ use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::{Body, HeaderMap, Request};
 use postgres_protocol::message::backend::DataRowBody;
+use postgres_protocol::message::backend::ReadyForQueryBody;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -244,30 +245,35 @@ pub async fn handle(
     // Now execute the query and return the result
     //
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+        Payload::Single(query) => query_raw_txt_as_json(&mut client, query, raw_output, array_mode)
             .await
             .map(|x| (x, HashMap::default())),
         Payload::Batch(queries) => {
             let mut results = Vec::new();
-            let mut builder = client.build_transaction();
-            if let Some(isolation_level) = txn_isolation_level {
-                builder = builder.isolation_level(isolation_level);
-            }
-            if txn_read_only {
-                builder = builder.read_only(true);
-            }
-            let transaction = builder.start().await?;
+
+            client
+                .start_tx(txn_isolation_level, Some(txn_read_only))
+                .await?;
+
             for query in queries {
-                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                let result =
+                    query_raw_txt_as_json(&mut client, query, raw_output, array_mode).await;
                 match result {
-                    Ok(r) => results.push(r),
+                    // TODO: check this tag to see if the client has executed a commit during the non-interactive transactions...
+                    Ok((r, _ready_tag)) => results.push(r),
                     Err(e) => {
-                        transaction.rollback().await?;
+                        let tag = client.rollback().await?;
+                        if allow_pool && tag.status() == b'I' {
+                            // return connection to the pool
+                            tokio::task::spawn(async move {
+                                let _ = conn_pool.put(&conn_info, client).await;
+                            });
+                        }
                         return Err(e);
                     }
                 }
             }
-            transaction.commit().await?;
+            let ready_tag = client.commit().await?;
             let mut headers = HashMap::default();
             headers.insert(
                 TXN_READ_ONLY.clone(),
@@ -276,11 +282,11 @@ pub async fn handle(
             if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
                 headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
             }
-            Ok((json!({ "results": results }), headers))
+            Ok(((json!({ "results": results }), ready_tag), headers))
         }
     };
 
-    if allow_pool {
+    if allow_pool && ready_tag.status() == b'I' {
         // return connection to the pool
         tokio::task::spawn(async move {
             let _ = conn_pool.put(&conn_info, client).await;
@@ -367,19 +373,19 @@ async fn query_to_json<T: GenericClient>(
 
 async fn query_raw_txt_as_json<'a, St, T>(
     conn: &mut connection::Connection<St, T>,
-    query: String,
-    params: Vec<Option<String>>,
+    data: QueryData,
     raw_output: bool,
     array_mode: bool,
-) -> anyhow::Result<Value>
+) -> anyhow::Result<(Value, ReadyForQueryBody)>
 where
     St: AsyncRead + AsyncWrite + Unpin + Send,
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let params = json_to_pg_text(data.params)?;
     let params = params.into_iter();
 
     let stmt_name = conn.statement_name();
-    let row_description = conn.prepare(&stmt_name, &query).await?;
+    let row_description = conn.prepare(&stmt_name, &data.query).await?;
 
     let mut fields = vec![];
     let mut columns = vec![];
@@ -415,6 +421,8 @@ where
 
     let mut curret_size = 0;
     while let Some(row) = row_stream.next().await.transpose()? {
+        // let row = row.map_err(Error::db)?;
+
         curret_size += row.buffer().len();
         if curret_size > MAX_RESPONSE_SIZE {
             return Err(anyhow::anyhow!("response too large"));
@@ -436,14 +444,19 @@ where
     }
     .and_then(|s| s.parse::<i64>().ok());
 
+    let ready_tag = conn.wait_for_ready().await?;
+
     // resulting JSON format is based on the format of node-postgres result
-    Ok(json!({
-        "command": command_tag_name,
-        "rowCount": command_tag_count,
-        "rows": rows,
-        "fields": fields,
-        "rowAsArray": array_mode,
-    }))
+    Ok((
+        json!({
+            "command": command_tag_name,
+            "rowCount": command_tag_count,
+            "rows": rows,
+            "fields": fields,
+            "rowAsArray": array_mode,
+        }),
+        ready_tag,
+    ))
 }
 
 struct Column {

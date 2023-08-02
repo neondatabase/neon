@@ -6,19 +6,20 @@ use futures::channel::mpsc;
 use futures::{Sink, StreamExt};
 use futures::{SinkExt, Stream};
 use hashbrown::HashMap;
-use postgres_protocol::Oid;
 use postgres_protocol::message::backend::{
-    BackendKeyDataBody, CommandCompleteBody, DataRowBody, Message, ReadyForQueryBody,
-    RowDescriptionBody,
+    BackendKeyDataBody, CommandCompleteBody, DataRowBody, ErrorResponseBody, Message,
+    ReadyForQueryBody, RowDescriptionBody,
 };
 use postgres_protocol::message::frontend;
-use tokio_postgres::types::Type;
+use postgres_protocol::Oid;
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::maybe_tls_stream::MaybeTlsStream;
+use tokio_postgres::types::Type;
+use tokio_postgres::IsolationLevel;
 use tokio_util::codec::Framed;
 
 pub enum RequestMessages {
@@ -103,6 +104,62 @@ pub struct Connection<S, T> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Connection<S, T> {
+    pub fn new(stream: MaybeTlsStream<S, T>) -> Connection<S, T> {
+        Connection {
+            stmt_counter: 0,
+            typeinfo: None,
+            typecache: HashMap::new(),
+            raw: RawConnection::new(Framed::new(stream, PostgresCodec), BytesMut::new()),
+        }
+    }
+
+    pub async fn start_tx(
+        &mut self,
+        isolation_level: Option<IsolationLevel>,
+        read_only: Option<bool>,
+    ) -> Result<ReadyForQueryBody, Error> {
+        let mut query = "START TRANSACTION".to_string();
+        let mut first = true;
+
+        if let Some(level) = isolation_level {
+            first = false;
+
+            query.push_str(" ISOLATION LEVEL ");
+            let level = match level {
+                IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
+                IsolationLevel::ReadCommitted => "READ COMMITTED",
+                IsolationLevel::RepeatableRead => "REPEATABLE READ",
+                IsolationLevel::Serializable => "SERIALIZABLE",
+                _ => return Err(Error::unexpected_message()),
+            };
+            query.push_str(level);
+        }
+
+        if let Some(read_only) = read_only {
+            if !first {
+                query.push(',');
+            }
+            first = false;
+
+            let s = if read_only {
+                " READ ONLY"
+            } else {
+                " READ WRITE"
+            };
+            query.push_str(s);
+        }
+
+        self.execute_simple(&query).await
+    }
+
+    pub async fn rollback(&mut self) -> Result<ReadyForQueryBody, Error> {
+        self.execute_simple("ROLLBACK").await
+    }
+
+    pub async fn commit(&mut self) -> Result<ReadyForQueryBody, Error> {
+        self.execute_simple("COMMIT").await
+    }
+
     // pub async fn auth_sasl_scram<'a, I>(
     //     mut raw: RawConnection<S, T>,
     //     params: I,
@@ -184,6 +241,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
         format!("s{}", self.stmt_counter)
     }
 
+    async fn execute_simple(&mut self, query: &str) -> Result<ReadyForQueryBody, Error> {
+        frontend::query(query, &mut self.raw.buf)?;
+        self.raw.send().await?;
+
+        loop {
+            match self.raw.next_message().await? {
+                Message::ReadyForQuery(q) => return Ok(q),
+                Message::CommandComplete(_)
+                | Message::EmptyQueryResponse
+                | Message::RowDescription(_)
+                | Message::DataRow(_) => {}
+                _ => return Err(Error::unexpected_message()),
+            }
+        }
+    }
+
     pub async fn prepare(&mut self, name: &str, query: &str) -> Result<RowDescriptionBody, Error> {
         frontend::parse(name, query, std::iter::empty(), &mut self.raw.buf)?;
         frontend::describe(b'S', name, &mut self.raw.buf)?;
@@ -252,22 +325,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Conne
 
 pub enum RowStream<'a, S, T> {
     Stream(&'a mut RawConnection<S, T>),
-    Complete(CommandCompleteBody),
+    Complete(Option<CommandCompleteBody>),
 }
 impl<S, T> Unpin for RowStream<'_, S, T> {}
 
 impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Stream
     for RowStream<'_, S, T>
 {
-    type Item = Result<DataRowBody, Error>;
+    // this is horrible - first result is for transport/protocol errors errors
+    // second result is for sql errors.
+    type Item = Result<Result<DataRowBody, ErrorResponseBody>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut *self {
             RowStream::Stream(raw) => match ready!(raw.poll_read(cx)?) {
-                Message::DataRow(row) => Poll::Ready(Some(Ok(row))),
+                Message::DataRow(row) => Poll::Ready(Some(Ok(Ok(row)))),
                 Message::CommandComplete(tag) => {
-                    *self = Self::Complete(tag);
+                    *self = Self::Complete(Some(tag));
                     Poll::Ready(None)
+                }
+                Message::EmptyQueryResponse | Message::PortalSuspended => {
+                    *self = Self::Complete(None);
+                    Poll::Ready(None)
+                }
+                Message::ErrorResponse(error) => {
+                    *self = Self::Complete(None);
+                    Poll::Ready(Some(Ok(Err(error))))
                 }
                 _ => Poll::Ready(Some(Err(Error::expecting("command completion")))),
             },
@@ -277,7 +360,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin, T: AsyncRead + AsyncWrite + Unpin> Strea
 }
 
 impl<S, T> RowStream<'_, S, T> {
-    pub fn tag(self) -> CommandCompleteBody {
+    pub fn tag(self) -> Option<CommandCompleteBody> {
         match self {
             RowStream::Stream(_) => panic!("should not get tag unless row stream is exhausted"),
             RowStream::Complete(tag) => tag,
