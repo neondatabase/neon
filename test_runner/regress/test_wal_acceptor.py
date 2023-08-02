@@ -24,7 +24,6 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
     PgBin,
     PgProtocol,
-    PortDistributor,
     Safekeeper,
     SafekeeperHttpClient,
     SafekeeperPort,
@@ -35,6 +34,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     RemoteStorageKind,
     RemoteStorageUsers,

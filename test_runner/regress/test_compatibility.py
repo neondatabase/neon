@@ -13,7 +13,6 @@ from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -22,6 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
