@@ -53,7 +53,6 @@ More specifically, here is an example ext_index.json
     ],
     "library_index": {
         "anon": "anon",
-        "kq_imcx": "kq_imcx",
         "pg_buffercache": "pg_buffercache"
     },
     "extension_data": {
@@ -62,12 +61,6 @@ More specifically, here is an example ext_index.json
                 "pg_buffercache.control": "# pg_buffercache extension \ncomment = 'examine the shared buffer cache' \ndefault_version = '1.3' \nmodule_pathname = '$libdir/pg_buffercache' \nrelocatable = true \ntrusted=true"
             },
             "archive_path": "5670669815/v14/extensions/pg_buffercache.tar.zst"
-        },
-        "kq_imcx": {
-            "control_data": {
-                "kq_imcx.control": "# This file is generated content from add_postgresql_extension.\n# No point in modifying it, it will be overwritten anyway.\n\n# Default version, always set\ndefault_version = '0.1'\n\n# Module pathname generated from target shared library name. Use\n# MODULE_PATHNAME in script file.\nmodule_pathname = '$libdir/kq_imcx.so'\n\n# Comment for extension. Set using COMMENT option. Can be set in\n# script file as well.\ncomment = 'ketteQ In-Memory Calendar Extension (IMCX)'\n\n# Encoding for script file. Set using ENCODING option.\n#encoding = ''\n\n# Required extensions. Set using REQUIRES option (multi-valued).\n#requires = ''\ntrusted = true\n"
-            },
-            "archive_path": "5670669815/v14/extensions/kq_imcx.tar.zst"
         },
         "anon": {
             "control_data": {

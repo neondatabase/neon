@@ -113,8 +113,6 @@ def test_remote_extensions(
         tenant_id=tenant_id,
         remote_ext_config=env.ext_remote_storage.to_string(),
         # config_lines=["log_min_messages=debug3"],
-        # disable kq_imcx for now: we can't test custom extensions from python
-        # config_lines=["shared_preload_libraries='kq_imcx,neon'"],
     )
     try:
         with closing(endpoint.connect()) as conn:
@@ -124,7 +122,6 @@ def test_remote_extensions(
                 all_extensions = [x[0] for x in cur.fetchall()]
                 log.info(all_extensions)
                 assert "anon" in all_extensions
-                # assert "kq_imcx" in all_extensions
 
                 # postgis is on real s3 but not mock s3.
                 # it's kind of a big file, would rather not upload to github
