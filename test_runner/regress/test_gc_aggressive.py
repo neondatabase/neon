@@ -21,38 +21,37 @@ num_connections = 10
 num_rows = 100000
 updates_to_perform = 10000
 
-updates_performed = 0
-
-
-# Run random UPDATEs on test table
-async def update_table(endpoint: Endpoint):
-    global updates_performed
-    pg_conn = await endpoint.connect_async()
-
-    while updates_performed < updates_to_perform:
-        updates_performed += 1
-        id = random.randrange(1, num_rows)
-        await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
-
-
-# Perform aggressive GC with 0 horizon
-async def gc(env: NeonEnv, timeline: TimelineId):
-    pageserver_http = env.pageserver.http_client()
-
-    loop = asyncio.get_running_loop()
-
-    def do_gc():
-        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
-        pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
-
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        while updates_performed < updates_to_perform:
-            await loop.run_in_executor(pool, do_gc)
-
 
 # At the same time, run UPDATEs and GC
 async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
     workers = []
+    updates_performed = 0
+
+    # Perform aggressive GC with 0 horizon
+    async def gc(env: NeonEnv, timeline: TimelineId):
+        pageserver_http = env.pageserver.http_client()
+        nonlocal updates_performed
+
+        loop = asyncio.get_running_loop()
+
+        def do_gc():
+            pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
+            pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            while updates_performed < updates_to_perform:
+                await loop.run_in_executor(pool, do_gc)
+
+    # Run random UPDATEs on test table
+    async def update_table(endpoint: Endpoint):
+        pg_conn = await endpoint.connect_async()
+        nonlocal updates_performed
+
+        while updates_performed < updates_to_perform:
+            updates_performed += 1
+            id = random.randrange(1, num_rows)
+            await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
+
     for _ in range(num_connections):
         workers.append(asyncio.create_task(update_table(endpoint)))
     workers.append(asyncio.create_task(gc(env, timeline)))
@@ -128,11 +127,11 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
-            name="pageserver_remote_operation_seconds_count",
-            filter={
-                "file_kind": str(file_kind),
-                "op_kind": str(op_kind),
-            },
+                name="pageserver_remote_operation_seconds_count",
+                filter={
+                    "file_kind": str(file_kind),
+                    "op_kind": str(op_kind),
+                },
         ):
             total += sample[2]
         return int(total)
@@ -162,5 +161,5 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         log.info(f"{num_index_uploads} index uploads after GC iteration {i}")
 
     after = num_index_uploads
-    log.info(f"{after-before} new index uploads during test")
+    log.info(f"{after - before} new index uploads during test")
     assert after - before < 5

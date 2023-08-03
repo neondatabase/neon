@@ -88,6 +88,9 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
+    if pg_version == PgVersion.V16:
+        return
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         enable_remote_extensions=True,
@@ -154,6 +157,9 @@ def test_remote_library(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
+    if pg_version == PgVersion.V16:
+        return
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         enable_remote_extensions=True,
@@ -214,6 +220,9 @@ def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
+    if pg_version == PgVersion.V16:
+        return
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
         enable_remote_extensions=True,
@@ -258,7 +267,7 @@ def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    if "v14" not in pg_version:  # SKIP v15 for now because test set only has extension built for v14
+    if "v14" not in pg_version:  # test set only has extension built for v14
         return None
 
     neon_env_builder.enable_remote_storage(

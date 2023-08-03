@@ -27,48 +27,6 @@ from werkzeug.wrappers.response import Response
 # Storage metrics tests
 # ==============================================================================
 
-initial_tenant = TenantId.generate()
-remote_uploaded = 0
-checks = {
-    "written_size": lambda value: value > 0,
-    "resident_size": lambda value: value >= 0,
-    # >= 0 check here is to avoid race condition when we receive metrics before
-    # remote_uploaded is updated
-    "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
-    # logical size may lag behind the actual size, so allow 0 here
-    "timeline_logical_size": lambda value: value >= 0,
-}
-
-metric_kinds_checked = set([])
-
-
-#
-# verify that metrics look minilally sane
-#
-def metrics_handler(request: Request) -> Response:
-    if request.json is None:
-        return Response(status=400)
-
-    events = request.json["events"]
-    log.info("received events:")
-    log.info(events)
-
-    for event in events:
-        assert event["tenant_id"] == str(
-            initial_tenant
-        ), "Expecting metrics only from the initial tenant"
-        metric_name = event["metric"]
-
-        check = checks.get(metric_name)
-        # calm down mypy
-        if check is not None:
-            assert check(event["value"]), f"{metric_name} isn't valid"
-            global metric_kinds_checked
-            metric_kinds_checked.add(metric_name)
-
-    return Response(status=200)
-
-
 @pytest.mark.parametrize(
     "remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.LOCAL_FS]
 )
@@ -80,6 +38,44 @@ def test_metric_collection(
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
+
+    metric_kinds_checked = set([])
+    remote_uploaded = 0
+    checks = {
+        "written_size": lambda value: value > 0,
+        "resident_size": lambda value: value >= 0,
+        # >= 0 check here is to avoid race condition when we receive metrics before
+        # remote_uploaded is updated
+        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
+        # logical size may lag behind the actual size, so allow 0 here
+        "timeline_logical_size": lambda value: value >= 0,
+    }
+
+    #
+    # verify that metrics look minilally sane
+    #
+    def metrics_handler(request: Request) -> Response:
+        if request.json is None:
+            return Response(status=400)
+    
+        events = request.json["events"]
+        log.info("received events:")
+        log.info(events)
+    
+        for event in events:
+            assert event["tenant_id"] == str(
+                neon_env_builder.initial_tenant
+            ), "Expecting metrics only from the initial tenant"
+            metric_name = event["metric"]
+    
+            check = checks.get(metric_name)
+            # calm down mypy
+            if check is not None:
+                assert check(event["value"]), f"{metric_name} isn't valid"
+                metric_kinds_checked.add(metric_name)
+    
+        return Response(status=200)
+
 
     # Require collecting metrics frequently, since we change
     # the timeline and want something to be logged about it.
@@ -100,9 +96,6 @@ def test_metric_collection(
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
-    # Set initial tenant of the test, that we expect the logs from
-    global initial_tenant
-    initial_tenant = neon_env_builder.initial_tenant
     # mock http server that returns OK for the metrics
     httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
         metrics_handler
@@ -149,14 +142,15 @@ def test_metric_collection(
         pageserver_http = env.pageserver.http_client()
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
-        global remote_uploaded
+
         remote_uploaded = get_num_remote_ops("index", "upload")
         assert remote_uploaded > 0
+    else:
+        assert remote_uploaded == 0
 
     # wait longer than collecting interval and check that all requests are served
     time.sleep(3)
     httpserver.check()
-    global metric_kinds_checked, checks
     expected_checks = set(checks.keys())
     assert len(metric_kinds_checked) == len(
         checks
