@@ -37,13 +37,13 @@ use crate::{
 const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics {
-    use metrics::{register_int_counter_vec, IntCounter};
+    use metrics::{register_histogram_vec, register_int_counter_vec, Histogram, IntCounter};
     use once_cell::sync::Lazy;
 
-    static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
+    pub(super) static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
 
     #[derive(Clone, Copy, Debug)]
-    enum RequestKind {
+    pub(super) enum RequestKind {
         Get = 0,
         Put = 1,
         Delete = 2,
@@ -66,10 +66,10 @@ pub(super) mod metrics {
         }
     }
 
-    struct RequestTyped<C>([C; 4]);
+    pub(super) struct RequestTyped<C>([C; 4]);
 
     impl<C> RequestTyped<C> {
-        fn get(&self, kind: RequestKind) -> &C {
+        pub(super) fn get(&self, kind: RequestKind) -> &C {
             &self.0[kind.as_index()]
         }
 
@@ -90,9 +90,11 @@ pub(super) mod metrics {
         }
     }
 
-    struct BucketMetrics {
+    pub(super) struct BucketMetrics {
         requests: RequestTyped<IntCounter>,
         failed: RequestTyped<IntCounter>,
+
+        pub(super) wait_seconds: RequestTyped<Histogram>,
     }
 
     impl Default for BucketMetrics {
@@ -115,7 +117,21 @@ pub(super) mod metrics {
             let failed =
                 RequestTyped::build_with(|kind| failed.with_label_values(&[kind.as_str()]));
 
-            Self { requests, failed }
+            let wait_seconds = register_histogram_vec!(
+                "remote_storage_s3_wait_seconds",
+                "Seconds rate limited",
+                &["request_type"],
+                [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0].into(),
+            )
+            .unwrap();
+            let wait_seconds =
+                RequestTyped::build_with(|kind| wait_seconds.with_label_values(&[kind.as_str()]));
+
+            Self {
+                requests,
+                failed,
+                wait_seconds,
+            }
         }
     }
 
@@ -159,6 +175,8 @@ pub(super) mod metrics {
         BUCKET_METRICS.failed.get(Delete).inc()
     }
 }
+
+use self::metrics::RequestKind;
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -260,16 +278,41 @@ impl S3Bucket {
         }
     }
 
-    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+    async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
+        let started_at = std::time::Instant::now();
+        let permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .expect("semaphore is never closed");
+        metrics::BUCKET_METRICS
+            .wait_seconds
+            .get(kind)
+            .observe(started_at.elapsed().as_secs_f64());
+        permit
+    }
+
+    async fn owned_permit(&self, kind: RequestKind) -> tokio::sync::OwnedSemaphorePermit {
+        let started_at = std::time::Instant::now();
         let permit = self
             .concurrency_limiter
             .clone()
             .acquire_owned()
             .await
-            .context("Concurrency limiter semaphore got closed during S3 download")
-            .map_err(DownloadError::Other)?;
+            .expect("semaphore is never closed");
+        metrics::BUCKET_METRICS
+            .wait_seconds
+            .get(kind)
+            .observe(started_at.elapsed().as_secs_f64());
+        permit
+    }
+
+    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+        let permit = self.owned_permit(RequestKind::Get).await;
 
         metrics::inc_get_object();
+
+        let started_at = std::time::Instant::now();
 
         let get_object = self
             .client
@@ -354,14 +397,9 @@ impl RemoteStorage for S3Bucket {
         let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
-        loop {
-            let _guard = self
-                .concurrency_limiter
-                .acquire()
-                .await
-                .context("Concurrency limiter semaphore got closed during S3 list")
-                .map_err(DownloadError::Other)?;
 
+        loop {
+            let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
 
             let fetch_response = self
@@ -400,6 +438,8 @@ impl RemoteStorage for S3Bucket {
 
     /// See the doc for `RemoteStorage::list_files`
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let kind = RequestKind::List;
+
         let folder_name = folder
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());
@@ -408,11 +448,7 @@ impl RemoteStorage for S3Bucket {
         let mut continuation_token = None;
         let mut all_files = vec![];
         loop {
-            let _guard = self
-                .concurrency_limiter
-                .acquire()
-                .await
-                .context("Concurrency limiter semaphore got closed during S3 list_files")?;
+            let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
 
             let response = self
@@ -450,11 +486,8 @@ impl RemoteStorage for S3Bucket {
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 upload")?;
+        let kind = RequestKind::Put;
+        let _guard = self.permit(kind).await;
 
         metrics::inc_put_object();
 
@@ -510,11 +543,8 @@ impl RemoteStorage for S3Bucket {
         .await
     }
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 delete")?;
+        let kind = RequestKind::Delete;
+        let _guard = self.permit(kind).await;
 
         let mut delete_objects = Vec::with_capacity(paths.len());
         for path in paths {
@@ -555,11 +585,8 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 delete")?;
+        let kind = RequestKind::Delete;
+        let _guard = self.permit(kind).await;
 
         metrics::inc_delete_object();
 
