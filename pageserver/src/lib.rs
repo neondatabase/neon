@@ -211,6 +211,7 @@ async fn timed<Fut: std::future::Future>(
     let elapsed = started.elapsed();
 
     if elapsed >= warn_at {
+        // this has a global allowed_error
         tracing::warn!(
             task = name,
             elapsed_ms = elapsed.as_millis(),

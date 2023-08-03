@@ -1722,6 +1722,7 @@ class NeonPageserver(PgProtocol):
             ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
+            ".*took more than expected to complete.*",
         ]
 
     def start(
