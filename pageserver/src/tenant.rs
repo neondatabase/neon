@@ -2076,7 +2076,14 @@ impl Tenant {
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
 
-        tokio::spawn(async move {
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MetricsCollection,
+            Some(tenant_id),
+            None,
+            &format!("state metrics collector for tenant {tenant_id}"),
+            false,
+            async move {
             let tid = tenant_id.to_string();
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
@@ -2126,7 +2133,10 @@ impl Tenant {
                         .inc();
                 }
             }
-        });
+            Ok(())
+            }
+            .instrument(info_span!("state_metrics", tenant_id = %tenant_id)),
+        );
 
         Tenant {
             tenant_id,
