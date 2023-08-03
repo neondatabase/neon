@@ -29,13 +29,13 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev
+libcurl4-openssl-dev openssl python-poetry
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
-  protobuf-devel libcurl-devel
+  protobuf-devel libcurl-devel openssl poetry
 ```
 * On Arch based systems, these packages are needed:
 ```bash
