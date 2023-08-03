@@ -384,9 +384,9 @@ impl S3Bucket {
                     .req_seconds
                     .get(RequestKind::Get, false)
                     .observe(started_at.elapsed().as_secs_f64());
-                Err(DownloadError::Other(anyhow::anyhow!(
-                    "Failed to download S3 object: {e}"
-                )))
+                Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("download s3 object"),
+                ))
             }
         }
     }
