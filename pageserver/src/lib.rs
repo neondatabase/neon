@@ -274,7 +274,7 @@ mod timed_tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn test_timed() {
+    async fn timed_completes_when_inner_future_completes() {
         // A future that completes on time should have its result returned
         let r1 = timed(
             async move {
