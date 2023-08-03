@@ -225,14 +225,33 @@ pub mod v14 {
             }
         }
     }
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapLock {
+    pub xmax: TransactionId,
+    pub offnum: OffsetNumber,
+    pub infobits_set: u8,
+    pub flags: u8,
+}
+
+impl XlHeapLock {
+    pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+        XlHeapLock {
+            xmax: buf.get_u32_le(),
+            offnum: buf.get_u16_le(),
+            infobits_set: buf.get_u8(),
+            flags: buf.get_u8(),
+        }
+    }
+}
 }
 
 pub mod v15 {
-    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapMultiInsert, XlHeapUpdate};
+    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapMultiInsert, XlHeapUpdate, XlHeapLock};
 }
 
 pub mod v16 {
-    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert, XlHeapLock};
     use bytes::{Buf, Bytes};
     use postgres_ffi::{OffsetNumber, TransactionId};
 
