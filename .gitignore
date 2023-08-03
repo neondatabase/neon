@@ -18,3 +18,5 @@ test_output/
 *.o
 *.so
 *.Po
+
+tmp

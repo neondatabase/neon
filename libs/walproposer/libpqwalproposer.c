@@ -2,6 +2,7 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "rust_bindings.h"
+#include "replication/message.h"
 
 // defined in walproposer.h
 uint64 sim_redo_start_lsn;
@@ -166,4 +167,215 @@ sim_start_replication(XLogRecPtr startptr)
 
 		WalProposerPoll();
 	}
+}
+
+#define max_rdatas 16
+
+void InitMyInsert();
+static void MyBeginInsert();
+static void MyRegisterData(char *data, int len);
+static XLogRecPtr MyFinishInsert(RmgrId rmid, uint8 info, uint8 flags);
+static void MyCopyXLogRecordToWAL(int write_len, XLogRecData *rdata, XLogRecPtr StartPos, XLogRecPtr EndPos);
+
+/*
+ * An array of XLogRecData structs, to hold registered data.
+ */
+static XLogRecData rdatas[max_rdatas];
+static int	num_rdatas;			/* entries currently used */
+static uint32 mainrdata_len;	/* total # of bytes in chain */
+static XLogRecData hdr_rdt;
+static char hdr_scratch[16000];
+static XLogRecPtr CurrBytePos;
+static XLogRecPtr PrevBytePos;
+
+void InitMyInsert()
+{
+	CurrBytePos = sim_redo_start_lsn;
+	PrevBytePos = InvalidXLogRecPtr;
+}
+
+static void MyBeginInsert()
+{
+	num_rdatas = 0;
+	mainrdata_len = 0;
+}
+
+static void MyRegisterData(char *data, int len)
+{
+	XLogRecData *rdata;
+
+	if (num_rdatas >= max_rdatas)
+		walprop_log(ERROR, "too much WAL data");
+	rdata = &rdatas[num_rdatas++];
+
+	rdata->data = data;
+	rdata->len = len;
+	rdata->next = NULL;
+
+	if (num_rdatas > 1) {
+		rdatas[num_rdatas - 2].next = rdata;
+	}
+
+	mainrdata_len += len;
+}
+
+static XLogRecPtr
+MyFinishInsert(RmgrId rmid, uint8 info, uint8 flags)
+{
+	XLogRecData *rdt;
+	uint32		total_len = 0;
+	int			block_id;
+	pg_crc32c	rdata_crc;
+	XLogRecord *rechdr;
+	char	   *scratch = hdr_scratch;
+	int         size;
+	XLogRecPtr  StartPos;
+	XLogRecPtr  EndPos;
+
+	/*
+	 * Note: this function can be called multiple times for the same record.
+	 * All the modifications we do to the rdata chains below must handle that.
+	 */
+
+	/* The record begins with the fixed-size header */
+	rechdr = (XLogRecord *) scratch;
+	scratch += SizeOfXLogRecord;
+
+	hdr_rdt.data = hdr_scratch;
+	
+	if (num_rdatas > 0)
+	{
+		hdr_rdt.next = &rdatas[0];
+	}
+	else
+	{
+		hdr_rdt.next = NULL;
+	}
+
+	/* followed by main data, if any */
+	if (mainrdata_len > 0)
+	{
+		if (mainrdata_len > 255)
+		{
+			*(scratch++) = (char) XLR_BLOCK_ID_DATA_LONG;
+			memcpy(scratch, &mainrdata_len, sizeof(uint32));
+			scratch += sizeof(uint32);
+		}
+		else
+		{
+			*(scratch++) = (char) XLR_BLOCK_ID_DATA_SHORT;
+			*(scratch++) = (uint8) mainrdata_len;
+		}
+		total_len += mainrdata_len;
+	}
+
+	hdr_rdt.len = (scratch - hdr_scratch);
+	total_len += hdr_rdt.len;
+
+	/*
+	 * Calculate CRC of the data
+	 *
+	 * Note that the record header isn't added into the CRC initially since we
+	 * don't know the prev-link yet.  Thus, the CRC will represent the CRC of
+	 * the whole record in the order: rdata, then backup blocks, then record
+	 * header.
+	 */
+	INIT_CRC32C(rdata_crc);
+	COMP_CRC32C(rdata_crc, hdr_scratch + SizeOfXLogRecord, hdr_rdt.len - SizeOfXLogRecord);
+	for (size_t i = 0; i < num_rdatas; i++)
+	{
+		rdt = &rdatas[i];
+		COMP_CRC32C(rdata_crc, rdt->data, rdt->len);
+	}
+
+	/*
+	 * Fill in the fields in the record header. Prev-link is filled in later,
+	 * once we know where in the WAL the record will be inserted. The CRC does
+	 * not include the record header yet.
+	 */
+	rechdr->xl_xid = 0;
+	rechdr->xl_tot_len = total_len;
+	rechdr->xl_info = info;
+	rechdr->xl_rmid = rmid;
+	rechdr->xl_prev = InvalidXLogRecPtr;
+	rechdr->xl_crc = rdata_crc;
+
+	size = MAXALIGN(rechdr->xl_tot_len);
+
+	/* All (non xlog-switch) records should contain data. */
+	Assert(size > SizeOfXLogRecord);
+
+	// Get the position.
+	StartPos = CurrBytePos;
+	EndPos = StartPos + size;
+	rechdr->xl_prev = PrevBytePos;
+
+	// Update global pointers.
+	CurrBytePos = EndPos;
+	PrevBytePos = StartPos;
+
+	/*
+	 * Now that xl_prev has been filled in, calculate CRC of the record
+	 * header.
+	 */
+	rdata_crc = rechdr->xl_crc;
+	COMP_CRC32C(rdata_crc, rechdr, offsetof(XLogRecord, xl_crc));
+	FIN_CRC32C(rdata_crc);
+	rechdr->xl_crc = rdata_crc;
+
+	// Now write it to disk.
+	MyCopyXLogRecordToWAL(rechdr->xl_tot_len, &hdr_rdt, StartPos, EndPos);
+
+	return EndPos;
+}
+
+static void
+MyCopyXLogRecordToWAL(int write_len, XLogRecData *rdata, XLogRecPtr StartPos, XLogRecPtr EndPos)
+{
+	XLogRecPtr	CurrPos;
+	int			written;
+
+	// Write hdr_rdt and `num_rdatas` other datas.
+	CurrPos = StartPos;
+
+	while (rdata != NULL)
+	{
+		char	   *rdata_data = rdata->data;
+		int			rdata_len = rdata->len;
+
+		// Assert(CurrPos % XLOG_BLCKSZ >= SizeOfXLogShortPHD || rdata_len == 0);
+
+		XLogWalPropWrite(rdata_data, rdata_len, CurrPos);
+		CurrPos += rdata_len;
+		written += rdata_len;
+
+		rdata = rdata->next;
+	}
+
+	Assert(written == write_len);
+	CurrPos = MAXALIGN64(CurrPos);
+	Assert(CurrPos == EndPos);
+}
+
+XLogRecPtr MyInsertRecord()
+{
+	const char *prefix = "prefix";
+	const char *message = "message";
+	size_t size = 7;
+	bool transactional = false;
+
+	xl_logical_message xlrec;
+
+	xlrec.dbId = 0;
+	xlrec.transactional = transactional;
+	/* trailing zero is critical; see logicalmsg_desc */
+	xlrec.prefix_size = strlen(prefix) + 1;
+	xlrec.message_size = size;
+
+	MyBeginInsert();
+	MyRegisterData((char *) &xlrec, SizeOfLogicalMessage);
+	MyRegisterData(unconstify(char *, prefix), xlrec.prefix_size);
+	MyRegisterData(unconstify(char *, message), size);
+
+	return MyFinishInsert(RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE, XLOG_INCLUDE_ORIGIN);
 }

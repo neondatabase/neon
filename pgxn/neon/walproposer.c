@@ -349,11 +349,16 @@ void WalProposerCleanup()
 	}
 }
 
+void InitMyInsert();
+
 void WalProposerRust()
 {
 	struct stat stat_buf;
 
 	walprop_log(LOG, "WalProposerRust");
+
+	InitMyInsert();
+
 #if PG_VERSION_NUM < 150000
 	ThisTimeLineID = 1;
 #endif
@@ -479,7 +484,7 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 			}
 		}
 		walprop_log(FATAL, "unknown tcp connection");
-	} else if (event.tag == Message && event.any_message == LSN) {
+	} else if (event.tag == Internal && event.any_message == LSN) {
 		sim_epoll_rcv(0);
 		sim_msg_get_lsn(&sim_latest_available_lsn);
 		*occurred_events = (WaitEvent) {

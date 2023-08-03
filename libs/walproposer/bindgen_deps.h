@@ -24,3 +24,5 @@ void WalProposerCleanup();
 
 // Initialize global variables before calling any Postgres C code.
 void MyContextInit();
+
+XLogRecPtr MyInsertRecord();

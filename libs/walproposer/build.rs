@@ -109,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         .allowlist_function("WalProposerRust")
         .allowlist_function("MyContextInit")
         .allowlist_function("WalProposerCleanup")
+        .allowlist_function("MyInsertRecord")
         .allowlist_var("wal_acceptors_list")
         .allowlist_var("wal_acceptor_reconnect_timeout")
         .allowlist_var("wal_acceptor_connection_timeout")

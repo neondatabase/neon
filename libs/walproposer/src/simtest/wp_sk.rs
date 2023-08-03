@@ -2,15 +2,15 @@ use std::{ffi::CString, str::FromStr, sync::Arc};
 
 use safekeeper::simlib::{
     network::{Delay, NetworkOptions},
-    world::Node,
-    world::World,
+    world::{Node, NodeEvent},
+    world::World, proto::AnyMessage,
 };
 use utils::{id::TenantTimelineId, logging, lsn::Lsn};
 
 use crate::{
     bindings::{
         neon_tenant_walproposer, neon_timeline_walproposer, wal_acceptor_connection_timeout,
-        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers, sim_redo_start_lsn,
+        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers, sim_redo_start_lsn, MyInsertRecord,
     },
     c_context,
     simtest::safekeeper::run_server,
@@ -179,9 +179,13 @@ struct WalProposer {
 
 impl WalProposer {
     fn gen_wal_record(&self) -> Lsn {
-        // TODO:
+        let new_ptr = unsafe { MyInsertRecord() };
 
-        panic!("implement me")
+        self.node.network_chan().send(NodeEvent::Internal(
+            AnyMessage::LSN(new_ptr as u64),
+        ));
+
+        return Lsn(new_ptr as u64);
     }
 }
 
@@ -216,7 +220,10 @@ fn run_walproposer_generate_wal() {
     let wp = test.launch_walproposer(lsn);
     // let rec1 = wp.gen_wal_record();
 
-    test.poll_for_duration(3000);   
+    test.poll_for_duration(30);
 
-    // TODO:
+    for i in 0..100 {
+        wp.gen_wal_record();
+        test.poll_for_duration(5);
+    }
 }

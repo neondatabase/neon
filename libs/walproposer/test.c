@@ -6,6 +6,8 @@
 #include "postgres.h"
 #include "utils/memutils.h"
 #include "utils/guc.h"
+#include "miscadmin.h"
+#include "common/pg_prng.h"
 
 // From src/backend/main/main.c
 const char *progname = "fakepostgres";
@@ -65,6 +67,7 @@ void MyContextInit() {
     if (!initializedMemoryContext) {
         initializedMemoryContext = true;
         MemoryContextInit();
+        pg_prng_seed(&pg_global_prng_state, 0);
 
         setenv("PGDATA", "/home/admin/simulator/libs/walproposer/pgdata", 1);
 
@@ -78,6 +81,13 @@ void MyContextInit() {
             exit(1);
 
         log_min_messages = DEBUG5;
+
+        InitializeMaxBackends();
+        ChangeToDataDir();
+        CreateSharedMemoryAndSemaphores();
+        SetInstallXLogFileSegmentActive();
+        // CreateAuxProcessResourceOwner();
+        // StartupXLOG();
     }
     pthread_mutex_unlock(&lock);
 }
