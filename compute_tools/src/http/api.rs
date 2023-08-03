@@ -30,6 +30,7 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
         status: state.status,
         last_active: state.last_active,
         error: state.error.clone(),
+        metrics: state.metrics.clone(),
     }
 }
 

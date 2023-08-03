@@ -21,6 +21,7 @@ pub struct ComputeStatusResponse {
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
+    pub metrics: ComputeMetrics,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -66,7 +67,7 @@ where
 }
 
 /// Response of the /metrics.json API
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ComputeMetrics {
     pub wait_for_spec_ms: u64,
     pub sync_safekeepers_ms: u64,
