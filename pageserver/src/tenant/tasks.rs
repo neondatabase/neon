@@ -99,12 +99,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             }
 
-            // FIXME: stopping will come before cancellation, so unsure if this will help often
-            if cancel.is_cancelled() {
-                info!("received cancellation request");
-                break;
-            }
-
             let started_at = Instant::now();
 
             let sleep_duration = if period == Duration::ZERO {
