@@ -274,12 +274,15 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
                 let ordering = std::sync::atomic::Ordering::Relaxed;
                 let joined_other = std::sync::atomic::AtomicBool::new(false);
 
+                let tenant_weak = Arc::downgrade(&tenant);
                 let mut shutdown = std::pin::pin!(async {
                     let freeze_and_flush = true;
 
                     let res = {
                         let (_guard, shutdown_progress) = completion::channel();
-                        tenant.shutdown(shutdown_progress, freeze_and_flush).await
+                        // Always safe to upgrade this weak ptr, because the outer code block
+                        // holds an Arc to it past the point it awaits this async block.
+                        tenant_weak.upgrade().unwrap().shutdown(shutdown_progress, freeze_and_flush).await
                     };
 
                     if let Err(other_progress) = res {
@@ -303,6 +306,13 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
                         shutdown.await;
                     }
                 };
+
+                // Shutdown should have stopped all the background tasks that referenced
+                // the tenant: when we drop our ref it should drop the Tenant.  If that isn't
+                // the case it's a bug.
+                if Arc::into_inner(tenant).is_none() {
+                    warn!("Tenant still has references after shutdown");
+                }
 
                 debug!("tenant successfully stopped");
             }
