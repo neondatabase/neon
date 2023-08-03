@@ -47,24 +47,50 @@ pub use crate::metrics::preinitialize_metrics;
 
 #[tracing::instrument]
 pub async fn shutdown_pageserver(exit_code: i32) {
+    use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None),
+        "shutdown LibpqEndpointListener",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // Shut down any page service tasks.
-    task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
+        "shutdown PageRequestHandlers",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
-    tenant::mgr::shutdown_all_tenants().await;
+    timed(
+        tenant::mgr::shutdown_all_tenants(),
+        "shutdown all tenants",
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
-    task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None),
+        "shutdown http",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // There should be nothing left, but let's be sure
-    task_mgr::shutdown_tasks(None, None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(None, None, None),
+        "shutdown leftovers",
+        Duration::from_secs(1),
+    )
+    .await;
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }
@@ -172,6 +198,45 @@ pub struct InitializationOrder {
     pub background_jobs_can_start: utils::completion::Barrier,
 }
 
+/// Time the future with a warning when it exceeds a threshold.
+async fn timed<Fut: std::future::Future>(
+    fut: Fut,
+    name: &str,
+    warn_at: std::time::Duration,
+) -> <Fut as std::future::Future>::Output {
+    let started = std::time::Instant::now();
+
+    let mut fut = std::pin::pin!(fut);
+
+    match tokio::time::timeout(warn_at, &mut fut).await {
+        Ok(ret) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed"
+            );
+            ret
+        }
+        Err(_) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "still waiting, taking longer than expected..."
+            );
+
+            let ret = fut.await;
+
+            tracing::warn!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed, took longer than expected"
+            );
+
+            ret
+        }
+    }
+}
+
 #[cfg(test)]
 mod backoff_defaults_tests {
     use super::*;
@@ -200,5 +265,38 @@ mod backoff_defaults_tests {
             DEFAULT_MAX_BACKOFF_SECONDS,
             "Given big enough of retries, backoff should reach its allowed max value"
         );
+    }
+}
+
+#[cfg(test)]
+mod timed_tests {
+    use super::timed;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn timed_completes_when_inner_future_completes() {
+        // A future that completes on time should have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                123
+            },
+            "test 1",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(r1, 123);
+
+        // A future that completes too slowly should also have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                456
+            },
+            "test 1",
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(r1, 456);
     }
 }
