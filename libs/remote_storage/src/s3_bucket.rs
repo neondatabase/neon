@@ -113,6 +113,7 @@ pub(super) mod metrics {
         requests: RequestTyped<IntCounter>,
         failed: RequestTyped<IntCounter>,
 
+        pub(super) req_seconds: PassFailRequestTyped<Histogram>,
         pub(super) wait_seconds: RequestTyped<Histogram>,
     }
 
@@ -136,6 +137,17 @@ pub(super) mod metrics {
             let failed =
                 RequestTyped::build_with(|kind| failed.with_label_values(&[kind.as_str()]));
 
+            let req_seconds = register_histogram_vec!(
+                "remote_storage_s3_request_seconds",
+                "Seconds to complete a request",
+                &["request_type", "result"],
+                [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0].into(),
+            )
+            .unwrap();
+            let req_seconds = PassFailRequestTyped::build_with(|kind, pass| {
+                req_seconds.with_label_values(&[kind.as_str(), if pass { "ok" } else { "err" }])
+            });
+
             let wait_seconds = register_histogram_vec!(
                 "remote_storage_s3_wait_seconds",
                 "Seconds rate limited",
@@ -149,6 +161,7 @@ pub(super) mod metrics {
             Self {
                 requests,
                 failed,
+                req_seconds,
                 wait_seconds,
             }
         }
@@ -344,20 +357,33 @@ impl S3Bucket {
 
         match get_object {
             Ok(object_output) => {
+                let histogram = metrics::BUCKET_METRICS
+                    .req_seconds
+                    .get(RequestKind::Get, true)
+                    .clone();
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(RatelimitedAsyncRead::new(
-                        permit,
-                        object_output.body.into_async_read(),
+                    download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
+                        started_at,
+                        histogram,
+                        RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
                     ))),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                metrics::BUCKET_METRICS
+                    .req_seconds
+                    .get(RequestKind::Get, false)
+                    .observe(started_at.elapsed().as_secs_f64());
                 Err(DownloadError::NotFound)
             }
             Err(e) => {
                 metrics::inc_get_object_fail();
+                metrics::BUCKET_METRICS
+                    .req_seconds
+                    .get(RequestKind::Get, false)
+                    .observe(started_at.elapsed().as_secs_f64());
                 Err(DownloadError::Other(anyhow::anyhow!(
                     "Failed to download S3 object: {e}"
                 )))
@@ -392,6 +418,44 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
     }
 }
 
+pin_project_lite::pin_project! {
+    struct TimedDownload<S> {
+        started_at: std::time::Instant,
+        histogram: ::metrics::Histogram,
+        #[pin]
+        inner: S
+    }
+
+    impl<S> PinnedDrop for TimedDownload<S> {
+        fn drop(mut this: Pin<&mut Self>) {
+            // record regardless of drop
+            let elapsed = this.started_at.elapsed();
+            this.histogram.observe(elapsed.as_secs_f64());
+        }
+    }
+}
+
+impl<S: AsyncRead> TimedDownload<S> {
+    fn new(started_at: std::time::Instant, histogram: ::metrics::Histogram, inner: S) -> Self {
+        TimedDownload {
+            started_at,
+            histogram,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        this.inner.poll_read(cx, buf)
+    }
+}
+
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
     /// See the doc for `RemoteStorage::list_prefixes`
@@ -400,6 +464,8 @@ impl RemoteStorage for S3Bucket {
         &self,
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError> {
+        let kind = RequestKind::List;
+
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_s3_object(p))
@@ -420,6 +486,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
+            let started_at = std::time::Instant::now();
 
             let fetch_response = self
                 .client
@@ -436,7 +503,14 @@ impl RemoteStorage for S3Bucket {
                     e
                 })
                 .context("Failed to list S3 prefixes")
-                .map_err(DownloadError::Other)?;
+                .map_err(DownloadError::Other);
+
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .get(kind, fetch_response.is_ok())
+                .observe(started_at.elapsed().as_secs_f64());
+
+            let fetch_response = fetch_response?;
 
             document_keys.extend(
                 fetch_response
@@ -446,10 +520,10 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            match fetch_response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
+            continuation_token = match fetch_response.next_continuation_token {
+                Some(new_token) => Some(new_token),
                 None => break,
-            }
+            };
         }
 
         Ok(document_keys)
@@ -469,6 +543,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
+            let started_at = std::time::Instant::now();
 
             let response = self
                 .client
@@ -483,7 +558,14 @@ impl RemoteStorage for S3Bucket {
                     metrics::inc_list_objects_fail();
                     e
                 })
-                .context("Failed to list files in S3 bucket")?;
+                .context("Failed to list files in S3 bucket");
+
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .get(kind, response.is_ok())
+                .observe(started_at.elapsed().as_secs_f64());
+
+            let response = response?;
 
             for object in response.contents().unwrap_or_default() {
                 let object_path = object.key().expect("response does not contain a key");
@@ -509,11 +591,13 @@ impl RemoteStorage for S3Bucket {
         let _guard = self.permit(kind).await;
 
         metrics::inc_put_object();
+        let started_at = std::time::Instant::now();
 
         let body = Body::wrap_stream(ReaderStream::new(from));
         let bytes_stream = ByteStream::new(SdkBody::from(body));
 
-        self.client
+        let res = self
+            .client
             .put_object()
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(to))
@@ -525,7 +609,15 @@ impl RemoteStorage for S3Bucket {
             .map_err(|e| {
                 metrics::inc_put_object_fail();
                 e
-            })?;
+            });
+
+        metrics::BUCKET_METRICS
+            .req_seconds
+            .get(kind, res.is_ok())
+            .observe(started_at.elapsed().as_secs_f64());
+
+        res?;
+
         Ok(())
     }
 
@@ -575,6 +667,7 @@ impl RemoteStorage for S3Bucket {
 
         for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
             metrics::inc_delete_objects(chunk.len() as u64);
+            let started_at = std::time::Instant::now();
 
             let resp = self
                 .client
@@ -583,6 +676,11 @@ impl RemoteStorage for S3Bucket {
                 .delete(Delete::builder().set_objects(Some(chunk.to_vec())).build())
                 .send()
                 .await;
+
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .get(kind, resp.is_ok())
+                .observe(started_at.elapsed().as_secs_f64());
 
             match resp {
                 Ok(resp) => {
@@ -608,8 +706,10 @@ impl RemoteStorage for S3Bucket {
         let _guard = self.permit(kind).await;
 
         metrics::inc_delete_object();
+        let started_at = std::time::Instant::now();
 
-        self.client
+        let res = self
+            .client
             .delete_object()
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(path))
@@ -618,7 +718,15 @@ impl RemoteStorage for S3Bucket {
             .map_err(|e| {
                 metrics::inc_delete_object_fail();
                 e
-            })?;
+            });
+
+        metrics::BUCKET_METRICS
+            .req_seconds
+            .get(kind, res.is_ok())
+            .observe(started_at.elapsed().as_secs_f64());
+
+        res?;
+
         Ok(())
     }
 }
