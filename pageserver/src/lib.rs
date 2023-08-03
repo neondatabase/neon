@@ -272,7 +272,6 @@ mod backoff_defaults_tests {
 mod timed_tests {
     use super::timed;
     use std::time::Duration;
-    use tokio;
 
     #[tokio::test]
     async fn test_timed() {
