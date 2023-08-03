@@ -112,6 +112,8 @@ pub fn get_pg_version(pgbin: &str) -> String {
         return "v15".to_string();
     } else if human_version.contains("14") {
         return "v14".to_string();
+    } else if human_version.contains("16") {
+        return "v16".to_string();
     }
     panic!("Unsuported postgres version {human_version}");
 }
