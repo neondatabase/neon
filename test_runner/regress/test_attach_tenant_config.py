@@ -3,12 +3,11 @@ from typing import Generator, Optional
 
 import pytest
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
 )
 from fixtures.pageserver.http import PageserverApiException, TenantConfig
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId
 from fixtures.utils import wait_until
 

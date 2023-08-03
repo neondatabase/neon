@@ -5,9 +5,9 @@ import pytest
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
     VanillaPostgres,
 )
+from fixtures.port_distributor import PortDistributor
 from fixtures.types import TenantId, TimelineId
 
 

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import enum
 import filecmp
 import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 import textwrap
@@ -17,12 +15,11 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Flag, auto
 from functools import cached_property
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, cast
 from urllib.parse import urlparse
 
 import asyncpg
@@ -42,10 +39,21 @@ from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 
+from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    MockS3Server,
+    RemoteStorage,
+    RemoteStorageKind,
+    RemoteStorageUsers,
+    S3Storage,
+    remote_storage_to_toml_inline_table,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -220,77 +228,6 @@ def get_dir_size(path: str) -> int:
     return totalbytes
 
 
-def can_bind(host: str, port: int) -> bool:
-    """
-    Check whether a host:port is available to bind for listening
-
-    Inspired by the can_bind() perl function used in Postgres tests, in
-    vendor/postgres-v14/src/test/perl/PostgresNode.pm
-    """
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        # TODO: The pageserver and safekeepers don't use SO_REUSEADDR at the
-        # moment. If that changes, we should use start using SO_REUSEADDR here
-        # too, to allow reusing ports more quickly.
-        # See https://github.com/neondatabase/neon/issues/801
-        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        try:
-            sock.bind((host, port))
-            sock.listen()
-            return True
-        except socket.error:
-            log.info(f"Port {port} is in use, skipping")
-            return False
-        finally:
-            sock.close()
-
-
-class PortDistributor:
-    def __init__(self, base_port: int, port_number: int):
-        self.iterator = iter(range(base_port, base_port + port_number))
-        self.port_map: Dict[int, int] = {}
-
-    def get_port(self) -> int:
-        for port in self.iterator:
-            if can_bind("localhost", port):
-                return port
-        raise RuntimeError(
-            "port range configured for test is exhausted, consider enlarging the range"
-        )
-
-    def replace_with_new_port(self, value: Union[int, str]) -> Union[int, str]:
-        """
-        Returns a new port for a port number in a string (like "localhost:1234") or int.
-        Replacements are memorised, so a substitution for the same port is always the same.
-        """
-
-        # TODO: replace with structural pattern matching for Python >= 3.10
-        if isinstance(value, int):
-            return self._replace_port_int(value)
-
-        if isinstance(value, str):
-            return self._replace_port_str(value)
-
-        raise TypeError(f"unsupported type {type(value)} of {value=}")
-
-    def _replace_port_int(self, value: int) -> int:
-        known_port = self.port_map.get(value)
-        if known_port is None:
-            known_port = self.port_map[value] = self.get_port()
-
-        return known_port
-
-    def _replace_port_str(self, value: str) -> str:
-        # Use regex to find port in a string
-        # urllib.parse.urlparse produces inconvenient results for cases without scheme like "localhost:5432"
-        # See https://bugs.python.org/issue27657
-        ports = re.findall(r":(\d+)(?:/|$)", value)
-        assert len(ports) == 1, f"can't find port in {value}"
-        port_int = int(ports[0])
-
-        return value.replace(f":{port_int}", f":{self._replace_port_int(port_int)}")
-
-
 @pytest.fixture(scope="session")
 def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
@@ -462,140 +399,6 @@ class AuthKeys:
     # generate token giving access to only one tenant
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
         return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
-
-
-class MockS3Server:
-    """
-    Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
-    Relies that `poetry` and `moto` server are installed, since it's the way the tests are run.
-
-    Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
-    """
-
-    def __init__(
-        self,
-        port: int,
-    ):
-        self.port = port
-
-        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
-        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
-        # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", "s3", f"-p{port}"])
-        error = None
-        try:
-            return_code = self.subprocess.poll()
-            if return_code is not None:
-                error = f"expected mock s3 server to run but it exited with code {return_code}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        except Exception as e:
-            error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        if error is not None:
-            log.error(error)
-            self.kill()
-            raise RuntimeError("failed to start s3 mock server")
-
-    def endpoint(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def region(self) -> str:
-        return "us-east-1"
-
-    def access_key(self) -> str:
-        return "test"
-
-    def secret_key(self) -> str:
-        return "test"
-
-    def kill(self):
-        self.subprocess.kill()
-
-
-@enum.unique
-class RemoteStorageKind(str, enum.Enum):
-    LOCAL_FS = "local_fs"
-    MOCK_S3 = "mock_s3"
-    REAL_S3 = "real_s3"
-    # Pass to tests that are generic to remote storage
-    # to ensure the test pass with or without the remote storage
-    NOOP = "noop"
-
-
-def available_remote_storages() -> List[RemoteStorageKind]:
-    remote_storages = [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3]
-    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
-        remote_storages.append(RemoteStorageKind.REAL_S3)
-        log.info("Enabling real s3 storage for tests")
-    else:
-        log.info("Using mock implementations to test remote storage")
-    return remote_storages
-
-
-def available_s3_storages() -> List[RemoteStorageKind]:
-    remote_storages = [RemoteStorageKind.MOCK_S3]
-    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
-        remote_storages.append(RemoteStorageKind.REAL_S3)
-        log.info("Enabling real s3 storage for tests")
-    else:
-        log.info("Using mock implementations to test remote storage")
-    return remote_storages
-
-
-@dataclass
-class LocalFsStorage:
-    root: Path
-
-
-@dataclass
-class S3Storage:
-    bucket_name: str
-    bucket_region: str
-    access_key: str
-    secret_key: str
-    endpoint: Optional[str] = None
-    prefix_in_bucket: Optional[str] = ""
-
-    def access_env_vars(self) -> Dict[str, str]:
-        return {
-            "AWS_ACCESS_KEY_ID": self.access_key,
-            "AWS_SECRET_ACCESS_KEY": self.secret_key,
-        }
-
-    def to_string(self) -> str:
-        return json.dumps(
-            {
-                "bucket": self.bucket_name,
-                "region": self.bucket_region,
-                "endpoint": self.endpoint,
-                "prefix": self.prefix_in_bucket,
-            }
-        )
-
-
-RemoteStorage = Union[LocalFsStorage, S3Storage]
-
-
-# serialize as toml inline table
-def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
-    if isinstance(remote_storage, LocalFsStorage):
-        remote_storage_config = f"local_path='{remote_storage.root}'"
-    elif isinstance(remote_storage, S3Storage):
-        remote_storage_config = f"bucket_name='{remote_storage.bucket_name}',\
-            bucket_region='{remote_storage.bucket_region}'"
-
-        if remote_storage.prefix_in_bucket is not None:
-            remote_storage_config += f",prefix_in_bucket='{remote_storage.prefix_in_bucket}'"
-
-        if remote_storage.endpoint is not None:
-            remote_storage_config += f",endpoint='{remote_storage.endpoint}'"
-    else:
-        raise Exception("invalid remote storage type")
-
-    return f"{{{remote_storage_config}}}"
-
-
-class RemoteStorageUsers(Flag):
-    PAGESERVER = auto()
-    SAFEKEEPER = auto()
 
 
 class NeonEnvBuilder:
@@ -2897,59 +2700,6 @@ class SafekeeperHttpClient(requests.Session):
                 (TenantId(match.group(1)), TimelineId(match.group(2)))
             ] = int(match.group(3))
         return metrics
-
-
-@dataclass
-class NeonBroker:
-    """An object managing storage_broker instance"""
-
-    logfile: Path
-    port: int
-    neon_binpath: Path
-    handle: Optional[subprocess.Popen[Any]] = None  # handle of running daemon
-
-    def listen_addr(self):
-        return f"127.0.0.1:{self.port}"
-
-    def client_url(self):
-        return f"http://{self.listen_addr()}"
-
-    def check_status(self):
-        return True  # TODO
-
-    def try_start(self):
-        if self.handle is not None:
-            log.debug(f"storage_broker is already running on port {self.port}")
-            return
-
-        listen_addr = self.listen_addr()
-        log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
-        with open(self.logfile, "wb") as logfile:
-            args = [
-                str(self.neon_binpath / "storage_broker"),
-                f"--listen-addr={listen_addr}",
-            ]
-            self.handle = subprocess.Popen(args, stdout=logfile, stderr=logfile)
-
-        # wait for start
-        started_at = time.time()
-        while True:
-            try:
-                self.check_status()
-            except Exception as e:
-                elapsed = time.time() - started_at
-                if elapsed > 5:
-                    raise RuntimeError(
-                        f"timed out waiting {elapsed:.0f}s for storage_broker start: {e}"
-                    ) from e
-                time.sleep(0.5)
-            else:
-                break  # success
-
-    def stop(self):
-        if self.handle is not None:
-            self.handle.terminate()
-            self.handle.wait()
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:

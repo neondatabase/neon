@@ -8,10 +8,9 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_s3_storages,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.remote_storage import RemoteStorageKind, available_s3_storages
 
 
 # Cleaning up downloaded files is important for local tests
