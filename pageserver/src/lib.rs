@@ -206,22 +206,35 @@ async fn timed<Fut: std::future::Future>(
 ) -> <Fut as std::future::Future>::Output {
     let started = std::time::Instant::now();
 
-    let ret = fut.await;
+    let mut fut = std::pin::pin!(fut);
 
-    let elapsed = started.elapsed();
+    match tokio::time::timeout(warn_at, &mut fut).await {
+        Ok(ret) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed"
+            );
+            ret
+        }
+        Err(_) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "still waiting, taking longer than expected..."
+            );
 
-    if elapsed >= warn_at {
-        // this has a global allowed_error
-        tracing::warn!(
-            task = name,
-            elapsed_ms = elapsed.as_millis(),
-            "took more than expected to complete"
-        );
-    } else {
-        tracing::info!(task = name, elapsed_ms = elapsed.as_millis(), "completed");
+            let ret = fut.await;
+
+            tracing::warn!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed, took longer than expected"
+            );
+
+            ret
+        }
     }
-
-    ret
 }
 
 #[cfg(test)]
@@ -252,5 +265,38 @@ mod backoff_defaults_tests {
             DEFAULT_MAX_BACKOFF_SECONDS,
             "Given big enough of retries, backoff should reach its allowed max value"
         );
+    }
+}
+
+#[cfg(test)]
+mod timed_tests {
+    use super::timed;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn timed_completes_when_inner_future_completes() {
+        // A future that completes on time should have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                123
+            },
+            "test 1",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(r1, 123);
+
+        // A future that completes too slowly should also have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                456
+            },
+            "test 1",
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(r1, 456);
     }
 }
