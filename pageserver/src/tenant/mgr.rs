@@ -266,43 +266,25 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
         }
     };
 
+    let started_at = std::time::Instant::now();
     let mut join_set = JoinSet::new();
     for (tenant_id, tenant) in tenants_to_shut_down {
         join_set.spawn(
             async move {
-                // ordering shouldn't matter for this, either we store true right away or never
-                let ordering = std::sync::atomic::Ordering::Relaxed;
-                let joined_other = std::sync::atomic::AtomicBool::new(false);
+                let freeze_and_flush = true;
 
-                let mut shutdown = std::pin::pin!(async {
-                    let freeze_and_flush = true;
-
-                    let res = {
-                        let (_guard, shutdown_progress) = completion::channel();
-                        tenant.shutdown(shutdown_progress, freeze_and_flush).await
-                    };
-
-                    if let Err(other_progress) = res {
-                        // join the another shutdown in progress
-                        joined_other.store(true, ordering);
-                        other_progress.wait().await;
-                    }
-                });
-
-                // in practice we might not have a lot time to go, since systemd is going to
-                // SIGKILL us at 10s, but we can try. delete tenant might take a while, so put out
-                // a warning.
-                let warning = std::time::Duration::from_secs(5);
-                let mut warning = std::pin::pin!(tokio::time::sleep(warning));
-
-                tokio::select! {
-                    _ = &mut shutdown => {},
-                    _ = &mut warning => {
-                        let joined_other = joined_other.load(ordering);
-                        warn!(%joined_other, "waiting for the shutdown to complete");
-                        shutdown.await;
-                    }
+                let res = {
+                    let (_guard, shutdown_progress) = completion::channel();
+                    tenant.shutdown(shutdown_progress, freeze_and_flush).await
                 };
+
+                if let Err(other_progress) = res {
+                    // join the another shutdown in progress
+                    other_progress.wait().await;
+                }
+
+                // we cannot afford per tenant logging here, because if s3 is degraded, we are
+                // going to log too many lines
 
                 debug!("tenant successfully stopped");
             }
@@ -310,27 +292,51 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
         );
     }
 
+    let total = join_set.len();
     let mut panicked = 0;
+    let mut buffering = true;
+    const BUFFER_FOR: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut buffered = std::pin::pin!(tokio::time::sleep(BUFFER_FOR));
 
-    while let Some(res) = join_set.join_next().await {
-        match res {
-            Ok(()) => {}
-            Err(join_error) if join_error.is_cancelled() => {
-                unreachable!("we are not cancelling any of the futures");
-            }
-            Err(join_error) if join_error.is_panic() => {
-                // cannot really do anything, as this panic is likely a bug
-                panicked += 1;
-            }
-            Err(join_error) => {
-                warn!("unknown kind of JoinError: {join_error}");
+    while !join_set.is_empty() {
+        tokio::select! {
+            Some(joined) = join_set.join_next() => {
+                match joined {
+                    Ok(()) => {}
+                    Err(join_error) if join_error.is_cancelled() => {
+                        unreachable!("we are not cancelling any of the futures");
+                    }
+                    Err(join_error) if join_error.is_panic() => {
+                        // cannot really do anything, as this panic is likely a bug
+                        panicked += 1;
+                    }
+                    Err(join_error) => {
+                        warn!("unknown kind of JoinError: {join_error}");
+                    }
+                }
+                if !buffering {
+                    // buffer so that every 500ms since the first update (or starting) we'll log
+                    // how far away we are; this is because we will get SIGKILL'd at 10s, and we
+                    // are not able to log *then*.
+                    buffering = true;
+                    buffered.as_mut().reset(tokio::time::Instant::now() + BUFFER_FOR);
+                }
+            },
+            _ = &mut buffered, if buffering => {
+                buffering = false;
+                info!(remaining = join_set.len(), total, elapsed_ms = started_at.elapsed().as_millis(), "waiting for tenants to shutdown");
             }
         }
     }
 
     if panicked > 0 {
-        warn!(panicked, "observed panicks while shutting down tenants");
+        warn!(
+            panicked,
+            total, "observed panicks while shutting down tenants"
+        );
     }
+
+    // caller will log how long we took
 }
 
 pub async fn create_tenant(
