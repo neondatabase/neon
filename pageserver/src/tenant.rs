@@ -2084,6 +2084,8 @@ impl Tenant {
             &format!("state metrics collector for tenant {tenant_id}"),
             false,
             async move {
+            let cancel = task_mgr::shutdown_token();
+
             let tid = tenant_id.to_string();
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
@@ -2113,7 +2115,12 @@ impl Tenant {
                 let current = TENANT_STATE_METRIC.with_label_values(labels);
                 current.inc();
 
-                if rx.changed().await.is_err() {
+                let changed = tokio::select! {
+                    changed = rx.changed() => {changed},
+                    _ = cancel.cancelled() => {return Ok(())}
+                };
+
+                if changed.is_err() {
                     // tenant has been dropped; decrement the counter because a tenant with that
                     // state is no longer in tenant map, but allow any broken set item to exist
                     // still.
