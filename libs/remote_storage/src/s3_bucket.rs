@@ -90,6 +90,25 @@ pub(super) mod metrics {
         }
     }
 
+    pub(super) struct PassFailRequestTyped<C> {
+        success: RequestTyped<C>,
+        fail: RequestTyped<C>,
+    }
+
+    impl<C> PassFailRequestTyped<C> {
+        pub(super) fn get(&self, kind: RequestKind, success: bool) -> &C {
+            let target = if success { &self.success } else { &self.fail };
+            target.get(kind)
+        }
+
+        fn build_with(mut f: impl FnMut(RequestKind, bool) -> C) -> Self {
+            let success = RequestTyped::build_with(|kind| f(kind, true));
+            let fail = RequestTyped::build_with(|kind| f(kind, false));
+
+            PassFailRequestTyped { success, fail }
+        }
+    }
+
     pub(super) struct BucketMetrics {
         requests: RequestTyped<IntCounter>,
         failed: RequestTyped<IntCounter>,
