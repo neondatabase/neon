@@ -29,13 +29,13 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev
+libcurl4-openssl-dev openssl python-poetry
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
-  protobuf-devel libcurl-devel
+  protobuf-devel libcurl-devel openssl poetry
 ```
 * On Arch based systems, these packages are needed:
 ```bash
@@ -233,6 +233,13 @@ git clone --recursive https://github.com/neondatabase/neon.git
 CARGO_BUILD_FLAGS="--features=testing" make
 
 ./scripts/pytest
+```
+
+By default, this runs both debug and release modes, and all supported postgres versions. When
+testing locally, it is convenient to run just run one set of permutations, like this:
+
+```sh
+DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
 ```
 
 ## Documentation
