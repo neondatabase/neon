@@ -24,7 +24,6 @@ pub mod walredo;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tracing::info;
 
 /// Current storage format version
@@ -200,61 +199,42 @@ pub struct InitializationOrder {
 }
 
 /// Time the future with a warning when it exceeds a threshold.
-async fn timed<Fut: std::future::Future + Send>(
+async fn timed<Fut: std::future::Future>(
     fut: Fut,
     name: &str,
     warn_at: std::time::Duration,
 ) -> <Fut as std::future::Future>::Output {
     let started = std::time::Instant::now();
 
-    // Compose an unordered collection of the future we are waiting for, and
-    // a future that will become ready when we reach the warning time threshold
-    let mut futs = FuturesUnordered::new();
-    futs.push(async move { Ok(fut.await) }.boxed());
-    futs.push(
-        async move {
-            tokio::time::sleep(warn_at).await;
-            Err(())
-        }
-        .boxed(),
-    );
+    let mut fut = std::pin::pin!(fut);
 
-    let mut ret = None;
-    while let Some(r) = futs.next().await {
-        match r {
-            Ok(inner_ret) => {
-                // The inner future completed
-                ret = Some(inner_ret);
-                break;
-            }
-            Err(_) => {
-                // The warn_at time was reached before the inner future completed
-                tracing::warn!(
-                    task = name,
-                    elapsed_so_far = started.elapsed().as_millis(),
-                    "still running, taking longer than expected...",
-                );
-            }
+    match tokio::time::timeout(warn_at, &mut fut).await {
+        Ok(ret) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed"
+            );
+            ret
+        }
+        Err(_) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "still waiting, taking longer than expected..."
+            );
+
+            let ret = fut.await;
+
+            tracing::warn!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed, took longer than expected"
+            );
+
+            ret
         }
     }
-
-    // We should only have broken out of the loop over futures when we hit
-    // the one that populates ret.
-    assert!(ret.is_some());
-
-    let elapsed = started.elapsed();
-    if elapsed >= warn_at {
-        // this has a global allowed_error
-        tracing::warn!(
-            task = name,
-            elapsed_ms = elapsed.as_millis(),
-            "took more than expected to complete"
-        );
-    } else {
-        tracing::info!(task = name, elapsed_ms = elapsed.as_millis(), "completed");
-    }
-
-    ret.unwrap()
 }
 
 #[cfg(test)]
