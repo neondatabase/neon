@@ -394,6 +394,17 @@ pub(crate) static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
+/// How long did we take to start up?  Broken down by labels to describe
+/// different phases of startup.
+pub static STARTUP_DURATION: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_startup_duration_ms",
+        "Time taken by phases of pageserver startup, in milliseconds",
+        &["phase"]
+    )
+    .expect("Failed to register pageserver_startup_duration_ms metric")
+});
+
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {

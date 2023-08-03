@@ -9,8 +9,10 @@ use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::metrics::STARTUP_DURATION;
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use remote_storage::GenericRemoteStorage;
+use tokio::time::Instant;
 use tracing::*;
 
 use metrics::set_build_info_metric;
@@ -226,6 +228,19 @@ fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
 ) -> anyhow::Result<()> {
+    // Monotonic time for later calculating startup duration
+    let started_startup_at = Instant::now();
+
+    let startup_checkpoint = move |phase: &str| {
+        STARTUP_DURATION.with_label_values(&[phase]).set(
+            started_startup_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+    };
+
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
     // A changed version string indicates changed software.
@@ -335,6 +350,10 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // Up to this point no significant I/O has been done: this should have been fast.  Record
+    // duration prior to starting I/O intensive phase of startup.
+    startup_checkpoint("initial");
+
     // Startup staging or optimizing:
     //
     // We want to minimize downtime for `page_service` connections, and trying not to overload
@@ -378,6 +397,8 @@ fn start_pageserver(
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
 
             init_done_rx.wait().await;
+            startup_checkpoint("initial_tenant_load");
+
             // initial logical sizes can now start, as they were waiting on init_done_rx.
 
             scopeguard::ScopeGuard::into_inner(guard);
@@ -404,6 +425,7 @@ fn start_pageserver(
                         from_init_millis = (now - init_started_at).as_millis(),
                         "Initial logical sizes completed"
                     );
+                    startup_checkpoint("initial_logical_sizes");
                     None
                 }
                 Err(_) => {
@@ -419,6 +441,7 @@ fn start_pageserver(
 
             // allow background jobs to start
             drop(background_jobs_can_start);
+            startup_checkpoint("background_jobs_can_start");
 
             if let Some(init_sizes_done) = init_sizes_done {
                 // ending up here is not a bug; at the latest logical sizes will be queried by
@@ -434,8 +457,11 @@ fn start_pageserver(
                     from_init_millis = (now - init_started_at).as_millis(),
                     "Initial logical sizes completed after timeout (background jobs already started)"
                 );
+                startup_checkpoint("initial_logical_sizes");
 
             }
+
+            startup_checkpoint("complete");
         };
 
         async move {
