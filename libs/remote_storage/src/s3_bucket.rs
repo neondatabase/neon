@@ -37,79 +37,126 @@ use crate::{
 const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics {
-    use metrics::{register_int_counter_vec, IntCounterVec};
+    use metrics::{register_int_counter_vec, IntCounter};
     use once_cell::sync::Lazy;
 
-    static S3_REQUESTS_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "remote_storage_s3_requests_count",
-            "Number of s3 requests of particular type",
-            &["request_type"],
-        )
-        .expect("failed to define a metric")
-    });
+    static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
 
-    static S3_REQUESTS_FAIL_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "remote_storage_s3_failures_count",
-            "Number of failed s3 requests of particular type",
-            &["request_type"],
-        )
-        .expect("failed to define a metric")
-    });
+    #[derive(Clone, Copy, Debug)]
+    enum RequestKind {
+        Get = 0,
+        Put = 1,
+        Delete = 2,
+        List = 3,
+    }
+
+    use RequestKind::*;
+
+    impl RequestKind {
+        const fn as_str(&self) -> &'static str {
+            match self {
+                Get => "get_object",
+                Put => "put_object",
+                Delete => "delete_object",
+                List => "list_objects",
+            }
+        }
+        const fn as_index(&self) -> usize {
+            *self as usize
+        }
+    }
+
+    struct RequestTyped<C>([C; 4]);
+
+    impl<C> RequestTyped<C> {
+        fn get(&self, kind: RequestKind) -> &C {
+            &self.0[kind.as_index()]
+        }
+
+        fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
+            use RequestKind::*;
+            let mut it = [Get, Put, Delete, List].into_iter();
+            let arr = std::array::from_fn::<C, 4, _>(|index| {
+                let next = it.next().unwrap();
+                assert_eq!(index, next.as_index());
+                f(next)
+            });
+
+            if let Some(next) = it.next() {
+                panic!("unexpected {next:?}");
+            }
+
+            RequestTyped(arr)
+        }
+    }
+
+    struct BucketMetrics {
+        requests: RequestTyped<IntCounter>,
+        failed: RequestTyped<IntCounter>,
+    }
+
+    impl Default for BucketMetrics {
+        fn default() -> Self {
+            let requests = register_int_counter_vec!(
+                "remote_storage_s3_requests_count",
+                "Number of s3 requests of particular type",
+                &["request_type"],
+            )
+            .expect("failed to define a metric");
+            let requests =
+                RequestTyped::build_with(|kind| requests.with_label_values(&[kind.as_str()]));
+
+            let failed = register_int_counter_vec!(
+                "remote_storage_s3_failures_count",
+                "Number of failed s3 requests of particular type",
+                &["request_type"],
+            )
+            .expect("failed to define a metric");
+            let failed =
+                RequestTyped::build_with(|kind| failed.with_label_values(&[kind.as_str()]));
+
+            Self { requests, failed }
+        }
+    }
 
     pub fn inc_get_object() {
-        S3_REQUESTS_COUNT.with_label_values(&["get_object"]).inc();
+        BUCKET_METRICS.requests.get(Get).inc()
     }
 
     pub fn inc_get_object_fail() {
-        S3_REQUESTS_FAIL_COUNT
-            .with_label_values(&["get_object"])
-            .inc();
+        BUCKET_METRICS.failed.get(Get).inc()
     }
 
     pub fn inc_put_object() {
-        S3_REQUESTS_COUNT.with_label_values(&["put_object"]).inc();
+        BUCKET_METRICS.requests.get(Put).inc()
     }
 
     pub fn inc_put_object_fail() {
-        S3_REQUESTS_FAIL_COUNT
-            .with_label_values(&["put_object"])
-            .inc();
+        BUCKET_METRICS.failed.get(Put).inc()
     }
 
     pub fn inc_delete_object() {
-        S3_REQUESTS_COUNT
-            .with_label_values(&["delete_object"])
-            .inc();
+        BUCKET_METRICS.requests.get(Delete).inc()
     }
 
     pub fn inc_delete_objects(count: u64) {
-        S3_REQUESTS_COUNT
-            .with_label_values(&["delete_object"])
-            .inc_by(count);
+        BUCKET_METRICS.requests.get(Delete).inc_by(count)
     }
 
     pub fn inc_delete_object_fail() {
-        S3_REQUESTS_FAIL_COUNT
-            .with_label_values(&["delete_object"])
-            .inc();
+        BUCKET_METRICS.failed.get(Delete).inc()
     }
 
     pub fn inc_delete_objects_fail(count: u64) {
-        S3_REQUESTS_FAIL_COUNT
-            .with_label_values(&["delete_object"])
-            .inc_by(count);
+        BUCKET_METRICS.failed.get(Delete).inc_by(count)
     }
 
     pub fn inc_list_objects() {
-        S3_REQUESTS_COUNT.with_label_values(&["list_objects"]).inc();
+        BUCKET_METRICS.requests.get(List).inc()
     }
 
     pub fn inc_list_objects_fail() {
-        S3_REQUESTS_FAIL_COUNT
-            .with_label_values(&["list_objects"])
-            .inc();
+        BUCKET_METRICS.failed.get(Delete).inc()
     }
 }
 
