@@ -19,6 +19,7 @@ use pageserver_api::models::{
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -3518,16 +3519,41 @@ impl Timeline {
         // min-heap (reserve space for one more element added before eviction)
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
-        for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact.iter().map(|l| -> Result<_> {
-                Ok(l.clone()
-                    .downcast_delta_layer()
-                    .expect("delta layer")
-                    .load_keys(ctx)?
-                    .into_iter())
-            }),
-            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 < b.0),
-        )? {
+
+        let mut all_value_refs = Vec::new();
+        for l in deltas_to_compact.iter() {
+            // TODO: replace this with an await once we fully go async
+            all_value_refs.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_val_refs(ctx),
+                )?,
+            );
+        }
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_value_refs.sort_by_key(|(key, _lsn, _value_ref)| *key);
+
+        let mut all_keys = Vec::new();
+        for l in deltas_to_compact.iter() {
+            // TODO: replace this with an await once we fully go async
+            all_keys.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_keys(ctx),
+                )?,
+            );
+        }
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_keys.sort_by_key(|(key, _lsn, _size)| *key);
+
+        for (next_key, _next_lsn, _size) in all_keys.iter() {
+            let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
                 if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
@@ -3560,40 +3586,10 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| -> Result<_> {
-                Ok(l.clone()
-                    .downcast_delta_layer()
-                    .expect("delta layer")
-                    .load_val_refs(ctx)?
-                    .into_iter())
-            }),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    (a_key, a_lsn) < (b_key, b_lsn)
-                })
-            },
-        )?;
+        let all_values_iter = all_value_refs.into_iter();
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| -> Result<_> {
-                Ok(l.clone()
-                    .downcast_delta_layer()
-                    .expect("delta layer")
-                    .load_keys(ctx)?
-                    .into_iter())
-            }),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    (a_key, a_lsn) < (b_key, b_lsn)
-                })
-            },
-        )?;
+        let mut all_keys_iter = all_keys.into_iter();
 
         stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
