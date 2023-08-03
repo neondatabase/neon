@@ -1595,7 +1595,11 @@ class NeonCli(AbstractNeonCli):
         if endpoint_id is not None:
             args.append(endpoint_id)
 
-        res = self.raw_cli(args)
+        s3_env_vars = None
+        if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
+            s3_env_vars = self.env.remote_storage.access_env_vars()
+
+        res = self.raw_cli(args, extra_env_vars=s3_env_vars)
         res.check_returncode()
         return res
 
