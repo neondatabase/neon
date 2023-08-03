@@ -73,17 +73,13 @@ pub fn start_background_loops(
 ///
 async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let mut first = true;
         loop {
-            trace!("waking up");
-
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
@@ -103,6 +99,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             }
 
+            // FIXME: stopping will come before cancellation, so unsure if this will help often
             if cancel.is_cancelled() {
                 info!("received cancellation request");
                 break;
@@ -131,15 +128,12 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 .await
                 .is_ok()
             {
-                info!("received cancellation request during idling");
                 break;
             }
         }
     }
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
-
-    trace!("compaction loop stopped.");
 }
 
 ///
@@ -147,7 +141,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 ///
 async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         // GC might require downloading, to find the cutoff LSN that corresponds to the
@@ -156,11 +149,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
         let mut first = true;
         loop {
-            trace!("waking up");
-
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
@@ -205,14 +195,12 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 .await
                 .is_ok()
             {
-                info!("received cancellation request during idling");
                 break;
             }
         }
     }
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
-    trace!("GC loop stopped.");
 }
 
 async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
@@ -237,7 +225,6 @@ async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
                     }
                 }
                 Err(_sender_dropped_error) => {
-                    info!("Tenant dropped the state updates sender, quitting waiting for tenant and the task loop");
                     return ControlFlow::Break(());
                 }
             }

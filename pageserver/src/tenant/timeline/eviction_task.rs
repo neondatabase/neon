@@ -78,9 +78,6 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
-        scopeguard::defer! {
-            info!("eviction task finishing");
-        }
         use crate::tenant::tasks::random_init_delay;
         {
             let policy = self.get_eviction_policy();
