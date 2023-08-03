@@ -235,6 +235,13 @@ CARGO_BUILD_FLAGS="--features=testing" make
 ./scripts/pytest
 ```
 
+By default, this runs both debug and release modes, and all supported postgres versions. When
+testing locally, it is convenient to run just run one set of permutations, like this:
+
+```sh
+DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
+```
+
 ## Documentation
 
 [docs](/docs) Contains a top-level overview of all available markdown documentation.
