@@ -90,31 +90,82 @@ pub(super) mod metrics {
         }
     }
 
-    pub(super) struct PassFailRequestTyped<C> {
+    pub(super) struct PassFailCancelledRequestTyped<C> {
         success: RequestTyped<C>,
         fail: RequestTyped<C>,
+        cancelled: RequestTyped<C>,
     }
 
-    impl<C> PassFailRequestTyped<C> {
-        pub(super) fn get(&self, kind: RequestKind, success: bool) -> &C {
-            let target = if success { &self.success } else { &self.fail };
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum AttemptOutcome {
+        Ok,
+        Err,
+        Cancelled,
+    }
+
+    impl<T, E> From<&Result<T, E>> for AttemptOutcome {
+        fn from(value: &Result<T, E>) -> Self {
+            match value {
+                Ok(_) => AttemptOutcome::Ok,
+                Err(_) => AttemptOutcome::Err,
+            }
+        }
+    }
+
+    impl AttemptOutcome {
+        pub(super) fn as_str(&self) -> &'static str {
+            match self {
+                AttemptOutcome::Ok => "ok",
+                AttemptOutcome::Err => "err",
+                AttemptOutcome::Cancelled => "cancelled",
+            }
+        }
+    }
+
+    impl<C> PassFailCancelledRequestTyped<C> {
+        pub(super) fn get(&self, kind: RequestKind, outcome: AttemptOutcome) -> &C {
+            let target = match outcome {
+                AttemptOutcome::Ok => &self.success,
+                AttemptOutcome::Err => &self.fail,
+                AttemptOutcome::Cancelled => &self.cancelled,
+            };
             target.get(kind)
         }
 
-        fn build_with(mut f: impl FnMut(RequestKind, bool) -> C) -> Self {
-            let success = RequestTyped::build_with(|kind| f(kind, true));
-            let fail = RequestTyped::build_with(|kind| f(kind, false));
+        fn build_with(mut f: impl FnMut(RequestKind, AttemptOutcome) -> C) -> Self {
+            let success = RequestTyped::build_with(|kind| f(kind, AttemptOutcome::Ok));
+            let fail = RequestTyped::build_with(|kind| f(kind, AttemptOutcome::Err));
+            let cancelled = RequestTyped::build_with(|kind| f(kind, AttemptOutcome::Cancelled));
 
-            PassFailRequestTyped { success, fail }
+            PassFailCancelledRequestTyped {
+                success,
+                fail,
+                cancelled,
+            }
+        }
+    }
+
+    impl PassFailCancelledRequestTyped<Histogram> {
+        pub(super) fn observe_elapsed(
+            &self,
+            kind: RequestKind,
+            outcome: impl Into<AttemptOutcome>,
+            started_at: std::time::Instant,
+        ) {
+            self.get(kind, outcome.into())
+                .observe(started_at.elapsed().as_secs_f64())
         }
     }
 
     pub(super) struct BucketMetrics {
+        /// Total requests attempted
         requests: RequestTyped<IntCounter>,
+        /// Subset of attempted requests failed
         failed: RequestTyped<IntCounter>,
 
-        pub(super) req_seconds: PassFailRequestTyped<Histogram>,
+        pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
         pub(super) wait_seconds: RequestTyped<Histogram>,
+        pub(super) cancelled_waits: RequestTyped<IntCounter>,
     }
 
     impl Default for BucketMetrics {
@@ -144,8 +195,8 @@ pub(super) mod metrics {
                 [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0].into(),
             )
             .unwrap();
-            let req_seconds = PassFailRequestTyped::build_with(|kind, pass| {
-                req_seconds.with_label_values(&[kind.as_str(), if pass { "ok" } else { "err" }])
+            let req_seconds = PassFailCancelledRequestTyped::build_with(|kind, outcome| {
+                req_seconds.with_label_values(&[kind.as_str(), outcome.as_str()])
             });
 
             let wait_seconds = register_histogram_vec!(
@@ -158,11 +209,22 @@ pub(super) mod metrics {
             let wait_seconds =
                 RequestTyped::build_with(|kind| wait_seconds.with_label_values(&[kind.as_str()]));
 
+            let cancelled_waits = register_int_counter_vec!(
+                "remote_storage_s3_cancelled_waits_total",
+                "Times a semaphore wait has been cancelled per request type",
+                &["request_type"],
+            )
+            .unwrap();
+            let cancelled_waits = RequestTyped::build_with(|kind| {
+                cancelled_waits.with_label_values(&[kind.as_str()])
+            });
+
             Self {
                 requests,
                 failed,
                 req_seconds,
                 wait_seconds,
+                cancelled_waits,
             }
         }
     }
@@ -208,7 +270,7 @@ pub(super) mod metrics {
     }
 }
 
-use self::metrics::RequestKind;
+use self::metrics::{AttemptOutcome, RequestKind};
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -311,27 +373,32 @@ impl S3Bucket {
     }
 
     async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
-        let started_at = std::time::Instant::now();
+        let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
             .acquire()
             .await
             .expect("semaphore is never closed");
+
+        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .get(kind)
             .observe(started_at.elapsed().as_secs_f64());
+
         permit
     }
 
     async fn owned_permit(&self, kind: RequestKind) -> tokio::sync::OwnedSemaphorePermit {
-        let started_at = std::time::Instant::now();
+        let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
             .clone()
             .acquire_owned()
             .await
             .expect("semaphore is never closed");
+
+        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .get(kind)
@@ -340,11 +407,12 @@ impl S3Bucket {
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
-        let permit = self.owned_permit(RequestKind::Get).await;
+        let kind = RequestKind::Get;
+        let permit = self.owned_permit(kind).await;
 
         metrics::inc_get_object();
 
-        let started_at = std::time::Instant::now();
+        let started_at = start_measuring_requests(kind);
 
         let get_object = self
             .client
@@ -355,39 +423,34 @@ impl S3Bucket {
             .send()
             .await;
 
+        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+
+        if get_object.is_err() {
+            metrics::inc_get_object_fail();
+            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                kind,
+                AttemptOutcome::Err,
+                started_at,
+            );
+        }
+
         match get_object {
             Ok(object_output) => {
-                let histogram = metrics::BUCKET_METRICS
-                    .req_seconds
-                    .get(RequestKind::Get, true)
-                    .clone();
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
                     download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
                         started_at,
-                        histogram,
                         RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
                     ))),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
-                metrics::BUCKET_METRICS
-                    .req_seconds
-                    .get(RequestKind::Get, false)
-                    .observe(started_at.elapsed().as_secs_f64());
                 Err(DownloadError::NotFound)
             }
-            Err(e) => {
-                metrics::inc_get_object_fail();
-                metrics::BUCKET_METRICS
-                    .req_seconds
-                    .get(RequestKind::Get, false)
-                    .observe(started_at.elapsed().as_secs_f64());
-                Err(DownloadError::Other(
-                    anyhow::Error::new(e).context("download s3 object"),
-                ))
-            }
+            Err(e) => Err(DownloadError::Other(
+                anyhow::Error::new(e).context("download s3 object"),
+            )),
         }
     }
 }
@@ -419,27 +482,26 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
 }
 
 pin_project_lite::pin_project! {
+    /// Times and tracks the outcome of the request.
     struct TimedDownload<S> {
         started_at: std::time::Instant,
-        histogram: ::metrics::Histogram,
+        outcome: metrics::AttemptOutcome,
         #[pin]
         inner: S
     }
 
     impl<S> PinnedDrop for TimedDownload<S> {
         fn drop(mut this: Pin<&mut Self>) {
-            // record regardless of drop
-            let elapsed = this.started_at.elapsed();
-            this.histogram.observe(elapsed.as_secs_f64());
+            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(RequestKind::Get, this.outcome, this.started_at);
         }
     }
 }
 
 impl<S: AsyncRead> TimedDownload<S> {
-    fn new(started_at: std::time::Instant, histogram: ::metrics::Histogram, inner: S) -> Self {
+    fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
-            histogram,
+            outcome: metrics::AttemptOutcome::Cancelled,
             inner,
         }
     }
@@ -452,7 +514,18 @@ impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
         buf: &mut io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.project();
-        this.inner.poll_read(cx, buf)
+        let before = buf.filled().len();
+        let read = std::task::ready!(this.inner.poll_read(cx, buf));
+
+        let read_eof = buf.filled().len() == before;
+
+        match read {
+            Ok(()) if read_eof => *this.outcome = AttemptOutcome::Ok,
+            Ok(()) => { /* still in progress */ }
+            Err(_) => *this.outcome = AttemptOutcome::Err,
+        }
+
+        std::task::Poll::Ready(read)
     }
 }
 
@@ -486,7 +559,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
-            let started_at = std::time::Instant::now();
+            let started_at = start_measuring_requests(kind);
 
             let fetch_response = self
                 .client
@@ -505,10 +578,11 @@ impl RemoteStorage for S3Bucket {
                 .context("Failed to list S3 prefixes")
                 .map_err(DownloadError::Other);
 
+            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+
             metrics::BUCKET_METRICS
                 .req_seconds
-                .get(kind, fetch_response.is_ok())
-                .observe(started_at.elapsed().as_secs_f64());
+                .observe_elapsed(kind, &fetch_response, started_at);
 
             let fetch_response = fetch_response?;
 
@@ -543,7 +617,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let _guard = self.permit(kind).await;
             metrics::inc_list_objects();
-            let started_at = std::time::Instant::now();
+            let started_at = start_measuring_requests(kind);
 
             let response = self
                 .client
@@ -560,10 +634,10 @@ impl RemoteStorage for S3Bucket {
                 })
                 .context("Failed to list files in S3 bucket");
 
+            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
                 .req_seconds
-                .get(kind, response.is_ok())
-                .observe(started_at.elapsed().as_secs_f64());
+                .observe_elapsed(kind, &response, started_at);
 
             let response = response?;
 
@@ -591,7 +665,7 @@ impl RemoteStorage for S3Bucket {
         let _guard = self.permit(kind).await;
 
         metrics::inc_put_object();
-        let started_at = std::time::Instant::now();
+        let started_at = start_measuring_requests(kind);
 
         let body = Body::wrap_stream(ReaderStream::new(from));
         let bytes_stream = ByteStream::new(SdkBody::from(body));
@@ -611,10 +685,10 @@ impl RemoteStorage for S3Bucket {
                 e
             });
 
+        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .req_seconds
-            .get(kind, res.is_ok())
-            .observe(started_at.elapsed().as_secs_f64());
+            .observe_elapsed(kind, &res, started_at);
 
         res?;
 
@@ -667,7 +741,7 @@ impl RemoteStorage for S3Bucket {
 
         for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
             metrics::inc_delete_objects(chunk.len() as u64);
-            let started_at = std::time::Instant::now();
+            let started_at = start_measuring_requests(kind);
 
             let resp = self
                 .client
@@ -677,10 +751,10 @@ impl RemoteStorage for S3Bucket {
                 .send()
                 .await;
 
+            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
                 .req_seconds
-                .get(kind, resp.is_ok())
-                .observe(started_at.elapsed().as_secs_f64());
+                .observe_elapsed(kind, &resp, started_at);
 
             match resp {
                 Ok(resp) => {
@@ -706,7 +780,7 @@ impl RemoteStorage for S3Bucket {
         let _guard = self.permit(kind).await;
 
         metrics::inc_delete_object();
-        let started_at = std::time::Instant::now();
+        let started_at = start_measuring_requests(kind);
 
         let res = self
             .client
@@ -720,15 +794,45 @@ impl RemoteStorage for S3Bucket {
                 e
             });
 
+        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .req_seconds
-            .get(kind, res.is_ok())
-            .observe(started_at.elapsed().as_secs_f64());
+            .observe_elapsed(kind, &res, started_at);
 
         res?;
 
         Ok(())
     }
+}
+
+/// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
+fn start_counting_cancelled_wait(
+    kind: RequestKind,
+) -> scopeguard::ScopeGuard<
+    std::time::Instant,
+    impl FnOnce(std::time::Instant),
+    scopeguard::OnSuccess,
+> {
+    scopeguard::guard_on_success(std::time::Instant::now(), move |_| {
+        metrics::BUCKET_METRICS.cancelled_waits.get(kind).inc()
+    })
+}
+
+/// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
+fn start_measuring_requests(
+    kind: RequestKind,
+) -> scopeguard::ScopeGuard<
+    std::time::Instant,
+    impl FnOnce(std::time::Instant),
+    scopeguard::OnSuccess,
+> {
+    scopeguard::guard_on_success(std::time::Instant::now(), move |started_at| {
+        metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+            kind,
+            AttemptOutcome::Cancelled,
+            started_at,
+        )
+    })
 }
 
 #[cfg(test)]
