@@ -298,7 +298,14 @@ impl ComputeNode {
             info!("Storage auth token not set");
         }
 
+        // Connect to pageserver
         let mut client = config.connect(NoTls)?;
+        let pageserver_connect_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+
         let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
             Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
@@ -344,9 +351,10 @@ impl ComputeNode {
         };
 
         // Report metrics
-        self.state.lock().unwrap().metrics.basebackup_bytes =
-            measured_reader.get_byte_count() as u64;
-        self.state.lock().unwrap().metrics.basebackup_ms = Utc::now()
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_ms = pageserver_connect_ms;
+        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
+        state.metrics.basebackup_ms = Utc::now()
             .signed_duration_since(start_time)
             .to_std()
             .unwrap()
