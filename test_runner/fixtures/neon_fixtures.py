@@ -78,7 +78,7 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-WORKER_PORT_NUM: int = 1000
+WORKER_PORT_NUM: int = 384
 
 
 def pytest_configure(config: Config):
