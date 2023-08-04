@@ -134,6 +134,10 @@ pub(super) struct BucketMetrics {
 
     pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
     pub(super) wait_seconds: RequestTyped<Histogram>,
+
+    /// Track how many semaphore awaits were cancelled per request type.
+    ///
+    /// This is in case cancellations are happening more than expected.
     pub(super) cancelled_waits: RequestTyped<IntCounter>,
 }
 
