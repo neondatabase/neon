@@ -354,12 +354,15 @@ impl Layer for DeltaLayer {
             let cursor = file.block_cursor();
             let mut buf = Vec::new();
             for (entry_lsn, pos) in offsets {
-                cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
-                    format!(
-                        "Failed to read blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
+                cursor
+                    .read_blob_into_buf(pos, &mut buf)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to read blob from virtual file {}",
+                            file.file.path.display()
+                        )
+                    })?;
                 let val = Value::des(&buf).with_context(|| {
                     format!(
                         "Failed to deserialize file blob from virtual file {}",

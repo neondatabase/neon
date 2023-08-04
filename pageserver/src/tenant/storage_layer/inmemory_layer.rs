@@ -156,7 +156,7 @@ impl Layer for InMemoryLayer {
         for (key, vec_map) in inner.index.iter() {
             for (lsn, pos) in vec_map.as_slice() {
                 let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf)?;
+                cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let val = Value::des(&buf);
                 match val {
                     Ok(Value::Image(img)) => {
@@ -332,7 +332,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub async fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -363,7 +363,7 @@ impl InMemoryLayer {
             let key = **key;
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf)?;
+                cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }

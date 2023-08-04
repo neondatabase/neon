@@ -2946,7 +2946,7 @@ impl Timeline {
             let frozen_layer = Arc::clone(frozen_layer);
             move || {
                 // Write it out
-                let new_delta = frozen_layer.write_to_disk()?;
+                let new_delta = Handle::current().block_on(frozen_layer.write_to_disk())?;
                 let new_delta_path = new_delta.path();
 
                 // Sync it to disk.

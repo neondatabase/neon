@@ -23,12 +23,12 @@ where
     /// Read a blob into a new buffer.
     pub async fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
-        self.read_blob_into_buf(offset, &mut buf)?;
+        self.read_blob_into_buf(offset, &mut buf).await?;
         Ok(buf)
     }
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
-    pub fn read_blob_into_buf(
+    pub async fn read_blob_into_buf(
         &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
