@@ -106,7 +106,7 @@ pub async fn task_main(
                 let cancel_map = Arc::clone(&cancel_map);
                 connections.spawn(
                     async move {
-                        info!(?session_id, "accepted postgres client connection");
+                        info!("accepted postgres client connection");
 
                         socket
                             .set_nodelay(true)
@@ -114,7 +114,7 @@ pub async fn task_main(
 
                         handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
                     }
-                    .instrument(info_span!("", %peer_addr))
+                    .instrument(info_span!("handle_client", ?session_id, %peer_addr))
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
                         error!(?session_id, "per-client task finished with an error: {e:#}");
@@ -182,7 +182,6 @@ impl ClientMode {
     }
 }
 
-#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
