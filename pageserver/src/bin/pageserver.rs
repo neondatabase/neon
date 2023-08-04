@@ -9,7 +9,7 @@ use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
-use pageserver::metrics::STARTUP_DURATION;
+use pageserver::metrics::{STARTUP_DURATION, STARTUP_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use remote_storage::GenericRemoteStorage;
 use tokio::time::Instant;
@@ -349,6 +349,7 @@ fn start_pageserver(
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
     startup_checkpoint("initial", "Starting loading tenants");
+    STARTUP_LOADING.set(1);
 
     // Startup staging or optimizing:
     //
@@ -393,6 +394,7 @@ fn start_pageserver(
 
             init_done_rx.wait().await;
             startup_checkpoint("initial_tenant_load", "Initial load completed");
+            STARTUP_LOADING.set(0);
 
             // initial logical sizes can now start, as they were waiting on init_done_rx.
 

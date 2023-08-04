@@ -405,6 +405,14 @@ pub static STARTUP_DURATION: Lazy<F64GaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_duration_secs metric")
 });
 
+pub static STARTUP_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_startup_loading",
+        "1 while in initial startup load of tenants, 0 at other times"
+    )
+    .expect("Failed to register pageserver_startup_loading")
+});
+
 /// How long did tenants take to go from construction to active state?
 pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
