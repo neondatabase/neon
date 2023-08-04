@@ -266,11 +266,15 @@ impl Drop for EphemeralFile {
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
         if let Err(e) = res {
-            warn!(
-                "could not remove ephemeral file '{}': {}",
-                self.file.path.display(),
-                e
-            );
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // just never log the not found errors, we cannot do anything for them; on detach
+                // the tenant directory is already gone.
+                warn!(
+                    "could not remove ephemeral file '{}': {}",
+                    self.file.path.display(),
+                    e
+                );
+            }
         }
     }
 }
