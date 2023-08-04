@@ -398,29 +398,29 @@ pub(crate) static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(||
 /// different phases of startup.
 pub static STARTUP_DURATION: Lazy<F64GaugeVec> = Lazy::new(|| {
     register_f64_gauge_vec!(
-        "pageserver_startup_duration_secs",
+        "pageserver_startup_duration_seconds",
         "Time taken by phases of pageserver startup, in seconds",
         &["phase"]
     )
-    .expect("Failed to register pageserver_startup_duration_secs metric")
+    .expect("Failed to register pageserver_startup_duration_seconds metric")
 });
 
-pub static STARTUP_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
+pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_startup_loading",
+        "pageserver_startup_is_loading",
         "1 while in initial startup load of tenants, 0 at other times"
     )
-    .expect("Failed to register pageserver_startup_loading")
+    .expect("Failed to register pageserver_startup_is_loading")
 });
 
 /// How long did tenants take to go from construction to active state?
 pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_tenant_activation_secs",
+        "pageserver_tenant_activation_seconds",
         "Time taken by phases of pageserver startup, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_secs metric")
+    .expect("Failed to register pageserver_tenant_activation_seconds metric")
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
