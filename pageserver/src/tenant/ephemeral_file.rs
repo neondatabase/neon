@@ -269,6 +269,8 @@ impl Drop for EphemeralFile {
             if e.kind() != std::io::ErrorKind::NotFound {
                 // just never log the not found errors, we cannot do anything for them; on detach
                 // the tenant directory is already gone.
+                //
+                // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 warn!(
                     "could not remove ephemeral file '{}': {}",
                     self.file.path.display(),
