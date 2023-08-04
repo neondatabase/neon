@@ -22,6 +22,7 @@ use aws_sdk_s3::{
 };
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
+use scopeguard::ScopeGuard;
 use tokio::{
     io::{self, AsyncRead},
     sync::Semaphore,
@@ -388,7 +389,7 @@ impl S3Bucket {
             .await
             .expect("semaphore is never closed");
 
-        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+        let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
@@ -405,7 +406,7 @@ impl S3Bucket {
             .await
             .expect("semaphore is never closed");
 
-        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+        let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
@@ -429,7 +430,7 @@ impl S3Bucket {
             .send()
             .await;
 
-        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+        let started_at = ScopeGuard::into_inner(started_at);
 
         if get_object.is_err() {
             metrics::inc_get_object_fail();
@@ -584,7 +585,7 @@ impl RemoteStorage for S3Bucket {
                 .context("Failed to list S3 prefixes")
                 .map_err(DownloadError::Other);
 
-            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+            let started_at = ScopeGuard::into_inner(started_at);
 
             metrics::BUCKET_METRICS
                 .req_seconds
@@ -640,7 +641,7 @@ impl RemoteStorage for S3Bucket {
                 })
                 .context("Failed to list files in S3 bucket");
 
-            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+            let started_at = ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, &response, started_at);
@@ -691,7 +692,7 @@ impl RemoteStorage for S3Bucket {
                 e
             });
 
-        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+        let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
@@ -757,7 +758,7 @@ impl RemoteStorage for S3Bucket {
                 .send()
                 .await;
 
-            let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+            let started_at = ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, &resp, started_at);
@@ -800,7 +801,7 @@ impl RemoteStorage for S3Bucket {
                 e
             });
 
-        let started_at = scopeguard::ScopeGuard::into_inner(started_at);
+        let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
@@ -814,11 +815,7 @@ impl RemoteStorage for S3Bucket {
 /// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
 fn start_counting_cancelled_wait(
     kind: RequestKind,
-) -> scopeguard::ScopeGuard<
-    std::time::Instant,
-    impl FnOnce(std::time::Instant),
-    scopeguard::OnSuccess,
-> {
+) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
     scopeguard::guard_on_success(std::time::Instant::now(), move |_| {
         metrics::BUCKET_METRICS.cancelled_waits.get(kind).inc()
     })
@@ -827,11 +824,7 @@ fn start_counting_cancelled_wait(
 /// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
 fn start_measuring_requests(
     kind: RequestKind,
-) -> scopeguard::ScopeGuard<
-    std::time::Instant,
-    impl FnOnce(std::time::Instant),
-    scopeguard::OnSuccess,
-> {
+) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
     scopeguard::guard_on_success(std::time::Instant::now(), move |started_at| {
         metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
             kind,
