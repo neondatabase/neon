@@ -126,6 +126,11 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
 
+            if compute.ext_remote_storage.is_none() {
+                info!("no remote storage configured");
+                return Response::new(Body::from("no remote storage configured"));
+            }
+
             let mut is_library = false;
             if let Some(params) = req.uri().query() {
                 info!("serving {:?} POST request with params: {}", route, params);
