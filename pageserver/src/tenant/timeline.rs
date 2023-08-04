@@ -3780,7 +3780,7 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let mut guard = self.layers.write().await;
+        let mut guard = self.layers.modify().await;
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
 
         // In some rare cases, we may generate a file with exactly the same key range / LSN as before the compaction.
@@ -3844,15 +3844,13 @@ impl Timeline {
         }
 
         guard
-            .finish_compact_l0(
+            .finish_compact_l0_consume_guard(
                 layer_removal_cs,
                 remove_layers,
                 insert_layers,
                 &self.metrics,
             )
             .await?;
-
-        drop_wlock(guard);
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {

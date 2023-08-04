@@ -1,8 +1,9 @@
 use anyhow::{bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use either::Either;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{log::warn, trace};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn},
@@ -55,7 +56,8 @@ pub struct LayerManagerWriteGuard {
     layer_manager: Arc<LayerManager>,
     /// Mock the behavior of the layer map lock.
     #[allow(dead_code)]
-    pseudo_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
+    pseudo_lock:
+        Either<tokio::sync::OwnedRwLockWriteGuard<()>, tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl LayerManager {
@@ -92,7 +94,22 @@ impl LayerManager {
                 layer_map: self.layer_map.load_full(),
                 layer_fmgr: Arc::clone(&self.layer_fmgr),
             },
-            pseudo_lock,
+            pseudo_lock: Either::Left(pseudo_lock),
+            layer_manager: self.clone(),
+        }
+    }
+
+    /// Take the snapshot of the layer map and return a write guard. With the `modify` call, the guard
+    /// will only hold a read lock instead of write lock.
+    pub async fn modify(self: &Arc<Self>) -> LayerManagerWriteGuard {
+        // take the lock before taking snapshot
+        let pseudo_lock = self.pseudo_lock.clone().read_owned().await;
+        LayerManagerWriteGuard {
+            snapshot: LayerSnapshot {
+                layer_map: self.layer_map.load_full(),
+                layer_fmgr: Arc::clone(&self.layer_fmgr),
+            },
+            pseudo_lock: Either::Right(pseudo_lock),
             layer_manager: self.clone(),
         }
     }
@@ -108,7 +125,7 @@ impl LayerManager {
                     layer_map: self.layer_map.load_full(),
                     layer_fmgr: Arc::clone(&self.layer_fmgr),
                 },
-                pseudo_lock,
+                pseudo_lock: Either::Left(pseudo_lock),
                 layer_manager: self.clone(),
             })
     }
@@ -390,42 +407,49 @@ impl LayerManagerWriteGuard {
     }
 
     /// Called when compaction is completed.
-    pub(crate) async fn finish_compact_l0(
-        &mut self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+    pub(crate) async fn finish_compact_l0_consume_guard(
+        self,
+        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<dyn PersistentLayer>>,
         compact_to: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
     ) -> Result<()> {
-        self.layer_manager
+        let compact_from = self
+            .layer_manager
             .update(|mut layer_map| {
                 let mut updates = layer_map.batch_update();
                 for l in compact_to {
                     Self::insert_historic_layer(l, &mut updates, &self.snapshot.layer_fmgr);
                 }
-                for l in compact_from {
-                    // NB: the layer file identified by descriptor `l` is guaranteed to be present
-                    // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
-                    // time, even though we dropped `Timeline::layers` inbetween.
-                    if let Err(e) = Self::delete_historic_layer(
-                        layer_removal_cs.clone(),
-                        l,
-                        &mut updates,
-                        metrics,
-                        &self.snapshot.layer_fmgr,
-                    ) {
-                        // If this fails, we will need to return the "partially" modified layer map
-                        // now. Eventually, we should decouple file deletion and layer map updates, so
-                        // that this part can be moved out of the `update` section.
-                        updates.flush();
-                        return Ok((layer_map, Err(e)));
-                    }
+                for l in &compact_from {
+                    // only remove from the layer map, not from file manager
+                    updates.remove_historic(l.layer_desc().clone());
                 }
                 updates.flush();
-                Ok((layer_map, Ok(())))
+                Ok((layer_map, Ok::<_, anyhow::Error>(compact_from)))
             })
-            .await
-            .unwrap() // unwrap the first level error, which is always Ok.
+            .await??;
+        drop(self.pseudo_lock);
+        // acquire the write lock so that all read threads are blocked, and once this lock is acquired,
+        // new reads will be based on the updated layer map.
+        let guard = self.layer_manager.pseudo_lock.write().await;
+        drop(guard);
+        // now that no one has access to the old layer map, we can safely remove the layers from disk.
+        for layer in compact_from {
+            self.snapshot.layer_fmgr.remove(layer.clone());
+            // NB: the layer file identified by descriptor `l` is guaranteed to be present
+            // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
+            // time, even though we dropped `Timeline::layers` inbetween.
+            if !layer.is_remote_layer() {
+                if let Err(e) = layer.delete_resident_layer_file() {
+                    warn!("Failed to delete resident layer file: {}", e);
+                } else {
+                    let layer_file_size = layer.file_size();
+                    metrics.resident_physical_size_gauge.sub(layer_file_size);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
