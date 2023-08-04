@@ -90,6 +90,12 @@ pub(super) mod metrics {
         }
     }
 
+    impl RequestTyped<Histogram> {
+        pub(super) fn observe_elapsed(&self, kind: RequestKind, started_at: std::time::Instant) {
+            self.get(kind).observe(started_at.elapsed().as_secs_f64())
+        }
+    }
+
     pub(super) struct PassFailCancelledRequestTyped<C> {
         success: RequestTyped<C>,
         fail: RequestTyped<C>,
@@ -385,8 +391,7 @@ impl S3Bucket {
         let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
-            .get(kind)
-            .observe(started_at.elapsed().as_secs_f64());
+            .observe_elapsed(kind, started_at);
 
         permit
     }
@@ -403,8 +408,7 @@ impl S3Bucket {
         let started_at = scopeguard::ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
-            .get(kind)
-            .observe(started_at.elapsed().as_secs_f64());
+            .observe_elapsed(kind, started_at);
         permit
     }
 
