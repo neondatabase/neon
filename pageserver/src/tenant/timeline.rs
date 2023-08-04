@@ -3644,7 +3644,8 @@ impl Timeline {
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         for (key, lsn, value_ref) in all_values_iter {
-            let value = value_ref.load()?;
+            // TODO replace this with an await once we fully go async
+            let value = Handle::current().block_on(value_ref.load())?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {

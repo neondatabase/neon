@@ -986,7 +986,7 @@ pub struct ValueRef {
 
 impl ValueRef {
     /// Loads the value from disk
-    pub fn load(&self) -> Result<Value> {
+    pub async fn load(&self) -> Result<Value> {
         let buf = self.reader.read_blob(self.blob_ref.pos())?;
         let val = Value::des(&buf)?;
         Ok(val)
