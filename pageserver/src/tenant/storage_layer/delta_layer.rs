@@ -41,7 +41,6 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use once_cell::sync::OnceCell;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -52,6 +51,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -242,7 +242,7 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
         println!(
             "index_start_blk: {}, root {}",
@@ -317,7 +317,9 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+            let inner = self
+                .load(LayerAccessKind::GetValueReconstructData, ctx)
+                .await?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = &inner.file;
@@ -497,7 +499,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
+    async fn load(
         &self,
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
@@ -507,10 +509,11 @@ impl DeltaLayer {
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner())
+            .await
             .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
     }
 
-    fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let file = VirtualFile::open(&path)
@@ -571,7 +574,7 @@ impl DeltaLayer {
                 file_size,
             ),
             access_stats,
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         }
     }
 
@@ -598,7 +601,7 @@ impl DeltaLayer {
                 metadata.len(),
             ),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         })
     }
 
@@ -621,6 +624,7 @@ impl DeltaLayer {
     pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer")?;
         DeltaLayerInner::load_val_refs(inner)
             .await
@@ -631,6 +635,7 @@ impl DeltaLayer {
     pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer keys")?;
         DeltaLayerInner::load_keys(inner)
             .await
@@ -784,7 +789,7 @@ impl DeltaLayerWriterInner {
                 metadata.len(),
             ),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         };
 
         // fsync the file
