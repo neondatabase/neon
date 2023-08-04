@@ -476,7 +476,7 @@ class NeonEnvBuilder:
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
-        log.info(
+        log.debug(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(
