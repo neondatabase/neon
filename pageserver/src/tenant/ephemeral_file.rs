@@ -271,7 +271,7 @@ impl Drop for EphemeralFile {
                 // the tenant directory is already gone.
                 //
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
-                warn!(
+                error!(
                     "could not remove ephemeral file '{}': {}",
                     self.file.path.display(),
                     e
