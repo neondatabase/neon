@@ -159,8 +159,10 @@ pub(super) mod metrics {
 
     pub(super) struct BucketMetrics {
         /// Total requests attempted
+        // TODO: remove after next release and migrate dashboards to `sum by (result) (remote_storage_s3_requests_count)`
         requests: RequestTyped<IntCounter>,
         /// Subset of attempted requests failed
+        // TODO: remove after next release and migrate dashboards to `remote_storage_s3_requests_count{result="err"}`
         failed: RequestTyped<IntCounter>,
 
         pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
