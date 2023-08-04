@@ -3740,6 +3740,16 @@ impl Timeline {
 
         // Sync layers
         if !new_layers.is_empty() {
+            // Print a warning if the created layer is larger than double the target size
+            let warn_limit = target_file_size * 2;
+            for layer in new_layers.iter() {
+                if layer.desc.file_size > warn_limit {
+                    warn!(
+                        %layer,
+                        "created delta file of size {} larger than double of target of {target_file_size}", layer.desc.file_size
+                    );
+                }
+            }
             let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
 
             // Fsync all the layer files and directory using multiple threads to

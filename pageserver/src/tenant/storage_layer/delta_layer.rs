@@ -764,6 +764,17 @@ impl DeltaLayerWriterInner {
             .metadata()
             .context("get file metadata to determine size")?;
 
+        // 5GB limit for objects without multipart upload (which we don't want to use)
+        // Make it a little bit below to account for differing GB units
+        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
+        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+        ensure!(
+            metadata.len() <= S3_UPLOAD_LIMIT,
+            "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+            file.path.display(),
+            metadata.len()
+        );
+
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
