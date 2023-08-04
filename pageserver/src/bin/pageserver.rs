@@ -231,14 +231,10 @@ fn start_pageserver(
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
 
-    let startup_checkpoint = move |phase: &str| {
-        STARTUP_DURATION.with_label_values(&[phase]).set(
-            started_startup_at
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        );
+    let startup_checkpoint = move |phase: &str, human_phase: &str| {
+        let secs = started_startup_at.elapsed().as_secs_f64();
+        STARTUP_DURATION.with_label_values(&[phase]).set(secs);
+        info!("{human_phase} ({secs:.3}s since start)")
     };
 
     // Print version and launch timestamp to the log,
@@ -352,7 +348,7 @@ fn start_pageserver(
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
-    startup_checkpoint("initial");
+    startup_checkpoint("initial", "Starting loading tenants");
 
     // Startup staging or optimizing:
     //
@@ -379,7 +375,6 @@ fn start_pageserver(
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let init_started_at = std::time::Instant::now();
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -397,19 +392,11 @@ fn start_pageserver(
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
 
             init_done_rx.wait().await;
-            startup_checkpoint("initial_tenant_load");
+            startup_checkpoint("initial_tenant_load", "Initial load completed");
 
             // initial logical sizes can now start, as they were waiting on init_done_rx.
 
             scopeguard::ScopeGuard::into_inner(guard);
-
-            let init_done = std::time::Instant::now();
-            let elapsed = init_done - init_started_at;
-
-            tracing::info!(
-                elapsed_millis = elapsed.as_millis(),
-                "Initial load completed"
-            );
 
             let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
 
@@ -419,13 +406,7 @@ fn start_pageserver(
 
             let init_sizes_done = match tokio::time::timeout(timeout, &mut init_sizes_done).await {
                 Ok(_) => {
-                    let now = std::time::Instant::now();
-                    tracing::info!(
-                        from_init_done_millis = (now - init_done).as_millis(),
-                        from_init_millis = (now - init_started_at).as_millis(),
-                        "Initial logical sizes completed"
-                    );
-                    startup_checkpoint("initial_logical_sizes");
+                    startup_checkpoint("initial_logical_sizes", "Initial logical sizes completed");
                     None
                 }
                 Err(_) => {
@@ -441,7 +422,7 @@ fn start_pageserver(
 
             // allow background jobs to start
             drop(background_jobs_can_start);
-            startup_checkpoint("background_jobs_can_start");
+            startup_checkpoint("background_jobs_can_start", "Starting background jobs");
 
             if let Some(init_sizes_done) = init_sizes_done {
                 // ending up here is not a bug; at the latest logical sizes will be queried by
@@ -451,17 +432,11 @@ fn start_pageserver(
 
                 scopeguard::ScopeGuard::into_inner(guard);
 
-                let now = std::time::Instant::now();
-                tracing::info!(
-                    from_init_done_millis = (now - init_done).as_millis(),
-                    from_init_millis = (now - init_started_at).as_millis(),
-                    "Initial logical sizes completed after timeout (background jobs already started)"
-                );
-                startup_checkpoint("initial_logical_sizes");
+                startup_checkpoint("initial_logical_sizes", "Initial logical sizes completed after timeout (background jobs already started)");
 
             }
 
-            startup_checkpoint("complete");
+            startup_checkpoint("complete", "Startup complete");
         };
 
         async move {
