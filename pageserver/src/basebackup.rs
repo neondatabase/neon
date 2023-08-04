@@ -337,7 +337,10 @@ where
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = self.timeline.pg_version.to_string();
+            let pg_version_str = match self.timeline.pg_version {
+                14 | 15 => self.timeline.pg_version.to_string(),
+                ver => format!("{ver}\x0A")
+            };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar.append(&header, pg_version_str.as_bytes()).await?;
 
@@ -381,7 +384,10 @@ where
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-                let pg_version_str = self.timeline.pg_version.to_string();
+                let pg_version_str = match self.timeline.pg_version {
+                    14 | 15 => self.timeline.pg_version.to_string(),
+                    ver => format!("{ver}\x0A")
+                };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar.append(&header, pg_version_str.as_bytes()).await?;
 

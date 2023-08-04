@@ -1751,6 +1751,23 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	int			remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 
+	switch (reln->smgr_relpersistence)
+	{
+		case 0:
+			elog(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+
+		case RELPERSISTENCE_PERMANENT:
+			break;
+
+		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_UNLOGGED:
+			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+			return;
+
+		default:
+			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+
 	if (max_cluster_size > 0 &&
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
