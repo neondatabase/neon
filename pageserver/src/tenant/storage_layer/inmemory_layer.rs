@@ -202,7 +202,7 @@ impl Layer for InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos)?;
+                let buf = reader.read_blob(*pos).await?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {

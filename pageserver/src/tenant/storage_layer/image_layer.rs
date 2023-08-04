@@ -207,13 +207,17 @@ impl Layer for ImageLayer {
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         if let Some(offset) = tree_reader.get(&keybuf).await? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.path().display(),
-                    offset
-                )
-            })?;
+            let blob = file
+                .block_cursor()
+                .read_blob(offset)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read value from data file {} at offset {}",
+                        self.path().display(),
+                        offset
+                    )
+                })?;
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));

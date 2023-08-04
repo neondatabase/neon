@@ -51,6 +51,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -262,7 +263,8 @@ impl Layer for DeltaLayer {
 
         // A subroutine to dump a single blob
         let dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(blob_ref.pos())?;
+            // TODO this is not ideal, but on the other hand we are in dumping code...
+            let buf = Handle::current().block_on(cursor.read_blob(blob_ref.pos()))?;
             let val = Value::des(&buf)?;
             let desc = match val {
                 Value::Image(img) => {
@@ -987,7 +989,7 @@ pub struct ValueRef {
 impl ValueRef {
     /// Loads the value from disk
     pub async fn load(&self) -> Result<Value> {
-        let buf = self.reader.read_blob(self.blob_ref.pos())?;
+        let buf = self.reader.read_blob(self.blob_ref.pos()).await?;
         let val = Value::des(&buf)?;
         Ok(val)
     }
