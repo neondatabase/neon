@@ -23,9 +23,11 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
+
 # ==============================================================================
 # Storage metrics tests
 # ==============================================================================
+
 
 @pytest.mark.parametrize(
     "remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.LOCAL_FS]
@@ -57,25 +59,24 @@ def test_metric_collection(
     def metrics_handler(request: Request) -> Response:
         if request.json is None:
             return Response(status=400)
-    
+
         events = request.json["events"]
         log.info("received events:")
         log.info(events)
-    
+
         for event in events:
             assert event["tenant_id"] == str(
                 neon_env_builder.initial_tenant
             ), "Expecting metrics only from the initial tenant"
             metric_name = event["metric"]
-    
+
             check = checks.get(metric_name)
             # calm down mypy
             if check is not None:
                 assert check(event["value"]), f"{metric_name} isn't valid"
                 metric_kinds_checked.add(metric_name)
-    
-        return Response(status=200)
 
+        return Response(status=200)
 
     # Require collecting metrics frequently, since we change
     # the timeline and want something to be logged about it.

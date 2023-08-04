@@ -165,6 +165,7 @@ typedef enum PrefetchStatus {
 typedef struct PrefetchRequest {
 	BufferTag	buftag; /* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
+	XLogRecPtr	actual_request_lsn;
 	NeonResponse *response; /* may be null */
 	PrefetchStatus status;
 	uint64		my_ring_index;
@@ -319,6 +320,7 @@ compact_prefetch_buffers(void)
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
 		target_slot->effective_request_lsn = source_slot->effective_request_lsn;
+		target_slot->actual_request_lsn = source_slot->actual_request_lsn;
 		target_slot->my_ring_index = empty_ring_index;
 
 		prfh_delete(MyPState->prf_hash, source_slot);
@@ -505,6 +507,11 @@ prefetch_wait_for(uint64 ring_index)
 	{
 		entry = GetPrfSlot(MyPState->ring_receive);
 
+#if PG_MAJORVERSION_NUM >= 16
+		/* ensure the log is actually flushed up to the request point */
+		XLogFlush(entry->actual_request_lsn);
+#endif
+
 		Assert(entry->status == PRFS_REQUESTED);
 		if (!prefetch_read(entry))
 			return false;
@@ -648,7 +655,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	{
 		request.req.lsn = *force_lsn;
 		request.req.latest = *force_latest;
-		slot->effective_request_lsn = *force_lsn;
+		slot->actual_request_lsn = slot->effective_request_lsn = *force_lsn;
 	}
 	else
 	{
@@ -676,7 +683,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		 * The best LSN to use for effective_request_lsn would be
 		 * XLogCtl->Insert.RedoRecPtr, but that's expensive to access.
 		 */
-		request.req.lsn = lsn;
+		slot->actual_request_lsn = request.req.lsn = lsn;
 		prefetch_lsn = Max(prefetch_lsn, lsn);
 		slot->effective_request_lsn = prefetch_lsn;
 	}
@@ -1744,6 +1751,20 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	int			remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 
+	if (max_cluster_size > 0 &&
+		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
+		!IsAutoVacuumWorkerProcess())
+	{
+		uint64		current_size = GetZenithCurrentClusterSize();
+
+		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
+			ereport(ERROR,
+					(errcode(ERRCODE_DISK_FULL),
+					 errmsg("could not extend file because cluster size limit (%d MB) has been exceeded",
+							max_cluster_size),
+					 errhint("This limit is defined by neon.max_cluster_size GUC")));
+	}
+
 	/*
 	 * If a relation manages to grow to 2^32-1 blocks, refuse to extend it any
 	 * more --- we mustn't create a block whose number actually is
@@ -1904,11 +1925,13 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
  * While function is defined in the neon extension it's used within neon_test_utils directly.
  * To avoid breaking tests in the runtime please keep function signature in sync.
  */
+#if PG_MAJORVERSION_NUM < 16
 void PGDLLEXPORT
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-#if PG_MAJORVERSION_NUM < 16
 				 XLogRecPtr request_lsn, bool request_latest, char *buffer)
 #else
+void PGDLLEXPORT
+neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 XLogRecPtr request_lsn, bool request_latest, void *buffer)
 #endif
 {

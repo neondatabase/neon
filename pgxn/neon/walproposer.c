@@ -1424,7 +1424,7 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 #if PG_MAJORVERSION_NUM < 16
 	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
 #else
-	wrconn = walrcv_connect(conninfo, false, true, "wal_proposer_recovery", &err);
+	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
 #endif
 
 	if (!wrconn)
