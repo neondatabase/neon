@@ -25,9 +25,9 @@ use utils::{
 };
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
+use parking_lot::RwLock;
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
 
@@ -101,7 +101,7 @@ impl InMemoryLayer {
 
     pub fn info(&self) -> InMemoryLayerInfo {
         let lsn_start = self.start_lsn;
-        let lsn_end = self.inner.read().unwrap().end_lsn;
+        let lsn_end = self.inner.read().end_lsn;
 
         match lsn_end {
             Some(lsn_end) => InMemoryLayerInfo::Frozen { lsn_start, lsn_end },
@@ -117,7 +117,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_lsn_range(&self) -> Range<Lsn> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let end_lsn = if let Some(end_lsn) = inner.end_lsn {
             end_lsn
@@ -134,7 +134,7 @@ impl Layer for InMemoryLayer {
 
     /// debugging function to print out the contents of the layer
     async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let end_str = inner
             .end_lsn
@@ -194,7 +194,7 @@ impl Layer for InMemoryLayer {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let reader = inner.file.block_cursor();
 
@@ -236,7 +236,7 @@ impl Layer for InMemoryLayer {
 
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
         write!(f, "inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
@@ -248,7 +248,7 @@ impl InMemoryLayer {
     /// Get layer size on the disk
     ///
     pub fn size(&self) -> Result<u64> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         Ok(inner.file.size)
     }
 
@@ -284,7 +284,7 @@ impl InMemoryLayer {
     /// Adds the page version to the in-memory tree
     pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         inner.assert_writeable();
 
         let off = {
@@ -317,7 +317,7 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub fn freeze(&self, end_lsn: Lsn) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
 
         assert!(self.start_lsn < end_lsn);
         inner.end_lsn = Some(end_lsn);
@@ -342,7 +342,7 @@ impl InMemoryLayer {
         // lock, it will see that it's not writeable anymore and retry, but it
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,

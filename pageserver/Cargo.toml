@@ -39,6 +39,7 @@ nix.workspace = true
 num_cpus = { version = "1.15" }
 num-traits.workspace = true
 once_cell.workspace = true
+parking_lot = { workspace = true, features = ["send_guard"] }
 pin-project-lite.workspace = true
 postgres.workspace = true
 postgres_backend.workspace = true
