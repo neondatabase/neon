@@ -405,6 +405,16 @@ pub static STARTUP_DURATION: Lazy<F64GaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_duration_secs metric")
 });
 
+/// How long did tenants take to go from construction to active state?
+pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_tenant_activation_secs",
+        "Time taken by phases of pageserver startup, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register pageserver_tenant_activation_secs metric")
+});
+
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {
