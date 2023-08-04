@@ -156,11 +156,13 @@ impl Default for BucketMetrics {
         .expect("failed to define a metric");
         let failed = RequestTyped::build_with(|kind| failed.with_label_values(&[kind.as_str()]));
 
+        let buckets = [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
+
         let req_seconds = register_histogram_vec!(
             "remote_storage_s3_request_seconds",
             "Seconds to complete a request",
             &["request_type", "result"],
-            [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0].into(),
+            buckets.to_vec(),
         )
         .unwrap();
         let req_seconds = PassFailCancelledRequestTyped::build_with(|kind, outcome| {
@@ -171,7 +173,7 @@ impl Default for BucketMetrics {
             "remote_storage_s3_wait_seconds",
             "Seconds rate limited",
             &["request_type"],
-            [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0].into(),
+            buckets.to_vec(),
         )
         .unwrap();
         let wait_seconds =
