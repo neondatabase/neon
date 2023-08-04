@@ -224,6 +224,11 @@ impl LayerManagerWriteGuard {
         on_disk_layers: Vec<Arc<dyn PersistentLayer>>,
         next_open_layer_at: Lsn,
     ) {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
+
         self.layer_manager
             .initialize_update(|mut layer_map| {
                 let mut updates = layer_map.batch_update();
@@ -252,6 +257,11 @@ impl LayerManagerWriteGuard {
         corrupted_local_layers: Vec<Arc<dyn PersistentLayer>>,
         remote_layers: Vec<Arc<RemoteLayer>>,
     ) {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
+
         self.layer_manager
             .initialize_update(|mut layer_map| {
                 let mut updates = layer_map.batch_update();
@@ -278,6 +288,11 @@ impl LayerManagerWriteGuard {
         timeline_id: TimelineId,
         tenant_id: TenantId,
     ) -> Result<Arc<InMemoryLayer>> {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
+
         ensure!(lsn.is_aligned());
 
         ensure!(
@@ -334,6 +349,11 @@ impl LayerManagerWriteGuard {
         Lsn(last_record_lsn): Lsn,
         last_freeze_at: &AtomicLsn,
     ) {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
+
         let end_lsn = Lsn(last_record_lsn + 1);
 
         if let Some(open_layer) = &self.snapshot.layer_map.open_layer {
@@ -359,6 +379,10 @@ impl LayerManagerWriteGuard {
 
     /// Add image layers to the layer map, called from `create_image_layers`.
     pub(crate) async fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
         self.layer_manager
             .update(|mut layer_map| {
                 let mut updates: BatchedUpdates<'_> = layer_map.batch_update();
@@ -382,6 +406,10 @@ impl LayerManagerWriteGuard {
         delta_layer: Option<DeltaLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
     ) {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
         self.layer_manager
             .update(|mut layer_map| {
                 let l = layer_map.frozen_layers.pop_front();
@@ -414,6 +442,10 @@ impl LayerManagerWriteGuard {
         compact_to: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
     ) -> Result<()> {
+        assert!(
+            self.pseudo_lock.is_right(),
+            "should use `modify` guard for this function."
+        );
         let compact_from = self
             .layer_manager
             .update(|mut layer_map| {
@@ -459,6 +491,10 @@ impl LayerManagerWriteGuard {
         gc_layers: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
     ) -> Result<()> {
+        assert!(
+            self.pseudo_lock.is_left(),
+            "should use `write` guard for this function."
+        );
         self.layer_manager
             .update(|mut layer_map| {
                 let mut updates = layer_map.batch_update();
