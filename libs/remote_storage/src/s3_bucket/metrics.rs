@@ -239,5 +239,5 @@ pub fn inc_list_objects() {
 }
 
 pub fn inc_list_objects_fail() {
-    BUCKET_METRICS.failed.get(Delete).inc()
+    BUCKET_METRICS.failed.get(List).inc()
 }
