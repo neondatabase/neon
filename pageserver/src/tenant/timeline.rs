@@ -3780,7 +3780,7 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let mut guard = self.layers.modify().await;
+        let guard = self.layers.modify().await;
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
 
         // In some rare cases, we may generate a file with exactly the same key range / LSN as before the compaction.
