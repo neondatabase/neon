@@ -82,7 +82,7 @@ pub struct ComputeMetrics {
     /// This is two roundtrips, so it's a good proxy for compute-pageserver
     /// latency. The latency is usually 0.2ms, but it's not safe to assume
     /// that.
-    pub pageserver_connect_ms: u64,
+    pub pageserver_connect_micros: u64,
 
     /// Time to get basebackup from pageserver and write it to disk.
     pub basebackup_ms: u64,
