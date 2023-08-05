@@ -568,6 +568,7 @@ impl Endpoint {
                         }
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
+                        | ComputeStatus::GracefulShutdown
                         | ComputeStatus::Configuration => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }

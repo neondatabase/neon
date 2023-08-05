@@ -294,6 +294,14 @@ fn main() -> Result<()> {
         info!("synced safekeepers at lsn {lsn}");
     }
 
+    // Change status to GracefulShutdown
+    {
+        let mut state = compute.state.lock().unwrap();
+        if matches!(state.status, ComputeStatus::Running) {
+            state.status = ComputeStatus::GracefulShutdown;
+        }
+    }
+
     if let Err(err) = compute.check_for_core_dumps() {
         error!("error while checking for core dumps: {err:?}");
     }
