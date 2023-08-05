@@ -450,22 +450,6 @@ where
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
         self.ar.append(&header, &pg_control_bytes[..]).await?;
-
-        //send wal segment
-        let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
-        let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
-        let wal_file_path = format!("pg_wal/{}", wal_file_name);
-        let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
-
-        let wal_seg = postgres_ffi::generate_wal_segment(
-            segno,
-            system_identifier,
-            self.timeline.pg_version,
-            self.lsn,
-        )
-        .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
-        ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
-        self.ar.append(&header, &wal_seg[..]).await?;
         Ok(())
     }
 }
