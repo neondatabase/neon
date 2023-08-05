@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
 use std::fmt::Write as FmtWrite;
@@ -29,9 +29,7 @@ use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
 use postgres_ffi::TransactionId;
-use postgres_ffi::XLogFileName;
-use postgres_ffi::PG_TLI;
-use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
+use postgres_ffi::{BLCKSZ, RELSEG_SIZE};
 use utils::lsn::Lsn;
 
 /// Create basebackup with non-rel data in it.
@@ -440,7 +438,7 @@ where
             .await
             .context("failed get control bytes")?;
 
-        let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
+        let (pg_control_bytes, _system_identifier) = postgres_ffi::generate_pg_control(
             &pg_control_bytes,
             &checkpoint_bytes,
             self.lsn,
@@ -450,6 +448,7 @@ where
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
         self.ar.append(&header, &pg_control_bytes[..]).await?;
+
         Ok(())
     }
 }
