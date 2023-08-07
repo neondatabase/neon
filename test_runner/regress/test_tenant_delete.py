@@ -151,6 +151,11 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
             ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            # We may leave some upload tasks in the queue. They're likely deletes.
+            # For uploads we explicitly wait with `last_flush_lsn_upload` below.
+            # So by ignoring these instead of waiting for empty upload queue
+            # we execute more distinct code paths.
+            '.*stopping left-over name="remote upload".*',
         ]
     )
 
