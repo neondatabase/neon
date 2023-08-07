@@ -232,9 +232,10 @@ fn start_pageserver(
     let started_startup_at = Instant::now();
 
     let startup_checkpoint = move |phase: &str, human_phase: &str| {
-        let secs = started_startup_at.elapsed().as_secs_f64();
+        let elapsed = started_startup_at.elapsed();
+        let secs = elapsed.as_secs_f64();
         STARTUP_DURATION.with_label_values(&[phase]).set(secs);
-        info!("{human_phase} ({secs:.3}s since start)")
+        info!(elapsed_millis=elapsed.as_millis(), "{human_phase} ({secs:.3}s since start)")
     };
 
     // Print version and launch timestamp to the log,
