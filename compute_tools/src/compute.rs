@@ -352,7 +352,7 @@ impl ComputeNode {
         let mut state = self.state.lock().unwrap();
         state.metrics.pageserver_connect_micros = pageserver_connect_micros;
         state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
-        state.metrics.basebackup_ms = Instant::now().duration_since(start_time).as_millis() as u64;
+        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
     }
 
