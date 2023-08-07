@@ -3534,7 +3534,7 @@ impl Timeline {
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_keys.sort_by_key(|(key, _lsn, _size, _value_ref)| *key);
+        all_keys.sort_by_key(|(key, lsn, _size, _value_ref)| (*key, *lsn));
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 

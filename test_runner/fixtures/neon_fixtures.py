@@ -476,7 +476,7 @@ class NeonEnvBuilder:
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
-        log.info(
+        log.debug(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(
@@ -1504,9 +1504,6 @@ class NeonPageserver(PgProtocol):
             ".*Error processing HTTP request: Forbidden",
             # intentional failpoints
             ".*failpoint ",
-            # FIXME: there is a race condition between GC and detach, see
-            # https://github.com/neondatabase/neon/issues/2442
-            ".*could not remove ephemeral file.*No such file or directory.*",
             # FIXME: These need investigation
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
