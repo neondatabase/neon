@@ -114,8 +114,6 @@ async fn schedule_ordered_timeline_deletions(
 
     let mut already_running_deletions = vec![];
 
-    let to_dbg: Vec<TimelineId> = sorted.iter().map(|s| s.0).collect();
-    dbg!(to_dbg);
     for (timeline_id, _) in sorted.into_iter().rev() {
         if let Err(e) = DeleteTimelineFlow::run(tenant, timeline_id, true).await {
             match e {
