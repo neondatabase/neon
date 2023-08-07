@@ -3534,7 +3534,7 @@ impl Timeline {
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_value_refs.sort_by_key(|(key, _lsn, _value_ref)| *key);
+        all_value_refs.sort_by_key(|(key, lsn, _value_ref)| (*key, *lsn));
 
         let mut all_keys = Vec::new();
         for l in deltas_to_compact.iter() {
@@ -3550,7 +3550,7 @@ impl Timeline {
         }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_keys.sort_by_key(|(key, _lsn, _size)| *key);
+        all_keys.sort_by_key(|(key, lsn, _size)| (*key, *lsn));
 
         for (next_key, _next_lsn, _size) in all_keys.iter() {
             let next_key = *next_key;
