@@ -45,8 +45,8 @@ def test_tenant_delete_smoke(
     with pytest.raises(PageserverApiException, match=f"NotFound: tenant {tenant_id}"):
         ps_http.tenant_delete(tenant_id=tenant_id)
 
-    tenant_id = ps_http.tenant_create(
-        tenant_id,
+    env.neon_cli.create_tenant(
+        tenant_id=tenant_id,
         conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
     )
 
