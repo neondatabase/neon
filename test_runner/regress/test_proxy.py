@@ -226,7 +226,23 @@ def test_sql_over_http(static_proxy: NeonProxy):
     assert res["command"] == "DROP"
     assert res["rowCount"] is None
 
-    res = q("pg_sleep(16.0)")
+
+def test_sql_over_http_fail(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
+        connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps({"query": sql, "params": params}),
+            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code >= 400
+        return response.json()
+
+    res = q("SELECT pg_sleep(16.0)")
     assert res["message"] == "deadline has elapsed"
 
 
