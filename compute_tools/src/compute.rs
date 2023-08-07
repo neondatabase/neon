@@ -575,11 +575,30 @@ impl ComputeNode {
 
         // Run initdb to completion
         info!("running initdb");
+
+        // VMs have cg-exec in their environment while pods don't
+        let vm = Command::new("/usr/bin/cgexec").output().is_ok();
+
         let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
-        Command::new(initdb_bin)
-            .args(["-D", pgdata])
-            .output()
-            .expect("cannot start initdb process");
+
+        if vm {
+            Command::new("/usr/bin/cgexec")
+                .args(["-g", "memory:neon-postgres"])
+                .args([
+                    initdb_bin
+                        .to_str()
+                        .expect("initdb bin should be valid utf-8"),
+                    "-D",
+                    pgdata,
+                ])
+                .output()
+                .expect("cannot start initdb process");
+        } else {
+            Command::new(initdb_bin)
+                .args(["-D", pgdata])
+                .output()
+                .expect("cannot start initdb process");
+        }
 
         // Write conf
         use std::io::Write;
@@ -591,10 +610,18 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = Command::new(&self.pgbin)
-            .args(["-D", pgdata])
-            .spawn()
-            .expect("cannot start postgres process");
+        let mut pg = if vm {
+            Command::new("/usr/bin/cgexec")
+                .args(["-g", "memory:neon-postgres"])
+                .args([&self.pgbin, "-D", pgdata])
+                .spawn()
+                .expect("cannot start postgres process")
+        } else {
+            Command::new(&self.pgbin)
+                .args(["-D", pgdata])
+                .spawn()
+                .expect("cannot start postgres process")
+        };
 
         // Stop it when it's ready
         info!("waiting for postgres");
@@ -618,16 +645,33 @@ impl ComputeNode {
     ) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
-        // Run postgres as a child process.
-        let mut pg = Command::new(&self.pgbin)
-            .args(["-D", &self.pgdata])
-            .envs(if let Some(storage_auth_token) = &storage_auth_token {
-                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
-            } else {
-                vec![]
-            })
-            .spawn()
-            .expect("cannot start postgres process");
+        // VMs have cg-exec in their environment while pods don't
+        let vm = Command::new("/usr/bin/cgexec").output().is_ok();
+
+        // Run postgres as a chile process. If we are a VM start postgres in
+        // the cgroup
+        let mut pg = if vm {
+            Command::new("/usr/bin/cgexec")
+                .args(["-g", "memory:neon-postgres"])
+                .args([&self.pgbin, "-D", &self.pgdata])
+                .envs(if let Some(storage_auth_token) = &storage_auth_token {
+                    vec![("NEON_AUTH_TOKEN", storage_auth_token)]
+                } else {
+                    vec![]
+                })
+                .spawn()
+                .expect("cannot start postgres process")
+        } else {
+            Command::new(&self.pgbin)
+                .args(["-D", &self.pgdata])
+                .envs(if let Some(storage_auth_token) = &storage_auth_token {
+                    vec![("NEON_AUTH_TOKEN", storage_auth_token)]
+                } else {
+                    vec![]
+                })
+                .spawn()
+                .expect("cannot start postgres process")
+        };
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
