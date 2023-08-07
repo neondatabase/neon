@@ -302,7 +302,7 @@ impl ComputeNode {
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
         let pageserver_connect_micros =
-            Instant::now().duration_since(start_time).as_micros() as u64;
+           start_time.elapsed().as_micros() as u64;
 
         let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
