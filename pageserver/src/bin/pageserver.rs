@@ -438,6 +438,7 @@ fn start_pageserver(
 
             }
 
+            startup_checkpoint("complete", "Startup complete");
         };
 
         async move {
@@ -575,7 +576,6 @@ fn start_pageserver(
         );
     }
 
-    startup_checkpoint("complete", "Startup complete");
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
