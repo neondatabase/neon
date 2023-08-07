@@ -15,6 +15,7 @@ from fixtures.pageserver.utils import (
     assert_prefix_empty,
     tenant_delete_wait_completed,
     wait_tenant_status_404,
+    wait_until_tenant_active,
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
@@ -184,7 +185,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         )
 
         reason = tenant_info["state"]["data"]["reason"]
-        log.info(f"timeline broken: {reason}")
+        log.info(f"tenant broken: {reason}")
 
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
@@ -202,6 +203,9 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             "tenant-delete-before-shutdown",
             "tenant-delete-before-create-remote-mark",
         ):
+            wait_until_tenant_active(
+                ps_http, tenant_id=tenant_id, iterations=iterations, period=0.25
+            )
             tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
         else:
             # Pageserver should've resumed deletion after restart.
