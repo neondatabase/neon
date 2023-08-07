@@ -390,6 +390,7 @@ impl DeleteTimelineFlow {
 
     /// Shortcut to create Timeline in stopping state and spawn deletion task.
     /// See corresponding parts of [`crate::tenant::delete::DeleteTenantFlow`]
+    #[instrument(skip_all, fields(%timeline_id))]
     pub async fn resume_deletion(
         tenant: Arc<Tenant>,
         timeline_id: TimelineId,
@@ -436,11 +437,15 @@ impl DeleteTimelineFlow {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(%timeline_id))]
     pub async fn cleanup_remaining_timeline_fs_traces(
         tenant: &Tenant,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await
+        let r =
+            cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await;
+        info!("Done");
+        r
     }
 
     fn prepare(

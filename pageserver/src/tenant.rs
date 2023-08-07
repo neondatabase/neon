@@ -813,9 +813,8 @@ impl Tenant {
                 let make_broken = |t: &Tenant, err: anyhow::Error| {
                     error!("load failed, setting tenant state to Broken: {err:?}");
                     t.state.send_modify(|state| {
-                        assert_eq!(
-                            *state,
-                            TenantState::Loading,
+                        assert!(
+                            matches!(*state, TenantState::Loading | TenantState::Stopping { .. }),
                             "the loading task owns the tenant state until activation is complete"
                         );
                         *state = TenantState::broken_from_reason(err.to_string());
@@ -847,10 +846,17 @@ impl Tenant {
                     }
                 };
 
+                info!("pending deletion {}", pending_deletion.is_some());
+
                 if let Some(deletion) = pending_deletion {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
+                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
+                    let _ = init_order
+                        .as_mut()
+                        .and_then(|x| x.initial_logical_size_attempt.take());
+
                     match DeleteTenantFlow::resume(
                         deletion,
                         &tenant_clone,
@@ -955,6 +961,8 @@ impl Tenant {
                             timeline_dir.display()
                         )
                     })?;
+
+                info!("Found deletion mark for timeline {}", timeline_id);
 
                 match load_metadata(self.conf, &self.tenant_id, &timeline_id) {
                     Ok(metadata) => {
@@ -1652,10 +1660,6 @@ impl Tenant {
         self.current_state() == TenantState::Active
     }
 
-    pub fn is_broken(&self) -> bool {
-        matches!(self.current_state(), TenantState::Broken { .. })
-    }
-
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
     /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
@@ -1765,7 +1769,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress).await {
+        match self.set_stopping(shutdown_progress, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -1805,18 +1809,23 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
+    async fn set_stopping(
+        &self,
+        progress: completion::Barrier,
+        allow_transition_from_loading: bool,
+    ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
                 );
                 false
             }
+            TenantState::Loading => allow_transition_from_loading,
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
@@ -1825,8 +1834,15 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Loading => {
+                if !allow_transition_from_loading {
+                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                };
+                *current_state = TenantState::Stopping { progress };
+                true
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
@@ -1896,6 +1912,10 @@ impl Tenant {
         .expect("cannot drop self.state while on a &self method");
 
         // we now know we're done activating, let's see whether this task is the winner to transition into Broken
+        self.set_broken_no_wait(reason)
+    }
+
+    pub(crate) fn set_broken_no_wait(&self, reason: String) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
@@ -2151,7 +2171,7 @@ impl Tenant {
             remote_client,
             pg_version,
             initial_logical_size_can_start.cloned(),
-            initial_logical_size_attempt.cloned(),
+            initial_logical_size_attempt.cloned().flatten(),
             state,
         );
 

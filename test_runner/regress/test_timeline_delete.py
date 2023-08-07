@@ -4,7 +4,6 @@ import queue
 import shutil
 import threading
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
@@ -14,13 +13,13 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     RemoteStorageKind,
-    S3Storage,
     available_remote_storages,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
+    assert_prefix_empty,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -185,10 +184,9 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
-        )
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
+    )
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -392,26 +390,6 @@ def test_timeline_resurrection_on_attach(
         main_timeline_id
     }, "the deleted timeline should not have been resurrected"
     assert all([tl["state"] == "Active" for tl in timelines])
-
-
-def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] = None):
-    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    assert neon_env_builder.remote_storage_kind in (
-        RemoteStorageKind.MOCK_S3,
-        RemoteStorageKind.REAL_S3,
-    )
-    # For mypy
-    assert isinstance(neon_env_builder.remote_storage, S3Storage)
-
-    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
-        Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
-    )
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):

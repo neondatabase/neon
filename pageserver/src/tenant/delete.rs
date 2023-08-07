@@ -1,9 +1,13 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Context;
+use pageserver_api::models::TenantState;
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{error, instrument, warn, Instrument, Span};
+use tracing::{error, info, instrument, warn, Instrument, Span};
 
 use utils::{
     completion, crashsafe, fs_ext,
@@ -29,6 +33,9 @@ const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u8 = 3;
 pub enum DeleteTenantError {
     #[error("GetTenant {0}")]
     Get(#[from] GetTenantError),
+
+    #[error("Invalid state {0}. Expected Active or Broken")]
+    InvalidState(TenantState),
 
     #[error("Tenant deletion is already in progress")]
     AlreadyInProgress,
@@ -58,11 +65,10 @@ fn remote_tenant_delete_mark_path(
 async fn create_remote_delete_mark(
     conf: &PageServerConf,
     remote_storage: &GenericRemoteStorage,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
 ) -> Result<(), DeleteTenantError> {
-    let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
+    let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id)?;
 
-    // TODO check if that works, if not put a timestamp here
     let data: &[u8] = &[];
     remote_storage
         .upload(data, 0, &remote_mark_path, None)
@@ -93,39 +99,48 @@ async fn create_local_delete_mark(
 async fn schedule_ordered_timeline_deletions(
     tenant: &Arc<Tenant>,
 ) -> Result<Vec<(Arc<tokio::sync::Mutex<DeleteTimelineFlow>>, TimelineId)>, DeleteTenantError> {
-    // Tenant is stopping at this point. We know it will be deleted. No new timelines should be created.
+    // Tenant is stopping at this point. We know it will be deleted.
+    // No new timelines should be created.
     // Tree sort timelines to delete from leafs to the root.
+    // NOTE: by calling clone we release the mutex which creates a possibility for a race: pending deletion
+    // can complete and remove timeline from the map in between our call to clone
+    // and `DeleteTimelineFlow::run`, so `run` wont find timeline in `timelines` map.
+    // timelines.lock is currently synchronous so we cant hold it across await point.
+    // So just ignore NotFound error if we get it from `run`.
+    // Beware: in case it becomes async and we try to hold it here, `run` also locks it, which can create a deadlock.
     let timelines = tenant.timelines.lock().unwrap().clone();
     let sorted =
         tree_sort_timelines(timelines, |t| t.get_ancestor_timeline_id()).context("tree sort")?;
 
     let mut already_running_deletions = vec![];
 
+    let to_dbg: Vec<TimelineId> = sorted.iter().map(|s| s.0).collect();
+    dbg!(to_dbg);
     for (timeline_id, _) in sorted.into_iter().rev() {
         if let Err(e) = DeleteTimelineFlow::run(tenant, timeline_id, true).await {
-            if let DeleteTimelineError::AlreadyInProgress(guard) = e {
-                already_running_deletions.push((guard, timeline_id));
-                continue;
+            match e {
+                DeleteTimelineError::NotFound => {
+                    // Timeline deletion finished after call to clone above but before call
+                    // to `DeleteTimelineFlow::run` and removed timeline from the map.
+                    continue;
+                }
+                DeleteTimelineError::AlreadyInProgress(guard) => {
+                    already_running_deletions.push((guard, timeline_id));
+                    continue;
+                }
+                e => return Err(DeleteTenantError::Timeline(e)),
             }
-
-            return Err(DeleteTenantError::Timeline(e));
         }
     }
 
     Ok(already_running_deletions)
 }
 
-async fn assert_timeline_dir_empty(
-    conf: &PageServerConf,
-    tenant: &Tenant,
-) -> Result<(), DeleteTenantError> {
+async fn assert_timelines_dir_empty(timelines_path: &Path) -> Result<(), DeleteTenantError> {
     // Assert timelines dir is empty.
-    let timelines_path = conf.timelines_path(&tenant.tenant_id);
-    if !fs_ext::is_directory_empty(&timelines_path).await? {
+    if !fs_ext::is_directory_empty(timelines_path).await? {
         // Display first 10 items in directory
-        let list = &fs_ext::list_dir(&timelines_path)
-            .await
-            .context("list_dir")?[..10];
+        let list = &fs_ext::list_dir(timelines_path).await.context("list_dir")?[..10];
         return Err(DeleteTenantError::Other(anyhow::anyhow!(
             "Timelines directory is not empty after all timelines deletion: {list:?}"
         )));
@@ -147,30 +162,49 @@ async fn remove_tenant_remote_delete_mark(
     Ok(())
 }
 
+// Cleanup fs traces: tenant config, timelines dir local delete mark, tenant dir
 async fn cleanup_remaining_fs_traces(
     conf: &PageServerConf,
     tenant_id: &TenantId,
 ) -> Result<(), DeleteTenantError> {
-    // Cleanup fs traces: tenant config, timelines dir local delete mark, tenant dir
-    let remains = [
-        (conf.tenant_config_path(tenant_id), false),
-        (conf.timelines_path(tenant_id), true),
-        (conf.tenant_deleted_mark_file_path(tenant_id), false),
-        (conf.tenant_path(tenant_id), true),
-    ];
-
-    for (remain, is_dir) in remains {
+    let rm = |p: PathBuf, is_dir: bool| async move {
         if is_dir {
-            tokio::fs::remove_dir(&remain).await
+            tokio::fs::remove_dir(&p).await
         } else {
-            tokio::fs::remove_file(&remain).await
+            tokio::fs::remove_file(&p).await
         }
         .or_else(fs_ext::ignore_not_found)
         .with_context(|| {
-            let to_display = remain.display();
+            let to_display = p.display();
             format!("failed to delete {to_display}")
-        })?;
-    }
+        })
+    };
+
+    rm(conf.tenant_config_path(tenant_id), false).await?;
+
+    fail::fail_point!("tenant-delete-before-remove-timelines-dir", |_| {
+        Err(anyhow::anyhow!(
+            "failpoint: tenant-delete-before-remove-timelines-dir"
+        ))?
+    });
+
+    rm(conf.timelines_path(tenant_id), true).await?;
+
+    fail::fail_point!("tenant-delete-before-remove-deleted-mark", |_| {
+        Err(anyhow::anyhow!(
+            "failpoint: tenant-delete-before-remove-deleted-mark"
+        ))?
+    });
+
+    rm(conf.tenant_deleted_mark_file_path(tenant_id), false).await?;
+
+    fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {
+        Err(anyhow::anyhow!(
+            "failpoint: tenant-delete-before-remove-tenant-dir"
+        ))?
+    });
+
+    rm(conf.tenant_path(tenant_id), true).await?;
 
     Ok(())
 }
@@ -214,21 +248,58 @@ impl DeleteTenantFlow {
     ) -> Result<(), DeleteTenantError> {
         let (tenant, mut guard) = Self::prepare(tenants, tenant_id).await?;
 
+        if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
+            tenant.set_broken(format!("{e:#}")).await;
+            return Err(e);
+        }
+
+        Self::schedule_background(guard, conf, remote_storage, tenants, tenant);
+
+        Ok(())
+    }
+
+    // Helper function needed to be able to match once on returned error and transition tenant into broken state.
+    // This is needed because tenant.shutwodn is not idempotent. If tenant state is set to stopping another call to tenant.shutdown
+    // will result in an error, but here we need to be able to retry shutdown when tenant deletion is retried.
+    // So the solution is to set tenant state to broken.
+    async fn run_inner(
+        guard: &mut OwnedMutexGuard<Self>,
+        conf: &'static PageServerConf,
+        remote_storage: Option<&GenericRemoteStorage>,
+        tenant: &Tenant,
+    ) -> Result<(), DeleteTenantError> {
         guard.mark_in_progress()?;
+
+        fail::fail_point!("tenant-delete-before-create-remote-mark", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: tenant-delete-before-create-remote-mark"
+            ))?
+        });
+
         // IDEA: implement detach as delete without remote storage. Then they would use the same lock (deletion_progress) so wont contend.
         // Though sounds scary, different mark name?
         // Detach currently uses remove_dir_all so in case of a crash we can end up in a weird state.
         if let Some(remote_storage) = &remote_storage {
-            create_remote_delete_mark(conf, remote_storage, tenant_id)
+            create_remote_delete_mark(conf, remote_storage, &tenant.tenant_id)
                 .await
-                .context("create delete mark")?
+                .context("remote_mark")?
         }
 
-        create_local_delete_mark(conf, &tenant_id)
+        fail::fail_point!("tenant-delete-before-create-local-mark", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: tenant-delete-before-create-local-mark"
+            ))?
+        });
+
+        create_local_delete_mark(conf, &tenant.tenant_id)
             .await
             .context("local delete mark")?;
 
-        Self::schedule_background(guard, conf, remote_storage, tenants, tenant);
+        fail::fail_point!("tenant-delete-before-background", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: tenant-delete-before-background"
+            ))?
+        });
 
         Ok(())
     }
@@ -300,18 +371,25 @@ impl DeleteTenantFlow {
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
+
         tenant
-            .set_stopping(progress)
+            .set_stopping(progress, true)
             .await
             .expect("cant be stopping or broken");
 
         // Do not consume valuable resources during the load phase, continue deletion once init phase is complete.
         let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
         if let Some(background) = background_jobs_can_start {
-            background.clone().wait().await
+            info!("waiting for backgound jobs barrier");
+            background.clone().wait().await;
+            info!("ready for backgound jobs barrier");
         }
 
-        tenant.load(init_order, ctx).await.context("load")?;
+        // Tenant may not be loadable if we fail late in cleanup_remaining_fs_traces (e g remove timelines dir)
+        let timelines_path = tenant.conf.timelines_path(&tenant.tenant_id);
+        if timelines_path.exists() {
+            tenant.load(init_order, ctx).await.context("load")?;
+        }
 
         Self::background(
             guard,
@@ -335,14 +413,21 @@ impl DeleteTenantFlow {
 
         // FIXME: unsure about active only. Our init jobs may not be cancellable properly,
         // so at least for now allow deletions only for active tenants. TODO recheck
-        // Broken is needed for retries.
-        if !(tenant.is_active() || tenant.is_broken()) {
-            return Err(GetTenantError::NotActive(tenant_id).into());
+        // Broken and Stopping is needed for retries.
+        if !matches!(
+            tenant.current_state(),
+            TenantState::Active | TenantState::Broken { .. }
+        ) {
+            return Err(DeleteTenantError::InvalidState(tenant.current_state()));
         }
 
         let guard = Arc::clone(&tenant.delete_progress)
             .try_lock_owned()
             .map_err(|_| DeleteTenantError::AlreadyInProgress)?;
+
+        fail::fail_point!("tenant-delete-before-shutdown", |_| {
+            Err(anyhow::anyhow!("failpoint: tenant-delete-before-shutdown"))?
+        });
 
         // make pageserver shutdown not to wait for our completion
         let (_, progress) = completion::channel();
@@ -352,7 +437,7 @@ impl DeleteTenantFlow {
         // tenant.set_stopping
         // tenant.shutdown
         // Its also bad that we're holding tenants.read here.
-        // TODO relax set_stopping to be idempotent.
+        // TODO relax set_stopping to be idempotent?
         if tenant.shutdown(progress, false).await.is_err() {
             return Err(DeleteTenantError::Other(anyhow::anyhow!(
                 "tenant shutdown is already in progress"
@@ -383,7 +468,7 @@ impl DeleteTenantFlow {
                     Self::background(guard, conf, remote_storage, tenants, &tenant).await
                 {
                     error!("Error: {err:#}");
-                    tenant.set_broken(err.to_string()).await;
+                    tenant.set_broken(format!("{err:#}")).await;
                 };
                 Ok(())
             }
@@ -407,7 +492,13 @@ impl DeleteTenantFlow {
         // the whole tenant will become broken as by `Self::schedule_background` logic
         let already_running_timeline_deletions = schedule_ordered_timeline_deletions(tenant)
             .await
-            .context("run_ordered_timeline_deletions")?;
+            .context("schedule_ordered_timeline_deletions")?;
+
+        fail::fail_point!("tenant-delete-before-polling-ongoing-deletions", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: tenant-delete-before-polling-ongoing-deletions"
+            ))?
+        });
 
         // Wait for deletions that were already running at the moment when tenant deletion was requested.
         // When we can lock deletion guard it means that corresponding timeline deletion finished.
@@ -420,20 +511,27 @@ impl DeleteTenantFlow {
             }
         }
 
-        assert_timeline_dir_empty(conf, tenant).await?;
+        let timelines_path = conf.timelines_path(&tenant.tenant_id);
+        // May not exist if we fail in cleanup_remaining_fs_traces after removing it
+        if timelines_path.exists() {
+            assert_timelines_dir_empty(&timelines_path)
+                .await
+                .context("timelines dir not empty")?;
+        }
 
         remove_tenant_remote_delete_mark(conf, remote_storage.as_ref(), &tenant.tenant_id).await?;
+
+        fail::fail_point!("tenant-delete-before-cleanup-remaining-fs-traces", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: tenant-delete-before-cleanup-remaining-fs-traces"
+            ))?
+        });
 
         cleanup_remaining_fs_traces(conf, &tenant.tenant_id)
             .await
             .context("cleanup_remaining_fs_traces")?;
 
         let mut locked = tenants.write().await;
-        // NOTE:
-        // race with shutdown? -- not a problem because of completion::Barrier in TenantState::Stopping
-        // race with detach?
-        // race with ignore?
-        // can be fixed if migrated to this flow (it can be generalized to support other tenant scoped destructive operations)
         if locked.remove(&tenant.tenant_id).is_none() {
             warn!("Tenant got removed from tenants map during deletion");
         };

@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -226,6 +226,35 @@ def timeline_delete_wait_completed(
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations)
 
 
+if TYPE_CHECKING:
+    # TODO avoid by combining remote storage related stuff in single type
+    # and just passing in this type instead of whole builder
+    from fixtures.neon_fixtures import NeonEnvBuilder
+
+
+def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    # FIXME obseolete after https://github.com/neondatabase/neon/pull/4871
+    from fixtures.neon_fixtures import RemoteStorageKind, S3Storage
+
+    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
+    assert neon_env_builder.remote_storage_kind in (
+        RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.REAL_S3,
+    )
+    # For mypy
+    assert isinstance(neon_env_builder.remote_storage, S3Storage)
+
+    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    response = neon_env_builder.remote_storage_client.list_objects_v2(
+        Bucket=neon_env_builder.remote_storage.bucket_name,
+        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
+    )
+    objects = response.get("Contents")
+    assert (
+        response["KeyCount"] == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+
+
 # FIXME dedup
 def wait_tenant_status_404(
     pageserver_http: PageserverHttpClient,
@@ -245,7 +274,7 @@ def wait_tenant_status_404(
 
             last_exc = e
 
-    raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")
+    raise last_exc or RuntimeError(f"Tenant wasnt deleted in time, state: {data['state']}")
 
 
 def tenant_delete_wait_completed(
@@ -255,3 +284,11 @@ def tenant_delete_wait_completed(
 ):
     pageserver_http.tenant_delete(tenant_id=tenant_id)
     wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
+
+
+MANY_SMALL_LAYERS_TENANT_CONFIG = {
+    "gc_period": "0s",
+    "compaction_period": "0s",
+    "checkpoint_distance": f"{1024**2}",
+    "image_creation_threshold": "100",
+}

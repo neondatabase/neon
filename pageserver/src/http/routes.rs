@@ -213,7 +213,10 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
         use crate::tenant::delete::DeleteTenantError::*;
         match value {
             Get(g) => ApiError::from(g),
-            e => ApiError::from(e),
+            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
+            Timeline(t) => ApiError::from(t),
+            Other(o) => ApiError::InternalServerError(o),
+            e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
         }
     }
 }
