@@ -11,6 +11,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use tokio::time;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -36,6 +37,7 @@ enum Payload {
 
 pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
+const MAX_REQUEST_DURATION: time::Duration = time::Duration::from_secs(15); // 15 secs
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -44,6 +46,7 @@ static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-iso
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+static HEADER_VALUE_FALSE: HeaderValue = HeaderValue::from_static("false");
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -226,13 +229,61 @@ pub async fn handle(
 
     let mut client = conn_pool.get(&conn_info, !allow_pool).await?;
 
+    let mut headers = HashMap::default();
+    // add back the headers for the request
+    match &payload {
+        Payload::Single(_) => {}
+        Payload::Batch(_) => {
+            if txn_read_only {
+                headers.insert(TXN_READ_ONLY.clone(), HEADER_VALUE_TRUE.clone());
+            } else {
+                headers.insert(TXN_READ_ONLY.clone(), HEADER_VALUE_FALSE.clone());
+            }
+            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            }
+        }
+    };
+
     //
-    // Now execute the query and return the result
+    // Now execute the query(s) and return the result
+    // - given they don't exceed the deadline
+    // - given the results don't exceed the row limit
     //
-    let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
-            .await
-            .map(|x| (x, HashMap::default())),
+    let result = time::timeout(
+        MAX_REQUEST_DURATION,
+        perform_queries(
+            &mut client,
+            payload,
+            raw_output,
+            array_mode,
+            txn_read_only,
+            txn_isolation_level,
+        ),
+    )
+    .await
+    .unwrap_or_else(|e| Err(e.into()));
+
+    if allow_pool {
+        // return connection to the pool
+        tokio::task::spawn(async move {
+            let _ = conn_pool.put(&conn_info, client).await;
+        });
+    }
+
+    result.map(|r| (r, headers))
+}
+
+async fn perform_queries(
+    client: &mut tokio_postgres::Client,
+    payload: Payload,
+    raw_output: bool,
+    array_mode: bool,
+    txn_read_only: bool,
+    txn_isolation_level: Option<IsolationLevel>,
+) -> anyhow::Result<Value> {
+    match payload {
+        Payload::Single(query) => query_to_json(client, query, raw_output, array_mode).await,
         Payload::Batch(queries) => {
             let mut results = Vec::new();
             let mut builder = client.build_transaction();
@@ -254,26 +305,9 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            let mut headers = HashMap::default();
-            headers.insert(
-                TXN_READ_ONLY.clone(),
-                HeaderValue::try_from(txn_read_only.to_string())?,
-            );
-            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
-                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
-            }
-            Ok((json!({ "results": results }), headers))
+            Ok(json!({ "results": results }))
         }
-    };
-
-    if allow_pool {
-        // return connection to the pool
-        tokio::task::spawn(async move {
-            let _ = conn_pool.put(&conn_info, client).await;
-        });
     }
-
-    result
 }
 
 async fn query_to_json<T: GenericClient>(

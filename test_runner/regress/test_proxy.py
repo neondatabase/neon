@@ -226,6 +226,9 @@ def test_sql_over_http(static_proxy: NeonProxy):
     assert res["command"] == "DROP"
     assert res["rowCount"] is None
 
+    res = q("pg_sleep(16.0)")
+    assert res["message"] == "deadline has elapsed"
+
 
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")

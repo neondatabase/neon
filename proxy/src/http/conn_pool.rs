@@ -119,6 +119,11 @@ impl GlobalConnPool {
         conn_info: &ConnInfo,
         client: tokio_postgres::Client,
     ) -> anyhow::Result<()> {
+        if client.is_closed() {
+            info!("pool: throwing away connection '{conn_info}' because connection is closed");
+            return Ok(());
+        }
+
         let pool = self.get_endpoint_pool(&conn_info.hostname).await;
 
         // return connection to the pool
