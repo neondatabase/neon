@@ -794,7 +794,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.13.1
+      VM_BUILDER_VERSION: v0.15.0-alpha1
 
     steps:
       - name: Checkout

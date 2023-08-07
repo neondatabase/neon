@@ -6,7 +6,8 @@ from typing import Optional, Type
 
 import backoff
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import PgProtocol, PortDistributor, VanillaPostgres
+from fixtures.neon_fixtures import PgProtocol, VanillaPostgres
+from fixtures.port_distributor import PortDistributor
 
 
 def generate_tls_cert(cn, certout, keyout):

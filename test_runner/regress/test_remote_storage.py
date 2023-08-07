@@ -12,10 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -25,6 +22,11 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_until_tenant_active,
     wait_until_tenant_state,
+)
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until

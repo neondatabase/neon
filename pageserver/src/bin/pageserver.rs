@@ -38,8 +38,6 @@ const PID_FILE_NAME: &str = "pageserver.pid";
 const FEATURES: &[&str] = &[
     #[cfg(feature = "testing")]
     "testing",
-    #[cfg(feature = "fail/failpoints")]
-    "fail/failpoints",
 ];
 
 fn version() -> String {

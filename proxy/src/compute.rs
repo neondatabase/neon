@@ -230,7 +230,8 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    async fn do_connect(
+    /// Connect to a corresponding compute node.
+    pub async fn connect(
         &self,
         allow_self_signed_compute: bool,
         timeout: Duration,
@@ -269,20 +270,6 @@ impl ConnCfg {
         };
 
         Ok(connection)
-    }
-
-    /// Connect to a corresponding compute node.
-    pub async fn connect(
-        &self,
-        allow_self_signed_compute: bool,
-        timeout: Duration,
-    ) -> Result<PostgresConnection, ConnectionError> {
-        self.do_connect(allow_self_signed_compute, timeout)
-            .inspect_err(|err| {
-                // Immediately log the error we have at our disposal.
-                error!("couldn't connect to compute node: {err}");
-            })
-            .await
     }
 }
 

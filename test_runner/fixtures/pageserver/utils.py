@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.remote_storage import RemoteStorageKind, S3Storage
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -233,9 +234,6 @@ if TYPE_CHECKING:
 
 
 def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
-    # FIXME obseolete after https://github.com/neondatabase/neon/pull/4871
-    from fixtures.neon_fixtures import RemoteStorageKind, S3Storage
-
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert neon_env_builder.remote_storage_kind in (
         RemoteStorageKind.MOCK_S3,
@@ -243,6 +241,7 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
     )
     # For mypy
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
+    assert neon_env_builder.remote_storage_client is not None
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = neon_env_builder.remote_storage_client.list_objects_v2(

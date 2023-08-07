@@ -12,8 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
-    available_remote_storages,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -26,6 +24,10 @@ from fixtures.pageserver.utils import (
     wait_timeline_detail_404,
     wait_until_tenant_active,
     wait_until_timeline_state,
+)
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -268,6 +270,23 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             wait_timeline_detail_404(
                 ps_http, env.initial_tenant, timeline_id, iterations=iterations
             )
+
+            if failpoint == "timeline-delete-after-index-delete":
+                m = ps_http.get_metrics()
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "err"},
+                    ).value
+                    == 1
+                )
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "ok"},
+                    ).value
+                    == 1
+                )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state
@@ -736,7 +755,7 @@ def test_timeline_delete_works_for_remote_smoke(
         )
 
     # for some reason the check above doesnt immediately take effect for the below.
-    # Assume it is mock server incosistency and check twice.
+    # Assume it is mock server inconsistency and check twice.
     wait_until(
         2,
         0.5,

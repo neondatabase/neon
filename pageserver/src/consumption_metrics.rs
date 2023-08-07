@@ -113,7 +113,9 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: "written_size_bytes_delta",
+            // the name here is correctly about data not size, because that is what is wanted by
+            // downstream pipeline
+            metric: "written_data_bytes_delta",
         }
         .incremental_values()
     }

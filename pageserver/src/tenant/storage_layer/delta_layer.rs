@@ -41,7 +41,6 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use once_cell::sync::OnceCell;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -52,6 +51,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -242,7 +242,7 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
         println!(
             "index_start_blk: {}, root {}",
@@ -281,22 +281,24 @@ impl Layer for DeltaLayer {
             Ok(desc)
         };
 
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |delta_key, val| {
-                let blob_ref = BlobRef(val);
-                let key = DeltaKey::extract_key_from_buf(delta_key);
-                let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
+        tree_reader
+            .visit(
+                &[0u8; DELTA_KEY_SIZE],
+                VisitDirection::Forwards,
+                |delta_key, val| {
+                    let blob_ref = BlobRef(val);
+                    let key = DeltaKey::extract_key_from_buf(delta_key);
+                    let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
 
-                let desc = match dump_blob(blob_ref) {
-                    Ok(desc) => desc,
-                    Err(err) => format!("ERROR: {}", err),
-                };
-                println!("  key {} at {}: {}", key, lsn, desc);
-                true
-            },
-        )?;
+                    let desc = match dump_blob(blob_ref) {
+                        Ok(desc) => desc,
+                        Err(err) => format!("ERROR: {}", err),
+                    };
+                    println!("  key {} at {}: {}", key, lsn, desc);
+                    true
+                },
+            )
+            .await?;
 
         Ok(())
     }
@@ -315,7 +317,9 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+            let inner = self
+                .load(LayerAccessKind::GetValueReconstructData, ctx)
+                .await?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = &inner.file;
@@ -328,19 +332,21 @@ impl Layer for DeltaLayer {
 
             let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
-            tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                let blob_ref = BlobRef(value);
-                if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                    return false;
-                }
-                let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                if entry_lsn < lsn_range.start {
-                    return false;
-                }
-                offsets.push((entry_lsn, blob_ref.pos()));
+            tree_reader
+                .visit(&search_key.0, VisitDirection::Backwards, |key, value| {
+                    let blob_ref = BlobRef(value);
+                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                        return false;
+                    }
+                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                    if entry_lsn < lsn_range.start {
+                        return false;
+                    }
+                    offsets.push((entry_lsn, blob_ref.pos()));
 
-                !blob_ref.will_init()
-            })?;
+                    !blob_ref.will_init()
+                })
+                .await?;
 
             // Ok, 'offsets' now contains the offsets of all the entries we need to read
             let cursor = file.block_cursor();
@@ -493,7 +499,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
+    async fn load(
         &self,
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
@@ -503,10 +509,11 @@ impl DeltaLayer {
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner())
+            .await
             .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
     }
 
-    fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let file = VirtualFile::open(&path)
@@ -567,7 +574,7 @@ impl DeltaLayer {
                 file_size,
             ),
             access_stats,
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         }
     }
 
@@ -594,7 +601,7 @@ impl DeltaLayer {
                 metadata.len(),
             ),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         })
     }
 
@@ -614,19 +621,25 @@ impl DeltaLayer {
     /// Obtains all keys and value references stored in the layer
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+    pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer")?;
-        DeltaLayerInner::load_val_refs(inner).context("Layer index is corrupted")
+        DeltaLayerInner::load_val_refs(inner)
+            .await
+            .context("Layer index is corrupted")
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
+            .await
             .context("load delta layer keys")?;
-        inner.load_keys().context("Layer index is corrupted")
+        DeltaLayerInner::load_keys(inner)
+            .await
+            .context("Layer index is corrupted")
     }
 }
 
@@ -776,7 +789,7 @@ impl DeltaLayerWriterInner {
                 metadata.len(),
             ),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: once_cell::sync::OnceCell::new(),
+            inner: OnceCell::new(),
         };
 
         // fsync the file
@@ -899,7 +912,7 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
-    fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+    async fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let file = &this.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             this.index_start_blk,
@@ -908,23 +921,25 @@ impl DeltaLayerInner {
         );
 
         let mut all_offsets = Vec::<(Key, Lsn, ValueRef)>::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
-                let val_ref = ValueRef {
-                    blob_ref: BlobRef(value),
-                    reader: BlockCursor::new(Adapter(this.clone())),
-                };
-                all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
-                true
-            },
-        )?;
+        tree_reader
+            .visit(
+                &[0u8; DELTA_KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, value| {
+                    let delta_key = DeltaKey::from_slice(key);
+                    let val_ref = ValueRef {
+                        blob_ref: BlobRef(value),
+                        reader: BlockCursor::new(Adapter(this.clone())),
+                    };
+                    all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
+                    true
+                },
+            )
+            .await?;
 
         Ok(all_offsets)
     }
-    fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
+    async fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
@@ -933,26 +948,28 @@ impl DeltaLayerInner {
         );
 
         let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
-                let pos = BlobRef(value).pos();
-                if let Some(last) = all_keys.last_mut() {
-                    if last.0 == delta_key.key() {
-                        return true;
-                    } else {
-                        // subtract offset of new key BLOB and first blob of this key
-                        // to get total size if values associated with this key
-                        let first_pos = last.2;
-                        last.2 = pos - first_pos;
+        tree_reader
+            .visit(
+                &[0u8; DELTA_KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, value| {
+                    let delta_key = DeltaKey::from_slice(key);
+                    let pos = BlobRef(value).pos();
+                    if let Some(last) = all_keys.last_mut() {
+                        if last.0 == delta_key.key() {
+                            return true;
+                        } else {
+                            // subtract offset of new key BLOB and first blob of this key
+                            // to get total size if values associated with this key
+                            let first_pos = last.2;
+                            last.2 = pos - first_pos;
+                        }
                     }
-                }
-                all_keys.push((delta_key.key(), delta_key.lsn(), pos));
-                true
-            },
-        )?;
+                    all_keys.push((delta_key.key(), delta_key.lsn(), pos));
+                    true
+                },
+            )
+            .await?;
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of layer
             last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;

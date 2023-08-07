@@ -551,8 +551,8 @@ FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
-RUN wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/0.3.1.tar.gz -O pg_embedding.tar.gz && \
-    echo "c4ae84eef36fa8ec5868f6e061f39812f19ee5ba3604d428d40935685c7be512 pg_embedding.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/0.3.5.tar.gz -O pg_embedding.tar.gz && \
+    echo "0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 pg_embedding.tar.gz" | sha256sum --check && \
     mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -816,6 +816,7 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # libxml2, libxslt1.1 for xml2
 # libzstd1 for zstd
 # libboost*, libfreetype6, and zlib1g for rdkit
+# ca-certificates for communicating with s3 by compute_ctl
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
@@ -839,7 +840,8 @@ RUN apt update &&  \
         libcurl4-openssl-dev \
         locales \
         procps \
-        zlib1g && \
+        zlib1g \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 

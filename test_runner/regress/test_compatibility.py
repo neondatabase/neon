@@ -13,7 +13,6 @@ from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -22,6 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -337,6 +337,7 @@ def check_neon_works(
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
+    config.remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config

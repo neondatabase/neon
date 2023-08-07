@@ -6,8 +6,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
-    available_remote_storages,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -19,6 +17,7 @@ from fixtures.pageserver.utils import (
     wait_tenant_status_404,
     wait_until_tenant_state,
 )
+from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
 from fixtures.types import TenantId
 from fixtures.utils import run_pg_bench_small
 

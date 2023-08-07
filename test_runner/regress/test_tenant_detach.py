@@ -11,8 +11,6 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -20,6 +18,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_until_tenant_state,
 )
+from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample

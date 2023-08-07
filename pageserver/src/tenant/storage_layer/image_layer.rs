@@ -38,7 +38,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use once_cell::sync::OnceCell;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -48,6 +47,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -168,17 +168,19 @@ impl Layer for ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
         let file = &inner.file;
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
         tree_reader.dump().await?;
 
-        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-            println!("key: {} offset {}", hex::encode(key), value);
-            true
-        })?;
+        tree_reader
+            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+                println!("key: {} offset {}", hex::encode(key), value);
+                true
+            })
+            .await?;
 
         Ok(())
     }
@@ -195,14 +197,16 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+        let inner = self
+            .load(LayerAccessKind::GetValueReconstructData, ctx)
+            .await?;
 
         let file = &inner.file;
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf)? {
+        if let Some(offset) = tree_reader.get(&keybuf).await? {
             let blob = file.block_cursor().read_blob(offset).with_context(|| {
                 format!(
                     "failed to read value from data file {} at offset {}",
@@ -312,7 +316,11 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, access_kind: LayerAccessKind, ctx: &RequestContext) -> Result<&ImageLayerInner> {
+    async fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<&ImageLayerInner> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
         loop {
@@ -321,11 +329,12 @@ impl ImageLayer {
             }
             self.inner
                 .get_or_try_init(|| self.load_inner())
+                .await
                 .with_context(|| format!("Failed to load image layer {}", self.path().display()))?;
         }
     }
 
-    fn load_inner(&self) -> Result<ImageLayerInner> {
+    async fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
         // Open the file if it's not open already.

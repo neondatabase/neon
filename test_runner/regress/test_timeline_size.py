@@ -16,8 +16,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
-    RemoteStorageKind,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
@@ -29,6 +27,8 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
