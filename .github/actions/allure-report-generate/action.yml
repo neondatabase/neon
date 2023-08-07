@@ -121,10 +121,9 @@ runs:
           # There's no previously uploaded data for this $GITHUB_RUN_ID
           exit 0
         fi
-        for S3_FILEPATH in ${S3_FILEPATHS}; do
-          time aws s3 cp --only-show-errors "s3://${BUCKET}/${S3_FILEPATH}" "${WORKDIR}"
 
-          archive=${WORKDIR}/$(basename $S3_FILEPATH)
+        time aws s3 cp --recursive --only-show-errors "s3://${BUCKET}/${RAW_PREFIX}/" "${WORKDIR}/"
+        for archive in $(find ${WORKDIR} -name "*.tar.zst"); do
           mkdir -p ${archive%.tar.zst}
           time tar -xf ${archive} -C ${archive%.tar.zst}
           rm -f ${archive}
