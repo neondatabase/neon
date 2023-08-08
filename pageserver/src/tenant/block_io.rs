@@ -2,8 +2,7 @@
 //! Low-level Block-oriented I/O functions
 //!
 
-use crate::page_cache;
-use crate::page_cache::{ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
@@ -15,14 +14,12 @@ use std::sync::atomic::AtomicU64;
 /// There are currently two implementations: EphemeralFile, and FileBlockReader
 /// below.
 pub trait BlockReader {
-    type BlockLease: Deref<Target = [u8; PAGE_SZ]> + 'static;
-
     ///
     /// Read a block. Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     ///
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error>;
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error>;
 
     ///
     /// Create a new "cursor" for reading from this reader.
@@ -41,10 +38,45 @@ impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    type BlockLease = B::BlockLease;
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        (*self).read_blk(blknum).into()
+    }
+}
 
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        (*self).read_blk(blknum)
+/// A block accessible for reading
+///
+/// During builds with `#[cfg(test)]`, this is a proper enum
+/// with two variants to support testing code. During normal
+/// builds, it just has one variant and is thus a cheap newtype
+/// wrapper of [`PageReadGuard`]
+pub enum BlockLease {
+    PageReadGuard(PageReadGuard<'static>),
+    #[cfg(test)]
+    Rc(std::rc::Rc<[u8; PAGE_SZ]>),
+}
+
+impl From<PageReadGuard<'static>> for BlockLease {
+    fn from(value: PageReadGuard<'static>) -> Self {
+        BlockLease::PageReadGuard(value)
+    }
+}
+
+#[cfg(test)]
+impl From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease {
+    fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
+        BlockLease::Rc(value)
+    }
+}
+
+impl Deref for BlockLease {
+    type Target = [u8; PAGE_SZ];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            BlockLease::PageReadGuard(v) => v.deref(),
+            #[cfg(test)]
+            BlockLease::Rc(v) => v.deref(),
+        }
     }
 }
 
@@ -80,8 +112,8 @@ where
         BlockCursor { reader }
     }
 
-    pub fn read_blk(&self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum)
+    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum).into()
     }
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -118,9 +150,7 @@ impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    type BlockLease = page_cache::PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
@@ -132,7 +162,7 @@ where
                         format!("Failed to read immutable buf: {e:#}"),
                     )
                 })? {
-                ReadBufResult::Found(guard) => break Ok(guard),
+                ReadBufResult::Found(guard) => break Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
                     self.fill_buffer(write_guard.deref_mut(), blknum)?;
