@@ -86,19 +86,6 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-WORKER_PORT_NUM: int = 1000
-
-
-def pytest_configure(config: Config):
-    """
-    Check that we do not overflow available ports range.
-    """
-
-    numprocesses = config.getoption("numprocesses")
-    if (
-        numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768
-    ):  # do not use ephemeral ports
-        raise Exception("Too many workers configured. Cannot distribute ports for services.")
 
 
 @pytest.fixture(scope="session")
@@ -201,6 +188,11 @@ def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "fu
 
 
 @pytest.fixture(scope="session")
+def worker_port_num():
+    return (32768 - BASE_PORT) // int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
+
+
+@pytest.fixture(scope="session")
 def worker_seq_no(worker_id: str) -> int:
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -212,10 +204,10 @@ def worker_seq_no(worker_id: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def worker_base_port(worker_seq_no: int) -> int:
-    # so we divide ports in ranges of 100 ports
+def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
+    # so we divide ports in ranges of ports
     # so workers have disjoint set of ports for services
-    return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
+    return BASE_PORT + worker_seq_no * worker_port_num
 
 
 def get_dir_size(path: str) -> int:
@@ -229,8 +221,8 @@ def get_dir_size(path: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def port_distributor(worker_base_port: int) -> PortDistributor:
-    return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
+def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistributor:
+    return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
 @pytest.fixture(scope="session")
