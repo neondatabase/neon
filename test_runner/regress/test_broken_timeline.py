@@ -20,7 +20,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*Failed to load delta layer.*",
+            ".*layer loading failed:.*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
@@ -87,7 +87,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # Second timeline will fail during basebackup, because the local layer file is corrupt.
     # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
-    with pytest.raises(Exception, match="Failed to load delta layer") as err:
+    with pytest.raises(Exception, match="layer loading failed:") as err:
         pg2.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant2}/{timeline2} with corrupt layers: {err}"
