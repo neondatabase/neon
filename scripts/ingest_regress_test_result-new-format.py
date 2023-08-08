@@ -1,13 +1,14 @@
 #! /usr/bin/env python3
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
 import re
 import sys
-from collections import namedtuple
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
@@ -23,9 +24,9 @@ CREATE TABLE IF NOT EXISTS results (
     suite        TEXT NOT NULL,
     name         TEXT NOT NULL,
     status       TEXT NOT NULL,
-    start_ts     TIMESTAMP NOT NULL,
-    stop_ts      TIMESTAMP NOT NULL,
-    duration_s   INT NOT NULL,
+    started_at   TIMESTAMPTZ NOT NULL,
+    stopped_at   TIMESTAMPTZ NOT NULL,
+    duration     INT NOT NULL,
     flaky        BOOLEAN NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
@@ -34,30 +35,29 @@ CREATE TABLE IF NOT EXISTS results (
     reference    TEXT NOT NULL,
     revision     CHAR(40) NOT NULL,
     raw          JSONB COMPRESSION lz4 NOT NULL,
-    UNIQUE (parent_suite, suite, name, build_type, pg_version, start_ts, stop_ts, run_id)
+    UNIQUE (parent_suite, suite, name, build_type, pg_version, started_at, stopped_at, run_id)
 );
 """
 
-Row = namedtuple(
-    "Row",
-    [
-        "parent_suite",
-        "suite",
-        "name",
-        "status",
-        "start_ts",
-        "stop_ts",
-        "duration_s",
-        "flaky",
-        "build_type",
-        "pg_version",
-        "run_id",
-        "run_attempt",
-        "reference",
-        "revision",
-        "raw",
-    ],
-)
+
+@dataclass
+class Row:
+    parent_suite: str
+    suite: str
+    name: str
+    status: str
+    started_at: datetime
+    stopped_at: datetime
+    duration: int
+    flaky: bool
+    build_type: str
+    pg_version: int
+    run_id: int
+    run_attempt: int
+    reference: str
+    revision: str
+    raw: str
+
 
 TEST_NAME_RE = re.compile(r"[\[-](?P<build_type>debug|release)-pg(?P<pg_version>\d+)[-\]]")
 
@@ -128,9 +128,9 @@ def ingest_test_result(
             suite=labels["suite"],
             name=unparametrized_name,
             status=test["status"],
-            start_ts=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
-            stop_ts=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
-            duration_s=round(test["time"]["duration"] / 1000),
+            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
+            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
+            duration=round(test["time"]["duration"] / 1000),
             flaky=test["flaky"] or test["retriesStatusChange"],
             build_type=build_type,
             pg_version=pg_version,
@@ -140,9 +140,9 @@ def ingest_test_result(
             revision=revision,
             raw=json.dumps(raw),
         )
-        rows.append(tuple(row))
+        rows.append(dataclasses.astuple(row))
 
-    columns = ",".join(Row._fields)
+    columns = ",".join(f.name for f in dataclasses.fields(Row))
     query = f"INSERT INTO results ({columns}) VALUES %s ON CONFLICT DO NOTHING"
     execute_values(cur, query, rows)
 
