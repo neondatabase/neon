@@ -108,12 +108,10 @@ impl From<&DeltaLayer> for Summary {
 // Flag indicating that this version initialize the page
 const WILL_INIT: u64 = 1;
 
-///
 /// Struct representing reference to BLOB in layers. Reference contains BLOB
 /// offset, and for WAL records it also contains `will_init` flag. The flag
 /// helps to determine the range of records that needs to be applied, without
 /// reading/deserializing records themselves.
-///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct BlobRef(pub u64);
 
@@ -138,10 +136,8 @@ impl BlobRef {
 pub const DELTA_KEY_SIZE: usize = KEY_SIZE + 8;
 struct DeltaKey([u8; DELTA_KEY_SIZE]);
 
-///
 /// This is the key of the B-tree index stored in the delta layer. It consists
 /// of the serialized representation of a Key and LSN.
-///
 impl DeltaKey {
     fn from_slice(buf: &[u8]) -> Self {
         let mut bytes: [u8; DELTA_KEY_SIZE] = [0u8; DELTA_KEY_SIZE];
