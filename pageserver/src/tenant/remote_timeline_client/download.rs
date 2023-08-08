@@ -259,13 +259,19 @@ pub(super) async fn download_index_part(
     )
     .await?;
 
-    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
+    let decode_result = serde_json::from_slice::<IndexPart>(&index_part_bytes)
         .with_context(|| {
             format!("Failed to deserialize index part file into file {index_part_path:?}")
         })
-        .map_err(DownloadError::Other)?;
+        .map_err(DownloadError::Other);
 
-    Ok(index_part)
+    // Peek at the result, and log the original bytes if they failed to decode
+    if decode_result.is_err() {
+        let index_str = String::from_utf8_lossy(index_part_bytes.as_slice());
+        warn!("Corrupt index bytes: {index_str}");
+    }
+
+    decode_result
 }
 
 ///

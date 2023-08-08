@@ -600,10 +600,7 @@ impl Tenant {
             debug!("successfully downloaded index part for timeline {timeline_id}");
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
-                    timeline_ancestors.insert(
-                        timeline_id,
-                        index_part.parse_metadata().context("parse_metadata")?,
-                    );
+                    timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
                 MaybeDeletedIndexPart::Deleted(_) => {
@@ -1128,10 +1125,7 @@ impl Tenant {
                         }
                     };
 
-                    let remote_metadata = index_part
-                        .parse_metadata()
-                        .context("parse_metadata")
-                        .map_err(LoadLocalTimelineError::Load)?;
+                    let remote_metadata = index_part.metadata.clone();
                     (
                         Some(RemoteStartupData {
                             index_part,

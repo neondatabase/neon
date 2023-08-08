@@ -1722,7 +1722,7 @@ impl Timeline {
 
         let mut corrupted_local_layers = Vec::new();
         let mut added_remote_layers = Vec::new();
-        for remote_layer_name in &index_part.timeline_layers {
+        for remote_layer_name in index_part.layer_metadata.keys() {
             let local_layer = local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
@@ -1877,7 +1877,7 @@ impl Timeline {
             Some(index_part) => {
                 info!(
                     "initializing upload queue from remote index with {} layer files",
-                    index_part.timeline_layers.len()
+                    index_part.layer_metadata.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
                 self.create_remote_layers(index_part, local_layers, disk_consistent_lsn)
