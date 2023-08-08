@@ -498,9 +498,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             if let Some(stop_pos) = self.stop_pos {
                 if self.start_pos >= stop_pos {
                     // recovery finished
-                    // Note that "ending streaming" part of the string is used by
-                    // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                    // do not change this string without updating pageserver.
                     return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                         "ending streaming to walproposer at {}, recovery finished",
                         self.start_pos
