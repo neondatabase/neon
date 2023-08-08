@@ -72,6 +72,8 @@ pub(super) async fn upload_timeline_layer<'a>(
             // upload. However, a nonexistent file can also be indicative of
             // something worse, like when a file is scheduled for upload before
             // it has been written to disk yet.
+            //
+            // This is tested against `test_compaction_delete_before_upload`
             info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
