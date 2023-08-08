@@ -4,6 +4,7 @@ pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod layer;
 mod layer_desc;
 mod remote_layer;
 
