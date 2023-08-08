@@ -1,8 +1,8 @@
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
-    register_counter_vec, register_f64_gauge_vec, register_histogram, register_histogram_vec,
+    register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, F64GaugeVec, Histogram,
+    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
     HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
@@ -396,8 +396,8 @@ pub(crate) static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(||
 
 /// How long did we take to start up?  Broken down by labels to describe
 /// different phases of startup.
-pub static STARTUP_DURATION: Lazy<F64GaugeVec> = Lazy::new(|| {
-    register_f64_gauge_vec!(
+pub static STARTUP_DURATION: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
         "pageserver_startup_duration_seconds",
         "Time taken by phases of pageserver startup, in seconds",
         &["phase"]

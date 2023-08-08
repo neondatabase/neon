@@ -3,7 +3,6 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 use once_cell::sync::Lazy;
-use prometheus::core::AtomicF64;
 use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
 pub use prometheus::opts;
 pub use prometheus::register;
@@ -29,7 +28,6 @@ pub mod metric_vec_duration;
 
 pub type UIntGauge = GenericGauge<AtomicU64>;
 pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;
-pub type F64GaugeVec = GenericGaugeVec<AtomicF64>;
 
 #[macro_export]
 macro_rules! register_uint_gauge_vec {
@@ -44,14 +42,6 @@ macro_rules! register_uint_gauge {
     ($NAME:expr, $HELP:expr $(,)?) => {{
         let gauge = $crate::UIntGauge::new($NAME, $HELP).unwrap();
         $crate::register(Box::new(gauge.clone())).map(|_| gauge)
-    }};
-}
-
-#[macro_export]
-macro_rules! register_f64_gauge_vec {
-    ($NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{
-        let gauge_vec = F64GaugeVec::new($crate::opts!($NAME, $HELP), $LABELS_NAMES).unwrap();
-        $crate::register(Box::new(gauge_vec.clone())).map(|_| gauge_vec)
     }};
 }
 
