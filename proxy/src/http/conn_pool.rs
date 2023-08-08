@@ -1,6 +1,8 @@
 use anyhow::Context;
 use async_trait::async_trait;
+use native_tls::TlsConnector;
 use parking_lot::Mutex;
+use postgres_native_tls::MakeTlsConnector;
 use pq_proto::StartupMessageParams;
 use std::fmt;
 use std::{collections::HashMap, sync::Arc};
@@ -54,6 +56,7 @@ pub struct EndpointConnPool {
 }
 
 pub struct GlobalConnPool {
+    tls_connector: MakeTlsConnector,
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
@@ -72,6 +75,9 @@ pub struct GlobalConnPool {
 impl GlobalConnPool {
     pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
         Arc::new(Self {
+            tls_connector: MakeTlsConnector::new(
+                TlsConnector::new().expect("TlsConnector should be constructable"),
+            ),
             global_pool: Mutex::new(HashMap::new()),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
@@ -123,6 +129,11 @@ impl GlobalConnPool {
             info!("pool: throwing away connection '{conn_info}' because connection is closed");
             return Ok(());
         }
+        // given a timeout, a query can still be in flight. best to terminate it
+        client
+            .cancel_token()
+            .cancel_query(self.tls_connector.clone())
+            .await?;
 
         let pool = self.get_endpoint_pool(&conn_info.hostname).await;
 

@@ -318,7 +318,7 @@ async fn query_to_json<T: GenericClient>(
 ) -> anyhow::Result<Value> {
     let query_params = json_to_pg_text(data.params)?;
     let row_stream = client
-        .query_raw_txt::<String, _>(data.query, query_params)
+        .query_raw_txt(&data.query, query_params)
         .await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging

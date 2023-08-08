@@ -243,7 +243,7 @@ def test_sql_over_http_fail(static_proxy: NeonProxy):
         return response.json()
 
     res = q("SELECT pg_sleep(16.0)")
-    assert res["message"] == "deadline has elapsed"
+    assert "deadline has elapsed" in res["message"]
 
 
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
