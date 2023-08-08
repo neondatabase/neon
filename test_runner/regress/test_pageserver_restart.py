@@ -12,6 +12,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 
     env.neon_cli.create_branch("test_pageserver_restart")
     endpoint = env.endpoints.create_start("test_pageserver_restart")
+    pageserver_http = env.pageserver.http_client()
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -52,8 +53,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # pageserver does if a compute node connects and sends a request for the tenant
     # while it's still in Loading state. (It waits for the loading to finish, and then
     # processes the request.)
+    tenant_load_delay_ms = 5000
     env.pageserver.stop()
-    env.pageserver.start(extra_env_vars={"FAILPOINTS": "before-loading-tenant=return(5000)"})
+    env.pageserver.start(extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"})
 
     # Check that it's in Loading state
     client = env.pageserver.http_client()
@@ -64,6 +66,36 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # Try to read. This waits until the loading finishes, and then return normally.
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
+
+    # Validate startup time metrics
+    metrics = pageserver_http.get_metrics()
+
+    # Expectation callbacks: arg t is sample value, arg p is the previous phase's sample value
+    expectations = {
+        "initial": lambda t, p: True,  # make no assumptions about the initial time point, it could be 0 in theory
+        # Initial tenant load should reflect the delay we injected
+        "initial_tenant_load": lambda t, p: t >= (tenant_load_delay_ms / 1000.0) and t >= p,
+        # Subsequent steps should occur in expected order
+        "initial_logical_sizes": lambda t, p: t > 0 and t >= p,
+        "background_jobs_can_start": lambda t, p: t > 0 and t >= p,
+        "complete": lambda t, p: t > 0 and t >= p,
+    }
+
+    prev_value = None
+    for sample in metrics.query_all("pageserver_startup_duration_seconds"):
+        labels = dict(sample.labels)
+        phase = labels['phase']
+        log.info(f"metric {phase}={sample.value}")
+        assert phase in expectations, f"Unexpected phase {phase}"
+        assert expectations[phase](sample.value, prev_value), f"Unexpected value for {phase}: {sample.value}"
+        prev_value = sample.value
+
+    # Startup is complete, this metric should exist but be zero
+    assert metrics.query_one("pageserver_startup_is_loading").value == 0
+
+    # This histogram should have been populated, although we aren't specific about exactly
+    # which bucket values: just nonzero
+    assert any(bucket.value > 0 for bucket in metrics.query_all("pageserver_tenant_activation_seconds_bucket"))
 
 
 # Test that repeatedly kills and restarts the page server, while the
