@@ -5,7 +5,7 @@ use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
-    proxy::handle_try_wake,
+    proxy::{handle_try_wake, retry_after},
     sasl, scram,
     stream::PqStream,
 };
@@ -62,10 +62,13 @@ pub(super) async fn authenticate(
             }
             Ok(ControlFlow::Continue(e)) => {
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-                num_retries += 1;
             }
             Ok(ControlFlow::Break(n)) => break n,
         }
+
+        let wait_duration = retry_after(num_retries);
+        num_retries += 1;
+        tokio::time::sleep(wait_duration).await;
     };
     if let Some(keys) = scram_keys {
         use tokio_postgres::config::AuthKeys;
