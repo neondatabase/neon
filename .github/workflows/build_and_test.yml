@@ -955,7 +955,7 @@ jobs:
         version: [ v14, v15 ]
 
     env:
-      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:latest
       AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ github.ref_name == 'release' && secrets.AWS_SECRET_KEY_PROD || secrets.AWS_SECRET_KEY_DEV }}
       S3_BUCKETS: ${{ github.ref_name == 'release' && vars.S3_EXTENSIONS_BUCKETS_PROD || vars.S3_EXTENSIONS_BUCKETS_DEV }}
