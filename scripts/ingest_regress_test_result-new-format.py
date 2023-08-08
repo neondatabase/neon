@@ -130,7 +130,7 @@ def ingest_test_result(
             status=test["status"],
             started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
             stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
-            duration=round(test["time"]["duration"] / 1000),
+            duration=test["time"]["duration"],
             flaky=test["flaky"] or test["retriesStatusChange"],
             build_type=build_type,
             pg_version=pg_version,
