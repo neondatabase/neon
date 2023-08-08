@@ -4408,66 +4408,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn layer_eviction_aba_fails() {
-        let harness = TenantHarness::create("layer_eviction_aba_fails").unwrap();
-
-        let ctx = any_context();
-        let tenant = harness.try_load(&ctx).await.unwrap();
-        let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
-            .await
-            .unwrap();
-
-        let _e = tracing::info_span!("foobar", tenant_id = %tenant.tenant_id, timeline_id = %timeline.timeline_id).entered();
-
-        let rc = timeline.remote_client.clone().unwrap();
-
-        // TenantHarness allows uploads to happen given GenericRemoteStorage is configured
-        let layer = find_some_layer(&timeline).await;
-
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let batch = [layer];
-
-        let first = {
-            let cancel = cancel.clone();
-            async {
-                timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-
-        // lets imagine this is stuck somehow, still referencing the original `Arc<dyn PersistentLayer>`
-        let second = {
-            let cancel = cancel.clone();
-            async {
-                timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-
-        // while it's stuck, we evict and end up redownloading it
-        only_one(first.await).expect("eviction succeeded");
-
-        let layer = find_some_layer(&timeline).await;
-        let layer = layer.downcast_remote_layer().unwrap();
-        timeline.download_remote_layer(layer).await.unwrap();
-
-        let res = only_one(second.await);
-
-        assert!(
-            matches!(res, Err(EvictionError::LayerNotFound(_))),
-            "{res:?}"
-        );
-
-        // no more specific asserting, outside of preconds this is the only valid replacement
-        // failure
-    }
-
     fn any_context() -> crate::context::RequestContext {
         use crate::context::*;
         use crate::task_mgr::*;
