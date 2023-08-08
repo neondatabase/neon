@@ -53,6 +53,9 @@ pub struct VirtualFile {
     pub path: PathBuf,
     open_options: OpenOptions,
 
+    // These are strings becase we only use them for metrics, and those expect strings.
+    // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
+    // strings.
     tenant_id: String,
     timeline_id: String,
 }
