@@ -1,4 +1,5 @@
 use super::storage_layer::LayerFileName;
+use super::storage_layer::ResidentLayer;
 use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -237,7 +238,7 @@ pub(crate) struct Delete {
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
@@ -252,13 +253,13 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
+            UploadOp::UploadLayer(layer, metadata) => {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    path.file_name(),
+                    layer,
                     metadata.file_size(),
-                    metadata.generation,
+                    metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use core::fmt::Display;
 use std::ops::Range;
 use utils::{
@@ -6,7 +5,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{context::RequestContext, repository::Key};
+use crate::repository::Key;
 
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
@@ -189,21 +188,31 @@ impl PersistentLayerDesc {
         self.is_delta
     }
 
-    pub fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} is_delta {} is_incremental {} size {} ----",
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end,
-            self.is_delta,
-            self.is_incremental(),
-            self.file_size,
-        );
-
-        Ok(())
+    pub fn dump(&self) {
+        if self.is_delta {
+            println!(
+                "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} is_incremental {} size {} ----",
+                self.tenant_id,
+                self.timeline_id,
+                self.key_range.start,
+                self.key_range.end,
+                self.lsn_range.start,
+                self.lsn_range.end,
+                self.is_incremental(),
+                self.file_size,
+            );
+        } else {
+            println!(
+                "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
+                self.tenant_id,
+                self.timeline_id,
+                self.key_range.start,
+                self.key_range.end,
+                self.image_layer_lsn(),
+                self.is_incremental(),
+                self.file_size
+            );
+        }
     }
 
     pub fn file_size(&self) -> u64 {
