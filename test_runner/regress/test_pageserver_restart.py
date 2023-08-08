@@ -55,7 +55,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # processes the request.)
     tenant_load_delay_ms = 5000
     env.pageserver.stop()
-    env.pageserver.start(extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"})
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"}
+    )
 
     # Check that it's in Loading state
     client = env.pageserver.http_client()
@@ -84,10 +86,12 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     prev_value = None
     for sample in metrics.query_all("pageserver_startup_duration_seconds"):
         labels = dict(sample.labels)
-        phase = labels['phase']
+        phase = labels["phase"]
         log.info(f"metric {phase}={sample.value}")
         assert phase in expectations, f"Unexpected phase {phase}"
-        assert expectations[phase](sample.value, prev_value), f"Unexpected value for {phase}: {sample.value}"
+        assert expectations[phase](
+            sample.value, prev_value
+        ), f"Unexpected value for {phase}: {sample.value}"
         prev_value = sample.value
 
     # Startup is complete, this metric should exist but be zero
@@ -95,7 +99,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 
     # This histogram should have been populated, although we aren't specific about exactly
     # which bucket values: just nonzero
-    assert any(bucket.value > 0 for bucket in metrics.query_all("pageserver_tenant_activation_seconds_bucket"))
+    assert any(
+        bucket.value > 0
+        for bucket in metrics.query_all("pageserver_tenant_activation_seconds_bucket")
+    )
 
 
 # Test that repeatedly kills and restarts the page server, while the
