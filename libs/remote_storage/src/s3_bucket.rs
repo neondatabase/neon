@@ -77,8 +77,6 @@ impl S3Bucket {
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
             .or_else(
@@ -87,6 +85,8 @@ impl S3Bucket {
                     .configure(&provider_conf)
                     .build(),
             )
+            // uses imds v2
+            .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
         let mut config_builder = Config::builder()
