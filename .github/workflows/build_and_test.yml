@@ -819,8 +819,8 @@ jobs:
         run: |
           ./vm-builder \
             -enable-file-cache \
-            -informant=neondatabase/vm-informant \
-            -monitor=neondatabase/vm-monitor \
+            -informant="neondatabase/vm-informant:v0.15.0-alpha1" \
+            -monitor="neondatabase/vm-monitor:v0.15.0-alpha1" \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
