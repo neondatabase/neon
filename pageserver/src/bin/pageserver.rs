@@ -236,7 +236,7 @@ fn start_pageserver(
         let secs = elapsed.as_secs_f64();
         STARTUP_DURATION.with_label_values(&[phase]).set(secs);
         info!(
-            elapsed_millis = elapsed.as_millis(),
+            elapsed_ms = elapsed.as_millis(),
             "{human_phase} ({secs:.3}s since start)"
         )
     };
