@@ -136,6 +136,8 @@ pub struct ImageLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
+    lsn: Lsn,
+
     /// Reader object for reading blocks from the file.
     file: FileBlockReader<VirtualFile>,
 }
@@ -200,27 +202,11 @@ impl Layer for ImageLayer {
         let inner = self
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
-
-        let file = &inner.file;
-        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf).await? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.path().display(),
-                    offset
-                )
-            })?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
+        inner
+            .get_value_reconstruct_data(key, reconstruct_state)
+            .await
+            // FIXME: makes no sense to dump paths
+            .with_context(|| format!("read {}", self.path().display()))
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
@@ -366,6 +352,7 @@ impl ImageLayer {
         Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            lsn: self.lsn,
             file,
         })
     }
@@ -434,6 +421,32 @@ impl ImageLayer {
             self.desc.tenant_id,
             &self.layer_name(),
         )
+    }
+}
+
+impl ImageLayerInner {
+    pub(super) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf).await? {
+            let blob = file
+                .block_cursor()
+                .read_blob(offset)
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+
+            reconstruct_state.img = Some((self.lsn, value));
+            Ok(ValueReconstructResult::Complete)
+        } else {
+            Ok(ValueReconstructResult::Missing)
+        }
     }
 }
 

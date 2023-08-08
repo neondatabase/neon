@@ -307,86 +307,16 @@ impl Layer for DeltaLayer {
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.desc.lsn_range.start);
-        let mut need_image = true;
 
         ensure!(self.desc.key_range.contains(&key));
 
-        {
-            // Open the file and lock the metadata in memory
-            let inner = self
-                .load(LayerAccessKind::GetValueReconstructData, ctx)
-                .await?;
+        let inner = self
+            .load(LayerAccessKind::GetValueReconstructData, ctx)
+            .await?;
 
-            // Scan the page versions backwards, starting from `lsn`.
-            let file = &inner.file;
-            let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-                inner.index_start_blk,
-                inner.index_root_blk,
-                file,
-            );
-            let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
-
-            let mut offsets: Vec<(Lsn, u64)> = Vec::new();
-
-            tree_reader
-                .visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                    let blob_ref = BlobRef(value);
-                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                        return false;
-                    }
-                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                    if entry_lsn < lsn_range.start {
-                        return false;
-                    }
-                    offsets.push((entry_lsn, blob_ref.pos()));
-
-                    !blob_ref.will_init()
-                })
-                .await?;
-
-            // Ok, 'offsets' now contains the offsets of all the entries we need to read
-            let cursor = file.block_cursor();
-            let mut buf = Vec::new();
-            for (entry_lsn, pos) in offsets {
-                cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
-                    format!(
-                        "Failed to read blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
-                let val = Value::des(&buf).with_context(|| {
-                    format!(
-                        "Failed to deserialize file blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
-                match val {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((entry_lsn, img));
-                        need_image = false;
-                        break;
-                    }
-                    Value::WalRecord(rec) => {
-                        let will_init = rec.will_init();
-                        reconstruct_state.records.push((entry_lsn, rec));
-                        if will_init {
-                            // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            // release metadata lock and close the file
-        }
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
+        inner
+            .get_value_reconstruct_data(key, lsn_range, reconstruct_state)
+            .await
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
@@ -908,6 +838,83 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
+    pub(super) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        let mut need_image = true;
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+        let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
+
+        let mut offsets: Vec<(Lsn, u64)> = Vec::new();
+
+        tree_reader
+            .visit(&search_key.0, VisitDirection::Backwards, |key, value| {
+                let blob_ref = BlobRef(value);
+                if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                    return false;
+                }
+                let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                if entry_lsn < lsn_range.start {
+                    return false;
+                }
+                offsets.push((entry_lsn, blob_ref.pos()));
+
+                !blob_ref.will_init()
+            })
+            .await?;
+
+        // Ok, 'offsets' now contains the offsets of all the entries we need to read
+        let cursor = file.block_cursor();
+        let mut buf = Vec::new();
+        for (entry_lsn, pos) in offsets {
+            cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
+                format!(
+                    "Failed to read blob from virtual file {}",
+                    file.file.path.display()
+                )
+            })?;
+            let val = Value::des(&buf).with_context(|| {
+                format!(
+                    "Failed to deserialize file blob from virtual file {}",
+                    file.file.path.display()
+                )
+            })?;
+            match val {
+                Value::Image(img) => {
+                    reconstruct_state.img = Some((entry_lsn, img));
+                    need_image = false;
+                    break;
+                }
+                Value::WalRecord(rec) => {
+                    let will_init = rec.will_init();
+                    reconstruct_state.records.push((entry_lsn, rec));
+                    if will_init {
+                        // This WAL record initializes the page, so no need to go further back
+                        need_image = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If an older page image is needed to reconstruct the page, let the
+        // caller know.
+        if need_image {
+            Ok(ValueReconstructResult::Continue)
+        } else {
+            Ok(ValueReconstructResult::Complete)
+        }
+    }
+
     async fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
         let file = &this.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
