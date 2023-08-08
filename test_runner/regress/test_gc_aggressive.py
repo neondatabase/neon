@@ -8,9 +8,9 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import query_scalar
 

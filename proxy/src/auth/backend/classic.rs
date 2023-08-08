@@ -10,7 +10,7 @@ use crate::{
     stream::PqStream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{error, info, warn};
 
 pub(super) async fn authenticate(
     api: &impl console::Api,
@@ -55,11 +55,17 @@ pub(super) async fn authenticate(
     let mut num_retries = 0;
     let mut node = loop {
         let wake_res = api.wake_compute(extra, creds).await;
-        match handle_try_wake(wake_res, num_retries)? {
-            ControlFlow::Continue(_) => num_retries += 1,
-            ControlFlow::Break(n) => break n,
+        match handle_try_wake(wake_res, num_retries) {
+            Err(e) => {
+                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                return Err(e.into());
+            }
+            Ok(ControlFlow::Continue(e)) => {
+                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+                num_retries += 1;
+            }
+            Ok(ControlFlow::Break(n)) => break n,
         }
-        info!(num_retries, "retrying wake compute");
     };
     if let Some(keys) = scram_keys {
         use tokio_postgres::config::AuthKeys;

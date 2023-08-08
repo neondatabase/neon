@@ -816,6 +816,7 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # libxml2, libxslt1.1 for xml2
 # libzstd1 for zstd
 # libboost*, libfreetype6, and zlib1g for rdkit
+# ca-certificates for communicating with s3 by compute_ctl
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
@@ -839,7 +840,8 @@ RUN apt update &&  \
         libcurl4-openssl-dev \
         locales \
         procps \
-        zlib1g && \
+        zlib1g \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 

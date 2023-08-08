@@ -4,10 +4,10 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
 

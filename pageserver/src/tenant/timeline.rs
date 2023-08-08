@@ -19,6 +19,7 @@ use pageserver_api::models::{
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -528,7 +529,7 @@ impl Timeline {
         size
     }
 
-    pub fn get_resident_physical_size(&self) -> u64 {
+    pub fn resident_physical_size(&self) -> u64 {
         self.metrics.resident_physical_size_gauge.get()
     }
 
@@ -697,6 +698,9 @@ impl Timeline {
                 Err(CompactionError::DownloadRequired(rls)) => {
                     anyhow::bail!("Compaction requires downloading multiple times (last was {} layers), possibly battling against eviction", rls.len())
                 }
+                Err(CompactionError::ShuttingDown) => {
+                    return Ok(());
+                }
                 Err(CompactionError::Other(e)) => {
                     return Err(e);
                 }
@@ -778,7 +782,8 @@ impl Timeline {
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         if self.is_stopping() {
-            return Err(anyhow::anyhow!("timeline is Stopping").into());
+            trace!("Dropping out of compaction on timeline shutdown");
+            return Err(CompactionError::ShuttingDown);
         }
 
         let target_file_size = self.get_checkpoint_distance();
@@ -3235,6 +3240,8 @@ enum CompactionError {
     /// This should not happen repeatedly, but will be retried once by top-level
     /// `Timeline::compact`.
     DownloadRequired(Vec<Arc<RemoteLayer>>),
+    /// The timeline or pageserver is shutting down
+    ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     Other(anyhow::Error),
 }
@@ -3512,10 +3519,41 @@ impl Timeline {
         // min-heap (reserve space for one more element added before eviction)
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
-        for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 < b.0),
-        )? {
+
+        let mut all_value_refs = Vec::new();
+        for l in deltas_to_compact.iter() {
+            // TODO: replace this with an await once we fully go async
+            all_value_refs.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_val_refs(ctx),
+                )?,
+            );
+        }
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_value_refs.sort_by_key(|(key, lsn, _value_ref)| (*key, *lsn));
+
+        let mut all_keys = Vec::new();
+        for l in deltas_to_compact.iter() {
+            // TODO: replace this with an await once we fully go async
+            all_keys.extend(
+                Handle::current().block_on(
+                    l.clone()
+                        .downcast_delta_layer()
+                        .expect("delta layer")
+                        .load_keys(ctx),
+                )?,
+            );
+        }
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_keys.sort_by_key(|(key, lsn, _size)| (*key, *lsn));
+
+        for (next_key, _next_lsn, _size) in all_keys.iter() {
+            let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
                 if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
@@ -3548,34 +3586,10 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    if let Ok((a_key, a_lsn, _)) = a {
-                        if let Ok((b_key, b_lsn, _)) = b {
-                            (a_key, a_lsn) < (b_key, b_lsn)
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
-                })
-            },
-        )?;
+        let all_values_iter = all_value_refs.into_iter();
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    (a_key, a_lsn) < (b_key, b_lsn)
-                })
-            },
-        )?;
+        let mut all_keys_iter = all_keys.into_iter();
 
         stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
@@ -3629,8 +3643,8 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        for x in all_values_iter {
-            let (key, lsn, value) = x?;
+        for (key, lsn, value_ref) in all_values_iter {
+            let value = value_ref.load()?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {

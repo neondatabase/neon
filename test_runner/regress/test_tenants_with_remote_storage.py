@@ -16,17 +16,19 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
+)
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until

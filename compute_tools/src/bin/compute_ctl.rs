@@ -5,6 +5,8 @@
 //! - `compute_ctl` accepts cluster (compute node) specification as a JSON file.
 //! - Every start is a fresh start, so the data directory is removed and
 //!   initialized again on each run.
+//! - If remote_extension_config is provided, it will be used to fetch extensions list
+//!  and download `shared_preload_libraries` from the remote storage.
 //! - Next it will put configuration files into the `PGDATA` directory.
 //! - Sync safekeepers and get commit LSN.
 //! - Get `basebackup` from pageserver using the returned on the previous step LSN.
@@ -27,7 +29,8 @@
 //! compute_ctl -D /var/db/postgres/compute \
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
-//!             -b /usr/local/bin/postgres
+//!             -b /usr/local/bin/postgres \
+//!             -r {"bucket": "neon-dev-extensions-eu-central-1", "region": "eu-central-1"}
 //! ```
 //!
 use std::collections::HashMap;
@@ -35,7 +38,7 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -48,22 +51,33 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
+use compute_tools::extension_server::{get_pg_version, init_remote_storage};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
-const BUILD_TAG_DEFAULT: &str = "local";
+// this is an arbitrary build tag. Fine as a default / for testing purposes
+// in-case of not-set environment var
+const BUILD_TAG_DEFAULT: &str = "5670669815";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
-
+    let build_tag = option_env!("BUILD_TAG")
+        .unwrap_or(BUILD_TAG_DEFAULT)
+        .to_string();
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
+    let pgbin_default = String::from("postgres");
+    let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
+
+    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
+    let ext_remote_storage = remote_ext_config.map(|x| {
+        init_remote_storage(x).expect("cannot initialize remote extension storage from config")
+    });
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -128,9 +142,6 @@ fn main() -> Result<()> {
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
-    // Try to use just 'postgres' if no path is provided
-    let pgbin = matches.get_one::<String>("pgbin").unwrap();
-
     let spec;
     let mut live_config_allowed = false;
     match spec_json {
@@ -168,6 +179,7 @@ fn main() -> Result<()> {
 
     let mut new_state = ComputeState::new();
     let spec_set;
+
     if let Some(spec) = spec {
         let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
         new_state.pspec = Some(pspec);
@@ -179,26 +191,36 @@ fn main() -> Result<()> {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
+        pgversion: get_pg_version(pgbin),
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
+        ext_remote_storage,
+        ext_remote_paths: OnceLock::new(),
+        ext_download_progress: RwLock::new(HashMap::new()),
+        library_index: OnceLock::new(),
+        build_tag,
     };
     let compute = Arc::new(compute_node);
+
+    // If this is a pooled VM, prewarm before starting HTTP server and becoming
+    // available for binding. Prewarming helps postgres start quicker later,
+    // because QEMU will already have it's memory allocated from the host, and
+    // the necessary binaries will alreaady be cached.
+    if !spec_set {
+        compute.prewarm_postgres()?;
+    }
 
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
+    let extension_server_port: u16 = http_port;
+
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
-
-        // TODO this can stall startups in the unlikely event that we bind
-        //      this compute node while it's busy prewarming. It's not too
-        //      bad because it's just 100ms and unlikely, but it's an
-        //      avoidable problem.
-        compute.prewarm_postgres()?;
 
         let mut state = compute.state.lock().unwrap();
         while state.status != ComputeStatus::ConfigurationPending {
@@ -236,7 +258,7 @@ fn main() -> Result<()> {
     // Start Postgres
     let mut delay_exit = false;
     let mut exit_code = None;
-    let pg = match compute.start_compute() {
+    let pg = match compute.start_compute(extension_server_port) {
         Ok(pg) => Some(pg),
         Err(err) => {
             error!("could not start the compute node: {:?}", err);
@@ -364,6 +386,12 @@ fn cli() -> clap::Command {
                 .short('p')
                 .long("control-plane-uri")
                 .value_name("CONTROL_PLANE_API_BASE_URI"),
+        )
+        .arg(
+            Arg::new("remote-ext-config")
+                .short('r')
+                .long("remote-ext-config")
+                .value_name("REMOTE_EXT_CONFIG"),
         )
 }
 

@@ -266,11 +266,17 @@ impl Drop for EphemeralFile {
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
         if let Err(e) = res {
-            warn!(
-                "could not remove ephemeral file '{}': {}",
-                self.file.path.display(),
-                e
-            );
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // just never log the not found errors, we cannot do anything for them; on detach
+                // the tenant directory is already gone.
+                //
+                // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
+                error!(
+                    "could not remove ephemeral file '{}': {}",
+                    self.file.path.display(),
+                    e
+                );
+            }
         }
     }
 }
@@ -420,7 +426,7 @@ mod tests {
             blobs.push((pos, data));
         }
 
-        let mut cursor = BlockCursor::new(&file);
+        let cursor = BlockCursor::new(&file);
         for (pos, expected) in blobs {
             let actual = cursor.read_blob(pos)?;
             assert_eq!(actual, expected);

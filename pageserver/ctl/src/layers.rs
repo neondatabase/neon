@@ -59,16 +59,18 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     );
     // TODO(chi): dedup w/ `delta_layer.rs` by exposing the API.
     let mut all = vec![];
-    tree_reader.visit(
-        &[0u8; DELTA_KEY_SIZE],
-        VisitDirection::Forwards,
-        |key, value_offset| {
-            let curr = Key::from_slice(&key[..KEY_SIZE]);
-            all.push((curr, BlobRef(value_offset)));
-            true
-        },
-    )?;
-    let mut cursor = BlockCursor::new(&file);
+    tree_reader
+        .visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value_offset| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                all.push((curr, BlobRef(value_offset)));
+                true
+            },
+        )
+        .await?;
+    let cursor = BlockCursor::new(&file);
     for (k, v) in all {
         let value = cursor.read_blob(v.pos())?;
         println!("key:{} value_len:{}", k, value.len());

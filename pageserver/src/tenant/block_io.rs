@@ -80,7 +80,7 @@ where
         BlockCursor { reader }
     }
 
-    pub fn read_blk(&mut self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
+    pub fn read_blk(&self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
         self.reader.read_blk(blknum)
     }
 }

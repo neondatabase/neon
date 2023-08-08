@@ -313,7 +313,7 @@ impl Endpoint {
 
                 // TODO: use future host field from safekeeper spec
                 // Pass the list of safekeepers to the replica so that it can connect to any of them,
-                // whichever is availiable.
+                // whichever is available.
                 let sk_ports = self
                     .env
                     .safekeepers
@@ -420,7 +420,12 @@ impl Endpoint {
         Ok(())
     }
 
-    pub fn start(&self, auth_token: &Option<String>, safekeepers: Vec<NodeId>) -> Result<()> {
+    pub fn start(
+        &self,
+        auth_token: &Option<String>,
+        safekeepers: Vec<NodeId>,
+        remote_ext_config: Option<&String>,
+    ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
         }
@@ -488,6 +493,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
+            custom_extensions: Some(vec![]),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -519,6 +525,11 @@ impl Endpoint {
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
+
+        if let Some(remote_ext_config) = remote_ext_config {
+            cmd.args(["--remote-ext-config", remote_ext_config]);
+        }
+
         let child = cmd.spawn()?;
 
         // Write down the pid so we can wait for it when we want to stop

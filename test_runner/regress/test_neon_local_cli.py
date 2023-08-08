@@ -1,4 +1,5 @@
-from fixtures.neon_fixtures import NeonEnvBuilder, PortDistributor
+from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.port_distributor import PortDistributor
 
 
 # Test that neon cli is able to start and stop all processes with the user defaults.

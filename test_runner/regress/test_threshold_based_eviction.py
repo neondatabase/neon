@@ -6,10 +6,10 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import LayerMapInfo
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TimelineId
 from pytest_httpserver import HTTPServer
 

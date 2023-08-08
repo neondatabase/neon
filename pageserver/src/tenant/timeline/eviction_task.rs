@@ -78,9 +78,6 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
-        scopeguard::defer! {
-            info!("eviction task finishing");
-        }
         use crate::tenant::tasks::random_init_delay;
         {
             let policy = self.get_eviction_policy();
@@ -308,8 +305,13 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let mut state = self.eviction_task_timeline_state.lock().await;
+
+        // Only do the imitate_layer accesses approximately as often as the threshold.  A little
+        // more frequently, to avoid this period racing with the threshold/period-th eviction iteration.
+        let inter_imitate_period = p.threshold.checked_sub(p.period).unwrap_or(p.threshold);
+
         match state.last_layer_access_imitation {
-            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
                 self.imitate_timeline_cached_layer_accesses(cancel, ctx)
                     .await;
@@ -332,7 +334,7 @@ impl Timeline {
         };
         let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {
-            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
                 self.imitate_synthetic_size_calculation_worker(&tenant, ctx, cancel)
                     .await;

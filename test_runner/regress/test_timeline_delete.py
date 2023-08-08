@@ -13,9 +13,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
-    S3Storage,
-    available_remote_storages,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -27,6 +24,11 @@ from fixtures.pageserver.utils import (
     wait_timeline_detail_404,
     wait_until_tenant_active,
     wait_until_timeline_state,
+)
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    S3Storage,
+    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -229,6 +231,8 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     ps_http.configure_failpoints((failpoint, "return"))
 
+    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+
     # These failpoints are earlier than background task is spawned.
     # so they result in api request failure.
     if failpoint in (
@@ -245,7 +249,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             tenant_id=env.initial_tenant,
             timeline_id=timeline_id,
             expected_state="Broken",
-            iterations=2,  # effectively try immediately and retry once in one second
+            iterations=iterations,
         )
 
         reason = timeline_info["state"]["Broken"]["reason"]
@@ -254,29 +258,44 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
-    wait_longer = remote_storage_kind is RemoteStorageKind.REAL_S3
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
+
+        wait_until_tenant_active(ps_http, env.initial_tenant, iterations=iterations)
+
         if failpoint == "timeline-delete-before-index-deleted-at":
             # We crashed before persisting this to remote storage, need to retry delete request
-
-            # Wait till tenant is loaded. Shouldnt take longer than 2 seconds (we shouldnt block tenant loading)
-            wait_until_tenant_active(ps_http, env.initial_tenant, iterations=2)
-
             timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
         else:
             # Pageserver should've resumed deletion after restart.
             wait_timeline_detail_404(
-                ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+                ps_http, env.initial_tenant, timeline_id, iterations=iterations
             )
+
+            if failpoint == "timeline-delete-after-index-delete":
+                m = ps_http.get_metrics()
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "err"},
+                    ).value
+                    == 1
+                )
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "ok"},
+                    ).value
+                    == 1
+                )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state
         ps_http.configure_failpoints((failpoint, "off"))
 
         timeline_delete_wait_completed(
-            ps_http, env.initial_tenant, timeline_id, wait_longer=wait_longer
+            ps_http, env.initial_tenant, timeline_id, iterations=iterations
         )
 
     # Check remote is impty
@@ -404,6 +423,7 @@ def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] 
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    assert neon_env_builder.remote_storage_client is not None
     response = neon_env_builder.remote_storage_client.list_objects_v2(
         Bucket=neon_env_builder.remote_storage.bucket_name,
         Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
@@ -569,7 +589,7 @@ def test_concurrent_timeline_delete_stuck_on(
         try:
             log.info("first call start")
             timeline_delete_wait_completed(
-                ps_http, env.initial_tenant, child_timeline_id, timeout=10
+                ps_http, env.initial_tenant, child_timeline_id, timeout=20
             )
             log.info("first call success")
             result_queue.put("success")
@@ -683,7 +703,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
 
 
 @pytest.mark.parametrize(
@@ -758,7 +778,7 @@ def test_timeline_delete_works_for_remote_smoke(
         )
 
     # for some reason the check above doesnt immediately take effect for the below.
-    # Assume it is mock server incosistency and check twice.
+    # Assume it is mock server inconsistency and check twice.
     wait_until(
         2,
         0.5,

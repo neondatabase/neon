@@ -9,7 +9,7 @@ mod remote_layer;
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::repository::{Key, Value};
+use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
@@ -34,7 +34,7 @@ use utils::{
     lsn::Lsn,
 };
 
-pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
+pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
@@ -381,12 +381,6 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
     async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
-/// Returned by [`PersistentLayer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
-
-/// Returned by [`PersistentLayer::key_iter`]
-pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
-
 /// Get a layer descriptor from a layer.
 pub trait AsLayerDesc {
     /// Get the layer descriptor.
@@ -426,15 +420,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
     // Path to the layer file in the local filesystem.
     // `None` for `RemoteLayer`.
     fn local_path(&self) -> Option<PathBuf>;
-
-    /// Iterate through all keys and values stored in the layer
-    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
-
-    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
-    /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        panic!("Not implemented")
-    }
 
     /// Permanently remove this layer from disk.
     fn delete_resident_layer_file(&self) -> Result<()>;

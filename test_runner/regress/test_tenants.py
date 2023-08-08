@@ -18,10 +18,9 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.pageserver.utils import timeline_delete_wait_completed
+from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
