@@ -68,8 +68,7 @@ impl S3Bucket {
             aws_config.bucket_name
         );
 
-        let provider_conf = ProviderConfig::without_region()
-            .with_region(Some(Region::new(aws_config.bucket_region.clone())));
+        let region = Some(Region::new(aws_config.bucket_region.clone()));
 
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
@@ -77,20 +76,21 @@ impl S3Bucket {
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
-            .or_else(
-                "token",
+            .or_else("token", {
+                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
-                    .build(),
-            )
+                    .build()
+            })
+            // uses imds v2
+            .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
         let mut config_builder = Config::builder()
-            .region(Region::new(aws_config.bucket_region.clone()))
+            .region(region)
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
