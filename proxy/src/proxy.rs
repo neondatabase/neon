@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    http,
     metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
@@ -71,6 +72,15 @@ static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
         "proxy_connection_failures_total",
         "Number of connection failures (per kind).",
         &["kind"],
+    )
+    .unwrap()
+});
+
+static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_breakdown",
+        "Number of wake-up failures (per kind).",
+        &["retry", "kind"],
     )
     .unwrap()
 });
@@ -397,6 +407,33 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
+fn report_error(e: &WakeComputeError, retry: bool) {
+    use crate::console::errors::ApiError;
+    let retry = retry.to_string();
+    match e {
+        WakeComputeError::BadComputeAddress(_) => NUM_WAKEUP_FAILURES
+            .with_label_values(&[&retry, "bad_compute_address"])
+            .inc(),
+        WakeComputeError::ApiError(ApiError::Transport(_)) => NUM_WAKEUP_FAILURES
+            .with_label_values(&[&retry, "api_transport_error"])
+            .inc(),
+        WakeComputeError::ApiError(ApiError::Console { status, .. }) => match status {
+            &http::StatusCode::BAD_REQUEST => NUM_WAKEUP_FAILURES
+                .with_label_values(&[&retry, "api_console_bad_request"])
+                .inc(),
+            &http::StatusCode::LOCKED => NUM_WAKEUP_FAILURES
+                .with_label_values(&[&retry, "api_console_locked"])
+                .inc(),
+            x if x.is_server_error() => NUM_WAKEUP_FAILURES
+                .with_label_values(&[&retry, "api_console_other_server_error"])
+                .inc(),
+            _ => NUM_WAKEUP_FAILURES
+                .with_label_values(&[&retry, "api_console_other_error"])
+                .inc(),
+        },
+    }
+}
+
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
@@ -440,10 +477,12 @@ where
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                report_error(&e, false);
                 return Err(e.into());
             }
             // failed to wake up but we can continue to retry
             Ok(ControlFlow::Continue(e)) => {
+                report_error(&e, true);
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
             }
             // successfully woke up a compute node and can break the wakeup loop
