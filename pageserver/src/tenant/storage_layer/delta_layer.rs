@@ -210,6 +210,12 @@ pub struct DeltaLayerInner {
     file: FileBlockReader<VirtualFile>,
 }
 
+impl AsRef<DeltaLayerInner> for DeltaLayerInner {
+    fn as_ref(&self) -> &DeltaLayerInner {
+        self
+    }
+}
+
 impl std::fmt::Debug for DeltaLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeltaLayerInner")
@@ -547,7 +553,10 @@ impl DeltaLayer {
     /// Obtains all keys and value references stored in the layer
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_val_refs(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, ValueRef)>> {
+    pub async fn load_val_refs(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<(Key, Lsn, ValueRef<Arc<DeltaLayerInner>>)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -915,15 +924,15 @@ impl DeltaLayerInner {
         }
     }
 
-    async fn load_val_refs(this: &Arc<DeltaLayerInner>) -> Result<Vec<(Key, Lsn, ValueRef)>> {
-        let file = &this.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            this.index_start_blk,
-            this.index_root_blk,
-            file,
-        );
+    pub(super) async fn load_val_refs<T: AsRef<DeltaLayerInner> + Clone>(
+        this: &T,
+    ) -> Result<Vec<(Key, Lsn, ValueRef<T>)>> {
+        let dl = this.as_ref();
+        let file = &dl.file;
+        let tree_reader =
+            DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_offsets = Vec::<(Key, Lsn, ValueRef)>::new();
+        let mut all_offsets = Vec::<(Key, Lsn, ValueRef<T>)>::new();
         tree_reader
             .visit(
                 &[0u8; DELTA_KEY_SIZE],
@@ -942,7 +951,8 @@ impl DeltaLayerInner {
 
         Ok(all_offsets)
     }
-    async fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
+
+    pub(super) async fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
@@ -982,12 +992,12 @@ impl DeltaLayerInner {
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef {
+pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
     blob_ref: BlobRef,
-    reader: BlockCursor<Adapter>,
+    reader: BlockCursor<Adapter<T>>,
 }
 
-impl ValueRef {
+impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     /// Loads the value from disk
     pub fn load(&self) -> Result<Value> {
         let buf = self.reader.read_blob(self.blob_ref.pos())?;
@@ -996,12 +1006,12 @@ impl ValueRef {
     }
 }
 
-struct Adapter(Arc<DeltaLayerInner>);
+struct Adapter<T: AsRef<DeltaLayerInner>>(T);
 
-impl BlockReader for Adapter {
+impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
     type BlockLease = PageReadGuard<'static>;
 
     fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        self.0.file.read_blk(blknum)
+        self.0.as_ref().file.read_blk(blknum)
     }
 }
