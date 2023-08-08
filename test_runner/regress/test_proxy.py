@@ -230,20 +230,40 @@ def test_sql_over_http(static_proxy: NeonProxy):
 def test_sql_over_http_fail(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+    def q(status: int, sql: str, params: Optional[List[Any]] = None) -> Any:
         params = params or []
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
             data=json.dumps({"query": sql, "params": params}),
-            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
-        assert response.status_code >= 400
+        assert response.status_code == status
         return response.json()
 
-    res = q("SELECT pg_sleep(16.0)")
+    q(200, "create table t(id serial primary key, val int)")
+
+    # insert a row, but delayed to trigger a timeout
+    res = q(
+        400,
+        """
+        INSERT INTO t (id, val)
+        SELECT delay.id, delay.val FROM (
+            SELECT pg_sleep(20.0) as sleep, 1 as id, 1 as val
+        ) as delay
+        """,
+    )
     assert "deadline has elapsed" in res["message"]
+
+    # would have duplicate constraint violation if the query isn't cancelled.
+    res = q(200, "INSERT INTO t (id, val) SELECT 1 as id, 2 as val")
+    assert res["command"] == "INSERT"
+    assert res["rowCount"] == 1
 
 
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
