@@ -68,6 +68,8 @@ impl S3Bucket {
             aws_config.bucket_name
         );
 
+        let region = Some(Region::new(aws_config.bucket_region.clone()));
+
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
             CredentialsProviderChain::first_try(
@@ -77,8 +79,7 @@ impl S3Bucket {
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
             .or_else("token", {
-                let provider_conf = ProviderConfig::without_region()
-                    .with_region(Some(Region::new(aws_config.bucket_region.clone())));
+                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
 
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
@@ -89,7 +90,7 @@ impl S3Bucket {
         };
 
         let mut config_builder = Config::builder()
-            .region(Region::new(aws_config.bucket_region.clone()))
+            .region(region)
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
