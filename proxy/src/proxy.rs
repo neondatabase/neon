@@ -407,28 +407,36 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
+const fn bool_to_str(x: bool) -> &'static str {
+    if x {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 fn report_error(e: &WakeComputeError, retry: bool) {
     use crate::console::errors::ApiError;
-    let retry = retry.to_string();
+    let retry = bool_to_str(retry);
     match e {
         WakeComputeError::BadComputeAddress(_) => NUM_WAKEUP_FAILURES
-            .with_label_values(&[&retry, "bad_compute_address"])
+            .with_label_values(&[retry, "bad_compute_address"])
             .inc(),
         WakeComputeError::ApiError(ApiError::Transport(_)) => NUM_WAKEUP_FAILURES
-            .with_label_values(&[&retry, "api_transport_error"])
+            .with_label_values(&[retry, "api_transport_error"])
             .inc(),
         WakeComputeError::ApiError(ApiError::Console { status, .. }) => match status {
             &http::StatusCode::BAD_REQUEST => NUM_WAKEUP_FAILURES
-                .with_label_values(&[&retry, "api_console_bad_request"])
+                .with_label_values(&[retry, "api_console_bad_request"])
                 .inc(),
             &http::StatusCode::LOCKED => NUM_WAKEUP_FAILURES
-                .with_label_values(&[&retry, "api_console_locked"])
+                .with_label_values(&[retry, "api_console_locked"])
                 .inc(),
             x if x.is_server_error() => NUM_WAKEUP_FAILURES
-                .with_label_values(&[&retry, "api_console_other_server_error"])
+                .with_label_values(&[retry, "api_console_other_server_error"])
                 .inc(),
             _ => NUM_WAKEUP_FAILURES
-                .with_label_values(&[&retry, "api_console_other_error"])
+                .with_label_values(&[retry, "api_console_other_error"])
                 .inc(),
         },
     }
