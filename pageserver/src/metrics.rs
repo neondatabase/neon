@@ -417,7 +417,7 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
 pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_tenant_activation_seconds",
-        "Time taken by phases of pageserver startup, in seconds",
+        "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
     .expect("Failed to register pageserver_tenant_activation_seconds metric")
