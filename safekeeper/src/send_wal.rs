@@ -2,6 +2,7 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::safekeeper::Term;
 use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
@@ -359,8 +360,12 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
+        term: Option<Term>,
     ) -> Result<(), QueryError> {
-        if let Err(end) = self.handle_start_replication_guts(pgb, start_pos).await {
+        if let Err(end) = self
+            .handle_start_replication_guts(pgb, start_pos, term)
+            .await
+        {
             // Log the result and probably send it to the client, closing the stream.
             pgb.handle_copy_stream_end(end).await;
         }
@@ -371,6 +376,7 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
+        term: Option<Term>,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
         let tli =
@@ -440,6 +446,7 @@ impl SafekeeperPostgresHandler {
             start_pos,
             end_pos,
             stop_pos,
+            term,
             commit_lsn_watch_rx,
             ws_guard: ws_guard.clone(),
             wal_reader,
@@ -476,6 +483,10 @@ struct WalSender<'a, IO> {
     // If present, terminate after reaching this position; used by walproposer
     // in recovery.
     stop_pos: Option<Lsn>,
+    /// When streaming uncommitted part, the term the client acts as the leader
+    /// in. Streaming is stopped if local term changes to a different (higher)
+    /// value.
+    term: Option<Term>,
     commit_lsn_watch_rx: Receiver<Lsn>,
     ws_guard: Arc<WalSenderGuard>,
     wal_reader: WalReader,
@@ -518,8 +529,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 .0 as usize;
             send_size = min(send_size, self.send_buf.len());
             let send_buf = &mut self.send_buf[..send_size];
-            // read wal into buffer
-            send_size = self.wal_reader.read(send_buf).await?;
+            let send_size: usize;
+            {
+                // If uncommitted part is being pulled, check that the term is
+                // still the expected one.
+                let _term_guard = if let Some(t) = self.term {
+                    Some(self.tli.acquire_term(t).await?)
+                } else {
+                    None
+                };
+                // read wal into buffer
+                send_size = self.wal_reader.read(send_buf).await?
+            };
             let send_buf = &send_buf[..send_size];
 
             // and send it
