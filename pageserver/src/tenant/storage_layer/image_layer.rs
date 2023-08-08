@@ -66,7 +66,7 @@ use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLay
 /// the 'index' starts at the block indicated by 'index_start_blk'
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Summary {
+pub(super) struct Summary {
     /// Magic value to identify this as a neon image file. Always IMAGE_FILE_MAGIC.
     magic: u16,
     format_version: u16,
@@ -85,13 +85,29 @@ struct Summary {
 
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
+        Self::expected(
+            layer.desc.tenant_id,
+            layer.desc.timeline_id,
+            layer.desc.key_range.clone(),
+            layer.lsn,
+        )
+    }
+}
+
+impl Summary {
+    pub(super) fn expected(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        key_range: Range<Key>,
+        lsn: Lsn,
+    ) -> Self {
         Self {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: layer.desc.tenant_id,
-            timeline_id: layer.desc.timeline_id,
-            key_range: layer.desc.key_range.clone(),
-            lsn: layer.lsn,
+            tenant_id,
+            timeline_id,
+            key_range,
+            lsn,
 
             index_start_blk: 0,
             index_root_blk: 0,
@@ -318,43 +334,26 @@ impl ImageLayer {
     async fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        // Open the file if it's not open already.
-        let file = VirtualFile::open(&path)
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0)?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let expected_summary = match &self.path_or_conf {
+            PathOrConf::Conf(_) => Some(Summary::from(self)),
+            PathOrConf::Path(_) => None,
+        };
 
-        match &self.path_or_conf {
-            PathOrConf::Conf(_) => {
-                let mut expected_summary = Summary::from(self);
-                expected_summary.index_start_blk = actual_summary.index_start_blk;
-                expected_summary.index_root_blk = actual_summary.index_root_blk;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary)?;
 
-                if actual_summary != expected_summary {
-                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                }
-            }
-            PathOrConf::Path(path) => {
-                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+        if let PathOrConf::Path(ref path) = self.path_or_conf {
+            // not production code
+            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let expected_filename = self.filename().file_name();
 
-                if actual_filename != expected_filename {
-                    println!(
-                        "warning: filename does not match what is expected from in-file summary"
-                    );
-                    println!("actual: {:?}", actual_filename);
-                    println!("expected: {:?}", expected_filename);
-                }
+            if actual_filename != expected_filename {
+                println!("warning: filename does not match what is expected from in-file summary");
+                println!("actual: {:?}", actual_filename);
+                println!("expected: {:?}", expected_filename);
             }
         }
 
-        Ok(ImageLayerInner {
-            index_start_blk: actual_summary.index_start_blk,
-            index_root_blk: actual_summary.index_root_blk,
-            lsn: self.lsn,
-            file,
-        })
+        Ok(loaded)
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -425,6 +424,39 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
+    pub(super) fn load(
+        path: &std::path::Path,
+        lsn: Lsn,
+        summary: Option<Summary>,
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0)?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+
+        if let Some(mut expected_summary) = summary {
+            // production code path
+            expected_summary.index_start_blk = actual_summary.index_start_blk;
+            expected_summary.index_root_blk = actual_summary.index_root_blk;
+
+            if actual_summary != expected_summary {
+                bail!(
+                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                    actual_summary,
+                    expected_summary
+                );
+            }
+        }
+
+        Ok(ImageLayerInner {
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+            lsn,
+            file,
+        })
+    }
+
     pub(super) async fn get_value_reconstruct_data(
         &self,
         key: Key,

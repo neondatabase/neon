@@ -90,14 +90,30 @@ pub struct Summary {
 
 impl From<&DeltaLayer> for Summary {
     fn from(layer: &DeltaLayer) -> Self {
+        Self::expected(
+            layer.desc.tenant_id,
+            layer.desc.timeline_id,
+            layer.desc.key_range.clone(),
+            layer.desc.lsn_range.clone(),
+        )
+    }
+}
+
+impl Summary {
+    pub(super) fn expected(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        keys: Range<Key>,
+        lsns: Range<Lsn>,
+    ) -> Self {
         Self {
             magic: DELTA_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
 
-            tenant_id: layer.desc.tenant_id,
-            timeline_id: layer.desc.timeline_id,
-            key_range: layer.desc.key_range.clone(),
-            lsn_range: layer.desc.lsn_range.clone(),
+            tenant_id,
+            timeline_id,
+            key_range: keys,
+            lsn_range: lsns,
 
             index_start_blk: 0,
             index_root_blk: 0,
@@ -448,43 +464,27 @@ impl DeltaLayer {
     async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let file = VirtualFile::open(&path)
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-        let file = FileBlockReader::new(file);
+        let summary = match &self.path_or_conf {
+            PathOrConf::Conf(_) => Some(Summary::from(self)),
+            PathOrConf::Path(_) => None,
+        };
 
-        let summary_blk = file.read_blk(0)?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let loaded = DeltaLayerInner::load(&path, summary)?;
 
-        match &self.path_or_conf {
-            PathOrConf::Conf(_) => {
-                let mut expected_summary = Summary::from(self);
-                expected_summary.index_start_blk = actual_summary.index_start_blk;
-                expected_summary.index_root_blk = actual_summary.index_root_blk;
-                if actual_summary != expected_summary {
-                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                }
-            }
-            PathOrConf::Path(path) => {
-                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+        if let PathOrConf::Path(ref path) = self.path_or_conf {
+            // not production code
 
-                if actual_filename != expected_filename {
-                    println!(
-                        "warning: filename does not match what is expected from in-file summary"
-                    );
-                    println!("actual: {:?}", actual_filename);
-                    println!("expected: {:?}", expected_filename);
-                }
+            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let expected_filename = self.filename().file_name();
+
+            if actual_filename != expected_filename {
+                println!("warning: filename does not match what is expected from in-file summary");
+                println!("actual: {:?}", actual_filename);
+                println!("expected: {:?}", expected_filename);
             }
         }
 
-        debug!("loaded from {}", &path.display());
-
-        Ok(Arc::new(DeltaLayerInner {
-            file,
-            index_start_blk: actual_summary.index_start_blk,
-            index_root_blk: actual_summary.index_root_blk,
-        }))
+        Ok(Arc::new(loaded))
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -847,6 +847,34 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
+    pub(super) fn load(path: &std::path::Path, summary: Option<Summary>) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+        let file = FileBlockReader::new(file);
+
+        let summary_blk = file.read_blk(0)?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+
+        if let Some(mut expected_summary) = summary {
+            // production code path
+            expected_summary.index_start_blk = actual_summary.index_start_blk;
+            expected_summary.index_root_blk = actual_summary.index_root_blk;
+            if actual_summary != expected_summary {
+                bail!(
+                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                    actual_summary,
+                    expected_summary
+                );
+            }
+        }
+
+        Ok(DeltaLayerInner {
+            file,
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+        })
+    }
+
     pub(super) async fn get_value_reconstruct_data(
         &self,
         key: Key,
