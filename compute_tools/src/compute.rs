@@ -1,11 +1,11 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Condvar, Mutex, OnceLock, RwLock};
-use std::{fs, io};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -180,17 +180,24 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
     }
 }
 
-/// Spawns a command in the neon-postgres cgroup, returning a handle to it.
+/// Spawns a command in the neon-postgres cgroup if it exists, otherwise just
+/// spawns it normally, returning a handle to it.
 ///
-/// This is how VM's should start postgres. The cgroup is guaranteed to exist
-/// for VM's because vm-builder creates it during the sysinit phase of its
-/// inittab.
-fn cgexec(cmd: &mut Command) -> io::Result<Child> {
-    Command::new("cgexec")
-        .args(["-g", "memory:neon-postgres"])
-        .arg(cmd.get_program())
-        .args(cmd.get_args())
-        .spawn()
+/// This function should be used to start postgres, as it will start in in the
+/// neon-postgres cgroup if we are a VM. The cgroup will exist in VM's because
+/// vm-builder creates it during the sysinit phase of its inittab.
+fn maybe_cgexec(cmd: &str) -> Command {
+    // These paths should be unique to VMs
+    let is_vm = Path::new("/sys/fs/cgroup/neon-postgres").exists() && Path::new("/neonvm").exists();
+
+    if is_vm {
+        let mut command = Command::new("cgexec");
+        command.args(["-g", "memory:neon-postgres"]);
+        command.arg(cmd);
+        command
+    } else {
+        Command::new(cmd)
+    }
 }
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
@@ -588,7 +595,6 @@ impl ComputeNode {
 
         // Run initdb to completion
         info!("running initdb");
-
         let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
         Command::new(initdb_bin)
             .args(["-D", pgdata])
@@ -605,17 +611,10 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-
-        // VMs have cg-exec in their environment while pods don't
-        let vm = Command::new("/usr/bin/cgexec").output().is_ok();
-
-        let mut pg_cmd = Command::new(&self.pgbin);
-        pg_cmd.args(["-D", pgdata]);
-        let mut pg = if vm {
-            cgexec(&mut pg_cmd).expect("cannot start postgres process in cgroup")
-        } else {
-            pg_cmd.spawn().expect("cannot start postgres process")
-        };
+        let mut pg = maybe_cgexec(&self.pgbin)
+            .args(["-D", pgdata])
+            .spawn()
+            .expect("cannot start postgres process");
 
         // Stop it when it's ready
         info!("waiting for postgres");
@@ -639,25 +638,16 @@ impl ComputeNode {
     ) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
-        // VMs have cg-exec in their environment while pods don't
-        let is_vm = Command::new("/usr/bin/cgexec").output().is_ok();
-
-        // Run postgres as a child process. If we are a VM start postgres in
-        // the cgroup
-        let mut pg_cmd = Command::new(&self.pgbin);
-        pg_cmd.args(["-D", &self.pgdata]).envs(
-            if let Some(storage_auth_token) = &storage_auth_token {
+        // Run postgres as a child process.
+        let mut pg = maybe_cgexec(&self.pgbin)
+            .args(["-D", &self.pgdata])
+            .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
                 vec![]
-            },
-        );
-
-        let mut pg = if is_vm {
-            cgexec(&mut pg_cmd).expect("cannot start postgres process in cgroup")
-        } else {
-            pg_cmd.spawn().expect("cannot start postgres process")
-        };
+            })
+            .spawn()
+            .expect("cannot start postgres process");
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
