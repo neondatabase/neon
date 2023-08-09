@@ -3457,14 +3457,14 @@ impl Timeline {
         // "gaps" in the sequence of level 0 files should only happen in case
         // of a crash, partial download from cloud storage, or something like
         // that, so it's not a big deal in practice.
-        level0_deltas.sort_by_key(|l| l.get_lsn_range().start);
+        level0_deltas.sort_by_key(|l| l.layer_desc().lsn_range.start);
         let mut level0_deltas_iter = level0_deltas.iter();
 
         let first_level0_delta = level0_deltas_iter.next().unwrap();
-        let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
+        let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
         for l in level0_deltas_iter {
-            let lsn_range = l.get_lsn_range();
+            let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
@@ -3473,8 +3473,13 @@ impl Timeline {
             prev_lsn_end = lsn_range.end;
         }
         let lsn_range = Range {
-            start: deltas_to_compact.first().unwrap().get_lsn_range().start,
-            end: deltas_to_compact.last().unwrap().get_lsn_range().end,
+            start: deltas_to_compact
+                .first()
+                .unwrap()
+                .layer_desc()
+                .lsn_range
+                .start,
+            end: deltas_to_compact.last().unwrap().layer_desc().lsn_range.end,
         };
 
         let remotes = deltas_to_compact
