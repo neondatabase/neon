@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
@@ -187,10 +188,8 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
 /// neon-postgres cgroup if we are a VM. The cgroup will exist in VM's because
 /// vm-builder creates it during the sysinit phase of its inittab.
 fn maybe_cgexec(cmd: &str) -> Command {
-    // These paths should be unique to VMs
-    let is_vm = Path::new("/sys/fs/cgroup/neon-postgres").exists() && Path::new("/neonvm").exists();
-
-    if is_vm {
+    // The cplane sets this env var for autoscaling computes
+    if env::var("AUTOSCALING").is_ok() {
         let mut command = Command::new("cgexec");
         command.args(["-g", "memory:neon-postgres"]);
         command.arg(cmd);
