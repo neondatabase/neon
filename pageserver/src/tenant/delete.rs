@@ -23,6 +23,7 @@ use crate::{
 
 use super::{
     mgr::{GetTenantError, TenantsMap},
+    span,
     timeline::delete::DeleteTimelineFlow,
     tree_sort_timelines, DeleteTimelineError, Tenant,
 };
@@ -237,13 +238,16 @@ impl DeleteTenantFlow {
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
     // NOTE: static needed for background part.
-    #[instrument(skip_all, fields(%tenant_id))]
+    // We assume that calling code sets up the span with tenant_id.
+    #[instrument(skip_all)]
     pub(crate) async fn run(
         conf: &'static PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         tenant_id: TenantId,
     ) -> Result<(), DeleteTenantError> {
+        span::debug_assert_current_span_has_tenant_id();
+
         let (tenant, mut guard) = Self::prepare(tenants, tenant_id).await?;
 
         if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
