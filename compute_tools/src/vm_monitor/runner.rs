@@ -17,7 +17,9 @@ use tracing::{info, warn};
 use crate::vm_monitor::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
 use crate::vm_monitor::dispatcher::Dispatcher;
 use crate::vm_monitor::filecache::{FileCacheConfig, FileCacheState};
-use crate::vm_monitor::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
+use crate::vm_monitor::protocol::{
+    InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources,
+};
 use crate::vm_monitor::{bytes_to_mebibytes, get_total_system_memory, Args, MiB};
 
 /// Central struct that interacts with informant, dispatcher, and cgroup to handle

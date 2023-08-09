@@ -34,8 +34,8 @@
 //! ```
 //!
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
-use std::panic;
 use std::path::Path;
 use std::process::exit;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
@@ -81,6 +81,10 @@ fn main() -> Result<()> {
     });
 
     let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+    if env::var("AUTOSCALING").is_ok() && vm_monitor_addr.is_none() {
+        panic!("autoscaling enabled but --vm-monitor-addr option not set")
+    }
+
     let cgroup = matches.get_one::<String>("cgroup");
     let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
 
