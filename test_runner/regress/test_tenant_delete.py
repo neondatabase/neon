@@ -51,12 +51,17 @@ def test_tenant_delete_smoke(
         conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
     )
 
-    # create two timelines
+    # create two timelines one being the parent of another
+    parent = None
     for timeline in ["first", "second"]:
-        timeline_id = env.neon_cli.create_timeline(timeline, tenant_id=tenant_id)
+        timeline_id = env.neon_cli.create_branch(
+            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
+        )
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
+
+        parent = timeline
 
     iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
