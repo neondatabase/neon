@@ -82,7 +82,6 @@ pub async fn init_tenant_mgr(
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
 
     loop {
-        // TODO resume deletion.
         match dir_entries.next_entry().await {
             Ok(None) => break,
             Ok(Some(dir_entry)) => {
