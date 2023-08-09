@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
@@ -191,6 +192,9 @@ pub struct Timeline {
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
+
+    /// Deletion queue: a global queue, separate to the remote storage queue's
+    deletion_queue_client: Option<Arc<DeletionQueueClient>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -1375,6 +1379,7 @@ impl Timeline {
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         remote_client: Option<RemoteTimelineClient>,
+        deletion_queue_client: Option<DeletionQueueClient>,
         pg_version: u32,
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
@@ -1410,6 +1415,7 @@ impl Timeline {
                 walreceiver: Mutex::new(None),
 
                 remote_client: remote_client.map(Arc::new),
+                deletion_queue_client: deletion_queue_client.map(Arc::new),
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {

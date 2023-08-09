@@ -33,6 +33,7 @@ struct FlushOp {
     tx: tokio::sync::oneshot::Sender<()>,
 }
 
+#[derive(Clone)]
 pub struct DeletionQueueClient {
     tx: tokio::sync::mpsc::Sender<QueueMessage>,
 }

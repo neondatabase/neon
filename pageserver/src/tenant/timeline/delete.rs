@@ -14,6 +14,7 @@ use utils::{
 
 use crate::{
     config::PageServerConf,
+    deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
         metadata::TimelineMetadata,
@@ -407,6 +408,7 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: Option<RemoteTimelineClient>,
+        deletion_queue_client: Option<DeletionQueueClient>,
         init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
@@ -417,6 +419,7 @@ impl DeleteTimelineFlow {
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
                 remote_client,
+                deletion_queue_client,
                 init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
