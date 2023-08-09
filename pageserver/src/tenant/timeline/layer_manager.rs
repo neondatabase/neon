@@ -120,10 +120,9 @@ impl LayerManager {
 
         ensure!(
             lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})\n{}",
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
             last_record_lsn,
-            std::backtrace::Backtrace::force_capture(),
         );
 
         // Do we have a layer open for writing already?
