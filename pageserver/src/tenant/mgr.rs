@@ -18,6 +18,7 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueue;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -68,6 +69,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: DeletionQueue,
     init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
@@ -127,6 +129,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
+                        &deletion_queue,
                         Some(init_order.clone()),
                         &TENANTS,
                         &ctx,
@@ -164,6 +167,7 @@ pub(crate) fn schedule_local_tenant_processing(
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: &DeletionQueue,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
     ctx: &RequestContext,
@@ -201,7 +205,14 @@ pub(crate) fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            match Tenant::spawn_attach(conf, tenant_id, broker_client, remote_storage, ctx) {
+            match Tenant::spawn_attach(
+                conf,
+                tenant_id,
+                broker_client,
+                remote_storage,
+                deletion_queue,
+                ctx,
+            ) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -224,6 +235,7 @@ pub(crate) fn schedule_local_tenant_processing(
             tenant_id,
             broker_client,
             remote_storage,
+            deletion_queue,
             init_order,
             tenants,
             ctx,
@@ -352,6 +364,7 @@ pub async fn create_tenant(
     tenant_id: TenantId,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
@@ -363,7 +376,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, &TENANTS, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, deletion_queue, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -512,6 +525,7 @@ pub async fn load_tenant(
     tenant_id: TenantId,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
@@ -522,7 +536,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, &TENANTS, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, deletion_queue, None, &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -589,6 +603,7 @@ pub async fn attach_tenant(
     tenant_conf: TenantConfOpt,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     // Temporary solution, proper one would be to resume deletion, but that needs more plumbing around Tenant::load/Tenant::attach
@@ -609,7 +624,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, &TENANTS, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), deletion_queue, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

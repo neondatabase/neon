@@ -389,6 +389,7 @@ fn start_pageserver(
         conf,
         broker_client.clone(),
         remote_storage.clone(),
+        deletion_queue.clone(),
         order,
     ))?;
 
@@ -484,6 +485,7 @@ fn start_pageserver(
             http_auth,
             broker_client.clone(),
             remote_storage,
+            deletion_queue.clone(),
             disk_usage_eviction_state,
         )?
         .build()

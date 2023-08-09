@@ -13,6 +13,7 @@ use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 ///   not compete with the same S3 clients/connections used for higher priority uploads.
 ///
 /// DeletionQueue is the frontend that the rest of the pageserver interacts with.
+#[derive(Clone)]
 pub struct DeletionQueue {
     tx: tokio::sync::mpsc::Sender<QueueMessage>,
 }
@@ -156,5 +157,12 @@ impl DeletionQueue {
                 rx,
             },
         )
+    }
+
+    /// A queue to nowhere: attempts to delete will do nothing
+    #[cfg(test)]
+    pub fn new_mock() -> Self {
+        let (tx, _) = tokio::sync::mpsc::channel(16384);
+        Self { tx }
     }
 }

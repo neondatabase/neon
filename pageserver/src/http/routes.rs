@@ -23,6 +23,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueue;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -56,6 +57,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: DeletionQueue,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
@@ -65,6 +67,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue: DeletionQueue,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
@@ -78,6 +81,7 @@ impl State {
             allowlist_routes,
             remote_storage,
             broker_client,
+            deletion_queue,
             disk_usage_eviction_state,
         })
     }
@@ -490,6 +494,7 @@ async fn tenant_attach_handler(
             tenant_conf,
             state.broker_client.clone(),
             remote_storage.clone(),
+            &state.deletion_queue,
             &ctx,
         )
         .instrument(info_span!("tenant_attach", %tenant_id))
@@ -553,6 +558,7 @@ async fn tenant_load_handler(
         tenant_id,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        &state.deletion_queue,
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))
@@ -878,6 +884,7 @@ async fn tenant_create_handler(
         target_tenant_id,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        &state.deletion_queue,
         &ctx,
     )
     .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
@@ -1334,6 +1341,7 @@ pub fn make_router(
     auth: Option<Arc<JwtAuth>>,
     broker_client: BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: DeletionQueue,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
@@ -1363,6 +1371,7 @@ pub fn make_router(
                 conf,
                 auth,
                 remote_storage,
+                deletion_queue,
                 broker_client,
                 disk_usage_eviction_state,
             )

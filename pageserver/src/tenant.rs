@@ -57,6 +57,8 @@ use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueue;
+use crate::deletion_queue::DeletionQueueClient;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -184,6 +186,9 @@ pub struct Tenant {
 
     // provides access to timeline data sitting in the remote storage
     remote_storage: Option<GenericRemoteStorage>,
+
+    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    deletion_queue_client: Option<DeletionQueueClient>,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -503,6 +508,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: GenericRemoteStorage,
+        deletion_queue: &DeletionQueue,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
@@ -517,6 +523,7 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             Some(remote_storage),
+            Some(deletion_queue.new_client()),
         ));
 
         // Do all the hard work in the background
@@ -756,6 +763,7 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             None,
+            None,
         ))
     }
 
@@ -774,6 +782,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue: &DeletionQueue,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
@@ -796,6 +805,7 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             remote_storage.clone(),
+            Some(deletion_queue.new_client()),
         );
         let tenant = Arc::new(tenant);
 
@@ -2191,7 +2201,16 @@ impl Tenant {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue_client: Option<DeletionQueueClient>,
     ) -> Tenant {
+        #[cfg(not(test))]
+        match state {
+            TenantState::Broken { .. } => {}
+            _ => {
+                // Non-broken tenants must be constructed with a deletion queue
+                assert!(deletion_queue_client.is_some());
+            }
+        }
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
@@ -2257,6 +2276,7 @@ impl Tenant {
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
+            deletion_queue_client,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
@@ -3389,7 +3409,7 @@ pub mod harness {
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
-                self.try_load(&ctx, None)
+                self.try_load(&ctx, None, None)
                     .await
                     .expect("failed to load test tenant"),
                 ctx,
@@ -3400,6 +3420,7 @@ pub mod harness {
             &self,
             ctx: &RequestContext,
             remote_storage: Option<remote_storage::GenericRemoteStorage>,
+            deletion_queue: Option<&DeletionQueue>,
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
@@ -3410,6 +3431,7 @@ pub mod harness {
                 walredo_mgr,
                 self.tenant_id,
                 remote_storage,
+                deletion_queue.map(|q| q.new_client()),
             ));
             tenant
                 .load(None, ctx)
@@ -3949,7 +3971,7 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness
-            .try_load(&ctx, None)
+            .try_load(&ctx, None, None)
             .await
             .err()
             .expect("should fail");

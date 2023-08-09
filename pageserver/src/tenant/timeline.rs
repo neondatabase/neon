@@ -4882,6 +4882,7 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
+    use crate::deletion_queue::DeletionQueue;
     use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
 
     use super::{EvictionError, Timeline};
@@ -4904,9 +4905,13 @@ mod tests {
             };
             GenericRemoteStorage::from_config(&config).unwrap()
         };
+        let deletion_queue = DeletionQueue::new_mock();
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness
+            .try_load(&ctx, Some(remote_storage), Some(&deletion_queue))
+            .await
+            .unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
@@ -4969,9 +4974,13 @@ mod tests {
             };
             GenericRemoteStorage::from_config(&config).unwrap()
         };
+        let deletion_queue = DeletionQueue::new_mock();
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness
+            .try_load(&ctx, Some(remote_storage), Some(&deletion_queue))
+            .await
+            .unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
