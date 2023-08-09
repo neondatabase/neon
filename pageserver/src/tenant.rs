@@ -3442,7 +3442,7 @@ pub mod harness {
             &self,
             ctx: &RequestContext,
             remote_storage: Option<remote_storage::GenericRemoteStorage>,
-            deletion_queue: Option<&DeletionQueue>,
+            deletion_queue_client: Option<DeletionQueueClient>,
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
@@ -3453,7 +3453,7 @@ pub mod harness {
                 walredo_mgr,
                 self.tenant_id,
                 remote_storage,
-                deletion_queue.map(|q| q.new_client()),
+                deletion_queue_client,
             ));
             tenant
                 .load(None, ctx)
