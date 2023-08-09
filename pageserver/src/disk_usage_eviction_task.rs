@@ -313,8 +313,8 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 .unwrap()
                 .as_micros(),
             partition,
-            candidate.layer.get_tenant_id(),
-            candidate.layer.get_timeline_id(),
+            candidate.layer.layer_desc().tenant_id,
+            candidate.layer.layer_desc().timeline_id,
             candidate.layer,
         );
     }

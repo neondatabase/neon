@@ -401,11 +401,6 @@ pub trait AsLayerDesc {
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 pub trait PersistentLayer: Layer + AsLayerDesc {
-    /// Identify the tenant this layer belongs to
-    fn get_tenant_id(&self) -> TenantId {
-        self.layer_desc().tenant_id
-    }
-
     /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> TimelineId {
         self.layer_desc().timeline_id
