@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -347,6 +348,10 @@ fn start_pageserver(
 
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
+
+    // Set up deletion queue
+    let (deletion_queue, mut deletion_worker) = DeletionQueue::new(remote_storage.clone(), conf);
+    BACKGROUND_RUNTIME.spawn(async move { deletion_worker.background().await });
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.

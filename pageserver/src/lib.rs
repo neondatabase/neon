@@ -3,6 +3,7 @@ pub mod basebackup;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
+pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
