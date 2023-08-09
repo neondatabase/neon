@@ -57,6 +57,7 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
+use compute_tools::vm_monitor;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -78,6 +79,10 @@ fn main() -> Result<()> {
     let ext_remote_storage = remote_ext_config.map(|x| {
         init_remote_storage(x).expect("cannot initialize remote extension storage from config")
     });
+
+    let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+    let cgroup = matches.get_one::<String>("cgroup");
+    let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -271,6 +276,15 @@ fn main() -> Result<()> {
         }
     };
 
+    // start the vm-monitor if directed to
+    let vm_monitor = vm_monitor_addr.map(|addr| {
+        tokio::spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+            cgroup: cgroup.cloned(),
+            pgconnstr: file_cache_connstr.cloned(),
+            addr: addr.clone(),
+        }))))
+    });
+
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
     if let Some(mut pg) = pg {
@@ -282,6 +296,12 @@ fn main() -> Result<()> {
             .expect("failed to start waiting on Postgres process");
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
+    }
+
+    // Terminate the vm_monitor so it releases the file watcher on
+    // /sys/fs/cgroup/neon-postgres
+    if let Some(handle) = vm_monitor {
+        handle.abort()
     }
 
     // Maybe sync safekeepers again, to speed up next startup
@@ -392,6 +412,17 @@ fn cli() -> clap::Command {
                 .short('r')
                 .long("remote-ext-config")
                 .value_name("REMOTE_EXT_CONFIG"),
+        )
+        .arg(
+            Arg::new("vm-monitor-addr")
+                .long("vm-monitor-addr")
+                .value_name("VM_MONITOR_ADDR"),
+        )
+        .arg(Arg::new("cgroup").long("cgroup").value_name("CGROUP"))
+        .arg(
+            Arg::new("filecache-connstr")
+                .long("filecache-connstr")
+                .value_name("FILECACHE_CONNSTR"),
         )
 }
 

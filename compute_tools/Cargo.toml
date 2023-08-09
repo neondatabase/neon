@@ -7,11 +7,15 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-compression.workspace = true
+async-std.workspace = true
+axum.workspace = true
+cgroups-rs.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
+inotify.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
@@ -19,10 +23,12 @@ postgres.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
 tar.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true

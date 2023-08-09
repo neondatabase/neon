@@ -15,3 +15,4 @@ pub mod params;
 pub mod pg_helpers;
 pub mod spec;
 pub mod sync_sk;
+pub mod vm_monitor;
