@@ -1111,14 +1111,14 @@ LIMIT 100",
             .as_millis() as u64;
         info!("Prepare extensions took {prep_ext_time_delta}ms");
 
-        // Don't try to download libraries that are not in the index.
-        // Assume that they are already present locally.
-        libs_vec.retain(|lib| {
-            self.library_index
-                .get()
-                .expect("error accessing ext_remote_paths")
-                .contains_key(lib)
-        });
+        // // Don't try to download libraries that are not in the index.
+        // // Assume that they are already present locally.
+        // libs_vec.retain(|lib| {
+        //     self.library_index
+        //         .get()
+        //         .expect("error accessing ext_remote_paths")
+        //         .contains_key(lib)
+        // });
 
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
 
