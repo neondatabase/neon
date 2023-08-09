@@ -323,15 +323,10 @@ impl ImageLayer {
     ) -> Result<&ImageLayerInner> {
         self.access_stats
             .record_access(access_kind, ctx.task_kind());
-        loop {
-            if let Some(inner) = self.inner.get() {
-                return Ok(inner);
-            }
-            self.inner
-                .get_or_try_init(|| self.load_inner())
-                .await
-                .with_context(|| format!("Failed to load image layer {}", self.path().display()))?;
-        }
+        self.inner
+            .get_or_try_init(|| self.load_inner())
+            .await
+            .with_context(|| format!("Failed to load image layer {}", self.path().display()))
     }
 
     async fn load_inner(&self) -> Result<ImageLayerInner> {
