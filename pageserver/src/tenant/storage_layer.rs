@@ -401,16 +401,6 @@ pub trait AsLayerDesc {
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 pub trait PersistentLayer: Layer + AsLayerDesc {
-    /// Identify the tenant this layer belongs to
-    fn get_tenant_id(&self) -> TenantId {
-        self.layer_desc().tenant_id
-    }
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId {
-        self.layer_desc().timeline_id
-    }
-
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     fn filename(&self) -> LayerFileName {
@@ -434,14 +424,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
 
     fn is_remote_layer(&self) -> bool {
         false
-    }
-
-    /// Returns None if the layer file size is not known.
-    ///
-    /// Should not change over the lifetime of the layer object because
-    /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64 {
-        self.layer_desc().file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;

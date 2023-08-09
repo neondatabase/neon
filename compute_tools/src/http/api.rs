@@ -141,6 +141,15 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let filename = route.split('/').last().unwrap().to_string();
             info!("serving /extension_server POST request, filename: {filename:?} is_library: {is_library}");
 
+            // don't even try to download extensions
+            // if no remote storage is configured
+            if compute.ext_remote_storage.is_none() {
+                info!("no extensions remote storage configured");
+                let mut resp = Response::new(Body::from("no remote storage configured"));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+
             match compute.download_extension(&filename, is_library).await {
                 Ok(_) => Response::new(Body::from("OK")),
                 Err(e) => {

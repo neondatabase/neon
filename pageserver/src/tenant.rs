@@ -56,6 +56,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::metrics::TENANT_ACTIVATION;
 use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -1639,6 +1640,8 @@ impl Tenant {
                     post_state = <&'static str>::from(&*current_state),
                     "activation attempt finished"
                 );
+
+                TENANT_ACTIVATION.observe(elapsed.as_secs_f64());
             });
         }
     }

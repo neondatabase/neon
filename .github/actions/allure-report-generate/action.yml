@@ -2,6 +2,12 @@ name: 'Create Allure report'
 description: 'Generate Allure report from uploaded by actions/allure-report-store tests results'
 
 outputs:
+  base-url:
+    description: 'Base URL for Allure report'
+    value: ${{ steps.generate-report.outputs.base-url }}
+  base-s3-url:
+    description: 'Base S3 URL for Allure report'
+    value: ${{ steps.generate-report.outputs.base-s3-url }}
   report-url:
     description: 'Allure report URL'
     value: ${{ steps.generate-report.outputs.report-url }}
@@ -63,8 +69,8 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.22.1
-        ALLURE_ZIP_SHA256: fdc7a62d94b14c5e0bf25198ae1feded6b005fdbed864b4d3cb4e5e901720b0b
+        ALLURE_VERSION: 2.23.1
+        ALLURE_ZIP_SHA256: 11141bfe727504b3fd80c0f9801eb317407fd0ac983ebb57e671f14bac4bcd86
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
     - name: Acquire lock
@@ -102,6 +108,11 @@ runs:
         REPORT_PREFIX=reports/${BRANCH_OR_PR}
         RAW_PREFIX=reports-raw/${BRANCH_OR_PR}/${GITHUB_RUN_ID}
 
+        BASE_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}
+        BASE_S3_URL=s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}
+        REPORT_URL=${BASE_URL}/index.html
+        REPORT_JSON_URL=${BASE_URL}/data/suites.json
+
         # Get previously uploaded data for this run
         ZSTD_NBTHREADS=0
 
@@ -110,10 +121,9 @@ runs:
           # There's no previously uploaded data for this $GITHUB_RUN_ID
           exit 0
         fi
-        for S3_FILEPATH in ${S3_FILEPATHS}; do
-          time aws s3 cp --only-show-errors "s3://${BUCKET}/${S3_FILEPATH}" "${WORKDIR}"
 
-          archive=${WORKDIR}/$(basename $S3_FILEPATH)
+        time aws s3 cp --recursive --only-show-errors "s3://${BUCKET}/${RAW_PREFIX}/" "${WORKDIR}/"
+        for archive in $(find ${WORKDIR} -name "*.tar.zst"); do
           mkdir -p ${archive%.tar.zst}
           time tar -xf ${archive} -C ${archive%.tar.zst}
           rm -f ${archive}
@@ -129,10 +139,9 @@ runs:
         sed -i 's|<a href="." class=|<a href="https://'${BUCKET}'.s3.amazonaws.com/'${REPORT_PREFIX}'/latest/index.html?nocache='"'+Date.now()+'"'" class=|g' ${WORKDIR}/report/app.js
 
         # Upload a history and the final report (in this particular order to not to have duplicated history in 2 places)
+        # Use sync for the final report to delete files from previous runs
         time aws s3 mv --recursive --only-show-errors "${WORKDIR}/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
-        time aws s3 mv --recursive --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
-
-        REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
+        time aws s3 sync --delete --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
 
         # Generate redirect
         cat <<EOF > ${WORKDIR}/index.html
@@ -144,8 +153,10 @@ runs:
         EOF
         time aws s3 cp --only-show-errors ${WORKDIR}/index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
-        echo "report-url=${REPORT_URL}"                                   >> $GITHUB_OUTPUT
-        echo "report-json-url=${REPORT_URL%/index.html}/data/suites.json" >> $GITHUB_OUTPUT
+        echo "base-url=${BASE_URL}"               >> $GITHUB_OUTPUT
+        echo "base-s3-url=${BASE_S3_URL}"         >> $GITHUB_OUTPUT
+        echo "report-url=${REPORT_URL}"           >> $GITHUB_OUTPUT
+        echo "report-json-url=${REPORT_JSON_URL}" >> $GITHUB_OUTPUT
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
 

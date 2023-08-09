@@ -223,6 +223,7 @@ module.exports = async ({ github, context, fetch, report }) => {
     } else {
         commentBody += `#### No tests were run or test report is not available\n`
     }
+    commentBody += autoupdateNotice
 
     let createCommentFn, listCommentsFn, updateCommentFn, issueNumberOrSha
     if (isPullRequest) {

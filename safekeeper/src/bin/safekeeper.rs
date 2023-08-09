@@ -79,6 +79,10 @@ struct Args {
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
+    /// Advertised endpoint for receiving/sending WAL in the form host:port. If not
+    /// specified, listen_pg is used to advertise instead.
+    #[arg(long, default_value = None)]
+    advertise_pg: Option<String>,
     /// Availability zone of the safekeeper.
     #[arg(long)]
     availability_zone: Option<String>,
@@ -185,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         listen_pg_addr: args.listen_pg,
         listen_pg_addr_tenant_only: args.listen_pg_tenant_only,
         listen_http_addr: args.listen_http,
+        advertise_pg_addr: args.advertise_pg,
         availability_zone: args.availability_zone,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,

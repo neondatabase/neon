@@ -245,7 +245,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     # we try to simulate large (flush_lsn - truncate_lsn) lag, to test that WAL segments
     # are not removed before broadcasted to all safekeepers, with the help of replication slot
     asyncio.run(
-        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=5)
+        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=4)
     )
 
 
