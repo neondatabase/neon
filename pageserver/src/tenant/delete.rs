@@ -135,7 +135,7 @@ async fn schedule_ordered_timeline_deletions(
     Ok(already_running_deletions)
 }
 
-async fn assert_timelines_dir_empty(timelines_path: &Path) -> Result<(), DeleteTenantError> {
+async fn ensure_timelines_dir_empty(timelines_path: &Path) -> Result<(), DeleteTenantError> {
     // Assert timelines dir is empty.
     if !fs_ext::is_directory_empty(timelines_path).await? {
         // Display first 10 items in directory
@@ -516,7 +516,7 @@ impl DeleteTenantFlow {
         let timelines_path = conf.timelines_path(&tenant.tenant_id);
         // May not exist if we fail in cleanup_remaining_fs_traces after removing it
         if timelines_path.exists() {
-            assert_timelines_dir_empty(&timelines_path)
+            ensure_timelines_dir_empty(&timelines_path)
                 .await
                 .context("timelines dir not empty")?;
         }
