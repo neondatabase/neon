@@ -277,7 +277,7 @@ impl LayerManager {
         updates: &mut BatchedUpdates<'_>,
         mapping: &mut LayerFileManager,
     ) {
-        updates.remove_historic(layer.layer_desc().clone());
+        updates.remove_historic(layer.layer_desc());
         mapping.remove(layer);
     }
 
@@ -291,7 +291,7 @@ impl LayerManager {
         metrics: &TimelineMetrics,
         mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
-        let desc = layer.layer_desc().to_owned();
+        let desc = layer.layer_desc();
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
             metrics.resident_physical_size_gauge.sub(desc.file_size);
