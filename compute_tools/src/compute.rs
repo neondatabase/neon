@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Condvar, Mutex, OnceLock, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -285,7 +286,7 @@ impl ComputeNode {
     #[instrument(skip_all, fields(%lsn))]
     fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Utc::now();
+        let start_time = Instant::now();
 
         let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
 
@@ -298,7 +299,10 @@ impl ComputeNode {
             info!("Storage auth token not set");
         }
 
+        // Connect to pageserver
         let mut client = config.connect(NoTls)?;
+        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+
         let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
             Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
@@ -344,13 +348,10 @@ impl ComputeNode {
         };
 
         // Report metrics
-        self.state.lock().unwrap().metrics.basebackup_bytes =
-            measured_reader.get_byte_count() as u64;
-        self.state.lock().unwrap().metrics.basebackup_ms = Utc::now()
-            .signed_duration_since(start_time)
-            .to_std()
-            .unwrap()
-            .as_millis() as u64;
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
+        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
+        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
     }
 
