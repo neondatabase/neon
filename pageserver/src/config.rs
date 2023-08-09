@@ -566,6 +566,13 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
+    pub fn remote_deletion_list_path(&self, sequence: u64) -> PathBuf {
+        PathBuf::from_str("deletion")
+            .unwrap()
+            .join(self.id.to_string())
+            .join(sequence.to_string())
+    }
+
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenants_path().join(tenant_id.to_string())
     }
