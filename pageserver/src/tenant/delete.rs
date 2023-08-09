@@ -516,6 +516,7 @@ impl DeleteTenantFlow {
         let timelines_path = conf.timelines_path(&tenant.tenant_id);
         // May not exist if we fail in cleanup_remaining_fs_traces after removing it
         if timelines_path.exists() {
+            // sanity check to guard against layout changes
             ensure_timelines_dir_empty(&timelines_path)
                 .await
                 .context("timelines dir not empty")?;
