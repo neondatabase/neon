@@ -963,7 +963,7 @@ LIMIT 100",
             // library.so or library.so.3. We strip this off
             // because library_index is based on the name without the file extension
             let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
-            let lib_raw_name = strip_lib_suffix.replace(&real_ext_name, "").to_string();
+            let lib_raw_name = strip_lib_suffix.replace(real_ext_name, "").to_string();
 
             real_ext_name = self
                 .library_index
@@ -1038,7 +1038,7 @@ LIMIT 100",
         info!("downloading new extension {ext_archive_name}");
 
         let download_size = extension_server::download_extension(
-            &real_ext_name,
+            real_ext_name,
             ext_path,
             remote_storage,
             &self.pgbin,
