@@ -2274,15 +2274,16 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Arc<dyn PersistentLayer> {
     fn traversal_id(&self) -> TraversalId {
+        let timeline_id = self.layer_desc().timeline_id;
         match self.local_path() {
             Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", self.get_timeline_id())),
+                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", timeline_id)),
                     "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
                 format!("{}", local_path.display())
             }
             None => {
-                format!("remote {}/{self}", self.get_timeline_id())
+                format!("remote {}/{self}", timeline_id)
             }
         }
     }
