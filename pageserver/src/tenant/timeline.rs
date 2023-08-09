@@ -41,7 +41,8 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerFileName, RemoteLayer,
+    DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerE, LayerFileName,
+    RemoteLayer,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -1611,8 +1612,10 @@ impl Timeline {
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
-        let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
+        let conf = self.conf;
         let span = tracing::Span::current();
+
+        let this = self.myself.upgrade().expect("&self method holds the arc");
 
         let (loaded_layers, to_sync, total_physical_size) = tokio::task::spawn_blocking({
             move || {
@@ -1696,35 +1699,14 @@ impl Timeline {
 
                     let stats = LayerAccessStats::for_loading_layer(status);
 
-                    let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
-                        (Delta(d), UseLocal(m) | NeedsUpload(m)) => {
+                    let layer = match (name, &decision) {
+                        (name, UseLocal(m) | NeedsUpload(m)) => {
                             total_physical_size += m.file_size();
-                            Arc::new(DeltaLayer::new(
-                                conf,
-                                timeline_id,
-                                tenant_id,
-                                &d,
-                                m.file_size(),
-                                stats,
-                            ))
+                            Arc::new(LayerE::new(conf, &this, &name, m.file_size(), stats))
                         }
-                        (Image(i), UseLocal(m) | NeedsUpload(m)) => {
-                            total_physical_size += m.file_size();
-                            Arc::new(ImageLayer::new(
-                                conf,
-                                timeline_id,
-                                tenant_id,
-                                &i,
-                                m.file_size(),
-                                stats,
-                            ))
+                        (name, Evicted(remote) | UseRemote { remote, .. }) => {
+                            Arc::new(LayerE::new(conf, &this, &name, remote.file_size(), stats))
                         }
-                        (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
-                            RemoteLayer::new_delta(tenant_id, timeline_id, &d, remote, stats),
-                        ),
-                        (Image(i), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
-                            RemoteLayer::new_img(tenant_id, timeline_id, &i, remote, stats),
-                        ),
                     };
 
                     if let NeedsUpload(m) = decision {
@@ -2945,7 +2927,7 @@ impl Timeline {
         lsn: Lsn,
         force: bool,
         ctx: &RequestContext,
-    ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
+    ) -> Result<HashMap<Arc<LayerE>, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
 
