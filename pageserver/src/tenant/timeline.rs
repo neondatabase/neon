@@ -3531,33 +3531,22 @@ impl Timeline {
         let mut prev: Option<Key> = None;
 
         let mut all_value_refs = Vec::new();
+        let mut all_keys = Vec::new();
+
         for l in deltas_to_compact.iter() {
             // TODO: replace this with an await once we fully go async
-            all_value_refs.extend(
-                Handle::current().block_on(
-                    l.clone()
-                        .downcast_delta_layer()
-                        .expect("delta layer")
-                        .load_val_refs(ctx),
-                )?,
-            );
+            let delta = l.clone().downcast_delta_layer().expect("delta layer");
+            Handle::current().block_on(async {
+                all_value_refs.extend(delta.load_val_refs(ctx).await?);
+                all_keys.extend(delta.load_keys(ctx).await?);
+                anyhow::Ok(())
+            })?;
         }
+
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
         all_value_refs.sort_by_key(|(key, lsn, _value_ref)| (*key, *lsn));
 
-        let mut all_keys = Vec::new();
-        for l in deltas_to_compact.iter() {
-            // TODO: replace this with an await once we fully go async
-            all_keys.extend(
-                Handle::current().block_on(
-                    l.clone()
-                        .downcast_delta_layer()
-                        .expect("delta layer")
-                        .load_keys(ctx),
-                )?,
-            );
-        }
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
         all_keys.sort_by_key(|(key, lsn, _size)| (*key, *lsn));
