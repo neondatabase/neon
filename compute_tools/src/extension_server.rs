@@ -222,7 +222,7 @@ pub async fn download_extension(
     );
     let libdir_paths = (
         unzip_dest.to_string() + "/lib",
-        Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql"),
+        Path::new(&get_pg_config("--pkglibdir", pgbin)).to_path_buf(),
     );
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
     for paths in [sharedir_paths, libdir_paths] {
