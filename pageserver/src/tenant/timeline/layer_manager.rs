@@ -292,10 +292,10 @@ impl LayerManager {
         metrics: &TimelineMetrics,
         mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
+        let desc = layer.layer_desc().to_owned();
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            let layer_file_size = layer.file_size();
-            metrics.resident_physical_size_gauge.sub(layer_file_size);
+            metrics.resident_physical_size_gauge.sub(desc.file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.
@@ -303,7 +303,7 @@ impl LayerManager {
         //      won't be needed for page reconstruction for this timeline,
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
-        updates.remove_historic(layer.layer_desc().clone());
+        updates.remove_historic(desc);
         mapping.remove(layer);
 
         Ok(())

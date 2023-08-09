@@ -1160,7 +1160,7 @@ impl Timeline {
             return Err(EvictionError::CannotEvictRemoteLayer);
         }
 
-        let layer_file_size = local_layer.file_size();
+        let layer_file_size = local_layer.layer_desc().file_size;
 
         let local_layer_mtime = local_layer
             .local_path()
@@ -2819,7 +2819,10 @@ impl Timeline {
                 // We will remove frozen layer and add delta layer in one atomic operation later.
                 let layer = self.create_delta_layer(&frozen_layer).await?;
                 (
-                    HashMap::from([(layer.filename(), LayerFileMetadata::new(layer.file_size()))]),
+                    HashMap::from([(
+                        layer.filename(),
+                        LayerFileMetadata::new(layer.layer_desc().file_size),
+                    )]),
                     Some(layer),
                 )
             };
@@ -2839,7 +2842,7 @@ impl Timeline {
                 );
 
                 // update metrics
-                let sz = l.file_size();
+                let sz = l.layer_desc().file_size;
                 self.metrics.resident_physical_size_gauge.add(sz);
                 self.metrics.num_persistent_files_created.inc_by(1);
                 self.metrics.persistent_bytes_written.inc_by(sz);
@@ -4656,7 +4659,7 @@ impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
 
 impl LocalLayerInfoForDiskUsageEviction {
     pub fn file_size(&self) -> u64 {
-        self.layer.file_size()
+        self.layer.layer_desc().file_size
     }
 }
 

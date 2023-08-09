@@ -426,14 +426,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
         false
     }
 
-    /// Returns None if the layer file size is not known.
-    ///
-    /// Should not change over the lifetime of the layer object because
-    /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64 {
-        self.layer_desc().file_size
-    }
-
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
     fn access_stats(&self) -> &LayerAccessStats;
