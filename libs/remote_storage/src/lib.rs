@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{bail, Context};
 
+use serde::{Deserialize, Serialize};
 use tokio::io;
 use toml_edit::Item;
 use tracing::info;
@@ -49,6 +50,25 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 /// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemotePath(PathBuf);
+
+impl Serialize for RemotePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for RemotePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        Ok(Self(PathBuf::from(&str)))
+    }
+}
 
 impl std::fmt::Display for RemotePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
