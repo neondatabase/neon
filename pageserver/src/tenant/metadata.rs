@@ -12,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 
 use anyhow::{bail, ensure, Context};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error, Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracing::info_span;
 use utils::bin_ser::SerializeError;
@@ -229,6 +229,28 @@ impl TimelineMetadata {
 
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
+    }
+}
+
+impl<'de> Deserialize<'de> for TimelineMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{}", e)))
+    }
+}
+
+impl Serialize for TimelineMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = self
+            .to_bytes()
+            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?;
+        bytes.serialize(serializer)
     }
 }
 
