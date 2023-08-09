@@ -558,7 +558,7 @@ impl DeltaLayer {
         ctx: &RequestContext,
     ) -> Result<Vec<(Key, Lsn, ValueRef<Arc<DeltaLayerInner>>)>> {
         let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
+            .load(LayerAccessKind::Iter, ctx)
             .await
             .context("load delta layer")?;
         DeltaLayerInner::load_val_refs(inner)
@@ -1028,6 +1028,7 @@ pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
 impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     /// Loads the value from disk
     pub fn load(&self) -> Result<Value> {
+        // theoretically we *could* record an access time for each, but it does not really matter
         let buf = self.reader.read_blob(self.blob_ref.pos())?;
         let val = Value::des(&buf)?;
         Ok(val)
