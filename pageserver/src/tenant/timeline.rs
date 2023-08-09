@@ -1590,7 +1590,6 @@ impl Timeline {
     ///
     pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
-        let mut num_layers = 0;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
 
@@ -1608,12 +1607,12 @@ impl Timeline {
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
 
-            if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
+            if let Some(filename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
-                if imgfilename.lsn > disk_consistent_lsn {
+                if filename.lsn > disk_consistent_lsn {
                     info!(
                         "found future image layer {} on timeline {} disk_consistent_lsn is {}",
-                        imgfilename, self.timeline_id, disk_consistent_lsn
+                        filename, self.timeline_id, disk_consistent_lsn
                     );
 
                     rename_to_backup(&direntry_path)?;
@@ -1621,31 +1620,31 @@ impl Timeline {
                 }
 
                 let file_size = direntry_path.metadata()?.len();
+                let stats =
+                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
 
                 let layer = ImageLayer::new(
                     self.conf,
                     self.timeline_id,
                     self.tenant_id,
-                    &imgfilename,
+                    &filename,
                     file_size,
-                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident),
+                    stats,
                 );
 
-                trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
                 loaded_layers.push(Arc::new(layer));
-                num_layers += 1;
-            } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
+            } else if let Some(filename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
                 // The end-LSN is exclusive, while disk_consistent_lsn is
                 // inclusive. For example, if disk_consistent_lsn is 100, it is
                 // OK for a delta layer to have end LSN 101, but if the end LSN
                 // is 102, then it might not have been fully flushed to disk
                 // before crash.
-                if deltafilename.lsn_range.end > disk_consistent_lsn + 1 {
+                if filename.lsn_range.end > disk_consistent_lsn + 1 {
                     info!(
                         "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
-                        deltafilename, self.timeline_id, disk_consistent_lsn
+                        filename, self.timeline_id, disk_consistent_lsn
                     );
 
                     rename_to_backup(&direntry_path)?;
@@ -1653,20 +1652,20 @@ impl Timeline {
                 }
 
                 let file_size = direntry_path.metadata()?.len();
+                let stats =
+                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
 
                 let layer = DeltaLayer::new(
                     self.conf,
                     self.timeline_id,
                     self.tenant_id,
-                    &deltafilename,
+                    &filename,
                     file_size,
-                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident),
+                    stats,
                 );
 
-                trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
                 loaded_layers.push(Arc::new(layer));
-                num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
             } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
@@ -1691,6 +1690,7 @@ impl Timeline {
             }
         }
 
+        let num_layers = loaded_layers.len();
         guard.initialize_local_layers(loaded_layers, Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
@@ -1791,13 +1791,15 @@ impl Timeline {
                     );
                         continue;
                     }
+                    let stats =
+                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
 
                     let remote_layer = RemoteLayer::new_img(
                         self.tenant_id,
                         self.timeline_id,
                         imgfilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted),
+                        stats,
                     );
                     let remote_layer = Arc::new(remote_layer);
                     added_remote_layers.push(remote_layer);
@@ -1816,12 +1818,15 @@ impl Timeline {
                         );
                         continue;
                     }
+                    let stats =
+                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
+
                     let remote_layer = RemoteLayer::new_delta(
                         self.tenant_id,
                         self.timeline_id,
                         deltafilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted),
+                        stats,
                     );
                     let remote_layer = Arc::new(remote_layer);
                     added_remote_layers.push(remote_layer);
