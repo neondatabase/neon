@@ -117,6 +117,21 @@ The node generation number defines a global "in" definition for pageserver nodes
 generation matches the generation the control plane most recently issued is a member of the cluster
 in good standing. Any node with any older generation ID is not.
 
+Distinction between generation numbers and Node ID:
+
+- The purpose of a generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
+- Generation ID is guaranteed to be globally unique across space and time. Node ID is not unique
+  in the event of starting a replacement node after an original node is network partitioned, or
+  in the event of a human error starting a replacement node that re-uses a node ID.
+- Node ID is written to disk in a pageserver's configuration, whereas generation number is
+  received at runtime just after startup.
+- The two concepts could be collapsed into one if we used ephemeral node IDs that were only ever used one time,
+  but this makes it harder to efficiently handle the case of the same physical node restarting, where we may want
+  to retain the same attachments as it had before restart, without having to map them to a different node ID.
+- We may in future run the pageserver in a different cluster runtime environment (e.g. k8s) where
+  guaranteeing that the cluster manager (e.g. k8s) doesn't run two concurrent instances with the same
+  node ID is much harder.
+
 #### Why use per-tenant _and_ per-node generation numbers?
 
 The essential generation number is the tenant attachment number: this alone would be sufficient
@@ -139,7 +154,8 @@ coupling:
 
 - Control plane must not "steal" a tenant from a node (by attaching to another node without detaching
   from the first node) without also incrementing the original node's generation number, which
-  effectively marks the original node as dead.
+  effectively marks the original node as dead. (doing a "clean" transfer by detaching
+  from one node before attaching to another does not require a change in node generation number).
 - This enables nodes to trust that if their generation ID is still current, then all their
   attachments are as well.
 
@@ -170,7 +186,10 @@ This suffix provides a lot of flexibility in how we may handle migration/restart
 at runtime:
 
 - We can replace a pageserver with another physical node having the same pageserver ID, and
-  the pageserver ID in the name will protect from conflicting writes.
+  the pageserver ID in the name will protect from conflicting writes. This applies even if we
+  have no robust way to terminate a partitioned pageserver: the older-generation node may
+  continue writing objects under their own generation number, but those will not conflict
+  with objects written by the newer generation pageserver.
 - Two pageservers may have the same tenant attached without risking stepping on each others
   writes.
 - Ultimately, pageservers might self-coordinate such that a single "attachment" refers to
@@ -213,7 +232,8 @@ Deletion lists have an a couple of additional benefits:
 - read replicas: if some other node is reading data in S3 via some older metadata, the longer we delay
   deletions in a deletion list, the less up-to-date we require that read replica to be when serving
   reads for a historical LSN (i.e. for historical reads, leaving some stale objects around is
-  a good thing).
+  a good thing). In practice this race is relatively short, just the duration of an in-flight read operation
+  that might be traversing some slightly stale metadata.
 
 There is some flexibility in exactly how deletion should work, but a simple implementation would look
 like this:
@@ -230,6 +250,25 @@ are only valid within a particular node generation. Future writers may either dr
 list and let orphan object cleanup handle the objects (see below), or they may reconcile the
 deletion objects with latest metadata to ensure all victim objects are really not referenced by
 latest metadata.
+
+### WAL trim changes
+
+The WAL may be trimmed by the safekeepers in response to feedback from the pageserver -- data
+that has been ingested into S3 can be safely dropped by the safekeepers. At present, safekeepers retain
+a perpetual copy of the write log in S3, so we don't risk data loss from a bad trim, but this RFC accounts for
+the future state where safekeepers only retain WAL content up til the point that it has been ingested
+by pageservers.
+
+We may solve for safety issues here in the same way as for deletions: before indicating to safekeepers
+that they may trim up to a particular LSN, pageservers should communicate with the control plane
+to confirm that their node generation is current. This guarantees that any future generation will
+be starting from the last metadata that this generation wrote out, i.e. the S3 state which contains
+all the data from the WAL up to the proposed trim point.
+
+The pageservers indicate what to trim by the `remote_consistent_lsn` field in messages to
+the safekeeper. The pageservers will change to only advertise the true remote_consistent_lsn
+after they have periodically checked the validity of their generation: this will slightly
+delay WAL trimming by whatever period we decide to make that control plane check-in.
 
 ### Housekeeping: Cleaning up orphan objects
 
@@ -273,20 +312,25 @@ get an up to date LayerMap.
 
 Unless a pageserver is sure (via control plane) that all its attachments are the same as its last
 startup, it must synchronize metadata from S3 before doing anything. This will mean finding the
-index_part.json written by the last node to do writes on this tenant, whose exact key is unknown
-as we do not know what node/generation last wrote it. This is pretty simple to solve:
+index_part.json written by the last node to do writes on this tenant.
 
-- we can issue a ListObjectsv2 request with the index_part.json as the prefix, and load the object with
-  the highest attachment generation number, and then as soon as we've written out an index_part.json with
-  our generation suffix, we may erase the old index_part.json files.
-- This listing can be avoided with some optimizations, depending on the HA scheme in use. If HA is driven
-  entirely by tenant attachment changes, then writer nodes may write out a tiny object one time at startup,
-  where this "link" object just has the attachment generation in its name, so that future nodes can subtract
-  one from their own attachment generation to get an almost-always-right GET path for the object that will
-  lead them to the most recent writer's latest metadata.
-- Alternatively, whatever drives failover (perhaps the control plane) could also provide the hint to new
-  attachments of what the most recent active attachment was, so that the newly attached node already
-  knows the generation numbers of the node that last wrote metadata for this tenant.
+We can find the latest index_part.json as follows:
+
+- In a clean migration of a tenant, the control plane may remember the tenant's most recent
+  generation numbers, and provide them to the new node in the attach request. This is sufficient
+  for the new node to directly GET the latest index.
+- Alternatively, we may use the storage broker for this: if we are continuously publishing the generation
+  information to the broker, then a newly attached tenant may query this information back and if
+  the attachment generation is exactly 1 less than the current attachment, or if the attachment is
+  the same but the node generation is exactly 1 less and the node ID is the same, then we may use that
+  information to calculate the most recent index key. See "Optional Safekeeper changes" below for where
+  we publish generation info to the safekeeper & in turn to the storage broker.
+- As a fallback, newly attached tenants may issue a ListObjectsv2 request using index_part as a prefix
+  to enumerate the indices and pick the most recent one by attachment generation. The listing would
+  typically only return 1-2 indices.
+
+Once the new attachment has written out its index_part.json, it may clean up historic index_part.json
+files that were found (this would usually be exactly one, from the previous attachment).
 
 ### Control Plane Changes
 
@@ -325,22 +369,100 @@ fast:
   if the control plane has responded to the node's absence by re-attaching all tenants to
   other nodes, before the original node returns to service.
 
-### Safekeeper changes
+### Optional Safekeeper changes
+
+As an optimization, we may extend the safekeeper to be asynchronously updated about pageserver node
+generation numbers. We may do this by including the generation in messages from pageserver to safekeeper,
+and having the safekeeper write the highest generation number it has seen to the storage broker in
+SafekeeperTimelineInfo (or more efficiently, by introducing a per-pageserver structure in storage broker).
+
+Once the safekeeper has visibility of the most recent generation, it may reject requests from pageservers
+with stale generation numbers: this would reduce any possible extra load on the safekeeper from stale pageservers,
+and provide feedback to stale pageservers that they should shut down.
+
+This is not required for safety: reads from a stale pageserver are functionally harmless and only
+waste system resources. Logical writes (i.e. updates to remote_persistent_lsn that can cause trimming)
+are handled on the pageserver side (see "WAL trim changes" above).
+
+#### Optimization: fencing reads from stale pageservers
 
 As an optimization, the safekeeper may track the most recent known generation for each pageserver node ID,
 and respond with an error to any communications from older generations: this would help isolated
 pageserver nodes to shut down more quickly once they realize that they are stale, rather than continuing
 to put load on the safekeeper and write objects to S3 that are already superseded by later generations.
 
-For strict safety, the safekeeper should ensure that it does not trim any data based on messages
-from stale pageserver generations: this would require a series of barriers, where the control plane
-tells safekeepers about a new generation ID before it issues it to a pageserver. Implementing this
-is a lower priority than the underlying format changes, because the lifetime of split-brain situations
-is likely to be very short compared with the length of data retention in the safekeeper.
+## Operational impact
 
-Implementation of safekeeper changes is optional as long as the safekeeper keeps tenant WAL data
-indefinitely. Once we start deleting that, it becomes necessary for the safekeeper to only
-obey updates to the remote persistent LSN from nodes whose generation numbers are not stale.
+### Availability
+
+Coordination of generation numbers via the control plane introduce a dependency for certain
+operations:
+
+1. Starting new pageservers (or activating pageservers after a restart)
+2. Executing enqueued deletions
+3. Advertising updated `remote_consistent_lsn` to enable WAL trimming
+
+Item 1. would mean that some in-place restarts that previously would have resumed service even if the control plane were
+unavailable, will now not resume service ot users until the control plane is available. We could
+avoid this by having a timeout on communication with the control plane, and after some timeout,
+resume service with the node's previous generation (assuming this was persisted to disk). However,
+this is unlikely to be needed as the control plane is already an essential & highly available component.
+
+Item 2. is a non-issue operationally: it's harmless to delay deletions, the only impact of objects pending deletion is
+the S3 capacity cost.
+
+Item 3. is an issue if safekeepers are low on disk space and the control plane is unavailable for a long time.
+
+### Rollout
+
+Although there is coupling between components, we may deploy most of the new data plane components
+independently of the control plane: initially they can just use a static generation number.
+
+#### Phase 1
+
+The pageserver is deployed with some special config to:
+
+- Always act like everything is generation 1 and do not wait for a control plane issued generation on startup.
+- Skip the places in deletion and remote_consistent_lsn updates where we would call into control plane
+
+The storage broker will tolerate the timeline state omitting generation numbers.
+
+The safekeeper will be aware of both new and old versions of `PageserverFeedback` message, and tolerate
+the old version.
+
+#### Phase 2
+
+The control plane changes are deployed: control plane will now track and increment generation numbers.
+
+#### Phase 3
+
+The pageserver is deployed with its control-plane-dependent changes enabled: it will now require
+the control plane to issue a generation number, and require to communicate with the control plane
+prior to processing deletions.
+
+### On-disk backward compatibility
+
+Backward compatibility with existing data is straightforward:
+
+- When reading the index, we may assume that any layer whose metadata doesn't include
+  generations will have a generation-less key path.
+- When locating the index file on attachment, we may use the "fallback" listing path
+  and if there is only a generation-less index, that is the one we load.
+
+It is not necessary to re-write an existing layers: even new index files will be able
+to represent generation-less layers.
+
+### On-disk forward compatibility
+
+We will do a two phase rollout, probably over multiple releases because we will naturally
+have some of the read-side code ready before the overall functionality is ready:
+
+1. Deploy pageservers which understand the new index format and generation numbers
+   in keys, but do not write objects with generation numbers in the keys.
+2. Deploy pageservers that write objects with generation numbers in the keys.
+
+Old pageservers will be oblivious to generation numbers. That means that they can't
+read objects with generation numbers in the name.
 
 # Appendix A: Examples of use in high availability/failover
 
@@ -378,17 +500,17 @@ unresponsive node might be network partitioned and still writing to S3.
 #### Case A: re-attachment to other nodes
 
 1. Let's say node 0 fails in a cluster of three nodes 0, 1, 2.
-1. Some external mechanism notices that the node is unavailable and initiates
+2. Some external mechanism notices that the node is unavailable and initiates
    movement of all tenants attached to that node to a different node. In
    this example it would mean incrementing the attachment generation
    of all tenants that were attached to node 0, and attaching them
    to node 1 or 2 based on some distribution rule (this might be round
    robin, or capacity based).
-1. A tenant which is now attached to node 1 will _also_ still be attached to node
+3. A tenant which is now attached to node 1 will _also_ still be attached to node
    0, from the perspective of node 0. Let's say it was originally attached with
    generation suffix 00000001-0000-00000001 -- its new suffix on node 1
    might be 00000002-0001-00000001 (attachment gen 2, on node 1).
-1. S3 writes will continue from nodes 0 and 1: there will be an index*part.json-00000001-0000-00000001
+4. S3 writes will continue from nodes 0 and 1: there will be an index*part.json-00000001-0000-00000001
    \_and* an index_part.json-00000002-0001-00000001. Objects written under the old suffix
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
@@ -405,15 +527,15 @@ Eventually, node 0 will somehow realize it should stop running by some means:
 #### Case B: direct node replacement with blank node (cold standby)
 
 1. Let's say node 0 fails, and there may be some other peers but they aren't relevant.
-1. Some external mechanism notices that the node is unavailable, and creates
+2. Some external mechanism notices that the node is unavailable, and creates
    a "new node 0" (Node 0b) which is a physically separate server. The original node 0
    (Node 0a) may still be running.
-1. On startup, node 0b acquires a new generation number. It doesn't have any local state,
+3. On startup, node 0b acquires a new generation number. It doesn't have any local state,
    so the control plane must send attach requests to node 0b for all the tenants. However,
    these do not have to increment the attachment generation as they're still attached to
    logical node 0, it's just a different physical node. So we have an O(tenant_count) communication
    to the pageserver, but not an O(tenant_count) write to the database.
-1. S3 writes continue from nodes 0a and 0b, but the writes do not collide due to different
+4. S3 writes continue from nodes 0a and 0b, but the writes do not collide due to different
    node generation in the suffix, and the writes from node 0a are not visible to the rest
    of the system because endpoints are reading only from node 0b.
 
@@ -437,11 +559,9 @@ mitigate the fact that remote data is not _physically_ immutable (i.e. the actua
 page moves around as compaction happens).
 
 A read replica needs to be aware of generations in remote data in order to read the latest
-metadata (find the index_part.json with the latest suffix). This does not have to involve any
-control plane interaction: a read replica node can scan remote index files to find the latest one. However,
-it may make sense to send notifications from the control plane to avoid the need for read replicas
-to poll S3 to detect when the writer for a particular tenant changed, or to expose this information
-via some intermediate pub/sub mechanism for async consumption by read replicas.
+metadata (find the index_part.json with the latest suffix). It may either query this
+from the control plane, or more efficiently read it from the storage broker -- publishing
+generation information to the storage broker.
 
 ## Seamless migration
 
