@@ -202,6 +202,7 @@ def wait_timeline_detail_404(
     iterations: int,
 ):
     def timeline_is_missing():
+        data = {}
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
             log.info(f"timeline detail {data}")
@@ -209,7 +210,8 @@ def wait_timeline_detail_404(
             log.debug(e)
             if e.status_code == 404:
                 return
-            raise RuntimeError(f"Timeline exists state {data['state']}") from e
+
+        raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
     wait_until(iterations, interval=0.250, func=timeline_is_missing)
 
@@ -258,6 +260,7 @@ def wait_tenant_status_404(
     iterations: int,
 ):
     def tenant_is_missing():
+        data = {}
         try:
             data = pageserver_http.tenant_status(tenant_id)
             log.info(f"tenant status {data}")
@@ -265,7 +268,8 @@ def wait_tenant_status_404(
             log.debug(e)
             if e.status_code == 404:
                 return
-            raise RuntimeError(f"Timeline exists state {data['state']}") from e
+
+        raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
     wait_until(iterations, interval=0.250, func=tenant_is_missing)
 
