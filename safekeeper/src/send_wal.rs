@@ -568,6 +568,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             {
                 if self.tli.should_walsender_stop(remote_consistent_lsn).await {
                     // Terminate if there is nothing more to send.
+                    // Note that "ending streaming" part of the string is used by
+                    // pageserver to identify WalReceiverError::SuccessfulCompletion,
+                    // do not change this string without updating pageserver.
                     return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                         "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
                         self.appname, self.start_pos,

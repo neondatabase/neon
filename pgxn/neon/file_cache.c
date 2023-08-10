@@ -172,7 +172,7 @@ lfc_change_limit_hook(int newval, void *extra)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
-			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
+			elog(WARNING, "Failed to open file cache %s: %m, disabling file cache", lfc_path);
 			lfc_size_limit = 0; /* disable file cache */
 			return;
 		}
@@ -557,7 +557,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			Assert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
-			elog(LOG, "Swap file cache page");
+			elog(DEBUG2, "Swap file cache page");
 		}
 		else
 		{
@@ -574,7 +574,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
-			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
+			elog(WARNING, "Failed to open file cache %s: %m, disabling file cache", lfc_path);
 			lfc_size_limit = 0; /* disable file cache */
 		}
 	}
@@ -583,7 +583,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 		if (rc != BLCKSZ)
 		{
-			elog(INFO, "Failed to write file cache: %m");
+			elog(WARNING, "Failed to write file cache: %m, disabling file cache");
 			lfc_size_limit = 0; /* disable file cache */
 		}
 	}

@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Condvar, Mutex, OnceLock, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -24,7 +25,7 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -285,7 +286,7 @@ impl ComputeNode {
     #[instrument(skip_all, fields(%lsn))]
     fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Utc::now();
+        let start_time = Instant::now();
 
         let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
 
@@ -298,7 +299,10 @@ impl ComputeNode {
             info!("Storage auth token not set");
         }
 
+        // Connect to pageserver
         let mut client = config.connect(NoTls)?;
+        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+
         let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
             Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
@@ -344,13 +348,10 @@ impl ComputeNode {
         };
 
         // Report metrics
-        self.state.lock().unwrap().metrics.basebackup_bytes =
-            measured_reader.get_byte_count() as u64;
-        self.state.lock().unwrap().metrics.basebackup_ms = Utc::now()
-            .signed_duration_since(start_time)
-            .to_std()
-            .unwrap()
-            .as_millis() as u64;
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
+        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
+        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
     }
 
@@ -925,6 +926,7 @@ LIMIT 100",
             let spec = &pspec.spec;
             let custom_ext = spec.custom_extensions.clone().unwrap_or(Vec::new());
             info!("custom extensions: {:?}", &custom_ext);
+
             let (ext_remote_paths, library_index) = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
@@ -944,94 +946,113 @@ LIMIT 100",
     }
 
     // download an archive, unzip and place files in correct locations
-    pub async fn download_extension(&self, ext_name: &str, is_library: bool) -> Result<u64> {
-        match &self.ext_remote_storage {
-            None => anyhow::bail!("No remote extension storage"),
-            Some(remote_storage) => {
-                let mut real_ext_name = ext_name.to_string();
-                if is_library {
-                    // sometimes library names might have a suffix like
-                    // library.so or library.so.3. We strip this off
-                    // because library_index is based on the name without the file extension
-                    let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
-                    let lib_raw_name = strip_lib_suffix.replace(&real_ext_name, "").to_string();
-                    real_ext_name = self
-                        .library_index
-                        .get()
-                        .expect("must have already downloaded the library_index")[&lib_raw_name]
-                        .clone();
-                }
+    pub async fn download_extension(
+        &self,
+        ext_name: &str,
+        is_library: bool,
+    ) -> Result<u64, DownloadError> {
+        let remote_storage = self
+            .ext_remote_storage
+            .as_ref()
+            .ok_or(DownloadError::BadInput(anyhow::anyhow!(
+                "Remote extensions storage is not configured",
+            )))?;
 
-                let ext_path = &self
-                    .ext_remote_paths
-                    .get()
-                    .expect("error accessing ext_remote_paths")[&real_ext_name];
-                let ext_archive_name = ext_path.object_name().expect("bad path");
+        let mut real_ext_name = ext_name;
+        if is_library {
+            // sometimes library names might have a suffix like
+            // library.so or library.so.3. We strip this off
+            // because library_index is based on the name without the file extension
+            let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
+            let lib_raw_name = strip_lib_suffix.replace(real_ext_name, "").to_string();
 
-                let mut first_try = false;
-                if !self
-                    .ext_download_progress
-                    .read()
-                    .expect("lock err")
-                    .contains_key(ext_archive_name)
-                {
-                    self.ext_download_progress
-                        .write()
-                        .expect("lock err")
-                        .insert(ext_archive_name.to_string(), (Utc::now(), false));
-                    first_try = true;
-                }
-                let (download_start, download_completed) =
-                    self.ext_download_progress.read().expect("lock err")[ext_archive_name];
-                let start_time_delta = Utc::now()
-                    .signed_duration_since(download_start)
-                    .to_std()
-                    .unwrap()
-                    .as_millis() as u64;
-
-                // how long to wait for extension download if it was started by another process
-                const HANG_TIMEOUT: u64 = 3000; // milliseconds
-
-                if download_completed {
-                    info!("extension already downloaded, skipping re-download");
-                    return Ok(0);
-                } else if start_time_delta < HANG_TIMEOUT && !first_try {
-                    info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
-                    let mut interval =
-                        tokio::time::interval(tokio::time::Duration::from_millis(500));
-                    loop {
-                        info!("waiting for download");
-                        interval.tick().await;
-                        let (_, download_completed_now) =
-                            self.ext_download_progress.read().expect("lock")[ext_archive_name];
-                        if download_completed_now {
-                            info!("download finished by whoever else downloaded it");
-                            return Ok(0);
-                        }
-                    }
-                    // NOTE: the above loop will get terminated
-                    // based on the timeout of the download function
-                }
-
-                // if extension hasn't been downloaded before or the previous
-                // attempt to download was at least HANG_TIMEOUT ms ago
-                // then we try to download it here
-                info!("downloading new extension {ext_archive_name}");
-
-                let download_size = extension_server::download_extension(
-                    &real_ext_name,
-                    ext_path,
-                    remote_storage,
-                    &self.pgbin,
-                )
-                .await;
-                self.ext_download_progress
-                    .write()
-                    .expect("bad lock")
-                    .insert(ext_archive_name.to_string(), (download_start, true));
-                download_size
-            }
+            real_ext_name = self
+                .library_index
+                .get()
+                .expect("must have already downloaded the library_index")
+                .get(&lib_raw_name)
+                .ok_or(DownloadError::BadInput(anyhow::anyhow!(
+                    "library {} is not found",
+                    lib_raw_name
+                )))?;
         }
+
+        let ext_path = &self
+            .ext_remote_paths
+            .get()
+            .expect("error accessing ext_remote_paths")
+            .get(real_ext_name)
+            .ok_or(DownloadError::BadInput(anyhow::anyhow!(
+                "real_ext_name {} is not found",
+                real_ext_name
+            )))?;
+
+        let ext_archive_name = ext_path.object_name().expect("bad path");
+
+        let mut first_try = false;
+        if !self
+            .ext_download_progress
+            .read()
+            .expect("lock err")
+            .contains_key(ext_archive_name)
+        {
+            self.ext_download_progress
+                .write()
+                .expect("lock err")
+                .insert(ext_archive_name.to_string(), (Utc::now(), false));
+            first_try = true;
+        }
+        let (download_start, download_completed) =
+            self.ext_download_progress.read().expect("lock err")[ext_archive_name];
+        let start_time_delta = Utc::now()
+            .signed_duration_since(download_start)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+
+        // how long to wait for extension download if it was started by another process
+        const HANG_TIMEOUT: u64 = 3000; // milliseconds
+
+        if download_completed {
+            info!("extension already downloaded, skipping re-download");
+            return Ok(0);
+        } else if start_time_delta < HANG_TIMEOUT && !first_try {
+            info!("download {ext_archive_name} already started by another process, hanging untill completion or timeout");
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            loop {
+                info!("waiting for download");
+                interval.tick().await;
+                let (_, download_completed_now) =
+                    self.ext_download_progress.read().expect("lock")[ext_archive_name];
+                if download_completed_now {
+                    info!("download finished by whoever else downloaded it");
+                    return Ok(0);
+                }
+            }
+            // NOTE: the above loop will get terminated
+            // based on the timeout of the download function
+        }
+
+        // if extension hasn't been downloaded before or the previous
+        // attempt to download was at least HANG_TIMEOUT ms ago
+        // then we try to download it here
+        info!("downloading new extension {ext_archive_name}");
+
+        let download_size = extension_server::download_extension(
+            real_ext_name,
+            ext_path,
+            remote_storage,
+            &self.pgbin,
+        )
+        .await
+        .map_err(DownloadError::Other);
+
+        self.ext_download_progress
+            .write()
+            .expect("bad lock")
+            .insert(ext_archive_name.to_string(), (download_start, true));
+
+        download_size
     }
 
     #[tokio::main]
@@ -1090,7 +1111,17 @@ LIMIT 100",
             .as_millis() as u64;
         info!("Prepare extensions took {prep_ext_time_delta}ms");
 
+        // Don't try to download libraries that are not in the index.
+        // Assume that they are already present locally.
+        libs_vec.retain(|lib| {
+            self.library_index
+                .get()
+                .expect("error accessing ext_remote_paths")
+                .contains_key(lib)
+        });
+
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
+
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
             download_tasks.push(self.download_extension(library, true));
@@ -1104,8 +1135,19 @@ LIMIT 100",
             prep_extensions_ms: prep_ext_time_delta,
         };
         for result in results {
-            let download_size = result?;
-            remote_ext_metrics.num_ext_downloaded += 1;
+            let download_size = match result {
+                Ok(res) => {
+                    remote_ext_metrics.num_ext_downloaded += 1;
+                    res
+                }
+                Err(err) => {
+                    // if we failed to download an extension, we don't want to fail the whole
+                    // process, but we do want to log the error
+                    error!("Failed to download extension: {}", err);
+                    0
+                }
+            };
+
             remote_ext_metrics.largest_ext_size =
                 std::cmp::max(remote_ext_metrics.largest_ext_size, download_size);
             remote_ext_metrics.total_ext_download_size += download_size;

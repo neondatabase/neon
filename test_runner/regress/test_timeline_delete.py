@@ -272,6 +272,23 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             wait_timeline_detail_404(
                 ps_http, env.initial_tenant, timeline_id, iterations=iterations
             )
+
+            if failpoint == "timeline-delete-after-index-delete":
+                m = ps_http.get_metrics()
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "err"},
+                    ).value
+                    == 1
+                )
+                assert (
+                    m.query_one(
+                        "remote_storage_s3_request_seconds_count",
+                        filter={"request_type": "get_object", "result": "ok"},
+                    ).value
+                    == 1
+                )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state

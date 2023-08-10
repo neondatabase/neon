@@ -169,13 +169,17 @@ pub async fn get_available_extensions(
             let extension_name = control_file
                 .strip_suffix(".control")
                 .expect("control files must end in .control");
-            ext_remote_paths.insert(
-                extension_name.to_string(),
-                RemotePath::from_string(&ext_data.archive_path)?,
-            );
             let control_path = local_sharedir.join(control_file);
-            info!("writing file {:?}{:?}", control_path, control_contents);
-            file_create_tasks.push(tokio::fs::write(control_path, control_contents));
+            if !control_path.exists() {
+                ext_remote_paths.insert(
+                    extension_name.to_string(),
+                    RemotePath::from_string(&ext_data.archive_path)?,
+                );
+                info!("writing file {:?}{:?}", control_path, control_contents);
+                file_create_tasks.push(tokio::fs::write(control_path, control_contents));
+            } else {
+                warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_file);
+            }
         }
     }
     let results = join_all(file_create_tasks).await;
@@ -222,7 +226,7 @@ pub async fn download_extension(
     );
     let libdir_paths = (
         unzip_dest.to_string() + "/lib",
-        Path::new(&get_pg_config("--libdir", pgbin)).join("postgresql"),
+        Path::new(&get_pg_config("--pkglibdir", pgbin)).to_path_buf(),
     );
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
     for paths in [sharedir_paths, libdir_paths] {

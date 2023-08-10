@@ -304,17 +304,18 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Debug-log the list of candidates
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        let desc = candidate.layer.layer_desc();
         debug!(
             "cand {}/{}: size={}, no_access_for={}us, partition={:?}, {}/{}/{}",
             i + 1,
             candidates.len(),
-            candidate.layer.file_size(),
+            desc.file_size,
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
             partition,
-            candidate.layer.get_tenant_id(),
-            candidate.layer.get_timeline_id(),
+            desc.tenant_id,
+            desc.timeline_id,
             candidate.layer,
         );
     }
@@ -346,7 +347,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             warned = Some(usage_planned);
         }
 
-        usage_planned.add_available_bytes(candidate.layer.file_size());
+        usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
 
         batched
             .entry(TimelineKey(candidate.timeline))
@@ -389,15 +390,16 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 Ok(results) => {
                     assert_eq!(results.len(), batch.len());
                     for (result, layer) in results.into_iter().zip(batch.iter()) {
+                        let file_size = layer.layer_desc().file_size;
                         match result {
                             Some(Ok(())) => {
-                                usage_assumed.add_available_bytes(layer.file_size());
+                                usage_assumed.add_available_bytes(file_size);
                             }
                             Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
                                 unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
                             }
                             Some(Err(EvictionError::FileNotFound)) => {
-                                evictions_failed.file_sizes += layer.file_size();
+                                evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }
                             Some(Err(
@@ -406,7 +408,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                             )) => {
                                 let e = utils::error::report_compact_sources(&e);
                                 warn!(%layer, "failed to evict layer: {e}");
-                                evictions_failed.file_sizes += layer.file_size();
+                                evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }
                             None => {
