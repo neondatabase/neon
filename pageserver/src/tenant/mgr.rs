@@ -1,6 +1,8 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use futures::Future;
+use scopeguard::ScopeGuard;
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -14,7 +16,7 @@ use tokio::task::JoinSet;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::crashsafe;
+use utils::{completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -347,24 +349,61 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
+    tenant_map_insert(tenant_id, async {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Create)?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+        let tenant_directory = super::create_tenant_files(
+            conf,
+            tenant_conf,
+            &tenant_id,
+            CreateTenantFilesMode::Create,
+        )?;
 
-        let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
+        let guard_fs = scopeguard::guard((), |_| {
+            if let Err(e) = std::fs::remove_dir_all(&tenant_directory) {
+                // log the error but not throwing it somewhere
+                warn!("failed to cleanup when tenant {tenant_id} fails to start: {e}");
+            }
+        });
 
-        let crated_tenant_id = created_tenant.tenant_id();
-        anyhow::ensure!(
+        let created_tenant = schedule_local_tenant_processing(
+            conf,
+            &tenant_directory,
+            broker_client,
+            remote_storage,
+            None,
+            ctx,
+        )?;
+
+        // Put all code that might error into the check function.
+
+        let check = || {
+            fail::fail_point!("tenant-create-fail", |_| {
+                anyhow::bail!("failpoint: tenant-create-fail");
+            });
+
+            let crated_tenant_id = created_tenant.tenant_id();
+            anyhow::ensure!(
                 tenant_id == crated_tenant_id,
                 "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
             );
+
+            Ok(())
+        };
+
+        if let Err(e) = check() {
+            // `schedule_local_tenant_processing` eventually launches the tenant's background task
+            // We need to shut them down before bailing out. Shutdown the tenant in the background.
+            tokio::spawn(async move {
+                let (_guard, shutdown_progress) = completion::channel();
+                created_tenant.shutdown(shutdown_progress, false).await
+            });
+            return Err(e);
+        }
+
+        // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
+        ScopeGuard::into_inner(guard_fs);
         Ok(created_tenant)
     }).await
 }
@@ -499,7 +538,7 @@ pub async fn load_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
+    tenant_map_insert(tenant_id, async {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
@@ -576,30 +615,61 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
-        let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach)?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+    tenant_map_insert(tenant_id, async {
+        let tenant_dir =
+            create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach)?;
+
+        let guard_fs = scopeguard::guard((), |_| {
+            if let Err(e) = std::fs::remove_dir_all(&tenant_dir) {
+                // log the error but not throwing it somewhere
+                warn!("failed to cleanup when tenant {tenant_id} fails to start: {e}");
+            }
+        });
 
         // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
         let marker_file_exists = conf
             .tenant_attaching_mark_file_path(&tenant_id)
             .try_exists()
             .context("check for attach marker file existence")?;
-        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
-
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
-
-        let attached_tenant_id = attached_tenant.tenant_id();
         anyhow::ensure!(
-            tenant_id == attached_tenant_id,
-            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+            marker_file_exists,
+            "create_tenant_files should have created the attach marker file"
         );
+
+        let attached_tenant = schedule_local_tenant_processing(
+            conf,
+            &tenant_dir,
+            broker_client,
+            Some(remote_storage),
+            None,
+            ctx,
+        )?;
+
+        // Put all code that might error in the check function.
+
+        let check = || {
+            let attached_tenant_id = attached_tenant.tenant_id();
+            anyhow::ensure!(
+                tenant_id == attached_tenant_id,
+                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+            );
+            Ok(())
+        };
+
+        if let Err(e) = check() {
+            // `schedule_local_tenant_processing` eventually launches the tenant's background task
+            // We need to shut them down before bailing out. Shutdown the tenant in the background.
+            tokio::spawn(async move {
+                let (_guard, shutdown_progress) = completion::channel();
+                attached_tenant.shutdown(shutdown_progress, false).await
+            });
+            return Err(e);
+        }
+
+        // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
+        ScopeGuard::into_inner(guard_fs);
         Ok(attached_tenant)
-    })
-    .await?;
+    }).await?;
     Ok(())
 }
 
@@ -621,12 +691,12 @@ pub enum TenantMapInsertError {
 ///
 /// NB: the closure should return quickly because the current implementation of tenants map
 /// serializes access through an `RwLock`.
-async fn tenant_map_insert<F>(
+async fn tenant_map_insert<Fut>(
     tenant_id: TenantId,
-    insert_fn: F,
+    insert_fut: Fut,
 ) -> Result<Arc<Tenant>, TenantMapInsertError>
 where
-    F: FnOnce() -> anyhow::Result<Arc<Tenant>>,
+    Fut: Future<Output = anyhow::Result<Arc<Tenant>>>,
 {
     let mut guard = TENANTS.write().await;
     let m = match &mut *guard {
@@ -639,7 +709,7 @@ where
             tenant_id,
             e.get().current_state(),
         )),
-        hash_map::Entry::Vacant(v) => match insert_fn() {
+        hash_map::Entry::Vacant(v) => match insert_fut.await {
             Ok(tenant) => {
                 v.insert(tenant.clone());
                 Ok(tenant)
