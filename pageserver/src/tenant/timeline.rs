@@ -3737,9 +3737,9 @@ impl Timeline {
                 }
 
                 fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                    Result::<_>::Err(
-                        anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into(),
-                    )
+                    Result::<_>::Err(anyhow::anyhow!(
+                        "failpoint delta-layer-writer-fail-before-finish"
+                    ))
                 });
 
                 writer.as_mut().unwrap().put_value(key, lsn, value)?;
