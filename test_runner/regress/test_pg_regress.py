@@ -56,10 +56,6 @@ def test_pg_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
 
@@ -166,9 +162,4 @@ def test_sql_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-        endpoint.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
