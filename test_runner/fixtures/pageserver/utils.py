@@ -19,15 +19,6 @@ def assert_tenant_state(
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
 
 
-def tenant_exists(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
-    tenants = pageserver_http.tenant_list()
-    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
-    assert len(matching) < 2
-    if len(matching) == 0:
-        return None
-    return matching[0]
-
-
 def remote_consistent_lsn(
     pageserver_http: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
@@ -258,6 +249,7 @@ def wait_tenant_status_404(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     iterations: int,
+    interval: float = 0.250,
 ):
     def tenant_is_missing():
         data = {}
@@ -271,7 +263,7 @@ def wait_tenant_status_404(
 
         raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    wait_until(iterations, interval=0.250, func=tenant_is_missing)
+    wait_until(iterations, interval=interval, func=tenant_is_missing)
 
 
 def tenant_delete_wait_completed(
