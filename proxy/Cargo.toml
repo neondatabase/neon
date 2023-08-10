@@ -54,7 +54,6 @@ tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-tracing-log.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true

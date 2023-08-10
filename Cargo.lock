@@ -3104,7 +3104,6 @@ dependencies = [
  "tokio-rustls 0.23.4",
  "tokio-util",
  "tracing",
- "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
@@ -5356,7 +5355,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
- "tracing-log",
  "tracing-subscriber",
  "url",
 ]

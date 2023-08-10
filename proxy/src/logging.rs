@@ -1,4 +1,3 @@
-use tracing_log::LogTracer;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
     filter::{EnvFilter, LevelFilter},
@@ -17,8 +16,6 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
-
-    LogTracer::init()?;
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
