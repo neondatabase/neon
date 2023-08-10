@@ -291,3 +291,7 @@ MANY_SMALL_LAYERS_TENANT_CONFIG = {
     "checkpoint_distance": f"{1024**2}",
     "image_creation_threshold": "100",
 }
+
+
+def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
+    return 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 6

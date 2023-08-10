@@ -18,6 +18,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
+    poll_for_remote_storage_iterations,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -229,7 +230,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     ps_http.configure_failpoints((failpoint, "return"))
 
-    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
     # These failpoints are earlier than background task is spawned.
     # so they result in api request failure.

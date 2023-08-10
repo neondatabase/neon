@@ -13,6 +13,7 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
+    poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
     wait_tenant_status_404,
     wait_until_tenant_active,
@@ -63,7 +64,8 @@ def test_tenant_delete_smoke(
 
         parent = timeline
 
-    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
 
     tenant_path = env.tenant_dir(tenant_id=tenant_id)
@@ -177,7 +179,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
     ps_http.configure_failpoints((failpoint, "return"))
 
-    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
     # These failpoints are earlier than background task is spawned.
     # so they result in api request failure.
