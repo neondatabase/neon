@@ -2,6 +2,7 @@
 
 use std::env::{var, VarError};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
@@ -614,6 +615,20 @@ fn start_pageserver(
             // The plan is to change that over time.
             shutdown_pageserver.take();
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+
+            // Best effort to persist any outstanding deletions, to avoid leaking objects
+            let dq = deletion_queue.clone();
+            BACKGROUND_RUNTIME.block_on(async move {
+                match tokio::time::timeout(Duration::from_secs(5), dq.new_client().flush()).await {
+                    Ok(()) => {
+                        info!("Deletion queue flushed successfully on shutdown");
+                    }
+                    Err(e) => {
+                        warn!("Timed out flushing deletion queue on shutdown ({e})")
+                    }
+                }
+            });
+
             unreachable!()
         }
     })
