@@ -26,9 +26,9 @@ use utils::{
 };
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
-use parking_lot::RwLock;
 use std::fmt::Write as _;
 use std::ops::Range;
+use tokio::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
 
@@ -125,7 +125,7 @@ impl Layer for InMemoryLayer {
 
     /// debugging function to print out the contents of the layer
     async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read();
+        let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
 
@@ -181,7 +181,7 @@ impl Layer for InMemoryLayer {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
-        let inner = self.inner.read();
+        let inner = self.inner.read().await;
 
         let reader = inner.file.block_cursor();
 
@@ -232,8 +232,8 @@ impl InMemoryLayer {
     ///
     /// Get layer size on the disk
     ///
-    pub fn size(&self) -> Result<u64> {
-        let inner = self.inner.read();
+    pub async fn size(&self) -> Result<u64> {
+        let inner = self.inner.read().await;
         Ok(inner.file.size)
     }
 
@@ -267,9 +267,9 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
+    pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write();
+        let mut inner = self.inner.write().await;
         self.assert_writable();
 
         let off = {
@@ -301,8 +301,8 @@ impl InMemoryLayer {
     /// Make the layer non-writeable. Only call once.
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
-    pub fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write();
+    pub async fn freeze(&self, end_lsn: Lsn) {
+        let inner = self.inner.write().await;
 
         assert!(self.start_lsn < end_lsn);
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
@@ -327,7 +327,7 @@ impl InMemoryLayer {
         // lock, it will see that it's not writeable anymore and retry, but it
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
-        let inner = self.inner.read();
+        let inner = self.inner.read().await;
 
         let end_lsn = *self.end_lsn.get().unwrap();
 

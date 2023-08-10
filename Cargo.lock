@@ -2564,7 +2564,6 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "pageserver_api",
- "parking_lot 0.12.1",
  "pin-project-lite",
  "postgres",
  "postgres-protocol",

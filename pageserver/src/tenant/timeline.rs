@@ -875,7 +875,7 @@ impl Timeline {
             let Some(open_layer) = layers.open_layer.as_ref() else {
                 return Ok(());
             };
-            open_layer.size()?
+            open_layer.size().await?
         };
         let last_freeze_at = self.last_freeze_at.load();
         let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
@@ -2647,7 +2647,7 @@ impl Timeline {
     async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val)?;
+        layer.put_value(key, lsn, val).await?;
         Ok(())
     }
 
@@ -2673,7 +2673,9 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
         let mut guard = self.layers.write().await;
-        guard.try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at);
+        guard
+            .try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at)
+            .await;
     }
 
     /// Layer flusher task's main loop.
