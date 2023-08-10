@@ -156,7 +156,7 @@ pub async fn get_available_extensions(
     let ext_index_full = serde_json::from_slice::<Index>(&ext_idx_buffer)?;
     let mut enabled_extensions = ext_index_full.public_extensions;
     enabled_extensions.extend_from_slice(custom_extensions);
-    let library_index = ext_index_full.library_index;
+    let mut library_index = ext_index_full.library_index;
     let all_extension_data = ext_index_full.extension_data;
     info!("library_index: {:?}", library_index);
 
@@ -179,6 +179,16 @@ pub async fn get_available_extensions(
                 file_create_tasks.push(tokio::fs::write(control_path, control_contents));
             } else {
                 warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_file);
+                // also delete this from library index
+                let keys_to_remove: Vec<String> = library_index
+                    .iter()
+                    .filter(|&(_, value)| value == extension_name)
+                    .map(|(key, _)| key.clone())
+                    .collect();
+
+                for key in &keys_to_remove {
+                    library_index.remove(key);
+                }
             }
         }
     }
