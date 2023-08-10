@@ -350,10 +350,14 @@ fn start_pageserver(
     let remote_storage = create_remote_storage_client(conf)?;
 
     // Set up deletion queue
-    let (deletion_queue, mut deletion_frontend, mut deletion_backend) =
+    let (deletion_queue, deletion_frontend, deletion_backend) =
         DeletionQueue::new(remote_storage.clone(), conf);
-    BACKGROUND_RUNTIME.spawn(async move { deletion_frontend.background().await });
-    BACKGROUND_RUNTIME.spawn(async move { deletion_backend.background().await });
+    if let Some(mut deletion_frontend) = deletion_frontend {
+        BACKGROUND_RUNTIME.spawn(async move { deletion_frontend.background().await });
+    }
+    if let Some(mut deletion_backend) = deletion_backend {
+        BACKGROUND_RUNTIME.spawn(async move { deletion_backend.background().await });
+    }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
