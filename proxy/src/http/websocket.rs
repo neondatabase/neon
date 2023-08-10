@@ -187,12 +187,16 @@ async fn ws_handler(
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
-            {
-                error!(session_id = ?session_id, "error in websocket connection: {e:?}");
+        tokio::spawn(
+            async move {
+                if let Err(e) =
+                    serve_websocket(websocket, config, &cancel_map, session_id, host).await
+                {
+                    error!(session_id = ?session_id, "error in websocket connection: {e:?}");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         // Return the response so the spawned future can continue.
         Ok(response)
