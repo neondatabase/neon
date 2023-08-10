@@ -189,8 +189,6 @@ impl S3Bucket {
         let kind = RequestKind::Get;
         let permit = self.owned_permit(kind).await;
 
-        metrics::inc_get_object();
-
         let started_at = start_measuring_requests(kind);
 
         let get_object = self
@@ -205,7 +203,6 @@ impl S3Bucket {
         let started_at = ScopeGuard::into_inner(started_at);
 
         if get_object.is_err() {
-            metrics::inc_get_object_fail();
             metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                 kind,
                 AttemptOutcome::Err,
@@ -337,7 +334,6 @@ impl RemoteStorage for S3Bucket {
 
         loop {
             let _guard = self.permit(kind).await;
-            metrics::inc_list_objects();
             let started_at = start_measuring_requests(kind);
 
             let fetch_response = self
@@ -350,10 +346,6 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })
                 .context("Failed to list S3 prefixes")
                 .map_err(DownloadError::Other);
 
@@ -395,7 +387,6 @@ impl RemoteStorage for S3Bucket {
         let mut all_files = vec![];
         loop {
             let _guard = self.permit(kind).await;
-            metrics::inc_list_objects();
             let started_at = start_measuring_requests(kind);
 
             let response = self
@@ -407,10 +398,6 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })
                 .context("Failed to list files in S3 bucket");
 
             let started_at = ScopeGuard::into_inner(started_at);
@@ -443,7 +430,6 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::Put;
         let _guard = self.permit(kind).await;
 
-        metrics::inc_put_object();
         let started_at = start_measuring_requests(kind);
 
         let body = Body::wrap_stream(ReaderStream::new(from));
@@ -458,11 +444,7 @@ impl RemoteStorage for S3Bucket {
             .content_length(from_size_bytes.try_into()?)
             .body(bytes_stream)
             .send()
-            .await
-            .map_err(|e| {
-                metrics::inc_put_object_fail();
-                e
-            });
+            .await;
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
@@ -519,7 +501,6 @@ impl RemoteStorage for S3Bucket {
         }
 
         for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
-            metrics::inc_delete_objects(chunk.len() as u64);
             let started_at = start_measuring_requests(kind);
 
             let resp = self
@@ -538,7 +519,6 @@ impl RemoteStorage for S3Bucket {
             match resp {
                 Ok(resp) => {
                     if let Some(errors) = resp.errors {
-                        metrics::inc_delete_objects_fail(errors.len() as u64);
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()
@@ -546,7 +526,6 @@ impl RemoteStorage for S3Bucket {
                     }
                 }
                 Err(e) => {
-                    metrics::inc_delete_objects_fail(chunk.len() as u64);
                     return Err(e.into());
                 }
             }
@@ -558,7 +537,6 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::Delete;
         let _guard = self.permit(kind).await;
 
-        metrics::inc_delete_object();
         let started_at = start_measuring_requests(kind);
 
         let res = self
@@ -567,11 +545,7 @@ impl RemoteStorage for S3Bucket {
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(path))
             .send()
-            .await
-            .map_err(|e| {
-                metrics::inc_delete_object_fail();
-                e
-            });
+            .await;
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
