@@ -2817,15 +2817,15 @@ def check_restored_datadir_content(
     endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
-    # flush xlogs just in case
-    # hopefully fixes https://github.com/neondatabase/neon/issues/559
+    # many tests already checkpoint, but do it just in case
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION neon_test_utils;")
-            cur.execute("SELECT neon_xlogflush('0/FFFFFF'::pg_lsn);")
+            cur.execute("CHECKPOINT")
 
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
@@ -2840,7 +2840,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 
