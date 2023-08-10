@@ -7,7 +7,7 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
-pub(crate) mod metrics;
+pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
@@ -226,6 +226,7 @@ async fn timed<Fut: std::future::Future>(
 
             let ret = fut.await;
 
+            // this has a global allowed_errors
             tracing::warn!(
                 task = name,
                 elapsed_ms = started.elapsed().as_millis(),

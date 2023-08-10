@@ -87,19 +87,6 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-WORKER_PORT_NUM: int = 1000
-
-
-def pytest_configure(config: Config):
-    """
-    Check that we do not overflow available ports range.
-    """
-
-    numprocesses = config.getoption("numprocesses")
-    if (
-        numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768
-    ):  # do not use ephemeral ports
-        raise Exception("Too many workers configured. Cannot distribute ports for services.")
 
 
 @pytest.fixture(scope="session")
@@ -202,6 +189,11 @@ def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "fu
 
 
 @pytest.fixture(scope="session")
+def worker_port_num():
+    return (32768 - BASE_PORT) // int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
+
+
+@pytest.fixture(scope="session")
 def worker_seq_no(worker_id: str) -> int:
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -213,10 +205,10 @@ def worker_seq_no(worker_id: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def worker_base_port(worker_seq_no: int) -> int:
-    # so we divide ports in ranges of 100 ports
+def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
+    # so we divide ports in ranges of ports
     # so workers have disjoint set of ports for services
-    return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
+    return BASE_PORT + worker_seq_no * worker_port_num
 
 
 def get_dir_size(path: str) -> int:
@@ -230,8 +222,8 @@ def get_dir_size(path: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def port_distributor(worker_base_port: int) -> PortDistributor:
-    return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
+def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistributor:
+    return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
 @pytest.fixture(scope="session")
@@ -1502,7 +1494,6 @@ class NeonPageserver(PgProtocol):
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -1535,6 +1526,8 @@ class NeonPageserver(PgProtocol):
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
+            # these can happen during shutdown, but it should not be a reason to fail a test
+            ".*completed, took longer than expected.*",
         ]
 
     def start(
@@ -2834,8 +2827,15 @@ def check_restored_datadir_content(
     endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
@@ -2850,7 +2850,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 
