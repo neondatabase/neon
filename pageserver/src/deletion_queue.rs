@@ -9,8 +9,10 @@ use utils::id::{TenantId, TimelineId};
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 
-// TODO: small value is just for testing, make this bigger
-const DELETION_LIST_TARGET_SIZE: usize = 16;
+// The number of keys in a DeletionList before we will proactively persist it
+// (without reaching a flush deadline).  This aims to deliver objects of the order
+// of magnitude 1MB when we are under heavy delete load.
+const DELETION_LIST_TARGET_SIZE: usize = 16384;
 
 // Ordinarily, we only flush to DeletionList periodically, to bound the window during
 // which we might leak objects from not flushing a DeletionList after
@@ -51,7 +53,7 @@ const FLUSH_EXPLICIT_DEADLINE: Duration = Duration::from_millis(100);
 /// - Persistent deletion blocks: these represent deletion lists that have already been written to S3 and
 ///   are pending execution.
 /// - Deletions read back frorm the persistent deletion blocks, which are batched up into groups
-///   of 1024 for execution via a DeleteObjects call.
+///   of 1000 for execution via a DeleteObjects call.
 #[derive(Clone)]
 pub struct DeletionQueue {
     tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
@@ -173,7 +175,7 @@ pub struct BackendQueueWorker {
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
 
-    // Accumulate up to 1024 keys for the next deletion operation
+    // Accumulate up to 1000 keys for the next deletion operation
     accumulator: Vec<RemotePath>,
 
     // DeletionLists we have fully ingested but might still have
@@ -209,7 +211,7 @@ impl BackendQueueWorker {
         // we wait to proceed.
 
         // From the S3 spec
-        const MAX_KEYS_PER_DELETE: usize = 1024;
+        const MAX_KEYS_PER_DELETE: usize = 1000;
 
         self.accumulator.reserve(MAX_KEYS_PER_DELETE);
 
