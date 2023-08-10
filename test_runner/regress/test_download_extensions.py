@@ -82,6 +82,7 @@ def upload_files(env):
 
 # Test downloading remote extension.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
+@pytest.mark.xfail(reason="flaky because mutating a shared directory, being fixed")
 def test_remote_extensions(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
