@@ -688,8 +688,8 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -
 #########################################################################################
 FROM build-deps AS neon-pg-ext-build
 # Public extensions
-COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=postgis-build /sfcgal/* /
+#COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=postgis-build /sfcgal/* /
 COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /h3/usr /
@@ -709,7 +709,7 @@ COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=kq-imcx-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=kq-imcx-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -779,7 +779,8 @@ COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/
 COPY --from=postgis-build /extensions/ /extensions/
 COPY scripts/combine_control_files.py ./combine_control_files.py
-RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG} --public_extensions="anon,postgis"
+# 3534 is a BUILD_TAG of the recent uploaded build of neon-pg-ext-build
+RUN python3 ./combine_control_files.py ${PG_VERSION} 3534 --public_extensions="anon,postgis"
 
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
