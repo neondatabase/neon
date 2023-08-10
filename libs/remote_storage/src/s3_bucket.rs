@@ -518,6 +518,12 @@ impl RemoteStorage for S3Bucket {
 
             match resp {
                 Ok(resp) => {
+                    // our ability to delete something does not necessarily correlate to us being able to
+                    // witness a success, but doing this only on "successes" or "not failures" might leave out
+                    // the odd dns/random connection issue, but the actual delete may have happened earlier.
+                    metrics::BUCKET_METRICS
+                        .deleted_objects_total
+                        .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
@@ -553,6 +559,11 @@ impl RemoteStorage for S3Bucket {
             .observe_elapsed(kind, &res, started_at);
 
         res?;
+
+        // our ability to delete something does not necessarily correlate to us being able to
+        // witness a success, but doing this only on "successes" or "not failures" might leave out
+        // the odd dns/random connection issue, but the actual delete may have happened earlier.
+        metrics::BUCKET_METRICS.deleted_objects_total.inc();
 
         Ok(())
     }

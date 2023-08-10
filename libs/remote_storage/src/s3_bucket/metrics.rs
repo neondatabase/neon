@@ -1,4 +1,6 @@
-use metrics::{register_histogram_vec, register_int_counter_vec, Histogram, IntCounter};
+use metrics::{
+    register_histogram_vec, register_int_counter, register_int_counter_vec, Histogram, IntCounter,
+};
 use once_cell::sync::Lazy;
 
 pub(super) static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
@@ -134,6 +136,9 @@ pub(super) struct BucketMetrics {
     ///
     /// This is in case cancellations are happening more than expected.
     pub(super) cancelled_waits: RequestTyped<IntCounter>,
+
+    /// Total amount of deleted objects in batches or single requests.
+    pub(super) deleted_objects_total: IntCounter,
 }
 
 impl Default for BucketMetrics {
@@ -170,10 +175,17 @@ impl Default for BucketMetrics {
         let cancelled_waits =
             RequestTyped::build_with(|kind| cancelled_waits.with_label_values(&[kind.as_str()]));
 
+        let deleted_objects_total = register_int_counter!(
+            "remote_storage_s3_deleted_objects_total",
+            "Amount of deleted objects in total",
+        )
+        .unwrap();
+
         Self {
             req_seconds,
             wait_seconds,
             cancelled_waits,
+            deleted_objects_total,
         }
     }
 }
