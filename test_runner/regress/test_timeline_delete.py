@@ -4,7 +4,6 @@ import queue
 import shutil
 import threading
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
@@ -18,6 +17,8 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
+    assert_prefix_empty,
+    poll_for_remote_storage_iterations,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -27,7 +28,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
-    S3Storage,
     available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -187,10 +187,9 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
-        )
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
+    )
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -231,7 +230,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     ps_http.configure_failpoints((failpoint, "return"))
 
-    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
     # These failpoints are earlier than background task is spawned.
     # so they result in api request failure.
@@ -280,14 +279,14 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
                         "remote_storage_s3_request_seconds_count",
                         filter={"request_type": "get_object", "result": "err"},
                     ).value
-                    == 1
+                    == 2  # One is missing tenant deletion mark, second is missing index part
                 )
                 assert (
                     m.query_one(
                         "remote_storage_s3_request_seconds_count",
                         filter={"request_type": "get_object", "result": "ok"},
                     ).value
-                    == 1
+                    == 1  # index part for initial timeline
                 )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
@@ -411,27 +410,6 @@ def test_timeline_resurrection_on_attach(
         main_timeline_id
     }, "the deleted timeline should not have been resurrected"
     assert all([tl["state"] == "Active" for tl in timelines])
-
-
-def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] = None):
-    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    assert neon_env_builder.remote_storage_kind in (
-        RemoteStorageKind.MOCK_S3,
-        RemoteStorageKind.REAL_S3,
-    )
-    # For mypy
-    assert isinstance(neon_env_builder.remote_storage, S3Storage)
-
-    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    assert neon_env_builder.remote_storage_client is not None
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
-        Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
-    )
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):

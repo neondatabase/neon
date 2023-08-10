@@ -32,6 +32,7 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -432,7 +433,7 @@ class NeonEnvBuilder:
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
         self.ext_remote_storage: Optional[S3Storage] = None
-        self.remote_storage_client: Optional[Any] = None
+        self.remote_storage_client: Optional[S3Client] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
@@ -875,7 +876,14 @@ class NeonEnv:
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
-        return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+
+    def tenant_dir(
+        self,
+        tenant_id: TenantId,
+    ) -> Path:
+        """Get a tenant directory's path based on the repo directory of the test environment"""
+        return self.repo_dir / "tenants" / str(tenant_id)
 
     def get_pageserver_version(self) -> str:
         bin_pageserver = str(self.neon_binpath / "pageserver")

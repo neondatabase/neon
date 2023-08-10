@@ -6,13 +6,16 @@ import subprocess
 import tarfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, TypeVar
 from urllib.parse import urlencode
 
 import allure
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import PgBin
 from fixtures.types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
@@ -314,3 +317,15 @@ def wait_while(number_of_iterations: int, interval: float, func):
         except Exception:
             return
     raise Exception("timed out while waiting for %s" % func)
+
+
+def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
+    """
+    Fast way to populate data.
+    For more layers consider combining with these tenant settings:
+    {
+        "checkpoint_distance": 1024 ** 2,
+        "image_creation_threshold": 100,
+    }
+    """
+    pg_bin.run(["pgbench", "-i", "-I dtGvp", "-s1", connstr])
