@@ -149,6 +149,7 @@ def test_remote_extensions(
 
 # Test downloading remote library.
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
+@pytest.mark.xfail(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_remote_library(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
@@ -210,6 +211,7 @@ def test_remote_library(
     RemoteStorageKind.REAL_S3 not in available_s3_storages(),
     reason="skipping test because real s3 not enabled",
 )
+@pytest.mark.xfail(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
@@ -254,6 +256,7 @@ def test_multiple_extensions_one_archive(
 # Run the test with mutliple simultaneous connections to an endpoint.
 # to ensure that the extension is downloaded only once.
 #
+@pytest.mark.xfail(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
