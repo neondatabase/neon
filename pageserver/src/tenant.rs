@@ -1809,6 +1809,8 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
+    ///
+    /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
     async fn set_stopping(
         &self,
         progress: completion::Barrier,
