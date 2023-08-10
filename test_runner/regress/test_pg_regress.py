@@ -69,7 +69,6 @@ def test_pg_regress(
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
 
-"""
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
 def test_isolation(
@@ -179,4 +178,3 @@ def test_sql_regress(
 
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
-"""
