@@ -5,6 +5,7 @@ from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorageKind, S3Storage
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 
 
 def assert_tenant_state(
@@ -200,20 +201,17 @@ def wait_timeline_detail_404(
     timeline_id: TimelineId,
     iterations: int,
 ):
-    last_exc = None
-    for _ in range(iterations):
-        time.sleep(0.250)
+    def timeline_is_missing():
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-            log.info(f"detail {data}")
+            log.info(f"timeline detail {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:
                 return
+            raise RuntimeError(f"Timeline exists state {data['state']}") from e
 
-            last_exc = e
-
-    raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")
+    wait_until(iterations, interval=0.250, func=timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
@@ -254,26 +252,22 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
     ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
-# FIXME dedup
 def wait_tenant_status_404(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     iterations: int,
 ):
-    last_exc = None
-    for _ in range(iterations):
-        time.sleep(0.250)
+    def tenant_is_missing():
         try:
             data = pageserver_http.tenant_status(tenant_id)
-            log.info(f"detail {data}")
+            log.info(f"tenant status {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:
                 return
+            raise RuntimeError(f"Timeline exists state {data['state']}") from e
 
-            last_exc = e
-
-    raise last_exc or RuntimeError(f"Tenant wasnt deleted in time, state: {data['state']}")
+    wait_until(iterations, interval=0.250, func=tenant_is_missing)
 
 
 def tenant_delete_wait_completed(
