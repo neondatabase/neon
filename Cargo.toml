@@ -130,6 +130,7 @@ toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tracing = "0.1"
+tracing-log = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.19.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter"] }

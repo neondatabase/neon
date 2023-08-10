@@ -8,8 +8,9 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, trace, warn, Instrument};
 
 #[derive(Clone)]
 pub struct Api {
@@ -88,7 +89,9 @@ impl Api {
                 .build()?;
 
             info!(url = request.url().as_str(), "sending http request");
+            let start = Instant::now();
             let response = self.endpoint.execute(request).await?;
+            trace!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
             // Unfortunately, ownership won't let us use `Option::ok_or` here.
