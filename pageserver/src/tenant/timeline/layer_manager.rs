@@ -45,8 +45,7 @@ struct LayerSnapshot {
 pub struct LayerManagerReadGuard {
     snapshot: LayerSnapshot,
     /// Mock the behavior of the layer map lock.
-    #[allow(dead_code)]
-    pseudo_lock: tokio::sync::OwnedRwLockReadGuard<()>,
+    _pseudo_lock: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
 pub struct LayerManagerWriteGuard {
@@ -54,8 +53,7 @@ pub struct LayerManagerWriteGuard {
     /// Semantic layer operations will need to modify the layer content.
     layer_manager: Arc<LayerManager>,
     /// Mock the behavior of the layer map lock.
-    #[allow(dead_code)]
-    pseudo_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _pseudo_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
 }
 
 impl LayerManager {
@@ -78,11 +76,11 @@ impl LayerManager {
                 layer_map: self.layer_map.load_full(),
                 layer_fmgr: Arc::clone(&self.layer_fmgr),
             },
-            pseudo_lock,
+            _pseudo_lock: pseudo_lock,
         }
     }
 
-    /// Take the snapshot of the layer map and return a write guard. The read guard will prevent
+    /// Take the snapshot of the layer map and return a write guard. The write guard will prevent
     /// the layer map from being read.
     pub async fn write(self: &Arc<Self>) -> LayerManagerWriteGuard {
         // take the lock before taking snapshot
@@ -92,7 +90,7 @@ impl LayerManager {
                 layer_map: self.layer_map.load_full(),
                 layer_fmgr: Arc::clone(&self.layer_fmgr),
             },
-            pseudo_lock,
+            _pseudo_lock: pseudo_lock,
             layer_manager: self.clone(),
         }
     }
@@ -108,13 +106,13 @@ impl LayerManager {
                     layer_map: self.layer_map.load_full(),
                     layer_fmgr: Arc::clone(&self.layer_fmgr),
                 },
-                pseudo_lock,
+                _pseudo_lock: pseudo_lock,
                 layer_manager: self.clone(),
             })
     }
 
     /// Make an update to the layer map. This function will NOT take the state lock and should ONLY
-    /// be used when there is not known concurrency when initializing the layer map. Error will be returned only when
+    /// be used when there is not known concurrency when initializing the layer map. Error will be returned only if
     /// the update function fails.
     fn initialize_update(&self, f: impl FnOnce(LayerMap) -> Result<LayerMap>) -> Result<()> {
         let snapshot = self.layer_map.load_full();
@@ -128,7 +126,7 @@ impl LayerManager {
         Ok(())
     }
 
-    /// Make an update to the layer map. Error will be returned only when the update function fails.
+    /// Make an update to the layer map. Error will be returned only if the update function fails.
     async fn update<T>(&self, f: impl FnOnce(LayerMap) -> Result<(LayerMap, T)>) -> Result<T> {
         let _guard = self.state_lock.lock().await;
         let snapshot = self.layer_map.load_full();
@@ -177,7 +175,7 @@ impl LayerManagerWriteGuard {
     /// code path where we need to check if a layer already exists on disk. With the immutable layer
     /// map design, it is possible that the layer map snapshot does not contain the layer, but the layer file
     /// manager does. Therefore, use this function with caution.
-    pub(crate) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
+    pub(super) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
         self.snapshot.contains(layer)
     }
 
