@@ -20,7 +20,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
-    lsn::Lsn,
+    lsn::{AtomicLsn, Lsn},
     vec_map::VecMap,
 };
 // avoid binding to Write (conflicts with std::io::Write)
@@ -42,11 +42,13 @@ pub struct InMemoryLayer {
     tenant_id: TenantId,
     timeline_id: TimelineId,
 
-    ///
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
-    ///
     start_lsn: Lsn,
+
+    /// Frozen layers have an exclusive end LSN.
+    /// Writes are only allowed when this is [`Lsn::INVALID`].
+    end_lsn: AtomicLsn,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -57,21 +59,16 @@ impl std::fmt::Debug for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InMemoryLayer")
             .field("start_lsn", &self.start_lsn)
+            .field("end_lsn", &self.end_lsn.load())
             .field("inner", &self.inner)
             .finish()
     }
 }
 
 pub struct InMemoryLayerInner {
-    /// Frozen layers have an exclusive end LSN.
-    /// Writes are only allowed when this is None
-    end_lsn: Option<Lsn>,
-
-    ///
     /// All versions of all pages in the layer are kept here.  Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    ///
     index: HashMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
@@ -82,15 +79,7 @@ pub struct InMemoryLayerInner {
 
 impl std::fmt::Debug for InMemoryLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InMemoryLayerInner")
-            .field("end_lsn", &self.end_lsn)
-            .finish()
-    }
-}
-
-impl InMemoryLayerInner {
-    fn assert_writeable(&self) {
-        assert!(self.end_lsn.is_none());
+        f.debug_struct("InMemoryLayerInner").finish()
     }
 }
 
@@ -101,11 +90,25 @@ impl InMemoryLayer {
 
     pub fn info(&self) -> InMemoryLayerInfo {
         let lsn_start = self.start_lsn;
-        let lsn_end = self.inner.read().unwrap().end_lsn;
+        let lsn_end = self.end_lsn.load();
 
-        match lsn_end {
-            Some(lsn_end) => InMemoryLayerInfo::Frozen { lsn_start, lsn_end },
-            None => InMemoryLayerInfo::Open { lsn_start },
+        if lsn_end == Lsn::INVALID {
+            InMemoryLayerInfo::Frozen { lsn_start, lsn_end }
+        } else {
+            InMemoryLayerInfo::Open { lsn_start }
+        }
+    }
+
+    fn assert_writable(&self) {
+        assert!(!self.end_lsn.load().is_valid());
+    }
+
+    fn end_lsn_or_max(&self) -> Lsn {
+        let end_lsn = self.end_lsn.load();
+        if end_lsn.is_valid() {
+            end_lsn
+        } else {
+            Lsn::MAX
         }
     }
 }
@@ -117,14 +120,7 @@ impl Layer for InMemoryLayer {
     }
 
     fn get_lsn_range(&self) -> Range<Lsn> {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = if let Some(end_lsn) = inner.end_lsn {
-            end_lsn
-        } else {
-            Lsn(u64::MAX)
-        };
-        self.start_lsn..end_lsn
+        self.start_lsn..self.end_lsn_or_max()
     }
 
     fn is_incremental(&self) -> bool {
@@ -136,11 +132,7 @@ impl Layer for InMemoryLayer {
     async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
-        let end_str = inner
-            .end_lsn
-            .as_ref()
-            .map(Lsn::to_string)
-            .unwrap_or_default();
+        let end_str = self.end_lsn.load().to_string();
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
@@ -236,9 +228,7 @@ impl Layer for InMemoryLayer {
 
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
+        let end_lsn = self.end_lsn_or_max();
         write!(f, "inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
 }
@@ -270,8 +260,8 @@ impl InMemoryLayer {
             timeline_id,
             tenant_id,
             start_lsn,
+            end_lsn: Lsn::INVALID.into(),
             inner: RwLock::new(InMemoryLayerInner {
-                end_lsn: None,
                 index: HashMap::new(),
                 file,
             }),
@@ -285,7 +275,7 @@ impl InMemoryLayer {
     pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
         let mut inner = self.inner.write().unwrap();
-        inner.assert_writeable();
+        self.assert_writable();
 
         let off = {
             SER_BUFFER.with(|x| -> Result<_> {
@@ -317,10 +307,10 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub fn freeze(&self, end_lsn: Lsn) {
-        let mut inner = self.inner.write().unwrap();
+        let inner = self.inner.write().unwrap();
 
         assert!(self.start_lsn < end_lsn);
-        inner.end_lsn = Some(end_lsn);
+        assert_eq!(self.end_lsn.fetch_max(end_lsn), Lsn::INVALID);
 
         for vec_map in inner.index.values() {
             for (lsn, _pos) in vec_map.as_slice() {
@@ -344,12 +334,16 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
 
+        let end_lsn = self.end_lsn.load();
+
+        assert!(end_lsn.is_valid());
+
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_id,
             Key::MIN,
-            self.start_lsn..inner.end_lsn.unwrap(),
+            self.start_lsn..end_lsn,
         )?;
 
         let mut buf = Vec::new();
