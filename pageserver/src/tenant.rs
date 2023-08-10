@@ -2275,7 +2275,6 @@ impl Tenant {
         // a detached tenant and config is passed via attach command.
         // https://github.com/neondatabase/neon/issues/1555
         // OR: we're loading after incomplete deletion that managed to remove config.
-        // Attention ^
         if !target_config_path.exists() {
             info!("tenant config not found in {target_config_display}");
             return Ok(TenantConfOpt::default());
