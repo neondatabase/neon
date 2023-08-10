@@ -226,6 +226,7 @@ async fn timed<Fut: std::future::Future>(
 
             let ret = fut.await;
 
+            // this has a global allowed_errors
             tracing::warn!(
                 task = name,
                 elapsed_ms = started.elapsed().as_millis(),

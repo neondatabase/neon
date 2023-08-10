@@ -1518,6 +1518,8 @@ class NeonPageserver(PgProtocol):
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
+            # these can happen during shutdown, but it should not be a reason to fail a test
+            ".*completed, took longer than expected.*",
         ]
 
     def start(
