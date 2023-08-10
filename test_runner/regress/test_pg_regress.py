@@ -3,7 +3,6 @@
 #
 from pathlib import Path
 
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
@@ -34,11 +33,6 @@ def test_pg_regress(
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
     pg_regress = build_path / "pg_regress"
-
-    with open(schedule, "r") as f:
-        # note: I suspect you have to recompile to apply the schedule?
-        log.info(f"Here is the test schedule {schedule}:")
-        log.info(f.read())
 
     pg_regress_command = [
         str(pg_regress),
