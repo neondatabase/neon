@@ -180,15 +180,7 @@ pub async fn get_available_extensions(
             } else {
                 warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_file);
                 // also delete this from library index
-                let keys_to_remove: Vec<String> = library_index
-                    .iter()
-                    .filter(|&(_, value)| value == extension_name)
-                    .map(|(key, _)| key.clone())
-                    .collect();
-
-                for key in &keys_to_remove {
-                    library_index.remove(key);
-                }
+                library_index.retain(|_, value| value != extension_name)
             }
         }
     }
