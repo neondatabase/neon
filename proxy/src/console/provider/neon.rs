@@ -8,6 +8,7 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
@@ -47,7 +48,9 @@ impl Api {
                 .build()?;
 
             info!(url = request.url().as_str(), "sending http request");
+            let start = Instant::now();
             let response = self.endpoint.execute(request).await?;
+            info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
@@ -88,7 +91,9 @@ impl Api {
                 .build()?;
 
             info!(url = request.url().as_str(), "sending http request");
+            let start = Instant::now();
             let response = self.endpoint.execute(request).await?;
+            info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
             // Unfortunately, ownership won't let us use `Option::ok_or` here.
