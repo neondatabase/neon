@@ -80,7 +80,7 @@ struct FlushOp {
 
 impl FlushOp {
     fn fire(self) {
-        if let Err(_) = self.tx.send(()) {
+        if self.tx.send(()).is_err() {
             // oneshot channel closed. This is legal: a client could be destroyed while waiting for a flush.
             debug!("deletion queue flush from dropped client");
         };
@@ -145,7 +145,7 @@ impl DeletionQueueClient {
 
     async fn do_flush(&self, msg: FrontendQueueMessage, rx: tokio::sync::oneshot::Receiver<()>) {
         self.do_push(msg).await;
-        if let Err(_) = rx.await {
+        if rx.await.is_err() {
             // This shouldn't happen if tenants are shut down before deletion queue.  If we
             // encounter a bug like this, then a flusher will incorrectly believe it has flushed
             // when it hasn't, possibly leading to leaking objects.
