@@ -16,11 +16,12 @@ use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
-    lsn::{AtomicLsn, Lsn},
+    lsn::Lsn,
     vec_map::VecMap,
 };
 // avoid binding to Write (conflicts with std::io::Write)
@@ -48,7 +49,7 @@ pub struct InMemoryLayer {
 
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is [`Lsn::INVALID`].
-    end_lsn: AtomicLsn,
+    end_lsn: OnceLock<Lsn>,
 
     /// The above fields never change. The parts that do change are in 'inner',
     /// and protected by mutex.
@@ -59,7 +60,7 @@ impl std::fmt::Debug for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InMemoryLayer")
             .field("start_lsn", &self.start_lsn)
-            .field("end_lsn", &self.end_lsn.load())
+            .field("end_lsn", &self.end_lsn)
             .field("inner", &self.inner)
             .finish()
     }
@@ -90,9 +91,8 @@ impl InMemoryLayer {
 
     pub fn info(&self) -> InMemoryLayerInfo {
         let lsn_start = self.start_lsn;
-        let lsn_end = self.end_lsn.load();
 
-        if lsn_end == Lsn::INVALID {
+        if let Some(&lsn_end) = self.end_lsn.get() {
             InMemoryLayerInfo::Frozen { lsn_start, lsn_end }
         } else {
             InMemoryLayerInfo::Open { lsn_start }
@@ -100,16 +100,11 @@ impl InMemoryLayer {
     }
 
     fn assert_writable(&self) {
-        assert!(!self.end_lsn.load().is_valid());
+        assert!(!self.end_lsn.get().is_some());
     }
 
     fn end_lsn_or_max(&self) -> Lsn {
-        let end_lsn = self.end_lsn.load();
-        if end_lsn.is_valid() {
-            end_lsn
-        } else {
-            Lsn::MAX
-        }
+        self.end_lsn.get().map(|l| *l).unwrap_or(Lsn::MAX)
     }
 }
 
@@ -132,7 +127,7 @@ impl Layer for InMemoryLayer {
     async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
-        let end_str = self.end_lsn.load().to_string();
+        let end_str = self.end_lsn_or_max();
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
@@ -310,7 +305,7 @@ impl InMemoryLayer {
         let inner = self.inner.write().unwrap();
 
         assert!(self.start_lsn < end_lsn);
-        assert_eq!(self.end_lsn.fetch_max(end_lsn), Lsn::INVALID);
+        self.end_lsn.set(end_lsn).expect("end_lsn set only once");
 
         for vec_map in inner.index.values() {
             for (lsn, _pos) in vec_map.as_slice() {
@@ -334,9 +329,7 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
 
-        let end_lsn = self.end_lsn.load();
-
-        assert!(end_lsn.is_valid());
+        let end_lsn = *self.end_lsn.get().unwrap();
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
