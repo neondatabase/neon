@@ -1542,7 +1542,11 @@ mod tests {
         };
 
         assert_file_list(
-            &index_part.timeline_layers,
+            &index_part
+                .layer_metadata
+                .keys()
+                .map(|f| f.to_owned())
+                .collect(),
             &[
                 &layer_file_name_1.file_name(),
                 &layer_file_name_2.file_name(),

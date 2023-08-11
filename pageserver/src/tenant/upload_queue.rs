@@ -140,8 +140,8 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
-        for layer_name in &index_part.timeline_layers {
+        let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
+        for layer_name in index_part.layer_metadata.keys() {
             match index_part
                 .layer_metadata
                 .get(layer_name)
