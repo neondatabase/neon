@@ -51,8 +51,8 @@ pub struct InMemoryLayer {
     /// Writes are only allowed when this is [`Lsn::INVALID`].
     end_lsn: OnceLock<Lsn>,
 
-    /// The above fields never change. The parts that do change are in 'inner',
-    /// and protected by mutex.
+    /// The above fields never change, except for `end_lsn`. All other changing parts are in `inner`,
+    /// and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
 }
 
