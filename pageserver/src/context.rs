@@ -85,6 +85,7 @@
 //! The solution is that all code paths are infected with precisely one
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
+
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
@@ -92,6 +93,7 @@ use crate::task_mgr::TaskKind;
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
+    atime_behavior: ATimeBehavior,
 }
 
 /// Desired behavior if the operation requires an on-demand download
@@ -109,6 +111,55 @@ pub enum DownloadBehavior {
     Error,
 }
 
+/// Whether this request should update access times used in LRU eviction
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ATimeBehavior {
+    /// Update access times: this request's access to data should be taken
+    /// as a hint that the accessed layer is likely to be accessed again
+    Update,
+
+    /// Do not update access times: this request is accessing the layer
+    /// but does not want to indicate that the layer should be retained in cache,
+    /// perhaps because the requestor is a compaction routine that will soon cover
+    /// this layer with another.
+    Skip,
+}
+
+pub struct RequestContextBuilder {
+    inner: RequestContext,
+}
+
+impl RequestContextBuilder {
+    /// A new builder with default settings
+    pub fn new(task_kind: TaskKind) -> Self {
+        Self {
+            inner: RequestContext {
+                task_kind,
+                download_behavior: DownloadBehavior::Download,
+                atime_behavior: ATimeBehavior::Update,
+            },
+        }
+    }
+
+    /// Configure the DownloadBehavior of the context: whether to
+    /// download missing layers, and/or warn on the download.
+    pub fn download_behavior(mut self, b: DownloadBehavior) -> Self {
+        self.inner.download_behavior = b;
+        self
+    }
+
+    /// Configure the ATimeBehavior of the context: whether layer
+    /// accesses should update the access time of the layer.
+    pub fn atime_behavior(mut self, b: ATimeBehavior) -> Self {
+        self.inner.atime_behavior = b;
+        self
+    }
+
+    pub fn build(self) -> RequestContext {
+        self.inner
+    }
+}
+
 impl RequestContext {
     /// Create a new RequestContext that has no parent.
     ///
@@ -123,10 +174,9 @@ impl RequestContext {
     /// because someone explicitly canceled it.
     /// It has no parent, so it cannot inherit cancellation from there.
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContext {
-            task_kind,
-            download_behavior,
-        }
+        RequestContextBuilder::new(task_kind)
+            .download_behavior(download_behavior)
+            .build()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -187,10 +237,7 @@ impl RequestContext {
     }
 
     fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContext {
-            task_kind,
-            download_behavior,
-        }
+        Self::new(task_kind, download_behavior)
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -199,5 +246,9 @@ impl RequestContext {
 
     pub fn download_behavior(&self) -> DownloadBehavior {
         self.download_behavior
+    }
+
+    pub fn atime_behavior(&self) -> ATimeBehavior {
+        self.atime_behavior
     }
 }
