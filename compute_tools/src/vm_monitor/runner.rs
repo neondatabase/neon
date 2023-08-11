@@ -317,7 +317,7 @@ impl Runner {
             info!(
                 target = bytes_to_mebibytes(new_cgroup_mem_high),
                 total = bytes_to_mebibytes(new_mem),
-                name = cgroup.name(),
+                name = cgroup.path(),
                 "updating cgroup memory.high",
             );
             let limits = MemoryLimits::new(new_cgroup_mem_high, available_memory);

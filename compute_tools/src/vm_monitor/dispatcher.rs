@@ -49,6 +49,10 @@ pub struct Dispatcher {
     /// The protocol version we have agreed to use with the informant. This is negotiated
     /// during the creation of the dispatcher, and should be the highest shared protocol
     /// version.
+    ///
+    // NOTE: currently unused, but will almost certainly be used in the futures
+    // as the protocol changes
+    #[allow(unused)]
     pub(crate) proto_version: ProtocolVersion,
 }
 

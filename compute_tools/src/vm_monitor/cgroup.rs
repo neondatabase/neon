@@ -67,14 +67,7 @@ impl MemoryEvent {
 
 impl Display for MemoryEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemoryEvent::Low => f.write_str("low"),
-            MemoryEvent::High => f.write_str("high"),
-            MemoryEvent::Max => f.write_str("max"),
-            MemoryEvent::Oom => f.write_str("oom"),
-            MemoryEvent::OomKill => f.write_str("oom_kill"),
-            MemoryEvent::OomGroupKill => f.write_str("oom_group_kill"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -137,6 +130,9 @@ impl<T> PeekableStream<T> {
     }
 
     /// Peek the stream.
+    // NOTE: currently unused, but potentially useful for the future. Also good
+    // to distinguish between `peek` and `peek_eager`
+    #[allow(unused)]
     pub async fn peek(&mut self) -> Option<&T> {
         if self.peek.is_none() {
             self.peek = self.stream.next().await;
@@ -275,11 +271,6 @@ pub struct CgroupWatcher {
     /// use it anyways so that methods take `&self`, not `&mut self`.
     last_upscale_seqnum: AtomicU64,
 
-    /// The name of the cgroup we are managing
-    // Won't be necessary if/once https://github.com/kata-containers/cgroups-rs/pull/120
-    // is merged
-    name: String,
-
     /// A channel on which we send messages to request upscale from the dispatcher.
     upscale_requester: Sender<()>,
 
@@ -295,7 +286,7 @@ pub struct CgroupWatcher {
     upscale_receiver: Receiver<Sequenced<Resources>>,
 }
 
-/// Stream of events that [`CgroupWatcher::run`] takes as input
+/// Stream of events that [`CgroupWatcher::watch`] takes as input
 pub struct CgroupWatcherEventStream {
     // We're using a full type to wrap the stream so that we dno't need to make the inner types
     // public.
@@ -306,7 +297,7 @@ pub struct CgroupWatcherEventStream {
 ///
 /// `path` specifies the path to the desired `memory.events` file.
 /// For more info, see the `memory.events` section of the [kernel docs]
-/// (https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files)
+/// <https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files>
 fn get_event_count(path: &str, event: MemoryEvent) -> anyhow::Result<u64> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read memory.events from {path}"))?;
@@ -412,7 +403,6 @@ impl CgroupWatcher {
 
         Ok((
             Self {
-                name,
                 cgroup,
                 upscale_requester,
                 upscale_receiver: upscale_notifier,
@@ -637,8 +627,8 @@ impl CgroupWatcher {
     }
 
     /// Get the cgroup's name.
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn path(&self) -> &str {
+        self.cgroup.path()
     }
 }
 
@@ -731,7 +721,12 @@ impl CgroupWatcher {
 
     /// Set cgroup memory.high and memory.max.
     pub fn set_limits(&self, limits: &MemoryLimits) -> anyhow::Result<()> {
-        info!(limits.high, limits.max, "writing new memory limits",);
+        info!(
+            limits.high,
+            limits.max,
+            path = self.path(),
+            "writing new memory limits",
+        );
         self.memory()
             .context("failed to get memory subsystem while setting memory limits")?
             .set_mem(cgroups_rs::memory::SetMemory {
@@ -748,7 +743,7 @@ impl CgroupWatcher {
         let new_high = self.config.calculate_memory_high_value(available_memory);
         let limits = MemoryLimits::new(new_high, available_memory);
         info!(
-            name = self.name,
+            path = self.path(),
             memory = ?limits,
             "setting cgroup memory",
         );

@@ -10,7 +10,7 @@
 //! The informant serializes messages in the form and then sends them. The use
 //! of `#[serde(tag = "type", content = "content")]` allows us to use `Type`
 //! to determine how to deserialize `Content`.
-//! ```
+//! ```ignore
 //! struct {
 //!     Content any
 //!     Type    string
@@ -18,7 +18,7 @@
 //! }
 //! ```
 //! and receives messages in the form:
-//! ```
+//! ```ignore
 //! struct {
 //!     {fields embedded}
 //!     Type string
