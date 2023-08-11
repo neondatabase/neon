@@ -192,7 +192,7 @@ async fn ws_handler(
                 if let Err(e) =
                     serve_websocket(websocket, config, &cancel_map, session_id, host).await
                 {
-                    error!(session_id = ?session_id, "error in websocket connection: {e:?}");
+                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
                 }
             }
             .in_current_span(),
@@ -221,6 +221,10 @@ async fn ws_handler(
                     },
                     None => Value::Null,
                 };
+                error!(
+                    ?code,
+                    "sql-over-http per-client task finished with an error: {e:#}"
+                );
                 (
                     json!({ "message": message, "code": code }),
                     HashMap::default(),
