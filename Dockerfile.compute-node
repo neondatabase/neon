@@ -666,6 +666,29 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/801f84f08c6881c8aa30f405
 
 #########################################################################################
 #
+# Layer "weighted-mean-pg-build"
+# compile weighted-mean extension
+# Note: Please do not include this in the compute image,
+# it is used for testing remote extension functionality
+# so the extension *must* not be part of the compute image already
+#
+#########################################################################################
+FROM build-deps AS weighted-mean-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/Kozea/weighted_mean/archive/master.tar.gz -O weighted_mean.tar.gz &&\
+    mkdir weighted_mean-src && cd weighted_mean-src && tar xvzf ../weighted_mean.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/weighted_mean.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/weighted_mean && cp /usr/local/pgsql/share/extension/weighted_mean.control /extensions/weighted_mean && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/weighted_mean.tar.zst -T -
+
+
+#########################################################################################
+#
 # Layer "pg-pgx-ulid-build"
 # Compile "pgx_ulid" extension
 #
@@ -778,8 +801,9 @@ RUN apt update && apt install -y zstd
 COPY --from=kq-imcx-pg-build /extensions/ /extensions/
 COPY --from=pg-anon-pg-build /extensions/ /extensions/
 COPY --from=postgis-build /extensions/ /extensions/
+COPY --from=weighted_mean-pg-build /extensions/ /extensions/
 COPY scripts/combine_control_files.py ./combine_control_files.py
-RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG} --public_extensions="anon,postgis"
+RUN python3 ./combine_control_files.py ${PG_VERSION} ${BUILD_TAG} --public_extensions="anon,postgis,weighted_mean"
 
 FROM scratch AS postgres-extensions
 # After the transition this layer will include all extensitons.
