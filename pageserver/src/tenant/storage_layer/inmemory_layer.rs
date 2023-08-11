@@ -48,11 +48,11 @@ pub struct InMemoryLayer {
     start_lsn: Lsn,
 
     /// Frozen layers have an exclusive end LSN.
-    /// Writes are only allowed when this is [`Lsn::INVALID`].
+    /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
 
-    /// The above fields never change, except for `end_lsn`. All other changing parts are in `inner`,
-    /// and protected by a mutex.
+    /// The above fields never change, except for `end_lsn`, which is only set once.
+    /// All other changing parts are in `inner`, and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
 }
 
