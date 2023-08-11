@@ -540,32 +540,8 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let kind = RequestKind::Delete;
-        let _guard = self.permit(kind).await;
-
-        let started_at = start_measuring_requests(kind);
-
-        let res = self
-            .client
-            .delete_object()
-            .bucket(self.bucket_name.clone())
-            .key(self.relative_path_to_s3_object(path))
-            .send()
-            .await;
-
-        let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
-
-        res?;
-
-        // our ability to delete something does not necessarily correlate to us being able to
-        // witness a success, but doing this only on "successes" or "not failures" might leave out
-        // the odd dns/random connection issue, but the actual delete may have happened earlier.
-        metrics::BUCKET_METRICS.deleted_objects_total.inc();
-
-        Ok(())
+        let path = path.to_owned();
+        self.delete_objects(&[path]).await
     }
 }
 
