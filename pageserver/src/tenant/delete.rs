@@ -10,7 +10,7 @@ use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, instrument, warn, Instrument, Span};
 
 use utils::{
-    completion, crashsafe, fs_ext,
+    backoff, completion, crashsafe, fs_ext,
     id::{TenantId, TimelineId},
 };
 
@@ -23,12 +23,13 @@ use crate::{
 
 use super::{
     mgr::{GetTenantError, TenantsMap},
+    remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
     span,
     timeline::delete::DeleteTimelineFlow,
     tree_sort_timelines, DeleteTimelineError, Tenant,
 };
 
-const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u8 = 3;
+const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTenantError {
@@ -71,10 +72,19 @@ async fn create_remote_delete_mark(
     let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id)?;
 
     let data: &[u8] = &[];
-    remote_storage
-        .upload(data, 0, &remote_mark_path, None)
-        .await
-        .context("mark upload")?;
+    backoff::retry(
+        || async {
+            remote_storage
+                .upload(data, 0, &remote_mark_path, None)
+                .await
+        },
+        |_e| false,
+        FAILED_UPLOAD_WARN_THRESHOLD,
+        FAILED_REMOTE_OP_RETRIES,
+        "mark_upload",
+    )
+    .await
+    .context("mark_upload")?;
 
     Ok(())
 }
@@ -154,9 +164,16 @@ async fn remove_tenant_remote_delete_mark(
     tenant_id: &TenantId,
 ) -> Result<(), DeleteTenantError> {
     if let Some(remote_storage) = remote_storage {
-        remote_storage
-            .delete(&remote_tenant_delete_mark_path(conf, tenant_id)?)
-            .await?;
+        let path = remote_tenant_delete_mark_path(conf, tenant_id)?;
+        backoff::retry(
+            || async { remote_storage.delete(&path).await },
+            |_e| false,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "remove_tenant_remote_delete_mark",
+        )
+        .await
+        .context("remove_tenant_remote_delete_mark")?;
     }
     Ok(())
 }
@@ -337,32 +354,28 @@ impl DeleteTenantFlow {
             return Ok(acquire(tenant));
         }
 
+        let remote_storage = match remote_storage {
+            Some(remote_storage) => remote_storage,
+            None => return Ok(None),
+        };
+
         // If remote storage is there we rely on it
-        if let Some(remote_storage) = remote_storage {
-            let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
+        let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
 
-            let attempt = 1;
-            loop {
-                match remote_storage.download(&remote_mark_path).await {
-                    Ok(_) => return Ok(acquire(tenant)),
-                    Err(e) => {
-                        if matches!(e, DownloadError::NotFound) {
-                            return Ok(None);
-                        }
-                        if attempt > SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS {
-                            return Err(anyhow::anyhow!(e))?;
-                        }
+        let result = backoff::retry(
+            || async { remote_storage.download(&remote_mark_path).await },
+            |e| matches!(e, DownloadError::NotFound),
+            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+            "fetch_tenant_deletion_mark",
+        )
+        .await;
 
-                        warn!(
-                            "failed to fetch tenant deletion mark at {} attempt {}",
-                            &remote_mark_path, attempt
-                        )
-                    }
-                }
-            }
+        match result {
+            Ok(_) => Ok(acquire(tenant)),
+            Err(DownloadError::NotFound) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!(e)).context("should_resume_deletion")?,
         }
-
-        Ok(None)
     }
 
     pub(crate) async fn resume(

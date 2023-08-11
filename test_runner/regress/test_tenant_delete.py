@@ -32,6 +32,8 @@ def test_tenant_delete_smoke(
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_tenant_delete_smoke",
@@ -142,6 +144,8 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     check: Check,
     pg_bin: PgBin,
 ):
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind, "test_delete_tenant_exercise_crash_safety_failpoints"
     )
