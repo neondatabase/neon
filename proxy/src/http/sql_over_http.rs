@@ -291,7 +291,6 @@ async fn query_to_json<T: GenericClient>(
 ) -> anyhow::Result<Value> {
     let query_params = json_to_pg_text(&data.params)?;
     let row_stream = client
-        // TODO: query_raw_txt should be able to accept &str and Vec<String>
         .query_raw_txt(&data.query, query_params)
         .await?;
 
