@@ -373,7 +373,7 @@ fn start_pageserver(
     let order = pageserver::InitializationOrder {
         initial_tenant_load: Some(init_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
-        initial_logical_size_attempt: init_logical_size_done_tx,
+        initial_logical_size_attempt: Some(init_logical_size_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 

@@ -20,17 +20,19 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
+use super::delete::DeleteTenantError;
 use super::timeline::delete::DeleteTimelineFlow;
 
 /// The tenants known to the pageserver.
 /// The enum variants are used to distinguish the different states that the pageserver can be in.
-enum TenantsMap {
+pub(crate) enum TenantsMap {
     /// [`init_tenant_mgr`] is not done yet.
     Initializing,
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
@@ -42,13 +44,13 @@ enum TenantsMap {
 }
 
 impl TenantsMap {
-    fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
+    pub(crate) fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.get(tenant_id),
         }
     }
-    fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
+    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
@@ -97,7 +99,9 @@ pub async fn init_tenant_mgr(
                         );
                     }
                 } else {
-                    // This case happens if we crash during attach before creating the attach marker file
+                    // This case happens if we:
+                    // * crash during attach before creating the attach marker file
+                    // * crash during tenant delete before removing tenant directory
                     let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
                         format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
                     })?;
@@ -124,6 +128,7 @@ pub async fn init_tenant_mgr(
                         broker_client.clone(),
                         remote_storage.clone(),
                         Some(init_order.clone()),
+                        &TENANTS,
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -154,12 +159,13 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-pub fn schedule_local_tenant_processing(
+pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     init_order: Option<InitializationOrder>,
+    tenants: &'static tokio::sync::RwLock<TenantsMap>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -219,6 +225,7 @@ pub fn schedule_local_tenant_processing(
             broker_client,
             remote_storage,
             init_order,
+            tenants,
             ctx,
         )
     };
@@ -356,7 +363,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -417,6 +424,14 @@ pub async fn get_tenant(
     }
 }
 
+pub async fn delete_tenant(
+    conf: &'static PageServerConf,
+    remote_storage: Option<GenericRemoteStorage>,
+    tenant_id: TenantId,
+) -> Result<(), DeleteTenantError> {
+    DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant_id).await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("Tenant {0}")]
@@ -432,7 +447,7 @@ pub async fn delete_timeline(
     _ctx: &RequestContext,
 ) -> Result<(), DeleteTimelineError> {
     let tenant = get_tenant(tenant_id, true).await?;
-    DeleteTimelineFlow::run(&tenant, timeline_id).await?;
+    DeleteTimelineFlow::run(&tenant, timeline_id, false).await?;
     Ok(())
 }
 
@@ -507,7 +522,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -588,7 +603,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

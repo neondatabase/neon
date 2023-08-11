@@ -190,7 +190,7 @@ pub struct InitializationOrder {
 
     /// Each timeline owns a clone of this to be consumed on the initial logical size calculation
     /// attempt. It is important to drop this once the attempt has completed.
-    pub initial_logical_size_attempt: utils::completion::Completion,
+    pub initial_logical_size_attempt: Option<utils::completion::Completion>,
 
     /// Barrier for when we can start any background jobs.
     ///
@@ -226,6 +226,7 @@ async fn timed<Fut: std::future::Future>(
 
             let ret = fut.await;
 
+            // this has a global allowed_errors
             tracing::warn!(
                 task = name,
                 elapsed_ms = started.elapsed().as_millis(),

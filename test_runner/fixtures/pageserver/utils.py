@@ -1,9 +1,11 @@
 import time
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.remote_storage import RemoteStorageKind, S3Storage
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 
 
 def assert_tenant_state(
@@ -15,15 +17,6 @@ def assert_tenant_state(
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
-
-
-def tenant_exists(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
-    tenants = pageserver_http.tenant_list()
-    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
-    assert len(matching) < 2
-    if len(matching) == 0:
-        return None
-    return matching[0]
 
 
 def remote_consistent_lsn(
@@ -199,20 +192,19 @@ def wait_timeline_detail_404(
     timeline_id: TimelineId,
     iterations: int,
 ):
-    last_exc = None
-    for _ in range(iterations):
-        time.sleep(0.250)
+    def timeline_is_missing():
+        data = {}
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-            log.info(f"detail {data}")
+            log.info(f"timeline detail {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:
                 return
 
-            last_exc = e
+        raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")
+    wait_until(iterations, interval=0.250, func=timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
@@ -224,3 +216,72 @@ def timeline_delete_wait_completed(
 ):
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations)
+
+
+if TYPE_CHECKING:
+    # TODO avoid by combining remote storage related stuff in single type
+    # and just passing in this type instead of whole builder
+    from fixtures.neon_fixtures import NeonEnvBuilder
+
+
+def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
+    assert neon_env_builder.remote_storage_kind in (
+        RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.REAL_S3,
+    )
+    # For mypy
+    assert isinstance(neon_env_builder.remote_storage, S3Storage)
+    assert neon_env_builder.remote_storage_client is not None
+
+    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    response = neon_env_builder.remote_storage_client.list_objects_v2(
+        Bucket=neon_env_builder.remote_storage.bucket_name,
+        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
+    )
+    objects = response.get("Contents")
+    assert (
+        response["KeyCount"] == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+
+
+def wait_tenant_status_404(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    iterations: int,
+    interval: float = 0.250,
+):
+    def tenant_is_missing():
+        data = {}
+        try:
+            data = pageserver_http.tenant_status(tenant_id)
+            log.info(f"tenant status {data}")
+        except PageserverApiException as e:
+            log.debug(e)
+            if e.status_code == 404:
+                return
+
+        raise RuntimeError(f"Timeline exists state {data.get('state')}")
+
+    wait_until(iterations, interval=interval, func=tenant_is_missing)
+
+
+def tenant_delete_wait_completed(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    iterations: int,
+):
+    pageserver_http.tenant_delete(tenant_id=tenant_id)
+    wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
+
+
+MANY_SMALL_LAYERS_TENANT_CONFIG = {
+    "gc_period": "0s",
+    "compaction_period": "0s",
+    "checkpoint_distance": f"{1024**2}",
+    "image_creation_threshold": "100",
+}
+
+
+def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
+    return 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 6

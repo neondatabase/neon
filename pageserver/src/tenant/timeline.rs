@@ -919,7 +919,7 @@ impl Timeline {
     pub fn set_state(&self, new_state: TimelineState) {
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+                info!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
             }
             (st, TimelineState::Loading) => {
                 error!("ignoring transition from {st:?} into Loading state");
