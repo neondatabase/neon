@@ -125,26 +125,34 @@ def combinations():
 
     for remote_storage_kind in remotes:
         for delete_failpoint in FAILPOINTS:
-            if remote_storage_kind == RemoteStorageKind.NOOP and delete_failpoint in (
+            if remote_storage_kind is RemoteStorageKind.NOOP and delete_failpoint in (
                 "timeline-delete-before-index-delete",
             ):
                 # the above failpoint are not relevant for config without remote storage
                 continue
 
-            result.append((remote_storage_kind, delete_failpoint))
+            # Simulate failures for only one type of remote storage
+            # to avoid log pollution and make tests run faster
+            if remote_storage_kind is RemoteStorageKind.MOCK_S3:
+                simulate_failures = True
+            else:
+                simulate_failures = False
+            result.append((remote_storage_kind, delete_failpoint, simulate_failures))
     return result
 
 
-@pytest.mark.parametrize("remote_storage_kind, failpoint", combinations())
+@pytest.mark.parametrize("remote_storage_kind, failpoint, simulate_failures", combinations())
 @pytest.mark.parametrize("check", list(Check))
 def test_delete_tenant_exercise_crash_safety_failpoints(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
     failpoint: str,
+    simulate_failures: bool,
     check: Check,
     pg_bin: PgBin,
 ):
-    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+    if simulate_failures:
+        neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind, "test_delete_tenant_exercise_crash_safety_failpoints"
