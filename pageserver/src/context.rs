@@ -141,6 +141,18 @@ impl RequestContextBuilder {
         }
     }
 
+    pub fn extend(original: &RequestContext) -> Self {
+        Self {
+            // This is like a Copy, but avoid implementing Copy because ordinary users of
+            // RequestContext should always move or ref it.
+            inner: RequestContext {
+                task_kind: original.task_kind,
+                download_behavior: original.download_behavior,
+                atime_behavior: original.atime_behavior,
+            },
+        }
+    }
+
     /// Configure the DownloadBehavior of the context: whether to
     /// download missing layers, and/or warn on the download.
     pub fn download_behavior(mut self, b: DownloadBehavior) -> Self {

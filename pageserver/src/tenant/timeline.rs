@@ -35,7 +35,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{ATimeBehavior, DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
@@ -799,10 +799,16 @@ impl Timeline {
             .await
         {
             Ok((partitioning, lsn)) => {
+                // Use a modified RequestContext that disables atime updates, so that generating image files
+                // doesn't spuriously move old delta layers up the LRU queue for eviction
+                let image_ctx = RequestContextBuilder::extend(ctx)
+                    .atime_behavior(ATimeBehavior::Skip)
+                    .build();
+
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
                 let layer_paths_to_upload = self
-                    .create_image_layers(&partitioning, lsn, false, ctx)
+                    .create_image_layers(&partitioning, lsn, false, &image_ctx)
                     .await
                     .map_err(anyhow::Error::from)?;
                 if let Some(remote_client) = &self.remote_client {
