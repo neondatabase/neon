@@ -292,13 +292,7 @@ async fn query_to_json<T: GenericClient>(
     let query_params = json_to_pg_text(&data.params)?;
     let row_stream = client
         // TODO: query_raw_txt should be able to accept &str and Vec<String>
-        .query_raw_txt::<&str, _>(
-            &data.query,
-            query_params
-                .iter()
-                .map(|x| x.as_ref().map(|y| y.as_str()))
-                .collect::<Vec<Option<&str>>>(),
-        )
+        .query_raw_txt(&data.query, query_params)
         .await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
