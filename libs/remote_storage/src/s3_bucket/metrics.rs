@@ -129,7 +129,7 @@ impl PassFailCancelledRequestTyped<Histogram> {
 pub(super) struct BucketMetrics {
     /// Full request duration until successful completion, error or cancellation.
     pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
-    /// Amount of seconds waited on queue.
+    /// Total amount of seconds waited on queue.
     pub(super) wait_seconds: RequestTyped<Histogram>,
 
     /// Track how many semaphore awaits were cancelled per request type.
