@@ -205,5 +205,43 @@
             "name": "zenith new",
             "new_name": "zenith \"new\""
         }
-    ]
+    ],
+    "remote_extensions": {
+        "library_index": {
+          "anon": "anon",
+          "postgis-3": "postgis",
+          "libpgrouting-3.4": "postgis",
+          "postgis_raster-3": "postgis",
+          "postgis_sfcgal-3": "postgis",
+          "postgis_topology-3": "postgis",
+          "address_standardizer-3": "postgis"
+        },
+        "extension_data": {
+          "anon": {
+            "archive_path": "5834329303/v15/extensions/anon.tar.zst",
+            "control_data": {
+              "anon.control": "# PostgreSQL Anonymizer (anon) extension\ncomment = ''Data anonymization tools''\ndefault_version = ''1.1.0''\ndirectory=''extension/anon''\nrelocatable = false\nrequires = ''pgcrypto''\nsuperuser = false\nmodule_pathname = ''$libdir/anon''\ntrusted = true\n"
+            }
+          },
+          "postgis": {
+            "archive_path": "5834329303/v15/extensions/postgis.tar.zst",
+            "control_data": {
+              "postgis.control": "# postgis extension\ncomment = ''PostGIS geometry and geography spatial types and functions''\ndefault_version = ''3.3.2''\nmodule_pathname = ''$libdir/postgis-3''\nrelocatable = false\ntrusted = true\n",
+              "pgrouting.control": "# pgRouting Extension\ncomment = ''pgRouting Extension''\ndefault_version = ''3.4.2''\nmodule_pathname = ''$libdir/libpgrouting-3.4''\nrelocatable = true\nrequires = ''plpgsql''\nrequires = ''postgis''\ntrusted = true\n",
+              "postgis_raster.control": "# postgis_raster extension\ncomment = ''PostGIS raster types and functions''\ndefault_version = ''3.3.2''\nmodule_pathname = ''$libdir/postgis_raster-3''\nrelocatable = false\nrequires = postgis\ntrusted = true\n",
+              "postgis_sfcgal.control": "# postgis topology extension\ncomment = ''PostGIS SFCGAL functions''\ndefault_version = ''3.3.2''\nrelocatable = true\nrequires = postgis\ntrusted = true\n",
+              "postgis_topology.control": "# postgis topology extension\ncomment = ''PostGIS topology spatial types and functions''\ndefault_version = ''3.3.2''\nrelocatable = false\nschema = topology\nrequires = postgis\ntrusted = true\n",
+              "address_standardizer.control": "# address_standardizer extension\ncomment = ''Used to parse an address into constituent elements. Generally used to support geocoding address normalization step.''\ndefault_version = ''3.3.2''\nrelocatable = true\ntrusted = true\n",
+              "postgis_tiger_geocoder.control": "# postgis tiger geocoder extension\ncomment = ''PostGIS tiger geocoder and reverse geocoder''\ndefault_version = ''3.3.2''\nrelocatable = false\nschema = tiger\nrequires = ''postgis,fuzzystrmatch''\nsuperuser= false\ntrusted = true\n",
+              "address_standardizer_data_us.control": "# address standardizer us dataset\ncomment = ''Address Standardizer US dataset example''\ndefault_version = ''3.3.2''\nrelocatable = true\ntrusted = true\n"
+            }
+          }
+        },
+        "custom_extensions": [
+          "anon"
+        ],
+        "public_extensions": [
+          "postgis"
+        ]
+      }
 }

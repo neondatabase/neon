@@ -73,10 +73,9 @@ More specifically, here is an example ext_index.json
 */
 use anyhow::Context;
 use anyhow::{self, Result};
-use futures::future::join_all;
+use compute_api::spec::RemoteExtSpec;
 use remote_storage::*;
 use serde_json;
-use std::collections::HashMap;
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
@@ -115,81 +114,6 @@ pub fn get_pg_version(pgbin: &str) -> String {
         return "v14".to_string();
     }
     panic!("Unsuported postgres version {human_version}");
-}
-
-// download control files for enabled_extensions
-// return Hashmaps converting library names to extension names (library_index)
-// and specifying the remote path to the archive for each extension name
-pub async fn get_available_extensions(
-    remote_storage: &GenericRemoteStorage,
-    pgbin: &str,
-    pg_version: &str,
-    custom_extensions: &[String],
-    build_tag: &str,
-) -> Result<(HashMap<String, RemotePath>, HashMap<String, String>)> {
-    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let index_path = format!("{build_tag}/{pg_version}/ext_index.json");
-    let index_path = RemotePath::new(Path::new(&index_path)).context("error forming path")?;
-    info!("download ext_index.json from: {:?}", &index_path);
-
-    let mut download = remote_storage.download(&index_path).await?;
-    let mut ext_idx_buffer = Vec::new();
-    download
-        .download_stream
-        .read_to_end(&mut ext_idx_buffer)
-        .await?;
-    info!("ext_index downloaded");
-
-    #[derive(Debug, serde::Deserialize)]
-    struct Index {
-        public_extensions: Vec<String>,
-        library_index: HashMap<String, String>,
-        extension_data: HashMap<String, ExtensionData>,
-    }
-
-    #[derive(Debug, serde::Deserialize)]
-    struct ExtensionData {
-        control_data: HashMap<String, String>,
-        archive_path: String,
-    }
-
-    let ext_index_full = serde_json::from_slice::<Index>(&ext_idx_buffer)?;
-    let mut enabled_extensions = ext_index_full.public_extensions;
-    enabled_extensions.extend_from_slice(custom_extensions);
-    let mut library_index = ext_index_full.library_index;
-    let all_extension_data = ext_index_full.extension_data;
-    info!("library_index: {:?}", library_index);
-
-    info!("enabled_extensions: {:?}", enabled_extensions);
-    let mut ext_remote_paths = HashMap::new();
-    let mut file_create_tasks = Vec::new();
-    for extension in enabled_extensions {
-        let ext_data = &all_extension_data[&extension];
-        for (control_file, control_contents) in &ext_data.control_data {
-            let extension_name = control_file
-                .strip_suffix(".control")
-                .expect("control files must end in .control");
-            let control_path = local_sharedir.join(control_file);
-            if !control_path.exists() {
-                ext_remote_paths.insert(
-                    extension_name.to_string(),
-                    RemotePath::from_string(&ext_data.archive_path)?,
-                );
-                info!("writing file {:?}{:?}", control_path, control_contents);
-                file_create_tasks.push(tokio::fs::write(control_path, control_contents));
-            } else {
-                warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_file);
-                // also delete this from library index
-                library_index.retain(|_, value| value != extension_name);
-            }
-        }
-    }
-    let results = join_all(file_create_tasks).await;
-    for result in results {
-        result?;
-    }
-    info!("ext_remote_paths {:?}", ext_remote_paths);
-    Ok((ext_remote_paths, library_index))
 }
 
 // download the archive for a given extension,
@@ -251,6 +175,22 @@ pub async fn download_extension(
     }
     info!("done moving extension {ext_name}");
     Ok(download_size)
+}
+
+// Create extension control files from spec
+pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
+    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+    for ext_data in remote_extensions.extension_data.values() {
+        for (control_name, control_content) in &ext_data.control_data {
+            let control_path = local_sharedir.join(control_name);
+            if !control_path.exists() {
+                info!("writing file {:?}{:?}", control_path, control_content);
+                std::fs::write(control_path, control_content).unwrap();
+            } else {
+                warn!("control file {:?} exists both locally and remotely. ignoring the remote version.", control_path);
+            }
+        }
+    }
 }
 
 // This function initializes the necessary structs to use remote storage
