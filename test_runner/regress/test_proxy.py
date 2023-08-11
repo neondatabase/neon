@@ -269,7 +269,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
-            data=json.dumps(list(map(lambda x: {"query": x[0], "params": x[1] or []}, queries))),
+            data=json.dumps({ "queries": list(map(lambda x: {"query": x[0], "params": x[1] or []}, queries)) }),
             headers={
                 "Content-Type": "application/sql",
                 "Neon-Connection-String": connstr,
