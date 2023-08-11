@@ -303,22 +303,6 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def wait_while(number_of_iterations: int, interval: float, func):
-    """
-    Wait until 'func' returns false, or throws an exception.
-    """
-    for i in range(number_of_iterations):
-        try:
-            if not func():
-                return
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            time.sleep(interval)
-            continue
-        except Exception:
-            return
-    raise Exception("timed out while waiting for %s" % func)
-
-
 def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
     """
     Fast way to populate data.
