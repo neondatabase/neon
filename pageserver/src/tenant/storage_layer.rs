@@ -8,7 +8,7 @@ mod layer_desc;
 mod remote_layer;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{ATimeBehavior, RequestContext};
 use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
@@ -241,10 +241,14 @@ impl LayerAccessStats {
         });
     }
 
-    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+    fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
+        if ctx.atime_behavior() == ATimeBehavior::Skip {
+            return;
+        }
+
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
-            task_kind,
+            task_kind: ctx.task_kind(),
             access_kind,
         };
 
@@ -252,7 +256,7 @@ impl LayerAccessStats {
         locked.iter_mut().for_each(|inner| {
             inner.first_access.get_or_insert(this_access);
             inner.count_by_access_kind[access_kind] += 1;
-            inner.task_kind_flag |= task_kind;
+            inner.task_kind_flag |= ctx.task_kind();
             inner.last_accesses.write(this_access);
         })
     }

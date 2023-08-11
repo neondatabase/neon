@@ -452,8 +452,7 @@ impl DeltaLayer {
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
     ) -> Result<&Arc<DeltaLayerInner>> {
-        self.access_stats
-            .record_access(access_kind, ctx.task_kind());
+        self.access_stats.record_access(access_kind, ctx);
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner())
