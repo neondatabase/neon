@@ -100,11 +100,11 @@ impl InMemoryLayer {
     }
 
     fn assert_writable(&self) {
-        assert!(!self.end_lsn.get().is_some());
+        assert!(self.end_lsn.get().is_none());
     }
 
     fn end_lsn_or_max(&self) -> Lsn {
-        self.end_lsn.get().map(|l| *l).unwrap_or(Lsn::MAX)
+        self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
 }
 
@@ -255,7 +255,7 @@ impl InMemoryLayer {
             timeline_id,
             tenant_id,
             start_lsn,
-            end_lsn: Lsn::INVALID.into(),
+            end_lsn: OnceLock::new(),
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
