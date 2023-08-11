@@ -1,17 +1,16 @@
 {
     "public_extensions": [
-        "anon"
+        "weighted_mean"
     ],
     "library_index": {
-        "anon": "anon"
+        "weighted_mean": "weighted_mean"
     },
     "extension_data": {
-        "anon": {
+        "weighted_mean": {
             "control_data": {
-                "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+                "weighted_mean.control": "# weighted_mean extension\ncomment = 'A weighted mean aggregate function extension'\ndefault_version = '1.0.1'\nmodule_pathname = '$libdir/weighted_mean'\nrelocatable = true\ntrusted = true\n"
             },
-            "archive_path": "5670669815/v15/extensions/anon.tar.zst"
+            "archive_path": "5670669815/v15/extensions/weighted_mean.tar.zst"
         }
     }
 }
-

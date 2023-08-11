@@ -58,16 +58,12 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
-// this is an arbitrary build tag. Fine as a default / for testing purposes
-// in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "5670669815";
-
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    let build_tag = option_env!("BUILD_TAG")
-        .unwrap_or(BUILD_TAG_DEFAULT)
-        .to_string();
+    // if there is no build tag environment variable, use a "default value"
+    // the use-case for this "default value" is regression tests that don't require BUILD_TAG
+    let build_tag = option_env!("BUILD_TAG").unwrap_or("5670669815").to_string();
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
