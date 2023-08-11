@@ -173,9 +173,7 @@ def test_remote_storage_backup_and_restore(
     #
     # The initiated attach operation should survive the restart, and continue from where it was.
     env.pageserver.stop()
-    layer_download_failed_regex = (
-        r"download.*[0-9A-F]+-[0-9A-F]+.*open a download stream for layer.*simulated failure"
-    )
+    layer_download_failed_regex = r"Failed to download a remote file: simulated failure of remote operation Download.*[0-9A-F]+-[0-9A-F]+"
     assert not env.pageserver.log_contains(
         layer_download_failed_regex
     ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
@@ -208,7 +206,7 @@ def test_remote_storage_backup_and_restore(
                 == f"{data}|{checkpoint_number}"
             )
 
-    log.info("ensure that we neede to retry downloads due to test_remote_failures=1")
+    log.info("ensure that we needed to retry downloads due to test_remote_failures=1")
     assert env.pageserver.log_contains(layer_download_failed_regex)
 
 
