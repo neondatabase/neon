@@ -23,6 +23,7 @@ use utils::{
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
+use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState, ServerInfo, Term,
@@ -164,8 +165,8 @@ impl SharedState {
         })
     }
 
-    fn is_active(&self, remote_consistent_lsn: Lsn) -> bool {
-        self.is_wal_backup_required()
+    fn is_active(&self, num_computes: usize, remote_consistent_lsn: Lsn) -> bool {
+        self.is_wal_backup_required(num_computes)
             // FIXME: add tracking of relevant pageservers and check them here individually,
             // otherwise migration won't work (we suspend too early).
             || remote_consistent_lsn < self.sk.inmem.commit_lsn
@@ -173,29 +174,34 @@ impl SharedState {
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action.
-    fn update_status(&mut self, remote_consistent_lsn: Lsn, ttid: TenantTimelineId) -> bool {
-        let is_active = self.is_active(remote_consistent_lsn);
+    fn update_status(
+        &mut self,
+        num_computes: usize,
+        remote_consistent_lsn: Lsn,
+        ttid: TenantTimelineId,
+    ) -> bool {
+        let is_active = self.is_active(num_computes, remote_consistent_lsn);
         if self.active != is_active {
             info!("timeline {} active={} now", ttid, is_active);
         }
         self.active = is_active;
-        self.is_wal_backup_action_pending()
+        self.is_wal_backup_action_pending(num_computes)
     }
 
     /// Should we run s3 offloading in current state?
-    fn is_wal_backup_required(&self) -> bool {
+    fn is_wal_backup_required(&self, num_computes: usize) -> bool {
         let seg_size = self.get_wal_seg_size();
-        self.num_computes > 0 ||
+        num_computes > 0 ||
         // Currently only the whole segment is offloaded, so compare segment numbers.
-               (self.sk.inmem.commit_lsn.segment_number(seg_size) >
-                self.sk.inmem.backup_lsn.segment_number(seg_size))
+            (self.sk.inmem.commit_lsn.segment_number(seg_size) >
+             self.sk.inmem.backup_lsn.segment_number(seg_size))
     }
 
     /// Is current state of s3 offloading is not what it ought to be?
-    fn is_wal_backup_action_pending(&self) -> bool {
-        let res = self.wal_backup_active != self.is_wal_backup_required();
+    fn is_wal_backup_action_pending(&self, num_computes: usize) -> bool {
+        let res = self.wal_backup_active != self.is_wal_backup_required(num_computes);
         if res {
-            let action_pending = if self.is_wal_backup_required() {
+            let action_pending = if self.is_wal_backup_required(num_computes) {
                 "start"
             } else {
                 "stop"
@@ -210,8 +216,8 @@ impl SharedState {
 
     /// Returns whether s3 offloading is required and sets current status as
     /// matching.
-    fn wal_backup_attend(&mut self) -> bool {
-        self.wal_backup_active = self.is_wal_backup_required();
+    fn wal_backup_attend(&mut self, num_computes: usize) -> bool {
+        self.wal_backup_active = self.is_wal_backup_required(num_computes);
         self.wal_backup_active
     }
 
@@ -295,6 +301,7 @@ pub struct Timeline {
     /// while holding it, ensuring that consensus checks are in order.
     mutex: Mutex<SharedState>,
     walsenders: Arc<WalSenders>,
+    walreceivers: Arc<WalReceivers>,
 
     /// Cancellation channel. Delete/cancel will send `true` here as a cancellation signal.
     cancellation_tx: watch::Sender<bool>,
@@ -329,6 +336,7 @@ impl Timeline {
             commit_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
             walsenders: WalSenders::new(rcl),
+            walreceivers: WalReceivers::new(),
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
@@ -355,6 +363,7 @@ impl Timeline {
             commit_lsn_watch_rx,
             mutex: Mutex::new(SharedState::create_new(&conf, &ttid, state)?),
             walsenders: WalSenders::new(Lsn(0)),
+            walreceivers: WalReceivers::new(),
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
@@ -441,40 +450,22 @@ impl Timeline {
     }
 
     fn update_status(&self, shared_state: &mut SharedState) -> bool {
-        shared_state.update_status(self.get_walsenders().get_remote_consistent_lsn(), self.ttid)
+        shared_state.update_status(
+            self.walreceivers.get_num(),
+            self.get_walsenders().get_remote_consistent_lsn(),
+            self.ttid,
+        )
     }
 
-    /// Register compute connection, starting timeline-related activity if it is
-    /// not running yet.
-    pub async fn on_compute_connect(&self) -> Result<()> {
+    /// Update timeline status and kick wal backup launcher to stop/start offloading if needed.
+    pub async fn update_status_notify(&self) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
-
-        let is_wal_backup_action_pending: bool;
-        {
+        let is_wal_backup_action_pending: bool = {
             let mut shared_state = self.write_shared_state().await;
-            shared_state.num_computes += 1;
-            is_wal_backup_action_pending = self.update_status(&mut shared_state);
-        }
-        // Wake up wal backup launcher, if offloading not started yet.
-        if is_wal_backup_action_pending {
-            // Can fail only if channel to a static thread got closed, which is not normal at all.
-            self.wal_backup_launcher_tx.send(self.ttid).await?;
-        }
-        Ok(())
-    }
-
-    /// De-register compute connection, shutting down timeline activity if
-    /// pageserver doesn't need catchup.
-    pub async fn on_compute_disconnect(&self) -> Result<()> {
-        let is_wal_backup_action_pending: bool;
-        {
-            let mut shared_state = self.write_shared_state().await;
-            shared_state.num_computes -= 1;
-            is_wal_backup_action_pending = self.update_status(&mut shared_state);
-        }
-        // Wake up wal backup launcher, if it is time to stop the offloading.
+            self.update_status(&mut shared_state)
+        };
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
             self.wal_backup_launcher_tx.send(self.ttid).await?;
@@ -506,7 +497,9 @@ impl Timeline {
             return false;
         }
 
-        self.write_shared_state().await.wal_backup_attend()
+        self.write_shared_state()
+            .await
+            .wal_backup_attend(self.walreceivers.get_num())
     }
 
     /// Returns commit_lsn watch channel.
@@ -635,6 +628,10 @@ impl Timeline {
 
     pub fn get_walsenders(&self) -> &Arc<WalSenders> {
         &self.walsenders
+    }
+
+    pub fn get_walreceivers(&self) -> &Arc<WalReceivers> {
+        &self.walreceivers
     }
 
     /// Returns flush_lsn.

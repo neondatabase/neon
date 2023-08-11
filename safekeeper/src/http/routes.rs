@@ -15,8 +15,10 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use utils::http::endpoint::request_span;
 
+use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
+use crate::send_wal::WalSenderState;
 use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
@@ -99,6 +101,8 @@ pub struct TimelineStatus {
     pub peer_horizon_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+    pub walsenders: Vec<WalSenderState>,
+    pub walreceivers: Vec<WalReceiverState>,
 }
 
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
@@ -149,6 +153,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
+        walsenders: tli.get_walsenders().get_all(),
+        walreceivers: tli.get_walreceivers().get_all(),
     };
     json_response(StatusCode::OK, status)
 }
