@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(*count.lock().await, 2);
 
         let count = Mutex::new(0);
-        let _ = retry(
+        retry(
             || async {
                 let mut locked = count.lock().await;
                 if *locked > 1 {
