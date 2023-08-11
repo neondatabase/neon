@@ -28,10 +28,15 @@ struct QueryData {
 }
 
 #[derive(serde::Deserialize)]
+struct BatchQueryData {
+    queries: Vec<QueryData>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Payload {
     Single(QueryData),
-    Batch(Vec<QueryData>),
+    Batch(BatchQueryData),
 }
 
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
@@ -233,7 +238,7 @@ pub async fn handle(
         Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
             .await
             .map(|x| (x, HashMap::default())),
-        Payload::Batch(queries) => {
+        Payload::Batch(batch_query) => {
             let mut results = Vec::new();
             let mut builder = client.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
@@ -243,7 +248,7 @@ pub async fn handle(
                 builder = builder.read_only(true);
             }
             let transaction = builder.start().await?;
-            for query in queries {
+            for query in batch_query.queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 match result {
                     Ok(r) => results.push(r),
