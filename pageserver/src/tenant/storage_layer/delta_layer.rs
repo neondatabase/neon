@@ -971,8 +971,8 @@ impl DeltaLayerInner {
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
-                        // subtract offset of new key BLOB and first blob of this key
-                        // to get total size of values associated with this key
+                        // subtract offset of the current and last entries to get the size
+                        // of the value associated with this (key, lsn) tuple
                         let first_pos = last.size;
                         last.size = pos - first_pos;
                     }
