@@ -552,10 +552,7 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_keys(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)>> {
+    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -953,14 +950,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)>> {
+    ) -> Result<Vec<DeltaEntry>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)> = Vec::new();
+        let mut all_keys: Vec<DeltaEntry> = Vec::new();
 
         tree_reader
             .visit(
@@ -976,20 +973,36 @@ impl DeltaLayerInner {
                     if let Some(last) = all_keys.last_mut() {
                         // subtract offset of new key BLOB and first blob of this key
                         // to get total size of values associated with this key
-                        let first_pos = last.2;
-                        last.2 = pos - first_pos;
+                        let first_pos = last.size;
+                        last.size = pos - first_pos;
                     }
-                    all_keys.push((delta_key.key(), delta_key.lsn(), pos, val_ref));
+                    let entry = DeltaEntry {
+                        key: delta_key.key(),
+                        lsn: delta_key.lsn(),
+                        size: pos,
+                        val: val_ref,
+                    };
+                    all_keys.push(entry);
                     true
                 },
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of layer
-            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
+            last.size = std::fs::metadata(&file.file.path)?.len() - last.size;
         }
         Ok(all_keys)
     }
+}
+
+/// A set of data associated with a delta layer key and its value
+pub struct DeltaEntry<'a> {
+    pub key: Key,
+    pub lsn: Lsn,
+    /// Size of the stored value
+    pub size: u64,
+    /// Reference to the on-disk value
+    pub val: ValueRef<&'a DeltaLayerInner>,
 }
 
 /// Reference to an on-disk value

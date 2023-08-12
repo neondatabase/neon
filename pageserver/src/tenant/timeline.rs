@@ -37,6 +37,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
+use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
     LayerAccessStats, LayerFileName, RemoteLayer,
@@ -3547,11 +3548,11 @@ impl Timeline {
 
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_keys.sort_by_key(|(key, lsn, _size, _value_ref)| (*key, *lsn));
+        all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
-        for (next_key, _next_lsn, _size, _value_ref) in all_keys.iter() {
+        for DeltaEntry { key: next_key, .. } in all_keys.iter() {
             let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -3589,7 +3590,7 @@ impl Timeline {
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = all_keys
             .iter()
-            .map(|(key, lsn, size, _value_ref)| (*key, *lsn, *size))
+            .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size))
             .coalesce(|mut prev, cur| {
                 // Coalesce keys that belong to the same key pair.
                 // This ensures that compaction doesn't put them
@@ -3655,8 +3656,11 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        for &(key, lsn, _size, ref value_ref) in all_values_iter {
-            let value = value_ref.load()?;
+        for &DeltaEntry {
+            key, lsn, ref val, ..
+        } in all_values_iter
+        {
+            let value = val.load()?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
