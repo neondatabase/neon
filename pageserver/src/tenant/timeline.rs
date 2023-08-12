@@ -3536,10 +3536,13 @@ impl Timeline {
 
         let mut all_keys = Vec::new();
 
-        for l in deltas_to_compact.iter() {
+        let downcast_deltas: Vec<_> = deltas_to_compact
+            .iter()
+            .map(|l| l.clone().downcast_delta_layer().expect("delta layer"))
+            .collect();
+        for dl in downcast_deltas.iter() {
             // TODO: replace this with an await once we fully go async
-            let dl = l.clone().downcast_delta_layer().expect("delta layer");
-            all_keys.extend(Handle::current().block_on(DeltaLayer::load_keys(&dl, ctx))?);
+            all_keys.extend(Handle::current().block_on(DeltaLayer::load_keys(dl, ctx))?);
         }
 
         // The current stdlib sorting implementation is designed in a way where it is

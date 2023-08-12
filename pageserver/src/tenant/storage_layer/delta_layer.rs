@@ -555,7 +555,7 @@ impl DeltaLayer {
     pub async fn load_keys(
         &self,
         ctx: &RequestContext,
-    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<Arc<DeltaLayerInner>>)>> {
+    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -953,14 +953,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<T>)>> {
+    ) -> Result<Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<(Key, Lsn, u64, ValueRef<T>)> = Vec::new();
+        let mut all_keys: Vec<(Key, Lsn, u64, ValueRef<&DeltaLayerInner>)> = Vec::new();
 
         tree_reader
             .visit(
@@ -970,7 +970,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(this.clone())),
+                        reader: BlockCursor::new(Adapter(dl)),
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
