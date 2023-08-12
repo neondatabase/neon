@@ -988,8 +988,9 @@ impl DeltaLayerInner {
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
-            // Last key occupies all space till end of layer
-            last.size = std::fs::metadata(&file.file.path)?.len() - last.size;
+            // Last key occupies all space till end of value storage,
+            // which corresponds to beginning of the index
+            last.size = dl.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
         }
         Ok(all_keys)
     }
