@@ -218,9 +218,8 @@ mod tests {
     use super::*;
     use crate::tenant::blob_io::BlobWriter;
     use crate::tenant::block_io::BlockCursor;
-    use rand::{seq::SliceRandom, thread_rng, RngCore};
+    use rand::{thread_rng, RngCore};
     use std::fs;
-    use std::ops::Deref;
     use std::str::FromStr;
 
     fn harness(
