@@ -1039,6 +1039,6 @@ struct Adapter<T: AsRef<DeltaLayerInner>>(T);
 
 impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
     fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum).into()
+        self.0.as_ref().file.read_blk(blknum)
     }
 }

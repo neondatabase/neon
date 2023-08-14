@@ -39,7 +39,7 @@ where
     B: BlockReader,
 {
     fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        (*self).read_blk(blknum).into()
+        (*self).read_blk(blknum)
     }
 }
 
@@ -113,7 +113,7 @@ where
     }
 
     pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum).into()
+        self.reader.read_blk(blknum)
     }
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
