@@ -354,10 +354,20 @@ fn start_pageserver(
     let (deletion_queue, deletion_frontend, deletion_backend) =
         DeletionQueue::new(remote_storage.clone(), conf);
     if let Some(mut deletion_frontend) = deletion_frontend {
-        BACKGROUND_RUNTIME.spawn(async move { deletion_frontend.background().await });
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_frontend
+                .background()
+                .instrument(info_span!(parent:None, "deletion frontend"))
+                .await
+        });
     }
     if let Some(mut deletion_backend) = deletion_backend {
-        BACKGROUND_RUNTIME.spawn(async move { deletion_backend.background().await });
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_backend
+                .background()
+                .instrument(info_span!(parent: None, "deletion backend"))
+                .await
+        });
     }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
