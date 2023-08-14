@@ -34,7 +34,7 @@ pub async fn retry<T, O, F, E>(
     mut op: O,
     is_permanent: impl Fn(&E) -> bool,
     warn_threshold: u32,
-    max_attempts: u32,
+    max_retries: u32,
     description: &str,
 ) -> Result<T, E>
 where
@@ -64,7 +64,7 @@ where
             Err(err) if attempts < warn_threshold => {
                 tracing::info!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err) if attempts < max_attempts => {
+            Err(err) if attempts < max_retries => {
                 tracing::warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
             Err(ref err) => {
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_retries() {
+    async fn retry_always_error() {
         let count = Mutex::new(0);
         let err_result = retry(
             || async {
@@ -138,7 +138,10 @@ mod tests {
         assert!(err_result.is_err());
 
         assert_eq!(*count.lock().await, 2);
+    }
 
+    #[tokio::test]
+    async fn retry_ok_after_err() {
         let count = Mutex::new(0);
         retry(
             || async {
@@ -157,8 +160,10 @@ mod tests {
         )
         .await
         .unwrap();
+    }
 
-        // permanent errors are not retried
+    #[tokio::test]
+    async fn dont_retry_permanent_errors() {
         let count = Mutex::new(0);
         let _ = retry(
             || async {
