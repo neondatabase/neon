@@ -8,7 +8,7 @@ mod layer_desc;
 mod remote_layer;
 
 use crate::config::PageServerConf;
-use crate::context::{ATimeBehavior, RequestContext};
+use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
@@ -242,7 +242,7 @@ impl LayerAccessStats {
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
-        if ctx.atime_behavior() == ATimeBehavior::Skip {
+        if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
             return;
         }
 

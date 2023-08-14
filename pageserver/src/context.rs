@@ -93,7 +93,7 @@ use crate::task_mgr::TaskKind;
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
-    atime_behavior: ATimeBehavior,
+    access_stats_behavior: AccessStatsBehavior,
 }
 
 /// Desired behavior if the operation requires an on-demand download
@@ -113,7 +113,7 @@ pub enum DownloadBehavior {
 
 /// Whether this request should update access times used in LRU eviction
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ATimeBehavior {
+pub(crate) enum AccessStatsBehavior {
     /// Update access times: this request's access to data should be taken
     /// as a hint that the accessed layer is likely to be accessed again
     Update,
@@ -136,7 +136,7 @@ impl RequestContextBuilder {
             inner: RequestContext {
                 task_kind,
                 download_behavior: DownloadBehavior::Download,
-                atime_behavior: ATimeBehavior::Update,
+                access_stats_behavior: AccessStatsBehavior::Update,
             },
         }
     }
@@ -148,7 +148,7 @@ impl RequestContextBuilder {
             inner: RequestContext {
                 task_kind: original.task_kind,
                 download_behavior: original.download_behavior,
-                atime_behavior: original.atime_behavior,
+                access_stats_behavior: original.access_stats_behavior,
             },
         }
     }
@@ -160,10 +160,10 @@ impl RequestContextBuilder {
         self
     }
 
-    /// Configure the ATimeBehavior of the context: whether layer
+    /// Configure the AccessStatsBehavior of the context: whether layer
     /// accesses should update the access time of the layer.
-    pub fn atime_behavior(mut self, b: ATimeBehavior) -> Self {
-        self.inner.atime_behavior = b;
+    pub(crate) fn access_stats_behavior(mut self, b: AccessStatsBehavior) -> Self {
+        self.inner.access_stats_behavior = b;
         self
     }
 
@@ -260,7 +260,7 @@ impl RequestContext {
         self.download_behavior
     }
 
-    pub fn atime_behavior(&self) -> ATimeBehavior {
-        self.atime_behavior
+    pub(crate) fn access_stats_behavior(&self) -> AccessStatsBehavior {
+        self.access_stats_behavior
     }
 }
