@@ -537,8 +537,8 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let path = path.to_owned();
-        self.delete_objects(&[path]).await
+        let paths = std::array::from_ref(path);
+        self.delete_objects(paths).await
     }
 }
 
