@@ -1,3 +1,4 @@
+use crate::metrics::{DELETION_QUEUE_EXECUTED, DELETION_QUEUE_SUBMITTED};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -137,6 +138,7 @@ impl DeletionQueueClient {
         timeline_id: TimelineId,
         layers: Vec<LayerFileName>,
     ) {
+        DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
         self.do_push(FrontendQueueMessage::Delete(DeletionOp {
             tenant_id,
             timeline_id,
@@ -191,6 +193,7 @@ impl BackendQueueWorker {
     async fn maybe_execute(&mut self) {
         match self.remote_storage.delete_objects(&self.accumulator).await {
             Ok(()) => {
+                DELETION_QUEUE_EXECUTED.inc_by(self.accumulator.len() as u64);
                 self.accumulator.clear();
                 self.executed_lists.append(&mut self.pending_lists);
             }
