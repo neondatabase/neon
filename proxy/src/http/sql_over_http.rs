@@ -28,13 +28,18 @@ struct QueryData {
 }
 
 #[derive(serde::Deserialize)]
+struct BatchQueryData {
+    queries: Vec<QueryData>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Payload {
     Single(QueryData),
-    Batch(Vec<QueryData>),
+    Batch(BatchQueryData),
 }
 
-pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
+pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -214,7 +219,7 @@ pub async fn handle(
 
     if request_content_length > MAX_REQUEST_SIZE {
         return Err(anyhow::anyhow!(
-            "request is too large (max {MAX_REQUEST_SIZE} bytes)"
+            "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
         ));
     }
 
@@ -233,7 +238,7 @@ pub async fn handle(
         Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
             .await
             .map(|x| (x, HashMap::default())),
-        Payload::Batch(queries) => {
+        Payload::Batch(batch_query) => {
             let mut results = Vec::new();
             let mut builder = client.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
@@ -243,7 +248,7 @@ pub async fn handle(
                 builder = builder.read_only(true);
             }
             let transaction = builder.start().await?;
-            for query in queries {
+            for query in batch_query.queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 match result {
                     Ok(r) => results.push(r),
@@ -292,13 +297,15 @@ async fn query_to_json<T: GenericClient>(
     // big.
     pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
-    let mut curret_size = 0;
+    let mut current_size = 0;
     while let Some(row) = row_stream.next().await {
         let row = row?;
-        curret_size += row.body_len();
+        current_size += row.body_len();
         rows.push(row);
-        if curret_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!("response too large"));
+        if current_size > MAX_RESPONSE_SIZE {
+            return Err(anyhow::anyhow!(
+                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
+            ));
         }
     }
 

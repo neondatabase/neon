@@ -11,19 +11,17 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-
-use tracing::{info, warn};
+use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
-use super::{FAILED_DOWNLOAD_RETRIES, FAILED_DOWNLOAD_WARN_THRESHOLD};
+use super::{FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES};
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
@@ -268,7 +266,6 @@ pub(super) async fn download_index_part(
     Ok(index_part)
 }
 
-///
 /// Helper function to handle retries for a download operation.
 ///
 /// Remote operations can fail due to rate limits (IAM, S3), spurious network
@@ -276,47 +273,17 @@ pub(super) async fn download_index_part(
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-async fn download_retry<T, O, F>(mut op: O, description: &str) -> Result<T, DownloadError>
+async fn download_retry<T, O, F>(op: O, description: &str) -> Result<T, DownloadError>
 where
     O: FnMut() -> F,
     F: Future<Output = Result<T, DownloadError>>,
 {
-    let mut attempts = 0;
-    loop {
-        let result = op().await;
-        match result {
-            Ok(_) => {
-                if attempts > 0 {
-                    info!("{description} succeeded after {attempts} retries");
-                }
-                return result;
-            }
-
-            // These are "permanent" errors that should not be retried.
-            Err(DownloadError::BadInput(_)) | Err(DownloadError::NotFound) => {
-                return result;
-            }
-            // Assume that any other failure might be transient, and the operation might
-            // succeed if we just keep trying.
-            Err(DownloadError::Other(err)) if attempts < FAILED_DOWNLOAD_WARN_THRESHOLD => {
-                info!("{description} failed, will retry (attempt {attempts}): {err:#}");
-            }
-            Err(DownloadError::Other(err)) if attempts < FAILED_DOWNLOAD_RETRIES => {
-                warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
-            }
-            Err(DownloadError::Other(ref err)) => {
-                // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
-                warn!("{description} still failed after {attempts} retries, giving up: {err:?}");
-                return result;
-            }
-        }
-        // sleep and retry
-        exponential_backoff(
-            attempts,
-            DEFAULT_BASE_BACKOFF_SECONDS,
-            DEFAULT_MAX_BACKOFF_SECONDS,
-        )
-        .await;
-        attempts += 1;
-    }
+    backoff::retry(
+        op,
+        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        FAILED_DOWNLOAD_WARN_THRESHOLD,
+        FAILED_REMOTE_OP_RETRIES,
+        description,
+    )
+    .await
 }

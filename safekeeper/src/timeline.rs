@@ -499,6 +499,19 @@ impl Timeline {
         false
     }
 
+    /// Ensure taht current term is t, erroring otherwise, and lock the state.
+    pub async fn acquire_term(&self, t: Term) -> Result<MutexGuard<SharedState>> {
+        let ss = self.write_shared_state().await;
+        if ss.sk.state.acceptor_state.term != t {
+            bail!(
+                "failed to acquire term {}, current term {}",
+                t,
+                ss.sk.state.acceptor_state.term
+            );
+        }
+        Ok(ss)
+    }
+
     /// Returns whether s3 offloading is required and sets current status as
     /// matching it.
     pub async fn wal_backup_attend(&self) -> bool {

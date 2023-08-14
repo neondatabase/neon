@@ -31,8 +31,10 @@ use storage_broker::Streaming;
 use tokio::select;
 use tracing::*;
 
-use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use postgres_connection::{parse_host_port, PgConnectionConfig};
+use utils::backoff::{
+    exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,

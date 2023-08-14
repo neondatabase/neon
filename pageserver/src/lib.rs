@@ -95,28 +95,6 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     std::process::exit(exit_code);
 }
 
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
-
-async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
-    let backoff_duration_seconds =
-        exponential_backoff_duration_seconds(n, base_increment, max_seconds);
-    if backoff_duration_seconds > 0.0 {
-        info!(
-            "Backoff: waiting {backoff_duration_seconds} seconds before processing with the task",
-        );
-        tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_duration_seconds)).await;
-    }
-}
-
-pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
-    if n == 0 {
-        0.0
-    } else {
-        (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
-    }
-}
-
 /// The name of the metadata file pageserver creates per timeline.
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
 pub const METADATA_FILE_NAME: &str = "metadata";
@@ -190,7 +168,7 @@ pub struct InitializationOrder {
 
     /// Each timeline owns a clone of this to be consumed on the initial logical size calculation
     /// attempt. It is important to drop this once the attempt has completed.
-    pub initial_logical_size_attempt: utils::completion::Completion,
+    pub initial_logical_size_attempt: Option<utils::completion::Completion>,
 
     /// Barrier for when we can start any background jobs.
     ///
@@ -226,6 +204,7 @@ async fn timed<Fut: std::future::Future>(
 
             let ret = fut.await;
 
+            // this has a global allowed_errors
             tracing::warn!(
                 task = name,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -234,37 +213,6 @@ async fn timed<Fut: std::future::Future>(
 
             ret
         }
-    }
-}
-
-#[cfg(test)]
-mod backoff_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn backoff_defaults_produce_growing_backoff_sequence() {
-        let mut current_backoff_value = None;
-
-        for i in 0..10_000 {
-            let new_backoff_value = exponential_backoff_duration_seconds(
-                i,
-                DEFAULT_BASE_BACKOFF_SECONDS,
-                DEFAULT_MAX_BACKOFF_SECONDS,
-            );
-
-            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
-                assert!(
-                    old_backoff_value <= new_backoff_value,
-                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
-                )
-            }
-        }
-
-        assert_eq!(
-            current_backoff_value.expect("Should have produced backoff values to compare"),
-            DEFAULT_MAX_BACKOFF_SECONDS,
-            "Given big enough of retries, backoff should reach its allowed max value"
-        );
     }
 }
 

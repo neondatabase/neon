@@ -323,8 +323,7 @@ impl ImageLayer {
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
     ) -> Result<&ImageLayerInner> {
-        self.access_stats
-            .record_access(access_kind, ctx.task_kind());
+        self.access_stats.record_access(access_kind, ctx);
         self.inner
             .get_or_try_init(|| self.load_inner())
             .await
@@ -471,6 +470,7 @@ impl ImageLayerInner {
             let blob = file
                 .block_cursor()
                 .read_blob(offset)
+                .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
             let value = Bytes::from(blob);
 

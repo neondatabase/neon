@@ -187,7 +187,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
             ),
-            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            a @ AlreadyInProgress(_) => ApiError::Conflict(a.to_string()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
@@ -204,6 +204,19 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
             ),
             Tenant(t) => ApiError::from(t),
             Timeline(t) => ApiError::from(t),
+        }
+    }
+}
+
+impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
+    fn from(value: crate::tenant::delete::DeleteTenantError) -> Self {
+        use crate::tenant::delete::DeleteTenantError::*;
+        match value {
+            Get(g) => ApiError::from(g),
+            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
+            Timeline(t) => ApiError::from(t),
+            Other(o) => ApiError::InternalServerError(o),
+            e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
         }
     }
 }
@@ -615,6 +628,23 @@ async fn tenant_status(
     .await?;
 
     json_response(StatusCode::OK, tenant_info)
+}
+
+async fn tenant_delete_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // TODO openapi spec
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+
+    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_id)
+        .instrument(info_span!("tenant_delete_handler", %tenant_id))
+        .await?;
+
+    json_response(StatusCode::ACCEPTED, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
@@ -1345,6 +1375,9 @@ pub fn make_router(
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
         .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
         .get("/v1/tenant/:tenant_id", |r| api_handler(r, tenant_status))
+        .delete("/v1/tenant/:tenant_id", |r| {
+            api_handler(r, tenant_delete_handler)
+        })
         .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
             api_handler(r, tenant_size_handler)
         })

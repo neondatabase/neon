@@ -20,6 +20,7 @@
 //!
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
+use either::Either;
 use hex;
 use std::{cmp::Ordering, io, result};
 use thiserror::Error;
@@ -256,103 +257,77 @@ where
     where
         V: FnMut(&[u8], u64) -> bool,
     {
-        self.search_recurse(self.root_blk, search_key, dir, &mut visitor)
-    }
+        let mut stack = Vec::new();
+        stack.push((self.root_blk, None));
+        while let Some((node_blknum, opt_iter)) = stack.pop() {
+            // Locate the node.
+            let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
 
-    fn search_recurse<V>(
-        &self,
-        node_blknum: u32,
-        search_key: &[u8; L],
-        dir: VisitDirection,
-        visitor: &mut V,
-    ) -> Result<bool>
-    where
-        V: FnMut(&[u8], u64) -> bool,
-    {
-        // Locate the node.
-        let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
+            let node = OnDiskNode::deparse(node_buf.as_ref())?;
+            let prefix_len = node.prefix_len as usize;
+            let suffix_len = node.suffix_len as usize;
 
-        let node = OnDiskNode::deparse(node_buf.as_ref())?;
-        let prefix_len = node.prefix_len as usize;
-        let suffix_len = node.suffix_len as usize;
+            assert!(node.num_children > 0);
 
-        assert!(node.num_children > 0);
+            let mut keybuf = Vec::new();
+            keybuf.extend(node.prefix);
+            keybuf.resize(prefix_len + suffix_len, 0);
 
-        let mut keybuf = Vec::new();
-        keybuf.extend(node.prefix);
-        keybuf.resize(prefix_len + suffix_len, 0);
-
-        if dir == VisitDirection::Forwards {
-            // Locate the first match
-            let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
-                Ok(idx) => idx,
-                Err(idx) => {
-                    if node.level == 0 {
-                        // Imagine that the node contains the following keys:
-                        //
-                        // 1
-                        // 3  <-- idx
-                        // 5
-                        //
-                        // If the search key is '2' and there is exact match,
-                        // the binary search would return the index of key
-                        // '3'. That's cool, '3' is the first key to return.
+            let mut iter = if let Some(iter) = opt_iter {
+                iter
+            } else if dir == VisitDirection::Forwards {
+                // Locate the first match
+                let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
+                    Ok(idx) => idx,
+                    Err(idx) => {
+                        if node.level == 0 {
+                            // Imagine that the node contains the following keys:
+                            //
+                            // 1
+                            // 3  <-- idx
+                            // 5
+                            //
+                            // If the search key is '2' and there is exact match,
+                            // the binary search would return the index of key
+                            // '3'. That's cool, '3' is the first key to return.
+                            idx
+                        } else {
+                            // This is an internal page, so each key represents a lower
+                            // bound for what's in the child page. If there is no exact
+                            // match, we have to return the *previous* entry.
+                            //
+                            // 1  <-- return this
+                            // 3  <-- idx
+                            // 5
+                            idx.saturating_sub(1)
+                        }
+                    }
+                };
+                Either::Left(idx..node.num_children.into())
+            } else {
+                let idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
+                    Ok(idx) => {
+                        // Exact match. That's the first entry to return, and walk
+                        // backwards from there.
                         idx
-                    } else {
-                        // This is an internal page, so each key represents a lower
-                        // bound for what's in the child page. If there is no exact
-                        // match, we have to return the *previous* entry.
-                        //
-                        // 1  <-- return this
-                        // 3  <-- idx
-                        // 5
-                        idx.saturating_sub(1)
                     }
-                }
-            };
-            // idx points to the first match now. Keep going from there
-            let mut key_off = idx * suffix_len;
-            while idx < node.num_children as usize {
-                let suffix = &node.keys[key_off..key_off + suffix_len];
-                keybuf[prefix_len..].copy_from_slice(suffix);
-                let value = node.value(idx);
-                #[allow(clippy::collapsible_if)]
-                if node.level == 0 {
-                    // leaf
-                    if !visitor(&keybuf, value.to_u64()) {
-                        return Ok(false);
+                    Err(idx) => {
+                        // No exact match. The binary search returned the index of the
+                        // first key that's > search_key. Back off by one, and walk
+                        // backwards from there.
+                        if let Some(idx) = idx.checked_sub(1) {
+                            idx
+                        } else {
+                            return Ok(false);
+                        }
                     }
-                } else {
-                    #[allow(clippy::collapsible_if)]
-                    if !self.search_recurse(value.to_blknum(), search_key, dir, visitor)? {
-                        return Ok(false);
-                    }
-                }
-                idx += 1;
-                key_off += suffix_len;
-            }
-        } else {
-            let mut idx = match node.binary_search(search_key, keybuf.as_mut_slice()) {
-                Ok(idx) => {
-                    // Exact match. That's the first entry to return, and walk
-                    // backwards from there. (The loop below starts from 'idx -
-                    // 1', so add one here to compensate.)
-                    idx + 1
-                }
-                Err(idx) => {
-                    // No exact match. The binary search returned the index of the
-                    // first key that's > search_key. Back off by one, and walk
-                    // backwards from there. (The loop below starts from idx - 1,
-                    // so we don't need to subtract one here)
-                    idx
-                }
+                };
+                Either::Right((0..=idx).rev())
             };
 
-            // idx points to the first match + 1 now. Keep going from there.
-            let mut key_off = idx * suffix_len;
-            while idx > 0 {
-                idx -= 1;
-                key_off -= suffix_len;
+            // idx points to the first match now. Keep going from there
+            while let Some(idx) = iter.next() {
+                let key_off = idx * suffix_len;
                 let suffix = &node.keys[key_off..key_off + suffix_len];
                 keybuf[prefix_len..].copy_from_slice(suffix);
                 let value = node.value(idx);
@@ -363,12 +338,8 @@ where
                         return Ok(false);
                     }
                 } else {
-                    #[allow(clippy::collapsible_if)]
-                    if !self.search_recurse(value.to_blknum(), search_key, dir, visitor)? {
-                        return Ok(false);
-                    }
-                }
-                if idx == 0 {
+                    stack.push((node_blknum, Some(iter)));
+                    stack.push((value.to_blknum(), None));
                     break;
                 }
             }
