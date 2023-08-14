@@ -191,6 +191,10 @@ pub struct BackendQueueWorker {
 
 impl BackendQueueWorker {
     async fn maybe_execute(&mut self) {
+        fail::fail_point!("deletion-queue-before-execute", |_| {
+            return;
+        });
+
         match self.remote_storage.delete_objects(&self.accumulator).await {
             Ok(()) => {
                 DELETION_QUEUE_EXECUTED.inc_by(self.accumulator.len() as u64);
