@@ -113,7 +113,7 @@ pub enum DownloadBehavior {
 
 /// Whether this request should update access times used in LRU eviction
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ATimeBehavior {
+pub(crate) enum ATimeBehavior {
     /// Update access times: this request's access to data should be taken
     /// as a hint that the accessed layer is likely to be accessed again
     Update,
