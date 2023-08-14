@@ -52,6 +52,21 @@ paths:
               schema:
                 type: object
 
+  /v1/deletion_queue/flush_execute:
+    put:
+      description: Execute any deletions currently enqueued
+      security: []
+      responses:
+        "200":
+          description: |
+            Flush completed: deletion has been attempted for enqueued objects.  This does not guarantee
+            that deletion executed successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+
+
   /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id

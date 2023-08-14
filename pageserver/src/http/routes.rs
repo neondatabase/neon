@@ -1132,6 +1132,28 @@ async fn always_panic_handler(
     json_response(StatusCode::NO_CONTENT, ())
 }
 
+async fn deletion_queue_flush_execute(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if let None = state.remote_storage {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let queue_client = state.deletion_queue.new_client();
+    tokio::select! {
+        _ = queue_client.flush_execute()=> {
+            json_response(StatusCode::OK, ())
+        },
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
+}
+
 async fn disk_usage_eviction_run(
     mut r: Request<Body>,
     _cancel: CancellationToken,
@@ -1455,6 +1477,9 @@ pub fn make_router(
         )
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
+        })
+        .put("/v1/deletion_queue/flush_execute", |r| {
+            api_handler(r, deletion_queue_flush_execute)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
