@@ -685,6 +685,7 @@ impl<const L: usize> BuildNode<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tenant::block_io::BlockLease;
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -699,12 +700,10 @@ mod tests {
         }
     }
     impl BlockReader for TestDisk {
-        type BlockLease = std::rc::Rc<[u8; PAGE_SZ]>;
-
-        fn read_blk(&self, blknum: u32) -> io::Result<Self::BlockLease> {
+        fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
-            Ok(std::rc::Rc::new(buf))
+            Ok(std::rc::Rc::new(buf).into())
         }
     }
     impl BlockWriter for &mut TestDisk {

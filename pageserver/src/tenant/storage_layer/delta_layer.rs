@@ -29,10 +29,10 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::page_cache::{PageReadGuard, PAGE_SZ};
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
-use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
+use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
     PersistentLayer, ValueReconstructResult, ValueReconstructState,
@@ -1041,9 +1041,7 @@ impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
 struct Adapter<T: AsRef<DeltaLayerInner>>(T);
 
 impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
-    type BlockLease = PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.0.as_ref().file.read_blk(blknum)
     }
 }
