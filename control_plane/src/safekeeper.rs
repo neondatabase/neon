@@ -161,14 +161,23 @@ impl SafekeeperNode {
 
         let key_path = self.env.base_data_dir.join("auth_public_key.pem");
         if self.conf.auth_enabled {
+            let key_path_string = key_path
+                .to_str()
+                .with_context(|| {
+                    format!("Key path {key_path:?} cannot be represented as a unicode string")
+                })?
+                .to_owned();
             args.extend([
-                "--auth-validation-public-key-path".to_owned(),
-                key_path
-                    .to_str()
-                    .with_context(|| {
-                        format!("Key path {key_path:?} cannot be represented as a unicode string")
-                    })?
-                    .to_owned(),
+                "--pg-auth-public-key-path".to_owned(),
+                key_path_string.clone(),
+            ]);
+            args.extend([
+                "--pg-tenant-only-auth-public-key-path".to_owned(),
+                key_path_string.clone(),
+            ]);
+            args.extend([
+                "--http-auth-public-key-path".to_owned(),
+                key_path_string.clone(),
             ]);
         }
 
