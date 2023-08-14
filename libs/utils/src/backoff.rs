@@ -120,7 +120,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_always_error() {
         let count = Mutex::new(0);
         let err_result = retry(
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(*count.lock().await, 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_ok_after_err() {
         let count = Mutex::new(0);
         retry(
@@ -162,7 +162,7 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dont_retry_permanent_errors() {
         let count = Mutex::new(0);
         let _ = retry(
