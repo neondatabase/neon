@@ -111,6 +111,10 @@ pub fn fsync(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}")))
 }
 
+pub async fn fsync_async(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
+    tokio::fs::File::open(path).await?.sync_all().await
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
