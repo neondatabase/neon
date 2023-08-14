@@ -230,11 +230,11 @@ impl std::fmt::Display for InMemoryLayer {
 
 impl InMemoryLayer {
     ///
-    /// Get layer size on the disk
+    /// Get layer size.
     ///
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
-        Ok(inner.file.size)
+        Ok(inner.file.size())
     }
 
     ///

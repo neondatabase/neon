@@ -7,7 +7,6 @@ use bytes::Bytes;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
-use std::sync::atomic::AtomicU64;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -50,31 +49,33 @@ where
 /// with two variants to support testing code. During normal
 /// builds, it just has one variant and is thus a cheap newtype
 /// wrapper of [`PageReadGuard`]
-pub enum BlockLease {
+pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
+    EphemeralFileMutableHead(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),
 }
 
-impl From<PageReadGuard<'static>> for BlockLease {
+impl<'a> From<PageReadGuard<'static>> for BlockLease<'a> {
     fn from(value: PageReadGuard<'static>) -> Self {
         BlockLease::PageReadGuard(value)
     }
 }
 
 #[cfg(test)]
-impl From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease {
+impl<'a> From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease<'a> {
     fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
         BlockLease::Rc(value)
     }
 }
 
-impl Deref for BlockLease {
+impl<'a> Deref for BlockLease<'a> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
         match self {
             BlockLease::PageReadGuard(v) => v.deref(),
+            BlockLease::EphemeralFileMutableHead(v) => v,
             #[cfg(test)]
             BlockLease::Rc(v) => v.deref(),
         }
@@ -121,7 +122,6 @@ where
         self.reader.read_blk(blknum)
     }
 }
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An adapter for reading a (virtual) file using the page cache.
 ///
@@ -131,7 +131,7 @@ pub struct FileBlockReader<F> {
     pub file: F,
 
     /// Unique ID of this file, used as key in the page cache.
-    file_id: u64,
+    file_id: page_cache::FileId,
 }
 
 impl<F> FileBlockReader<F>
@@ -139,7 +139,7 @@ where
     F: FileExt,
 {
     pub fn new(file: F) -> Self {
-        let file_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
     }

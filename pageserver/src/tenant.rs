@@ -136,9 +136,6 @@ pub use timeline::{
     LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
 };
 
-// re-export this function so that page_cache.rs can use it.
-pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
-
 // re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
 
