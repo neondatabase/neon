@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-compression.workspace = true
-async-std.workspace = true
 axum.workspace = true
 cgroups-rs.workspace = true
 chrono.workspace = true

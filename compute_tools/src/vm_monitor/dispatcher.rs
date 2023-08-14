@@ -7,12 +7,12 @@
 //! (notifying it of upscale).
 
 use anyhow::{bail, Context};
-use async_std::channel::{Receiver, Sender};
 use axum::extract::ws::{Message, WebSocket};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::info;
 
 use crate::vm_monitor::cgroup::Sequenced;

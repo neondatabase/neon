@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::{fmt::Debug, mem};
 
 use anyhow::{bail, Context};
-use async_std::channel;
 use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::vm_monitor::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
@@ -80,12 +80,11 @@ impl Runner {
             config.sys_buffer_bytes != 0,
             "invalid monitor Config: sys_buffer_bytes cannot be 0"
         );
-        // TODO: make these bounded? Probably
-        //
+
         // *NOTE*: the dispatcher and cgroup manager talk through these channels
         // so make sure they each get the correct half, nothing is droppped, etc.
-        let (notified_send, notified_recv) = channel::unbounded();
-        let (requesting_send, requesting_recv) = channel::unbounded();
+        let (notified_send, notified_recv) = mpsc::channel(1);
+        let (requesting_send, requesting_recv) = mpsc::channel(1);
 
         let dispatcher = Dispatcher::new(ws, notified_send, requesting_recv)
             .await
@@ -145,7 +144,7 @@ impl Runner {
 
         if let Some(name) = &args.cgroup {
             let (mut cgroup, cgroup_event_stream) =
-                CgroupWatcher::new(name.clone(), notified_recv, requesting_send)
+                CgroupWatcher::new(name.clone(), requesting_send)
                     .context("failed to create cgroup manager")?;
 
             let available = mem - file_cache_reserved_bytes;
@@ -159,7 +158,9 @@ impl Runner {
             // Some might call this . . . cgroup v2
             let cgroup_clone = Arc::clone(&cgroup);
 
-            tokio::spawn(async move { cgroup_clone.watch(cgroup_event_stream).await });
+            tokio::spawn(
+                async move { cgroup_clone.watch(notified_recv, cgroup_event_stream).await },
+            );
 
             state.cgroup = Some(cgroup);
         } else {
@@ -390,18 +391,16 @@ impl Runner {
                     }
                 }
                 // we need to propagate an upscale request
-                sender = self.dispatcher.request_upscale_events.recv() => {
-                    match sender {
-                        Ok(()) => {
-                            info!("cgroup asking for upscale; forwarding request");
-                            self.counter += 1;
-                            self.dispatcher
-                                .send(OutboundMsg::new(OutboundMsgKind::UpscaleRequest {}, self.counter))
-                                .await
-                                .context("failed to send message")?;
-                        },
-                        Err(e) => warn!("error receiving upscale event: {e}")
-                    }
+                request = self.dispatcher.request_upscale_events.recv() => {
+                    if request.is_none() {
+                        bail!("failed to listen for upscale event from cgroup")
+                    };
+                    info!("cgroup asking for upscale; forwarding request");
+                    self.counter += 1;
+                    self.dispatcher
+                        .send(OutboundMsg::new(OutboundMsgKind::UpscaleRequest {}, self.counter))
+                        .await
+                        .context("failed to send message")?;
                 }
                 // there is a message from the informant
                 msg = self.dispatcher.source.next() => {

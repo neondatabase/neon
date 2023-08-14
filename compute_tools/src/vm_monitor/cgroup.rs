@@ -1,13 +1,10 @@
 use std::{
     fmt::{Debug, Display},
     fs,
-    pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
-    task::{self, Poll},
 };
 
-use anyhow::{anyhow, Context};
-use async_std::channel::{Receiver, Sender};
+use anyhow::{anyhow, bail, Context};
 use cgroups_rs::{
     freezer::FreezerController,
     hierarchies::{self, is_cgroup2_unified_mode, UNIFIED_MOUNTPOINT},
@@ -15,10 +12,10 @@ use cgroups_rs::{
     MaxValue,
     Subsystem::{Freezer, Mem},
 };
-use futures::{stream::BoxStream, Future, FutureExt, Stream};
 use inotify::{EventStream, Inotify, WatchMask};
+use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
 use tokio::time::{Duration, Instant};
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tracing::{info, warn};
 
 use crate::vm_monitor::protocol::Resources;
@@ -68,95 +65,6 @@ impl MemoryEvent {
 impl Display for MemoryEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-/// An event that the `CgroupWatcher` responds to.
-///
-/// The `CroupWatcher`'s job primarily consists of reacting to these events.
-/// See the `CgroupWatcher` docs and associated impl items for more information.
-#[derive(Debug, Clone)]
-enum EventKind {
-    /// We were upscaling to the contained allocation
-    Upscale(Resources),
-
-    /// Number of memory.highs
-    MemoryHigh(u64),
-}
-
-/// An extension to a stream that makes it peekable.
-///
-/// Note: this should probably be replaced using futures::StreamExt::Peekable
-struct PeekableStream<T> {
-    stream: BoxStream<'static, T>,
-    peek: Option<T>,
-}
-
-impl<T> Debug for PeekableStream<T>
-where
-    T: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PeekableStream")
-            .field("stream", &"{ .. }")
-            .field("peek", &self.peek)
-            .finish()
-    }
-}
-
-impl<T> PeekableStream<T> {
-    pub fn new<S>(stream: S) -> Self
-    where
-        S: Stream<Item = T> + Send + 'static,
-    {
-        Self {
-            stream: futures::StreamExt::boxed(stream),
-            peek: None,
-        }
-    }
-
-    /// Peek the stream, but don't await a new element if there isn't currently
-    /// one in that we've already peeked.
-    pub fn peek_eager(&mut self) -> Option<&T> {
-        // Eagerly check for next item if the peek isn't initalized
-        if self.peek.is_none() {
-            self.peek = self
-                .stream
-                .next()
-                .now_or_never()
-                .expect("failed to read from stream");
-        }
-        self.peek.as_ref()
-    }
-
-    /// Peek the stream.
-    // NOTE: currently unused, but potentially useful for the future. Also good
-    // to distinguish between `peek` and `peek_eager`
-    #[allow(unused)]
-    pub async fn peek(&mut self) -> Option<&T> {
-        if self.peek.is_none() {
-            self.peek = self.stream.next().await;
-        }
-        return self.peek.as_ref();
-    }
-}
-
-impl<T> Stream for PeekableStream<T>
-where
-    T: Unpin,
-{
-    type Item = T;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
-        // first check if there's something we've already pulled from the stream
-        // in the peek
-        if let Some(data) = self.as_mut().peek.take() {
-            return Poll::Ready(Some(data));
-        }
-        // otherwise we actually need to pull something from the stream
-        let next = self.stream.next();
-        tokio::pin!(next);
-        Future::poll(Pin::new(&mut next), cx)
     }
 }
 
@@ -276,21 +184,6 @@ pub struct CgroupWatcher {
 
     /// The actual cgroup we are watching and managing.
     cgroup: cgroups_rs::Cgroup,
-
-    /// The direct source of upscale events, for if we need to listen for an
-    /// upscale event _in particular_.
-    ///
-    /// All events from this channel are also piped into `self.events`. Thus,
-    /// when awaiting upscales directly, first check if an upscale has already
-    /// been peeked and is held in events, then directly await this channel.
-    upscale_receiver: Receiver<Sequenced<Resources>>,
-}
-
-/// Stream of events that [`CgroupWatcher::watch`] takes as input
-pub struct CgroupWatcherEventStream {
-    // We're using a full type to wrap the stream so that we dno't need to make the inner types
-    // public.
-    stream: PeekableStream<Sequenced<EventKind>>,
 }
 
 /// Read memory.events for the desired event type.
@@ -341,11 +234,9 @@ impl CgroupWatcher {
     /// Create a new `CgroupWatcher`.
     pub fn new(
         name: String,
-        // A channel on which upscale notifications will be sent
-        upscale_notifier: Receiver<Sequenced<Resources>>,
         // A channel on which to send upscale requests
         upscale_requester: Sender<()>,
-    ) -> anyhow::Result<(Self, CgroupWatcherEventStream)> {
+    ) -> anyhow::Result<(Self, impl Stream<Item = Sequenced<u64>>)> {
         // TODO: clarify exactly why we need v2
         // Make sure cgroups v2 (aka unified) are supported
         if !is_cgroup2_unified_mode() {
@@ -379,7 +270,7 @@ impl CgroupWatcher {
                     None
                 }
             })
-            .map(|e| Sequenced::new(EventKind::MemoryHigh(e)));
+            .map(Sequenced::new);
 
         let initial_count = get_event_count(
             &format!("{}/{}/memory.events", UNIFIED_MOUNTPOINT, &name),
@@ -392,32 +283,37 @@ impl CgroupWatcher {
         // running in the cgroup before that caused it to be non-zero.
         MEMORY_EVENT_COUNT.fetch_max(initial_count, Ordering::AcqRel);
 
-        // Add the upscale requests into the stream
-        let all_events =
-            memory_events.merge(upscale_notifier.clone().map(|Sequenced { seqnum, data }| {
-                Sequenced {
-                    seqnum,
-                    data: EventKind::Upscale(data),
-                }
-            }));
-
         Ok((
             Self {
                 cgroup,
                 upscale_requester,
-                upscale_receiver: upscale_notifier,
                 last_upscale_seqnum: AtomicU64::new(0),
                 config: Default::default(),
             },
-            CgroupWatcherEventStream {
-                stream: PeekableStream::new(all_events),
-            },
+            memory_events,
         ))
     }
 
     /// The entrypoint for the `CgroupWatcher`.
     #[tracing::instrument(skip(self, events))]
-    pub async fn watch(&self, mut events: CgroupWatcherEventStream) -> anyhow::Result<()> {
+    pub async fn watch<E>(
+        &self,
+        // These are ~dependency injected~ (fancy, I know) because this function
+        // should never return.
+        // -> therefore: when we tokio::spawn it, we don't await the JoinHandle.
+        // -> therefore: if we want to stick it in an Arc so many threads can access
+        //    it, methods can never take mutable access.
+        //     - note: we use the Arc strategy so that a) we can call this function
+        //             right here and b) the runner can call the set/get_memory methods
+        // -> since calling recv() on a tokio::sync::mpsc::Receiver takes &mut self,
+        //    we just pass them in here instead of holding them in fields, as that
+        //    would require this method to take &mut self.
+        mut upscales: Receiver<Sequenced<Resources>>,
+        events: E,
+    ) -> anyhow::Result<()>
+    where
+        E: Stream<Item = Sequenced<u64>>,
+    {
         // There are several actions might do when receiving a `memory.high`,
         // such as freezing the cgroup, or increasing its `memory.high`. We don't
         // want to do these things too often (because postgres needs to run, and
@@ -426,15 +322,24 @@ impl CgroupWatcher {
         let wait_to_increase_memory_high = tokio::time::sleep(Duration::ZERO);
 
         tokio::pin!(wait_to_freeze, wait_to_increase_memory_high);
+        tokio::pin!(events);
 
         // Are we waiting to be upscaled? Could be true if we request upscale due
         // to a memory.high event and it does not arrive in time.
         let mut waiting_on_upscale = false;
 
-        while let Some(Sequenced { seqnum, data }) = events.stream.next().await {
-            match data {
-                EventKind::Upscale(_) => self.last_upscale_seqnum.store(seqnum, Ordering::Release),
-                EventKind::MemoryHigh(_) => {
+        loop {
+            tokio::select! {
+                upscale = upscales.recv() => {
+                    let Sequenced { seqnum, data } = upscale
+                        .context("failed to listen on upscale notification channel")?;
+                    self.last_upscale_seqnum.store(seqnum, Ordering::Release);
+                    info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
+                }
+                event = events.next() => {
+                    let Some(Sequenced { seqnum, .. }) = event else {
+                        bail!("failed to listen for memory.high events")
+                    };
                     // The memory.high came before our last upscale, so we consider
                     // it resolved
                     if self.last_upscale_seqnum.fetch_max(seqnum, Ordering::AcqRel) > seqnum {
@@ -447,12 +352,11 @@ impl CgroupWatcher {
                     // The memory.high came after our latest upscale. We don't
                     // want to do anything yet, so peek the next event in hopes
                     // that it's an upscale.
-                    if let Some(Sequenced {
-                        seqnum: peeknum,
-                        data: EventKind::Upscale(_),
-                    }) = events.stream.peek_eager()
+                    if let Some(upscale_num) = self
+                        .upscaled(&mut upscales)
+                        .context("failed to check if we were upscaled")?
                     {
-                        if *peeknum > seqnum {
+                        if upscale_num > seqnum {
                             info!(
                                 "received memory.high event, but it came before our last upscale -> ignoring it"
                             );
@@ -465,7 +369,7 @@ impl CgroupWatcher {
                     if wait_to_freeze.is_elapsed() {
                         info!("received memory.high event -> requesting upscale");
                         waiting_on_upscale = self
-                            .handle_memory_high_event(&mut events)
+                            .handle_memory_high_event(&mut upscales)
                             .await
                             .context("failed to handle upscale")?;
                         wait_to_freeze
@@ -481,7 +385,11 @@ impl CgroupWatcher {
                         // Make check to make sure we haven't been upscaled in the
                         // meantine (can happen if the agent independently decides
                         // to upscale us again)
-                        if self.upscale_receiver.recv().now_or_never().is_some() {
+                        if self
+                            .upscaled(&mut upscales)
+                            .context("failed to check if we were upscaled")?
+                            .is_some()
+                        {
                             info!("no need to request upscaling because we got upscaled");
                             continue;
                         }
@@ -504,7 +412,11 @@ impl CgroupWatcher {
                         // Make check to make sure we haven't been upscaled in the
                         // meantine (can happen if the agent independently decides
                         // to upscale us again)
-                        if self.upscale_receiver.recv().now_or_never().is_some() {
+                        if self
+                            .upscaled(&mut upscales)
+                            .context("failed to check if we were upscaled")?
+                            .is_some()
+                        {
                             info!("no need to increase memory.high because got upscaled");
                             continue;
                         }
@@ -535,7 +447,6 @@ impl CgroupWatcher {
                 }
             };
         }
-        Ok(())
     }
 
     /// Handle a `memory.high`, returning whether we are still waiting on upscale
@@ -548,10 +459,10 @@ impl CgroupWatcher {
     /// 4. After the timer elapses or we receive upscale, thaw the cgroup.
     /// 5. Return whether or not we are still waiting for upscale. If we are,
     ///    we'll increase the cgroups memory.high to avoid getting oom killed
-    #[tracing::instrument(skip(self, events))]
+    #[tracing::instrument(skip(self))]
     pub async fn handle_memory_high_event(
         &self,
-        events: &mut CgroupWatcherEventStream,
+        upscales: &mut Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<bool> {
         // Immediately freeze the cgroup before doing anything else.
         info!("received memory.high event -> freezing cgroup");
@@ -581,7 +492,7 @@ impl CgroupWatcher {
             }
 
             // Upscaled :)
-            res = self.await_upscale(events) => {
+            res = self.await_upscale(upscales) => {
                 res.context("failed to await upscale")?;
                 info!(elapsed = ?start_time.elapsed(), "received upscale in time");
                 waiting_on_upscale = false;
@@ -594,30 +505,39 @@ impl CgroupWatcher {
         Ok(waiting_on_upscale)
     }
 
+    /// Checks whether we were just upscaled, returning the upscale's sequence
+    /// number if so.
+    #[tracing::instrument(skip(self))]
+    fn upscaled(
+        &self,
+        upscales: &mut Receiver<Sequenced<Resources>>,
+    ) -> anyhow::Result<Option<u64>> {
+        let Sequenced { seqnum, data } = match upscales.try_recv() {
+            Ok(upscale) => upscale,
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                bail!("upscale notification channel was disconnected")
+            }
+        };
+
+        // Make sure to update the last upscale sequence number
+        self.last_upscale_seqnum.store(seqnum, Ordering::Release);
+        info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
+        Ok(Some(seqnum))
+    }
+
     /// Await an upscale event, discarding any `memory.high` events received in
     /// the process.
     ///
     /// This is used in `handle_memory_high_event`, where we need to listen
     /// for upscales in particular so we know if we can thaw the cgroup early.
-    #[tracing::instrument(skip(self, events))]
-    async fn await_upscale(&self, events: &mut CgroupWatcherEventStream) -> anyhow::Result<()> {
-        // First check if we've already peeked the upscale.
-        let peek = events.stream.peek_eager().cloned();
-
-        if let Some(Sequenced {
-            seqnum,
-            data: EventKind::Upscale(_),
-        }) = peek
-        {
-            // Clear out the peek
-            let _ = events.stream.next().await;
-            self.last_upscale_seqnum.store(seqnum, Ordering::Release);
-            return Ok(());
-        }
-
+    #[tracing::instrument(skip(self, upscales))]
+    async fn await_upscale(
+        &self,
+        upscales: &mut Receiver<Sequenced<Resources>>,
+    ) -> anyhow::Result<()> {
         // If we haven't peeked the upscale, directly await it
-        let Sequenced { seqnum, .. } = self
-            .upscale_receiver
+        let Sequenced { seqnum, .. } = upscales
             .recv()
             .await
             .context("error listening for upscales")?;

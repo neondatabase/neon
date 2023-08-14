@@ -33,7 +33,6 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
-async-std = { version = "1.12.0", features = ["async-channel"] }
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
