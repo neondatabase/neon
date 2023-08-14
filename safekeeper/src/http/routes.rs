@@ -19,6 +19,7 @@ use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 use crate::send_wal::WalSenderState;
+use crate::timeline::PeerInfo;
 use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
@@ -101,6 +102,7 @@ pub struct TimelineStatus {
     pub peer_horizon_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+    pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,
 }
@@ -140,6 +142,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         term_history,
     };
 
+    let conf = get_conf(&request);
     // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
         tenant_id: ttid.tenant_id,
@@ -153,6 +156,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
+        peers: tli.get_peers(conf).await,
         walsenders: tli.get_walsenders().get_all(),
         walreceivers: tli.get_walreceivers().get_all(),
     };
