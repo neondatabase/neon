@@ -259,9 +259,10 @@ where
     {
         let mut stack = Vec::new();
         stack.push((self.root_blk, None));
+        let block_cursor = self.reader.block_cursor();
         while let Some((node_blknum, opt_iter)) = stack.pop() {
             // Locate the node.
-            let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
+            let node_buf = block_cursor.read_blk(self.start_blk + node_blknum)?;
 
             let node = OnDiskNode::deparse(node_buf.as_ref())?;
             let prefix_len = node.prefix_len as usize;
@@ -353,8 +354,10 @@ where
 
         stack.push((self.root_blk, String::new(), 0, 0, 0));
 
+        let block_cursor = self.reader.block_cursor();
+
         while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
-            let blk = self.reader.read_blk(self.start_blk + blknum)?;
+            let blk = block_cursor.read_blk(self.start_blk + blknum)?;
             let buf: &[u8] = blk.as_ref();
             let node = OnDiskNode::<L>::deparse(buf)?;
 
