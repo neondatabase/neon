@@ -163,7 +163,7 @@ impl LayerManager {
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    pub fn try_freeze_in_memory_layer(
+    pub async fn try_freeze_in_memory_layer(
         &mut self,
         Lsn(last_record_lsn): Lsn,
         last_freeze_at: &AtomicLsn,
@@ -173,7 +173,7 @@ impl LayerManager {
         if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
-            open_layer.freeze(end_lsn);
+            open_layer.freeze(end_lsn).await;
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.

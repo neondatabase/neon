@@ -28,7 +28,7 @@ use utils::{
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
 
@@ -125,7 +125,7 @@ impl Layer for InMemoryLayer {
 
     /// debugging function to print out the contents of the layer
     async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
 
@@ -143,7 +143,7 @@ impl Layer for InMemoryLayer {
         for (key, vec_map) in inner.index.iter() {
             for (lsn, pos) in vec_map.as_slice() {
                 let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf)?;
+                cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let val = Value::des(&buf);
                 match val {
                     Ok(Value::Image(img)) => {
@@ -181,7 +181,7 @@ impl Layer for InMemoryLayer {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().await;
 
         let reader = inner.file.block_cursor();
 
@@ -189,7 +189,7 @@ impl Layer for InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos)?;
+                let buf = reader.read_blob(*pos).await?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
@@ -232,8 +232,8 @@ impl InMemoryLayer {
     ///
     /// Get layer size on the disk
     ///
-    pub fn size(&self) -> Result<u64> {
-        let inner = self.inner.read().unwrap();
+    pub async fn size(&self) -> Result<u64> {
+        let inner = self.inner.read().await;
         Ok(inner.file.size)
     }
 
@@ -267,9 +267,9 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
+    pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().await;
         self.assert_writable();
 
         let off = {
@@ -301,8 +301,8 @@ impl InMemoryLayer {
     /// Make the layer non-writeable. Only call once.
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
-    pub fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().unwrap();
+    pub async fn freeze(&self, end_lsn: Lsn) {
+        let inner = self.inner.write().await;
 
         assert!(self.start_lsn < end_lsn);
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
@@ -317,7 +317,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub async fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -327,7 +327,7 @@ impl InMemoryLayer {
         // lock, it will see that it's not writeable anymore and retry, but it
         // would have to wait until we release it. That race condition is very
         // rare though, so we just accept the potential latency hit for now.
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().await;
 
         let end_lsn = *self.end_lsn.get().unwrap();
 
@@ -350,7 +350,7 @@ impl InMemoryLayer {
             let key = **key;
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf)?;
+                cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
             }

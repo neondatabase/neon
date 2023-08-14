@@ -51,6 +51,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -280,7 +281,8 @@ impl Layer for DeltaLayer {
 
         // A subroutine to dump a single blob
         let dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(blob_ref.pos())?;
+            // TODO this is not ideal, but on the other hand we are in dumping code...
+            let buf = Handle::current().block_on(cursor.read_blob(blob_ref.pos()))?;
             let val = Value::des(&buf)?;
             let desc = match val {
                 Value::Image(img) => {
@@ -335,7 +337,6 @@ impl Layer for DeltaLayer {
         let inner = self
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
-
         inner
             .get_value_reconstruct_data(key, lsn_range, reconstruct_state)
             .await
@@ -912,12 +913,15 @@ impl DeltaLayerInner {
         let cursor = file.block_cursor();
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
-            cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
-                format!(
-                    "Failed to read blob from virtual file {}",
-                    file.file.path.display()
-                )
-            })?;
+            cursor
+                .read_blob_into_buf(pos, &mut buf)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to read blob from virtual file {}",
+                        file.file.path.display()
+                    )
+                })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
@@ -1026,9 +1030,9 @@ pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
 
 impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     /// Loads the value from disk
-    pub fn load(&self) -> Result<Value> {
+    pub async fn load(&self) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
-        let buf = self.reader.read_blob(self.blob_ref.pos())?;
+        let buf = self.reader.read_blob(self.blob_ref.pos()).await?;
         let val = Value::des(&buf)?;
         Ok(val)
     }

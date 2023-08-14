@@ -470,6 +470,7 @@ impl ImageLayerInner {
             let blob = file
                 .block_cursor()
                 .read_blob(offset)
+                .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
             let value = Bytes::from(blob);
 
