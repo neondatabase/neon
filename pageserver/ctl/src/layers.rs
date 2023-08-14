@@ -70,7 +70,7 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
             },
         )
         .await?;
-    let cursor = BlockCursor::new(&file);
+    let cursor = BlockCursor::new_fileblockreader_virtual(&file);
     for (k, v) in all {
         let value = cursor.read_blob(v.pos()).await?;
         println!("key:{} value_len:{}", k, value.len());

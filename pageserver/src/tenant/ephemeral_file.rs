@@ -3,7 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::block_io::{BlockLease, BlockReader};
+use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::fs::OpenOptions;
@@ -243,12 +243,15 @@ impl BlockReader for EphemeralFile {
             Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
         }
     }
+    fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
+        BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::block_io::BlockCursor;
+    use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
     use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
@@ -304,7 +307,7 @@ mod tests {
             blobs.push((pos, data));
         }
 
-        let cursor = BlockCursor::new(&file);
+        let cursor = BlockCursor::new(BlockReaderRef::EphemeralFile(&file));
         for (pos, expected) in blobs {
             let actual = cursor.read_blob(pos).await?;
             assert_eq!(actual, expected);

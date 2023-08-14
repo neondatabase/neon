@@ -686,15 +686,15 @@ impl<const L: usize> BuildNode<L> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::tenant::block_io::BlockLease;
+    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Default)]
-    struct TestDisk {
+    pub(crate) struct TestDisk {
         blocks: Vec<Bytes>,
     }
     impl TestDisk {
@@ -707,6 +707,9 @@ mod tests {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
             Ok(std::rc::Rc::new(buf).into())
+        }
+        fn block_cursor(&self) -> BlockCursor<'_> {
+            BlockCursor::new(BlockReaderRef::TestDisk(self))
         }
     }
     impl BlockWriter for &mut TestDisk {

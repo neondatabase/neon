@@ -318,30 +318,28 @@ impl DeltaLayer {
 
         tree_reader.dump().await?;
 
-        let keys = DeltaLayerInner::load_keys(&Ref(&**inner)).await?;
+        let keys = DeltaLayerInner::load_keys(&inner).await?;
 
         // A subroutine to dump a single blob
-        let dump_blob = |val: ValueRef<_>| -> _ {
-            async move {
-                let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
-                let val = Value::des(&buf)?;
-                let desc = match val {
-                    Value::Image(img) => {
-                        format!(" img {} bytes", img.len())
-                    }
-                    Value::WalRecord(rec) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec)?;
-                        format!(
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )
-                    }
-                };
-                Ok(desc)
-            }
-        };
+        async fn dump_blob(val: ValueRef<'_>) -> Result<String> {
+            let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        }
 
         for entry in keys {
             let DeltaEntry { key, lsn, val, .. } = entry;
@@ -552,17 +550,12 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub(crate) async fn load_keys(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<Vec<DeltaEntry<Ref<&'_ DeltaLayerInner>>>> {
+    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-
-        let inner = Ref(&**inner);
-        DeltaLayerInner::load_keys(&inner)
+        DeltaLayerInner::load_keys(inner)
             .await
             .context("Layer index is corrupted")
     }
@@ -958,14 +951,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<DeltaEntry<T>>> {
+    ) -> Result<Vec<DeltaEntry<'_>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<DeltaEntry<T>> = Vec::new();
+        let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
 
         tree_reader
             .visit(
@@ -975,7 +968,9 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(this.clone())),
+                        reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
+                            Adapter(dl),
+                        )),
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -1004,43 +999,23 @@ impl DeltaLayerInner {
     }
 }
 
-/// Cloneable borrow wrapper to make borrows behave like smart pointers.
-///
-/// Shared references are trivially copyable. This wrapper avoids (confusion) to otherwise attempt
-/// cloning DeltaLayerInner.
-pub(crate) struct Ref<T>(T);
-
-impl<'a, T> AsRef<T> for Ref<&'a T> {
-    fn as_ref(&self) -> &T {
-        self.0
-    }
-}
-
-impl<'a, T> Clone for Ref<&'a T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'a, T> Copy for Ref<&'a T> {}
-
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
+pub struct DeltaEntry<'a> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<T>,
+    pub val: ValueRef<'a>,
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
+pub struct ValueRef<'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<Adapter<T>>,
+    reader: BlockCursor<'a>,
 }
 
-impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
+impl<'a> ValueRef<'a> {
     /// Loads the value from disk
     pub async fn load(&self) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
@@ -1050,10 +1025,10 @@ impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     }
 }
 
-struct Adapter<T: AsRef<DeltaLayerInner>>(T);
+pub(crate) struct Adapter<T>(T);
 
-impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
+    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.0.as_ref().file.read_blk(blknum)
     }
 }
