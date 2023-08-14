@@ -1,3 +1,5 @@
+//! Newtypes to ensure that dirty buffers are written back to the filesystem before they are dropped.
+
 use std::io::ErrorKind;
 use std::ops::Deref;
 use std::ops::DerefMut;
