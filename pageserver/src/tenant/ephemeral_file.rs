@@ -20,6 +20,7 @@ use utils::id::{TenantId, TimelineId};
 use std::os::unix::fs::FileExt;
 
 mod buffer_pool;
+mod dirty_buffer;
 
 ///
 /// This is the global cache of file descriptors (File objects).
@@ -105,8 +106,6 @@ impl EphemeralFile {
         Ok(dirty_buffer::Buffer::new(self, buf, blkno))
     }
 }
-
-mod dirty_buffer;
 
 /// Does the given filename look like an ephemeral file?
 pub fn is_ephemeral_file(filename: &str) -> bool {
