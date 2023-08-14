@@ -2957,6 +2957,10 @@ impl Timeline {
             let frozen_layer = Arc::clone(frozen_layer);
             move || {
                 // Write it out
+                // Keep this inside `spawn_blocking` and `Handle::current`
+                // as long as the write path is still sync and the read impl
+                // is still not fully async. Otherwise executor threads would
+                // be blocked.
                 let new_delta = Handle::current().block_on(frozen_layer.write_to_disk())?;
                 let new_delta_path = new_delta.path();
 
