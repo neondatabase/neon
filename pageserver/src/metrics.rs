@@ -660,7 +660,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
 
 pub(crate) static DELETION_QUEUE_SUBMITTED: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_deletion_queue_submitted",
+        "pageserver_deletion_queue_submitted_total",
         "Number of objects submitted for deletion"
     )
     .expect("failed to define a metric")
@@ -668,8 +668,17 @@ pub(crate) static DELETION_QUEUE_SUBMITTED: Lazy<IntCounter> = Lazy::new(|| {
 
 pub(crate) static DELETION_QUEUE_EXECUTED: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_deletion_queue_executed",
+        "pageserver_deletion_queue_executed_total",
         "Number of objects deleted"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELETION_QUEUE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_deletion_queue_errors_total",
+        "Incremented on retryable remote I/O errors writing deletion lists or executing deletions.",
+        &["op_kind"],
     )
     .expect("failed to define a metric")
 });
