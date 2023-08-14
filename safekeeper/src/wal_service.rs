@@ -16,10 +16,13 @@ use crate::SafeKeeperConf;
 use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
+/// allowed_auth_scope is either SafekeeperData (wide JWT tokens giving access
+/// to any tenant are allowed) or Tenant (only tokens giving access to specific
+/// tenant are allowed). Doesn't matter if auth is disabled in conf.
 pub async fn task_main(
     conf: SafeKeeperConf,
     pg_listener: std::net::TcpListener,
-    allowed_auth_scope: Option<Scope>,
+    allowed_auth_scope: Scope,
 ) -> anyhow::Result<()> {
     // Tokio's from_std won't do this for us, per its comment.
     pg_listener.set_nonblocking(true)?;
@@ -50,7 +53,7 @@ async fn handle_socket(
     socket: TcpStream,
     conf: SafeKeeperConf,
     conn_id: ConnectionId,
-    allowed_auth_scope: Option<Scope>,
+    allowed_auth_scope: Scope,
 ) -> Result<(), QueryError> {
     socket.set_nodelay(true)?;
     let peer_addr = socket.peer_addr()?;
@@ -82,16 +85,17 @@ async fn handle_socket(
         },
     );
 
-    let auth_type = match conf.auth {
+    let auth_key = match allowed_auth_scope {
+        Scope::Tenant => conf.pg_tenant_only_auth.clone(),
+        _ => conf.pg_auth.clone(),
+    };
+    let auth_type = match auth_key {
         None => AuthType::Trust,
         Some(_) => AuthType::NeonJWT,
     };
-    let mut conn_handler = SafekeeperPostgresHandler::new(
-        conf,
-        conn_id,
-        Some(traffic_metrics.clone()),
-        allowed_auth_scope,
-    );
+    let auth_pair = auth_key.map(|key| (allowed_auth_scope, key));
+    let mut conn_handler =
+        SafekeeperPostgresHandler::new(conf, conn_id, Some(traffic_metrics.clone()), auth_pair);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
