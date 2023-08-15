@@ -196,6 +196,16 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         ]
     )
 
+    if simulate_failures:
+        env.pageserver.allowed_errors.extend(
+            [
+                # The deletion queue will complain when it encounters simulated S3 errors
+                ".*deletion frontend: Failed to write deletion list.*",
+                ".*deletion backend: Failed to delete deletion list.*",
+                ".*deletion backend: DeleteObjects request failed.*",
+            ]
+        )
+
     ps_http = env.pageserver.http_client()
 
     timeline_id = env.neon_cli.create_timeline("delete", tenant_id=tenant_id)
