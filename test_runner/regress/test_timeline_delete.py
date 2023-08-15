@@ -273,6 +273,10 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
+    # Flush deletion queue before restart/retry, so that anything logically deleted before the
+    # failpoint is really deleted.
+    ps_http.deletion_queue_flush_execute()
+
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
@@ -487,6 +491,15 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
+    # Timeline deletion takes some finite time after startup
+    wait_timeline_detail_404(
+        ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=leaf_timeline_id,
+        iterations=20,
+        interval=0.5,
+    )
+
     try:
         data = ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
         log.debug(f"detail {data}")
@@ -543,7 +556,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+        lambda: assert_prefix_empty(neon_env_builder, prefix="/tenants"),
     )
 
 
@@ -786,7 +799,11 @@ def test_timeline_delete_works_for_remote_smoke(
 
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
-    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder))
+    wait_until(
+        2,
+        0.5,
+        lambda: assert_prefix_empty(neon_env_builder, "/tenants"),
+    )
 
 
 def test_delete_orphaned_objects(

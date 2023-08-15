@@ -47,6 +47,14 @@ def test_tenant_delete_smoke(
     )
 
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion frontend: Failed to write deletion list.*",
+            ".*deletion backend: Failed to delete deletion list.*",
+            ".*deletion backend: DeleteObjects request failed.*",
+        ]
+    )
 
     ps_http = env.pageserver.http_client()
 
