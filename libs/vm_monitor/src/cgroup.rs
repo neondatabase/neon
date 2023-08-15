@@ -18,8 +18,8 @@ use tokio::time::{Duration, Instant};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{info, warn};
 
-use crate::vm_monitor::protocol::Resources;
-use crate::vm_monitor::MiB;
+use crate::protocol::Resources;
+use crate::MiB;
 
 /// Monotonically increasing counter of the number of memory.high events
 /// the cgroup has experienced.

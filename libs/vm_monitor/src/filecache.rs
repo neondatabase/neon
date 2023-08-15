@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU64;
 
-use crate::vm_monitor::MiB;
+use crate::MiB;
 use anyhow::{anyhow, Context};
 use tokio_postgres::{types::ToSql, Client, NoTls, Row};
 use tracing::{error, info};

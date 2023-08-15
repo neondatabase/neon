@@ -15,8 +15,8 @@ use futures::{
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::info;
 
-use crate::vm_monitor::cgroup::Sequenced;
-use crate::vm_monitor::protocol::{
+use crate::cgroup::Sequenced;
+use crate::protocol::{
     OutboundMsg, ProtocolRange, ProtocolResponse, ProtocolVersion, Resources, PROTOCOL_MAX_VERSION,
     PROTOCOL_MIN_VERSION,
 };

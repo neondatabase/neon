@@ -1,0 +1,24 @@
+[package]
+name = "vm_monitor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+cgroups-rs.workspace = true
+clap.workspace = true
+futures.workspace = true
+inotify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+

@@ -957,6 +957,7 @@ dependencies = [
  "tracing-utils",
  "url",
  "utils",
+ "vm_monitor",
  "workspace_hack",
  "zstd",
 ]
@@ -5065,6 +5066,27 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "vm_monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "cgroups-rs",
+ "clap",
+ "futures",
+ "inotify 0.10.2",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tokio-postgres",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "workspace_hack",
+]
 
 [[package]]
 name = "vsimd"

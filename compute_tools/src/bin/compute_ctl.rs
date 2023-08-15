@@ -57,7 +57,6 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
-use compute_tools::vm_monitor;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
