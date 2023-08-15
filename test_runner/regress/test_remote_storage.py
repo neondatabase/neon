@@ -607,7 +607,9 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
 
-    timeline_delete_wait_completed(client, tenant_id, timeline_id)
+    # Generous timeout, because currently deletions can get blocked waiting for compaction
+    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
+    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
 
     assert not timeline_path.exists()
 
