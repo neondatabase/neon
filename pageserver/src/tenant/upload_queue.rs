@@ -1,5 +1,3 @@
-use crate::metrics::RemoteOpFileKind;
-
 use super::storage_layer::LayerFileName;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -213,22 +211,12 @@ pub(crate) struct UploadTask {
 }
 
 #[derive(Debug)]
-pub(crate) struct Delete {
-    pub(crate) file_kind: RemoteOpFileKind,
-    pub(crate) layer_file_name: LayerFileName,
-    pub(crate) scheduled_from_timeline_delete: bool,
-}
-
-#[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(LayerFileName, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
-
-    /// Delete a layer file
-    Delete(Delete),
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
@@ -246,12 +234,6 @@ impl std::fmt::Display for UploadOp {
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(delete) => write!(
-                f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {})",
-                delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete
-            ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

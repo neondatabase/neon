@@ -201,7 +201,6 @@
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
 //! [`Timeline::reconcile_with_remote`]: super::Timeline::reconcile_with_remote
 
-mod delete;
 mod download;
 pub mod index;
 mod upload;
@@ -234,7 +233,6 @@ use crate::metrics::{
 };
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::upload_queue::Delete;
 use crate::{
     config::PageServerConf,
     task_mgr,
@@ -909,10 +907,6 @@ impl RemoteTimelineClient {
                     // have finished.
                     upload_queue.inprogress_tasks.is_empty()
                 }
-                UploadOp::Delete(_) => {
-                    // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
-                    upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
-                }
 
                 UploadOp::Barrier(_) => upload_queue.inprogress_tasks.is_empty(),
             };
@@ -939,9 +933,6 @@ impl RemoteTimelineClient {
                 }
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
-                }
-                UploadOp::Delete(_) => {
-                    upload_queue.num_inprogress_deletions += 1;
                 }
                 UploadOp::Barrier(sender) => {
                     sender.send_replace(());
@@ -1061,21 +1052,6 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(delete) => {
-                    let path = &self
-                        .conf
-                        .timeline_path(&self.tenant_id, &self.timeline_id)
-                        .join(delete.layer_file_name.file_name());
-                    delete::delete_layer(self.conf, &self.storage_impl, path)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            delete.file_kind,
-                            RemoteOpKind::Delete,
-                            Arc::clone(&self.metrics),
-                        )
-                        .await
-                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
@@ -1136,15 +1112,7 @@ impl RemoteTimelineClient {
             let mut upload_queue_guard = self.upload_queue.lock().unwrap();
             let upload_queue = match upload_queue_guard.deref_mut() {
                 UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
-                UploadQueue::Stopped(stopped) => {
-                    // Special care is needed for deletions, if it was an earlier deletion (not scheduled from deletion)
-                    // then stop() took care of it so we just return.
-                    // For deletions that come from delete_all we still want to maintain metrics, launch following tasks, etc.
-                    match &task.op {
-                        UploadOp::Delete(delete) if delete.scheduled_from_timeline_delete => Some(&mut stopped.upload_queue_for_deletion),
-                        _ => None
-                    }
-                },
+                UploadQueue::Stopped(_) => { None }
                 UploadQueue::Initialized(qi) => { Some(qi) }
             };
 
@@ -1165,9 +1133,6 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
-                }
-                UploadOp::Delete(_) => {
-                    upload_queue.num_inprogress_deletions -= 1;
                 }
                 UploadOp::Barrier(_) => unreachable!(),
             };
@@ -1198,13 +1163,6 @@ impl RemoteTimelineClient {
                 RemoteOpKind::Upload,
                 DontTrackSize {
                     reason: "metadata uploads are tiny",
-                },
-            ),
-            UploadOp::Delete(delete) => (
-                delete.file_kind,
-                RemoteOpKind::Delete,
-                DontTrackSize {
-                    reason: "should we track deletes? positive or negative sign?",
                 },
             ),
             UploadOp::Barrier(_) => {
