@@ -270,13 +270,59 @@ pub struct XlHeapDelete {
 
 impl XlHeapDelete {
     pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
-        XlHeapDelete {
-            xmax: buf.get_u32_le(),
-            offnum: buf.get_u16_le(),
-            _padding: buf.get_u16_le(),
-            t_cid: buf.get_u32_le(),
-            infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
+        if buf.remaining() == 14 {
+            XlHeapDelete {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: buf.get_u16_le(),
+                t_cid: buf.get_u32_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        } else {
+            XlHeapDelete {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: 0,
+                t_cid: 0,
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlHeapLock {
+    pub locking_xid: TransactionId,
+    pub offnum: OffsetNumber,
+    pub _padding: u16,
+    pub t_cid: u32,
+    pub infobits_set: u8,
+    pub flags: u8,
+}
+
+impl XlHeapLock {
+    pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+        if buf.remaining() == 14 {
+            XlHeapLock {
+                locking_xid: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: buf.get_u16_le(),
+                t_cid: buf.get_u32_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        } else {
+            XlHeapLock {
+                locking_xid: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: 0,
+                t_cid: 0,
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
         }
     }
 }
@@ -295,12 +341,21 @@ pub struct XlHeapUpdate {
 
 impl XlHeapUpdate {
     pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
+        let old_xmax = buf.get_u32_le();
+        let old_offnum = buf.get_u16_le();
+        let old_infobits_set = buf.get_u8();
+        let flags = buf.get_u8();
+        let t_cid = if (flags & pg_constants::XLH_UPDATE_STORE_CID) != 0 {
+            buf.get_u32()
+        } else {
+            0
+        };
         XlHeapUpdate {
-            old_xmax: buf.get_u32_le(),
-            old_offnum: buf.get_u16_le(),
-            old_infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
-            t_cid: buf.get_u32(),
+            old_xmax,
+            old_offnum,
+            old_infobits_set,
+            flags,
+            t_cid,
             new_xmax: buf.get_u32_le(),
             new_offnum: buf.get_u16_le(),
         }
