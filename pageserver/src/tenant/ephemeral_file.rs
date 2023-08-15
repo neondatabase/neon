@@ -302,8 +302,8 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> 
     }
 }
 
-impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+impl<'a> BlockReader<'a> for EphemeralFile {
+    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {

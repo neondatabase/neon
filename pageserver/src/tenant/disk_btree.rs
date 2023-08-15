@@ -22,7 +22,7 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
 use hex;
-use std::{cmp::Ordering, io, result};
+use std::{cmp::Ordering, io, marker::PhantomData, result};
 use thiserror::Error;
 use tracing::error;
 
@@ -201,13 +201,14 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
 ///
 /// Public reader object, to search the tree.
 ///
-pub struct DiskBtreeReader<R, const L: usize>
+pub struct DiskBtreeReader<'a, R, const L: usize>
 where
-    R: BlockReader,
+    R: BlockReader<'a>,
 {
     start_blk: u32,
     root_blk: u32,
     reader: R,
+    _marker: std::marker::PhantomData<&'a R>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,22 +217,23 @@ pub enum VisitDirection {
     Backwards,
 }
 
-impl<R, const L: usize> DiskBtreeReader<R, L>
+impl<'a, R, const L: usize> DiskBtreeReader<'a, R, L>
 where
-    R: BlockReader,
+    R: BlockReader<'a>,
 {
     pub fn new(start_blk: u32, root_blk: u32, reader: R) -> Self {
         DiskBtreeReader {
             start_blk,
             root_blk,
             reader,
+            _marker: PhantomData,
         }
     }
 
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub async fn get(&self, search_key: &[u8; L]) -> Result<Option<u64>> {
+    pub async fn get(&'a self, search_key: &[u8; L]) -> Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(search_key, VisitDirection::Forwards, |key, value| {
             if key == search_key {
@@ -249,7 +251,7 @@ where
     /// backwards)
     ///
     pub async fn visit<V>(
-        &self,
+        &'a self,
         search_key: &[u8; L],
         dir: VisitDirection,
         mut visitor: V,
@@ -348,7 +350,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub async fn dump(&self) -> Result<()> {
+    pub async fn dump(&'a self) -> Result<()> {
         let mut stack = Vec::new();
 
         stack.push((self.root_blk, String::new(), 0, 0, 0));
@@ -699,8 +701,8 @@ mod tests {
             Self::default()
         }
     }
-    impl BlockReader for TestDisk {
-        fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
+    impl<'a> BlockReader<'a> for TestDisk {
+        fn read_blk(&'a self, blknum: u32) -> io::Result<BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
             Ok(std::rc::Rc::new(buf).into())
