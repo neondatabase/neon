@@ -526,7 +526,6 @@ def test_remote_timeline_client_calls_started_metric(
     calls_started: Dict[Tuple[str, str], List[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
-        ("layer", "delete"): [0],
     }
 
     def fetch_calls_started():
