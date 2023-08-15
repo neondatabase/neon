@@ -1262,6 +1262,18 @@ impl Timeline {
 
         Ok(())
     }
+
+    async fn delete_all_remote(&self) -> anyhow::Result<()> {
+        if let Some(remote_client) = &self.remote_client {
+            if let Some(deletion_queue_client) = &self.deletion_queue_client {
+                remote_client.delete_all(&deletion_queue_client).await
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

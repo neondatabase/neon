@@ -239,15 +239,6 @@ async fn delete_local_layer_files(
     Ok(())
 }
 
-/// Removes remote layers and an index file after them.
-async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<()> {
-    if let Some(remote_client) = &timeline.remote_client {
-        remote_client.delete_all().await.context("delete_all")?
-    };
-
-    Ok(())
-}
-
 // This function removs remaining traces of a timeline on disk.
 // Namely: metadata file, timeline directory, delete mark.
 // Note: io::ErrorKind::NotFound are ignored for metadata and timeline dir.
@@ -562,7 +553,7 @@ impl DeleteTimelineFlow {
     ) -> Result<(), DeleteTimelineError> {
         delete_local_layer_files(conf, tenant.tenant_id, timeline).await?;
 
-        delete_remote_layers_and_index(timeline).await?;
+        timeline.delete_all_remote().await?;
 
         pausable_failpoint!("in_progress_delete");
 
