@@ -212,6 +212,19 @@ async fn cleanup_remaining_fs_traces(
         ))?
     });
 
+    // Make sure previous deletions are ordered before mark removal.
+    // Otherwise there is no guarantee that they reach the disk before mark deletion.
+    // So its possible for mark to reach disk first and for other deletions
+    // to be reordered later and thus missed if a crash occurs.
+    // Note that we dont need to sync after mark file is removed
+    // because we can tolerate the case when mark file reappears on startup.
+    let tenant_path = &conf.tenant_path(tenant_id);
+    if tenant_path.exists() {
+        crashsafe::fsync_async(&conf.tenant_path(tenant_id))
+            .await
+            .context("fsync_pre_mark_remove")?;
+    }
+
     rm(conf.tenant_deleted_mark_file_path(tenant_id), false).await?;
 
     fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {

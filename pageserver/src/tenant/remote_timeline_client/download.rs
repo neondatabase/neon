@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use utils::backoff;
+use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
@@ -22,10 +22,6 @@ use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES};
-
-async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
-    fs::File::open(path).await?.sync_all().await
-}
 
 static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
@@ -150,7 +146,7 @@ pub async fn download_layer_file<'a>(
         })
         .map_err(DownloadError::Other)?;
 
-    fsync_path(&local_path)
+    crashsafe::fsync_async(&local_path)
         .await
         .with_context(|| format!("Could not fsync layer file {}", local_path.display(),))
         .map_err(DownloadError::Other)?;
