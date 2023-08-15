@@ -432,6 +432,11 @@ jobs:
         if: ${{ !cancelled() }}
         id: create-allure-report
         uses: ./.github/actions/allure-report-generate
+        with:
+          store-test-results-into-db: true
+        env:
+          REGRESS_TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - uses: actions/github-script@v6
         if: ${{ !cancelled() }}
@@ -451,45 +456,6 @@ jobs:
               fetch,
               report,
             })
-
-      - name: Store Allure test stat in the DB
-        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
-        env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        run: |
-          ./scripts/pysync
-
-          curl --fail --output suites.json "${REPORT_JSON_URL}"
-          export BUILD_TYPE=unified
-          export DATABASE_URL="$TEST_RESULT_CONNSTR"
-
-          poetry run python3 scripts/ingest_regress_test_result.py \
-            --revision ${COMMIT_SHA} \
-            --reference ${GITHUB_REF} \
-            --build-type ${BUILD_TYPE} \
-            --ingest suites.json
-
-      - name: Store Allure test stat in the DB (new)
-        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
-        env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
-          BASE_S3_URL: ${{ steps.create-allure-report.outputs.base-s3-url }}
-        run: |
-          aws s3 cp --only-show-errors --recursive ${BASE_S3_URL}/data/test-cases ./test-cases
-
-          ./scripts/pysync
-
-          export DATABASE_URL="$TEST_RESULT_CONNSTR"
-          poetry run python3 scripts/ingest_regress_test_result-new-format.py \
-            --reference ${GITHUB_REF} \
-            --revision ${COMMIT_SHA} \
-            --run-id ${GITHUB_RUN_ID} \
-            --run-attempt ${GITHUB_RUN_ATTEMPT} \
-            --test-cases-dir ./test-cases
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
