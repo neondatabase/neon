@@ -191,7 +191,11 @@ def wait_timeline_detail_404(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     iterations: int,
+    interval: Optional[float] = None,
 ):
+    if interval is None:
+        interval = 0.25
+
     def timeline_is_missing():
         data = {}
         try:
@@ -204,7 +208,7 @@ def wait_timeline_detail_404(
 
         raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    wait_until(iterations, interval=0.250, func=timeline_is_missing)
+    wait_until(iterations, interval, func=timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
@@ -212,10 +216,11 @@ def timeline_delete_wait_completed(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     iterations: int = 20,
+    interval: Optional[float] = None,
     **delete_args,
 ):
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
-    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
 
 if TYPE_CHECKING:
