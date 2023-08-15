@@ -265,7 +265,11 @@ def test_sql_over_http_output_options(static_proxy: NeonProxy):
 def test_sql_over_http_batch(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def qq(queries: List[Tuple[str, Optional[List[Any]]]], read_only: bool = False, deferrable: bool = False) -> Any:
+    def qq(
+        queries: List[Tuple[str, Optional[List[Any]]]],
+        read_only: bool = False,
+        deferrable: bool = False,
+    ) -> Any:
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
