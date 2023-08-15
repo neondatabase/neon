@@ -1,8 +1,11 @@
 use anyhow::Context;
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use dashmap::DashMap;
+use parking_lot::RwLock;
 use pq_proto::StartupMessageParams;
+use std::collections::hash_map;
 use std::fmt;
+use std::sync::atomic::{self, AtomicUsize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::time;
 
@@ -46,11 +49,16 @@ struct ConnPoolEntry {
     _last_access: std::time::Instant,
 }
 
-// Per-endpoint connection pool, (dbname, username) -> Vec<ConnPoolEntry>
+// Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
 pub struct EndpointConnPool {
-    pools: HashMap<(String, String), Vec<ConnPoolEntry>>,
+    pools: HashMap<(String, String), DbUserConnPool>,
     total_conns: usize,
+}
+
+pub struct DbUserConnPool {
+    conns: Vec<ConnPoolEntry>,
+    password_hash: String,
 }
 
 pub struct GlobalConnPool {
@@ -58,7 +66,12 @@ pub struct GlobalConnPool {
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: Mutex<HashMap<String, Arc<Mutex<EndpointConnPool>>>>,
+    global_pool: DashMap<String, Arc<RwLock<EndpointConnPool>>>,
+
+    /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
+    /// That seems like far too much effort, so we're using a relaxed increment counter instead.
+    /// It's only used for diagnostics.
+    global_pool_size: AtomicUsize,
 
     // Maximum number of connections per one endpoint.
     // Can mix different (dbname, username) connections.
@@ -72,7 +85,8 @@ pub struct GlobalConnPool {
 impl GlobalConnPool {
     pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
         Arc::new(Self {
-            global_pool: Mutex::new(HashMap::new()),
+            global_pool: DashMap::new(),
+            global_pool_size: AtomicUsize::new(0),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
         })
@@ -86,32 +100,76 @@ impl GlobalConnPool {
         let mut client: Option<tokio_postgres::Client> = None;
 
         if !force_new {
-            let pool = self.get_endpoint_pool(&conn_info.hostname).await;
+            let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+            let mut hash = None;
 
             // find a pool entry by (dbname, username) if exists
-            let mut pool = pool.lock();
-            let pool_entries = pool.pools.get_mut(&conn_info.db_and_user());
-            if let Some(pool_entries) = pool_entries {
-                if let Some(entry) = pool_entries.pop() {
-                    client = Some(entry.conn);
-                    pool.total_conns -= 1;
+            {
+                let pool = pool.read();
+                if let Some(pool_entries) = pool.pools.get(&conn_info.db_and_user()) {
+                    if !pool_entries.conns.is_empty() {
+                        hash = Some(pool_entries.password_hash.clone());
+                    }
+                }
+            }
+
+            // a connection exists in the pool, verify the password hash
+            if let Some(hash) = hash {
+                let pw = conn_info.password.clone();
+                let validate =
+                    tokio::task::spawn_blocking(move || password_auth::verify_password(pw, &hash))
+                        .await
+                        .unwrap();
+
+                // if the hash is invalid, don't error
+                // we will continue with the regular connection flow
+                if validate.is_ok() {
+                    let mut pool = pool.write();
+                    if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
+                        if let Some(entry) = pool_entries.conns.pop() {
+                            client = Some(entry.conn);
+                            pool.total_conns -= 1;
+                        }
+                    }
                 }
             }
         }
 
         // ok return cached connection if found and establish a new one otherwise
-        if let Some(client) = client {
+        let new_client = if let Some(client) = client {
             if client.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info).await
+                connect_to_compute(self.proxy_config, conn_info).await?
             } else {
                 info!("pool: reusing connection '{conn_info}'");
-                Ok(client)
+                return Ok(client);
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info).await
+            connect_to_compute(self.proxy_config, conn_info).await?
+        };
+
+        if !force_new {
+            // we need to store the new password hash incase it has been updated
+            let pw = conn_info.password.clone();
+            let new_hash = tokio::task::spawn_blocking(move || password_auth::generate_hash(pw))
+                .await
+                .unwrap();
+
+            let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+            let mut pool = pool.write();
+            match pool.pools.entry(conn_info.db_and_user()) {
+                hash_map::Entry::Occupied(mut o) => o.get_mut().password_hash = new_hash,
+                hash_map::Entry::Vacant(v) => {
+                    v.insert(DbUserConnPool {
+                        conns: Vec::new(),
+                        password_hash: new_hash,
+                    });
+                }
+            }
         }
+
+        Ok(new_client)
     }
 
     pub async fn put(
@@ -119,33 +177,31 @@ impl GlobalConnPool {
         conn_info: &ConnInfo,
         client: tokio_postgres::Client,
     ) -> anyhow::Result<()> {
-        let pool = self.get_endpoint_pool(&conn_info.hostname).await;
+        let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
 
         // return connection to the pool
-        let mut total_conns;
         let mut returned = false;
         let mut per_db_size = 0;
-        {
-            let mut pool = pool.lock();
-            total_conns = pool.total_conns;
+        let total_conns = {
+            let mut pool = pool.write();
 
-            let pool_entries: &mut Vec<ConnPoolEntry> = pool
-                .pools
-                .entry(conn_info.db_and_user())
-                .or_insert_with(|| Vec::with_capacity(1));
-            if total_conns < self.max_conns_per_endpoint {
-                pool_entries.push(ConnPoolEntry {
-                    conn: client,
-                    _last_access: std::time::Instant::now(),
-                });
+            if pool.total_conns < self.max_conns_per_endpoint {
+                // we create this db-user entry in get, so it should not be None
+                if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
+                    pool_entries.conns.push(ConnPoolEntry {
+                        conn: client,
+                        _last_access: std::time::Instant::now(),
+                    });
 
-                total_conns += 1;
-                returned = true;
-                per_db_size = pool_entries.len();
+                    returned = true;
+                    per_db_size = pool_entries.conns.len();
 
-                pool.total_conns += 1;
+                    pool.total_conns += 1;
+                }
             }
-        }
+
+            pool.total_conns
+        };
 
         // do logging outside of the mutex
         if returned {
@@ -157,25 +213,35 @@ impl GlobalConnPool {
         Ok(())
     }
 
-    async fn get_endpoint_pool(&self, endpoint: &String) -> Arc<Mutex<EndpointConnPool>> {
+    fn get_or_create_endpoint_pool(&self, endpoint: &String) -> Arc<RwLock<EndpointConnPool>> {
+        // fast path
+        if let Some(pool) = self.global_pool.get(endpoint) {
+            return pool.clone();
+        }
+
+        // slow path
+        let new_pool = Arc::new(RwLock::new(EndpointConnPool {
+            pools: HashMap::new(),
+            total_conns: 0,
+        }));
+
         // find or create a pool for this endpoint
         let mut created = false;
-        let mut global_pool = self.global_pool.lock();
-        let pool = global_pool
+        let pool = self
+            .global_pool
             .entry(endpoint.clone())
             .or_insert_with(|| {
                 created = true;
-                Arc::new(Mutex::new(EndpointConnPool {
-                    pools: HashMap::new(),
-                    total_conns: 0,
-                }))
+                new_pool
             })
             .clone();
-        let global_pool_size = global_pool.len();
-        drop(global_pool);
 
         // log new global pool size
         if created {
+            let global_pool_size = self
+                .global_pool_size
+                .fetch_add(1, atomic::Ordering::Relaxed)
+                + 1;
             info!(
                 "pool: created new pool for '{endpoint}', global pool size now {global_pool_size}"
             );
