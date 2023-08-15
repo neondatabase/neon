@@ -270,24 +270,31 @@ pub struct XlHeapDelete {
 
 impl XlHeapDelete {
     pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
-        if buf.remaining() == 14 {
-            XlHeapDelete {
-                xmax: buf.get_u32_le(),
-                offnum: buf.get_u16_le(),
-                _padding: buf.get_u16_le(),
-                t_cid: buf.get_u32_le(),
-                infobits_set: buf.get_u8(),
-                flags: buf.get_u8(),
-            }
+        let xmax = buf.get_u32_le();
+        let offnum = buf.get_u16_le();
+        let _padding;
+        let t_cid;
+        let neon_format;
+        if buf.remaining() == pg_constants::SIZE_OF_HEAP_DELETE {
+            // Neon format
+            _padding = buf.get_u16_le();
+            t_cid = buf.get_u32_le();
+            neon_format = true;
         } else {
-            XlHeapDelete {
-                xmax: buf.get_u32_le(),
-                offnum: buf.get_u16_le(),
-                _padding: 0,
-                t_cid: 0,
-                infobits_set: buf.get_u8(),
-                flags: buf.get_u8(),
-            }
+            _padding = 0;
+            t_cid = 0;
+            neon_format = false;
+        }
+        let infobits_set = buf.get_u8();
+        let flags = buf.get_u8();
+        assert!(((flags & pg_constants::XLH_DELETE_STORE_CID) == 0) ^ neon_format);
+        XlHeapDelete {
+            xmax,
+            offnum,
+            _padding,
+            t_cid,
+            infobits_set,
+            flags,
         }
     }
 }
@@ -305,24 +312,31 @@ pub struct XlHeapLock {
 
 impl XlHeapLock {
     pub fn decode(buf: &mut Bytes) -> XlHeapLock {
-        if buf.remaining() == 14 {
-            XlHeapLock {
-                locking_xid: buf.get_u32_le(),
-                offnum: buf.get_u16_le(),
-                _padding: buf.get_u16_le(),
-                t_cid: buf.get_u32_le(),
-                infobits_set: buf.get_u8(),
-                flags: buf.get_u8(),
-            }
+        let locking_xid = buf.get_u32_le();
+        let offnum = buf.get_u16_le();
+        let _padding;
+        let t_cid;
+        let neon_format;
+        if buf.remaining() == pg_constants::SIZE_OF_HEAP_LOCK {
+            // Neon format
+            _padding = buf.get_u16_le();
+            t_cid = buf.get_u32_le();
+            neon_format = true;
         } else {
-            XlHeapLock {
-                locking_xid: buf.get_u32_le(),
-                offnum: buf.get_u16_le(),
-                _padding: 0,
-                t_cid: 0,
-                infobits_set: buf.get_u8(),
-                flags: buf.get_u8(),
-            }
+            _padding = 0;
+            t_cid = 0;
+            neon_format = false;
+        }
+        let infobits_set = buf.get_u8();
+        let flags = buf.get_u8();
+        assert!(((flags & pg_constants::XLH_LOCK_STORE_CID) == 0) ^ neon_format);
+        XlHeapLock {
+            locking_xid,
+            offnum,
+            _padding,
+            t_cid,
+            infobits_set,
+            flags,
         }
     }
 }

@@ -150,6 +150,9 @@ pub const XLH_UPDATE_STORE_CID: u8 = (1 << 7) as u8;
 pub const XLH_DELETE_STORE_CID: u8 = (1 << 7) as u8;
 pub const XLH_LOCK_STORE_CID: u8 = (1 << 7) as u8;
 
+pub const SIZE_OF_HEAP_LOCK: usize = 14;
+pub const SIZE_OF_HEAP_DELETE: usize = 14;
+
 // From replication/message.h
 pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
 
