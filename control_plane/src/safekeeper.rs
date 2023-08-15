@@ -101,7 +101,7 @@ impl SafekeeperNode {
         self.datadir_path().join("safekeeper.pid")
     }
 
-    pub fn start(&self) -> anyhow::Result<Child> {
+    pub fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<Child> {
         print!(
             "Starting safekeeper at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
@@ -180,6 +180,8 @@ impl SafekeeperNode {
                 key_path_string.clone(),
             ]);
         }
+
+        args.extend(extra_opts);
 
         background_process::start_process(
             &format!("safekeeper-{id}"),
