@@ -44,7 +44,6 @@ const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
-static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
@@ -194,7 +193,7 @@ pub async fn handle(
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
-    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool = false;
 
     // isolation level, read only and deferrable
 
