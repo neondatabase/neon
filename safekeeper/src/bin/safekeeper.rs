@@ -15,6 +15,7 @@ use toml_edit::Document;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::Uri;
@@ -124,18 +125,21 @@ struct Args {
     disable_wal_backup: bool,
     /// If given, enables auth on incoming connections to WAL service endpoint
     /// (--listen-pg). Value specifies path to a .pem public key used for
-    /// validations of JWT tokens.
-    #[arg(long, verbatim_doc_comment)]
+    /// validations of JWT tokens. Empty string is allowed and means disabling
+    /// auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
     pg_auth_public_key_path: Option<PathBuf>,
     /// If given, enables auth on incoming connections to tenant only WAL
     /// service endpoint (--listen-pg-tenant-only). Value specifies path to a
-    /// .pem public key used for validations of JWT tokens.
-    #[arg(long, verbatim_doc_comment)]
+    /// .pem public key used for validations of JWT tokens. Empty string is
+    /// allowed and means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
     pg_tenant_only_auth_public_key_path: Option<PathBuf>,
     /// If given, enables auth on incoming connections to http management
     /// service endpoint (--listen-http). Value specifies path to a .pem public
-    /// key used for validations of JWT tokens.
-    #[arg(long, verbatim_doc_comment)]
+    /// key used for validations of JWT tokens. Empty string is allowed and
+    /// means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
     http_auth_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
@@ -146,9 +150,39 @@ struct Args {
     current_thread_runtime: bool,
 }
 
+// Like PathBufValueParser, but allows empty string.
+fn opt_pathbuf_parser(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from_str(s).unwrap())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    // We want to allow multiple occurences of the same arg (taking the last) so
+    // that neon_local could generate command with defaults + overrides without
+    // getting 'argument cannot be used multiple times' error. This seems to be
+    // impossible with pure Derive API, so convert struct to Command, modify it,
+    // parse arguments, and then fill the struct back.
+    let cmd = <Args as clap::CommandFactory>::command().args_override_self(true);
+    let mut matches = cmd.get_matches();
+    let mut args = <Args as clap::FromArgMatches>::from_arg_matches_mut(&mut matches)?;
+
+    // I failed to modify opt_pathbuf_parser to return Option<PathBuf> in
+    // reasonable time, so turn empty string into option post factum.
+    if let Some(pb) = &args.pg_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.pg_tenant_only_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_tenant_only_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.http_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.http_auth_public_key_path = None;
+        }
+    }
 
     if let Some(addr) = args.dump_control_file {
         let state = control_file::FileStorage::load_control_file(addr)?;
@@ -200,7 +234,10 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!("loading pg tenant only auth JWT key from {}", path.display());
+            info!(
+                "loading pg tenant only auth JWT key from {}",
+                path.display()
+            );
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))

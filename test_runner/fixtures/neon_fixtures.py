@@ -1313,12 +1313,20 @@ class NeonCli(AbstractNeonCli):
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
-    def safekeeper_start(self, id: int) -> "subprocess.CompletedProcess[str]":
+    def safekeeper_start(
+        self, id: int, extra_opts: Optional[List[str]] = None
+    ) -> "subprocess.CompletedProcess[str]":
         s3_env_vars = None
         if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
             s3_env_vars = self.env.remote_storage.access_env_vars()
 
-        return self.raw_cli(["safekeeper", "start", str(id)], extra_env_vars=s3_env_vars)
+        if extra_opts is not None:
+            extra_opts = [f"-e={opt}" for opt in extra_opts]
+        else:
+            extra_opts = []
+        return self.raw_cli(
+            ["safekeeper", "start", str(id), *extra_opts], extra_env_vars=s3_env_vars
+        )
 
     def safekeeper_stop(
         self, id: Optional[int] = None, immediate=False
@@ -2507,9 +2515,9 @@ class Safekeeper:
     id: int
     running: bool = False
 
-    def start(self) -> "Safekeeper":
+    def start(self, extra_opts: Optional[List[str]] = None) -> "Safekeeper":
         assert self.running is False
-        self.env.neon_cli.safekeeper_start(self.id)
+        self.env.neon_cli.safekeeper_start(self.id, extra_opts=extra_opts)
         self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()
