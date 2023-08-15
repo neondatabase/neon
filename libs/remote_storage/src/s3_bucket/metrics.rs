@@ -1,4 +1,6 @@
-use metrics::{register_histogram_vec, register_int_counter_vec, Histogram, IntCounter};
+use metrics::{
+    register_histogram_vec, register_int_counter, register_int_counter_vec, Histogram, IntCounter,
+};
 use once_cell::sync::Lazy;
 
 pub(super) static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
@@ -125,41 +127,22 @@ impl PassFailCancelledRequestTyped<Histogram> {
 }
 
 pub(super) struct BucketMetrics {
-    /// Total requests attempted
-    // TODO: remove after next release and migrate dashboards to `sum by (result) (remote_storage_s3_requests_count)`
-    requests: RequestTyped<IntCounter>,
-    /// Subset of attempted requests failed
-    // TODO: remove after next release and migrate dashboards to `remote_storage_s3_requests_count{result="err"}`
-    failed: RequestTyped<IntCounter>,
-
+    /// Full request duration until successful completion, error or cancellation.
     pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
+    /// Total amount of seconds waited on queue.
     pub(super) wait_seconds: RequestTyped<Histogram>,
 
     /// Track how many semaphore awaits were cancelled per request type.
     ///
     /// This is in case cancellations are happening more than expected.
     pub(super) cancelled_waits: RequestTyped<IntCounter>,
+
+    /// Total amount of deleted objects in batches or single requests.
+    pub(super) deleted_objects_total: IntCounter,
 }
 
 impl Default for BucketMetrics {
     fn default() -> Self {
-        let requests = register_int_counter_vec!(
-            "remote_storage_s3_requests_count",
-            "Number of s3 requests of particular type",
-            &["request_type"],
-        )
-        .expect("failed to define a metric");
-        let requests =
-            RequestTyped::build_with(|kind| requests.with_label_values(&[kind.as_str()]));
-
-        let failed = register_int_counter_vec!(
-            "remote_storage_s3_failures_count",
-            "Number of failed s3 requests of particular type",
-            &["request_type"],
-        )
-        .expect("failed to define a metric");
-        let failed = RequestTyped::build_with(|kind| failed.with_label_values(&[kind.as_str()]));
-
         let buckets = [0.01, 0.10, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0];
 
         let req_seconds = register_histogram_vec!(
@@ -192,52 +175,17 @@ impl Default for BucketMetrics {
         let cancelled_waits =
             RequestTyped::build_with(|kind| cancelled_waits.with_label_values(&[kind.as_str()]));
 
+        let deleted_objects_total = register_int_counter!(
+            "remote_storage_s3_deleted_objects_total",
+            "Amount of deleted objects in total",
+        )
+        .unwrap();
+
         Self {
-            requests,
-            failed,
             req_seconds,
             wait_seconds,
             cancelled_waits,
+            deleted_objects_total,
         }
     }
-}
-
-pub fn inc_get_object() {
-    BUCKET_METRICS.requests.get(Get).inc()
-}
-
-pub fn inc_get_object_fail() {
-    BUCKET_METRICS.failed.get(Get).inc()
-}
-
-pub fn inc_put_object() {
-    BUCKET_METRICS.requests.get(Put).inc()
-}
-
-pub fn inc_put_object_fail() {
-    BUCKET_METRICS.failed.get(Put).inc()
-}
-
-pub fn inc_delete_object() {
-    BUCKET_METRICS.requests.get(Delete).inc()
-}
-
-pub fn inc_delete_objects(count: u64) {
-    BUCKET_METRICS.requests.get(Delete).inc_by(count)
-}
-
-pub fn inc_delete_object_fail() {
-    BUCKET_METRICS.failed.get(Delete).inc()
-}
-
-pub fn inc_delete_objects_fail(count: u64) {
-    BUCKET_METRICS.failed.get(Delete).inc_by(count)
-}
-
-pub fn inc_list_objects() {
-    BUCKET_METRICS.requests.get(List).inc()
-}
-
-pub fn inc_list_objects_fail() {
-    BUCKET_METRICS.failed.get(List).inc()
 }

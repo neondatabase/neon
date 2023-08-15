@@ -31,14 +31,19 @@ use storage_broker::Streaming;
 use tokio::select;
 use tracing::*;
 
-use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use postgres_connection::{parse_host_port, PgConnectionConfig};
+use utils::backoff::{
+    exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
 };
 
-use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
+use super::{
+    walreceiver_connection::WalConnectionStatus, walreceiver_connection::WalReceiverError,
+    TaskEvent, TaskHandle,
+};
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
@@ -419,13 +424,19 @@ impl ConnectionManagerState {
                 match res {
                     Ok(()) => Ok(()),
                     Err(e) => {
-                        use super::walreceiver_connection::ExpectedError;
-                        if e.is_expected() {
-                            info!("walreceiver connection handling ended: {e:#}");
-                            Ok(())
-                        } else {
-                            // give out an error to have task_mgr give it a really verbose logging
-                            Err(e).context("walreceiver connection handling failure")
+                        match e {
+                            WalReceiverError::SuccessfulCompletion(msg) => {
+                                info!("walreceiver connection handling ended with success: {msg}");
+                                Ok(())
+                            }
+                            WalReceiverError::ExpectedSafekeeperError(e) => {
+                                info!("walreceiver connection handling ended: {e}");
+                                Ok(())
+                            }
+                            WalReceiverError::Other(e) => {
+                                // give out an error to have task_mgr give it a really verbose logging
+                                Err(e).context("walreceiver connection handling failure")
+                            }
                         }
                     }
                 }

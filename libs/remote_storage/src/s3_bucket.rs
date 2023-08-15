@@ -10,6 +10,7 @@ use anyhow::Context;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
+    provider_config::ProviderConfig, web_identity_token::WebIdentityTokenCredentialsProvider,
 };
 use aws_credential_types::cache::CredentialsCache;
 use aws_sdk_s3::{
@@ -67,18 +68,29 @@ impl S3Bucket {
             aws_config.bucket_name
         );
 
+        let region = Some(Region::new(aws_config.bucket_region.clone()));
+
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
             CredentialsProviderChain::first_try(
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
+            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
+            // needed to access remote extensions bucket
+            .or_else("token", {
+                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+
+                WebIdentityTokenCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build()
+            })
             // uses imds v2
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
         let mut config_builder = Config::builder()
-            .region(Region::new(aws_config.bucket_region.clone()))
+            .region(region)
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
@@ -177,8 +189,6 @@ impl S3Bucket {
         let kind = RequestKind::Get;
         let permit = self.owned_permit(kind).await;
 
-        metrics::inc_get_object();
-
         let started_at = start_measuring_requests(kind);
 
         let get_object = self
@@ -193,7 +203,6 @@ impl S3Bucket {
         let started_at = ScopeGuard::into_inner(started_at);
 
         if get_object.is_err() {
-            metrics::inc_get_object_fail();
             metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                 kind,
                 AttemptOutcome::Err,
@@ -325,7 +334,6 @@ impl RemoteStorage for S3Bucket {
 
         loop {
             let _guard = self.permit(kind).await;
-            metrics::inc_list_objects();
             let started_at = start_measuring_requests(kind);
 
             let fetch_response = self
@@ -338,10 +346,6 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })
                 .context("Failed to list S3 prefixes")
                 .map_err(DownloadError::Other);
 
@@ -383,7 +387,6 @@ impl RemoteStorage for S3Bucket {
         let mut all_files = vec![];
         loop {
             let _guard = self.permit(kind).await;
-            metrics::inc_list_objects();
             let started_at = start_measuring_requests(kind);
 
             let response = self
@@ -395,10 +398,6 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })
                 .context("Failed to list files in S3 bucket");
 
             let started_at = ScopeGuard::into_inner(started_at);
@@ -431,7 +430,6 @@ impl RemoteStorage for S3Bucket {
         let kind = RequestKind::Put;
         let _guard = self.permit(kind).await;
 
-        metrics::inc_put_object();
         let started_at = start_measuring_requests(kind);
 
         let body = Body::wrap_stream(ReaderStream::new(from));
@@ -446,11 +444,7 @@ impl RemoteStorage for S3Bucket {
             .content_length(from_size_bytes.try_into()?)
             .body(bytes_stream)
             .send()
-            .await
-            .map_err(|e| {
-                metrics::inc_put_object_fail();
-                e
-            });
+            .await;
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
@@ -507,7 +501,6 @@ impl RemoteStorage for S3Bucket {
         }
 
         for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
-            metrics::inc_delete_objects(chunk.len() as u64);
             let started_at = start_measuring_requests(kind);
 
             let resp = self
@@ -525,8 +518,10 @@ impl RemoteStorage for S3Bucket {
 
             match resp {
                 Ok(resp) => {
+                    metrics::BUCKET_METRICS
+                        .deleted_objects_total
+                        .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
-                        metrics::inc_delete_objects_fail(errors.len() as u64);
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()
@@ -534,7 +529,6 @@ impl RemoteStorage for S3Bucket {
                     }
                 }
                 Err(e) => {
-                    metrics::inc_delete_objects_fail(chunk.len() as u64);
                     return Err(e.into());
                 }
             }
@@ -543,32 +537,8 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let kind = RequestKind::Delete;
-        let _guard = self.permit(kind).await;
-
-        metrics::inc_delete_object();
-        let started_at = start_measuring_requests(kind);
-
-        let res = self
-            .client
-            .delete_object()
-            .bucket(self.bucket_name.clone())
-            .key(self.relative_path_to_s3_object(path))
-            .send()
-            .await
-            .map_err(|e| {
-                metrics::inc_delete_object_fail();
-                e
-            });
-
-        let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
-
-        res?;
-
-        Ok(())
+        let paths = std::array::from_ref(path);
+        self.delete_objects(paths).await
     }
 }
 

@@ -2,8 +2,8 @@
 //! protocol commands.
 
 use anyhow::Context;
-use std::str;
 use std::str::FromStr;
+use std::str::{self};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
@@ -11,6 +11,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -44,7 +45,7 @@ pub struct SafekeeperPostgresHandler {
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
     StartWalPush,
-    StartReplication { start_lsn: Lsn },
+    StartReplication { start_lsn: Lsn, term: Option<Term> },
     IdentifySystem,
     TimelineStatus,
     JSONCtrl { cmd: AppendLogicalMessage },
@@ -55,15 +56,21 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
-            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)",
+            // We follow postgres START_REPLICATION LOGICAL options to pass term.
+            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)(?: \(term='(\d+)'\))?",
         )
         .unwrap();
-        let mut caps = re.captures_iter(cmd);
-        let start_lsn = caps
-            .next()
-            .map(|cap| Lsn::from_str(&cap[1]))
-            .context("parse start LSN from START_REPLICATION command")??;
-        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
+        let caps = re
+            .captures(cmd)
+            .context(format!("failed to parse START_REPLICATION command {}", cmd))?;
+        let start_lsn =
+            Lsn::from_str(&caps[1]).context("parse start LSN from START_REPLICATION command")?;
+        let term = if let Some(m) = caps.get(2) {
+            Some(m.as_str().parse::<u64>().context("invalid term")?)
+        } else {
+            None
+        };
+        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn, term })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
@@ -218,8 +225,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     .instrument(info_span!("WAL receiver", ttid = %span_ttid))
                     .await
             }
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                self.handle_start_replication(pgb, start_lsn)
+            SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
+                self.handle_start_replication(pgb, start_lsn, term)
                     .instrument(info_span!("WAL sender", ttid = %span_ttid))
                     .await
             }

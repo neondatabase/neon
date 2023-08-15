@@ -211,6 +211,9 @@ use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
+use utils::backoff::{
+    self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -241,7 +244,6 @@ use crate::{
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
-    {exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS},
 };
 
 use utils::id::{TenantId, TimelineId};
@@ -256,12 +258,12 @@ use super::upload_queue::SetDeletedFlagProgress;
 // But after FAILED_DOWNLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_DOWNLOAD_RETRIES times, we give up
-const FAILED_DOWNLOAD_WARN_THRESHOLD: u32 = 3;
-const FAILED_DOWNLOAD_RETRIES: u32 = 10;
+pub(crate) const FAILED_DOWNLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 
 // Similarly log failed uploads and deletions at WARN level, after this many
 // retries. Uploads and deletions are retried forever, though.
-const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -752,12 +754,24 @@ impl RemoteTimelineClient {
 
         pausable_failpoint!("persist_deleted_index_part");
 
-        upload::upload_index_part(
-            self.conf,
-            &self.storage_impl,
-            &self.tenant_id,
-            &self.timeline_id,
-            &index_part_with_deleted_at,
+        backoff::retry(
+            || async {
+                upload::upload_index_part(
+                    self.conf,
+                    &self.storage_impl,
+                    &self.tenant_id,
+                    &self.timeline_id,
+                    &index_part_with_deleted_at,
+                )
+                .await
+            },
+            |_e| false,
+            1,
+            // have just a couple of attempts
+            // when executed as part of timeline deletion this happens in context of api call
+            // when executed as part of tenant deletion this happens in the background
+            2,
+            "persist_index_part_with_deleted_flag",
         )
         .await?;
 
@@ -834,10 +848,19 @@ impl RemoteTimelineClient {
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
         let timeline_storage_path = self.conf.remote_path(&timeline_path)?;
 
-        let remaining = self
-            .storage_impl
-            .list_prefixes(Some(&timeline_storage_path))
-            .await?;
+        let remaining = backoff::retry(
+            || async {
+                self.storage_impl
+                    .list_prefixes(Some(&timeline_storage_path))
+                    .await
+            },
+            |_e| false,
+            FAILED_DOWNLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "list_prefixes",
+        )
+        .await
+        .context("list prefixes")?;
 
         let remaining: Vec<RemotePath> = remaining
             .into_iter()
@@ -852,7 +875,15 @@ impl RemoteTimelineClient {
             .collect();
 
         if !remaining.is_empty() {
-            self.storage_impl.delete_objects(&remaining).await?;
+            backoff::retry(
+                || async { self.storage_impl.delete_objects(&remaining).await },
+                |_e| false,
+                FAILED_UPLOAD_WARN_THRESHOLD,
+                FAILED_REMOTE_OP_RETRIES,
+                "delete_objects",
+            )
+            .await
+            .context("delete_objects")?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
@@ -864,7 +895,16 @@ impl RemoteTimelineClient {
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
 
         debug!("deleting index part");
-        self.storage_impl.delete(&index_file_path).await?;
+
+        backoff::retry(
+            || async { self.storage_impl.delete(&index_file_path).await },
+            |_e| false,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "delete_index",
+        )
+        .await
+        .context("delete_index")?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
             Err(anyhow::anyhow!(

@@ -51,6 +51,7 @@ RUN set -e \
       --bin safekeeper  \
       --bin storage_broker  \
       --bin proxy  \
+      --bin neon_local \
       --locked --release \
     && cachepot -s
 
@@ -76,6 +77,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl        
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local               /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/

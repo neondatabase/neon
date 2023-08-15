@@ -3,15 +3,11 @@
 #
 from pathlib import Path
 
-import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_pg_regress(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
@@ -60,18 +56,11 @@ def test_pg_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
@@ -173,9 +162,4 @@ def test_sql_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-        endpoint.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)

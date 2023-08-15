@@ -8,7 +8,7 @@ mod layer_desc;
 mod remote_layer;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
@@ -241,10 +241,14 @@ impl LayerAccessStats {
         });
     }
 
-    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+    fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
+        if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
+            return;
+        }
+
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
-            task_kind,
+            task_kind: ctx.task_kind(),
             access_kind,
         };
 
@@ -252,7 +256,7 @@ impl LayerAccessStats {
         locked.iter_mut().for_each(|inner| {
             inner.first_access.get_or_insert(this_access);
             inner.count_by_access_kind[access_kind] += 1;
-            inner.task_kind_flag |= task_kind;
+            inner.task_kind_flag |= ctx.task_kind();
             inner.last_accesses.write(this_access);
         })
     }
@@ -401,16 +405,6 @@ pub trait AsLayerDesc {
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 pub trait PersistentLayer: Layer + AsLayerDesc {
-    /// Identify the tenant this layer belongs to
-    fn get_tenant_id(&self) -> TenantId {
-        self.layer_desc().tenant_id
-    }
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId {
-        self.layer_desc().timeline_id
-    }
-
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
     fn filename(&self) -> LayerFileName {
@@ -434,14 +428,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
 
     fn is_remote_layer(&self) -> bool {
         false
-    }
-
-    /// Returns None if the layer file size is not known.
-    ///
-    /// Should not change over the lifetime of the layer object because
-    /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64 {
-        self.layer_desc().file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;

@@ -120,10 +120,9 @@ impl LayerManager {
 
         ensure!(
             lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})\n{}",
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
             lsn,
             last_record_lsn,
-            std::backtrace::Backtrace::force_capture(),
         );
 
         // Do we have a layer open for writing already?
@@ -164,7 +163,7 @@ impl LayerManager {
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    pub fn try_freeze_in_memory_layer(
+    pub async fn try_freeze_in_memory_layer(
         &mut self,
         Lsn(last_record_lsn): Lsn,
         last_freeze_at: &AtomicLsn,
@@ -174,7 +173,7 @@ impl LayerManager {
         if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
-            open_layer.freeze(end_lsn);
+            open_layer.freeze(end_lsn).await;
 
             // The layer is no longer open, update the layer map to reflect this.
             // We will replace it with on-disk historics below.
@@ -278,7 +277,7 @@ impl LayerManager {
         updates: &mut BatchedUpdates<'_>,
         mapping: &mut LayerFileManager,
     ) {
-        updates.remove_historic(layer.layer_desc().clone());
+        updates.remove_historic(layer.layer_desc());
         mapping.remove(layer);
     }
 
@@ -292,10 +291,10 @@ impl LayerManager {
         metrics: &TimelineMetrics,
         mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
+        let desc = layer.layer_desc();
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            let layer_file_size = layer.file_size();
-            metrics.resident_physical_size_gauge.sub(layer_file_size);
+            metrics.resident_physical_size_gauge.sub(desc.file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.
@@ -303,7 +302,7 @@ impl LayerManager {
         //      won't be needed for page reconstruction for this timeline,
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
-        updates.remove_historic(layer.layer_desc().clone());
+        updates.remove_historic(desc);
         mapping.remove(layer);
 
         Ok(())

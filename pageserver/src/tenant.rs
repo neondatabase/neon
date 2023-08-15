@@ -28,6 +28,7 @@ use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -46,8 +47,10 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::config::TenantConf;
+use self::delete::DeleteTenantFlow;
 use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
+use self::mgr::TenantsMap;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
@@ -56,6 +59,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::metrics::TENANT_ACTIVATION;
 use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -105,6 +109,7 @@ macro_rules! pausable_failpoint {
 
 pub mod blob_io;
 pub mod block_io;
+
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
@@ -117,6 +122,7 @@ mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
+pub mod delete;
 pub mod mgr;
 pub mod tasks;
 pub mod upload_queue;
@@ -143,6 +149,8 @@ pub use crate::tenant::timeline::WalReceiverInfo;
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
 pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
+
+pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
@@ -182,6 +190,8 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 }
 
 // We should not blindly overwrite local metadata with remote one.
@@ -273,7 +283,7 @@ pub enum LoadLocalTimelineError {
     ResumeDeletion(#[source] anyhow::Error),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
@@ -282,15 +292,35 @@ pub enum DeleteTimelineError {
     HasChildren(Vec<TimelineId>),
 
     #[error("Timeline deletion is already in progress")]
-    AlreadyInProgress,
+    AlreadyInProgress(Arc<tokio::sync::Mutex<DeleteTimelineFlow>>),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
+impl Debug for DeleteTimelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "NotFound"),
+            Self::HasChildren(c) => f.debug_tuple("HasChildren").field(c).finish(),
+            Self::AlreadyInProgress(_) => f.debug_tuple("AlreadyInProgress").finish(),
+            Self::Other(e) => f.debug_tuple("Other").field(e).finish(),
+        }
+    }
+}
+
 pub enum SetStoppingError {
     AlreadyStopping(completion::Barrier),
     Broken,
+}
+
+impl Debug for SetStoppingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyStopping(_) => f.debug_tuple("AlreadyStopping").finish(),
+            Self::Broken => write!(f, "Broken"),
+        }
+    }
 }
 
 struct RemoteStartupData {
@@ -615,7 +645,7 @@ impl Tenant {
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
-        let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
+        let sorted_timelines = tree_sort_timelines(timeline_ancestors, |m| m.ancestor_timeline())?;
         for (timeline_id, remote_metadata) in sorted_timelines {
             let (index_part, remote_client) = remote_index_and_client
                 .remove(&timeline_id)
@@ -739,12 +769,13 @@ impl Tenant {
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
     #[instrument(skip_all, fields(tenant_id=%tenant_id))]
-    pub fn spawn_load(
+    pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
         init_order: Option<InitializationOrder>,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         span::debug_assert_current_span_has_tenant_id();
@@ -764,7 +795,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            remote_storage,
+            remote_storage.clone(),
         );
         let tenant = Arc::new(tenant);
 
@@ -780,27 +811,83 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
+                let make_broken = |t: &Tenant, err: anyhow::Error| {
+                    error!("load failed, setting tenant state to Broken: {err:?}");
+                    t.state.send_modify(|state| {
+                        assert!(
+                            matches!(*state, TenantState::Loading | TenantState::Stopping { .. }),
+                            "the loading task owns the tenant state until activation is complete"
+                        );
+                        *state = TenantState::broken_from_reason(err.to_string());
+                    });
+                };
+
                 let mut init_order = init_order;
 
                 // take the completion because initial tenant loading will complete when all of
                 // these tasks complete.
-                let _completion = init_order.as_mut().and_then(|x| x.initial_tenant_load.take());
+                let _completion = init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load.take());
+
+                // Dont block pageserver startup on figuring out deletion status
+                let pending_deletion = {
+                    match DeleteTenantFlow::should_resume_deletion(
+                        conf,
+                        remote_storage.as_ref(),
+                        &tenant_clone,
+                    )
+                    .await
+                    {
+                        Ok(should_resume_deletion) => should_resume_deletion,
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                    }
+                };
+
+                info!("pending deletion {}", pending_deletion.is_some());
+
+                if let Some(deletion) = pending_deletion {
+                    // as we are no longer loading, signal completion by dropping
+                    // the completion while we resume deletion
+                    drop(_completion);
+                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
+                    let _ = init_order
+                        .as_mut()
+                        .and_then(|x| x.initial_logical_size_attempt.take());
+
+                    match DeleteTenantFlow::resume(
+                        deletion,
+                        &tenant_clone,
+                        init_order.as_ref(),
+                        tenants,
+                        &ctx,
+                    )
+                    .await
+                    {
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                        Ok(()) => return Ok(()),
+                    }
+                }
+
+                let background_jobs_can_start =
+                    init_order.as_ref().map(|x| &x.background_jobs_can_start);
 
                 match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
-                        debug!("load finished, activating");
-                        let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                        debug!("load finished",);
+
                         tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
-                    Err(err) => {
-                        error!("load failed, setting tenant state to Broken: {err:?}");
-                        tenant_clone.state.send_modify(|state| {
-                            assert_eq!(*state, TenantState::Loading, "the loading task owns the tenant state until activation is complete");
-                            *state = TenantState::broken_from_reason(err.to_string());
-                        });
-                    }
+                    Err(err) => make_broken(&tenant_clone, err),
                 }
-               Ok(())
+
+                Ok(())
             }
             .instrument({
                 let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
@@ -875,6 +962,8 @@ impl Tenant {
                             timeline_dir.display()
                         )
                     })?;
+
+                info!("Found deletion mark for timeline {}", timeline_id);
 
                 match load_metadata(self.conf, &self.tenant_id, &timeline_id) {
                     Ok(metadata) => {
@@ -965,9 +1054,11 @@ impl Tenant {
 
         // Sort the array of timeline IDs into tree-order, so that parent comes before
         // all its children.
-        tree_sort_timelines(timelines_to_load).map(|sorted_timelines| TenantDirectoryScan {
-            sorted_timelines_to_load: sorted_timelines,
-            timelines_to_resume_deletion,
+        tree_sort_timelines(timelines_to_load, |m| m.ancestor_timeline()).map(|sorted_timelines| {
+            TenantDirectoryScan {
+                sorted_timelines_to_load: sorted_timelines,
+                timelines_to_resume_deletion,
+            }
         })
     }
 
@@ -1639,6 +1730,8 @@ impl Tenant {
                     post_state = <&'static str>::from(&*current_state),
                     "activation attempt finished"
                 );
+
+                TENANT_ACTIVATION.observe(elapsed.as_secs_f64());
             });
         }
     }
@@ -1679,7 +1772,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress).await {
+        match self.set_stopping(shutdown_progress, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -1719,18 +1812,25 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    async fn set_stopping(&self, progress: completion::Barrier) -> Result<(), SetStoppingError> {
+    ///
+    /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
+    async fn set_stopping(
+        &self,
+        progress: completion::Barrier,
+        allow_transition_from_loading: bool,
+    ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
                 );
                 false
             }
+            TenantState::Loading => allow_transition_from_loading,
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
@@ -1739,8 +1839,15 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Loading => {
+                if !allow_transition_from_loading {
+                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                };
+                *current_state = TenantState::Stopping { progress };
+                true
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
@@ -1810,6 +1917,10 @@ impl Tenant {
         .expect("cannot drop self.state while on a &self method");
 
         // we now know we're done activating, let's see whether this task is the winner to transition into Broken
+        self.set_broken_no_wait(reason)
+    }
+
+    pub(crate) fn set_broken_no_wait(&self, reason: String) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
@@ -1875,22 +1986,28 @@ impl Tenant {
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),
 /// perform a topological sort, so that the parent of each timeline comes
 /// before the children.
-fn tree_sort_timelines(
-    timelines: HashMap<TimelineId, TimelineMetadata>,
-) -> anyhow::Result<Vec<(TimelineId, TimelineMetadata)>> {
+/// E extracts the ancestor from T
+/// This allows for T to be different. It can be TimelineMetadata, can be Timeline itself, etc.
+fn tree_sort_timelines<T, E>(
+    timelines: HashMap<TimelineId, T>,
+    extractor: E,
+) -> anyhow::Result<Vec<(TimelineId, T)>>
+where
+    E: Fn(&T) -> Option<TimelineId>,
+{
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
     // (ancestor, children)
-    let mut later: HashMap<TimelineId, Vec<(TimelineId, TimelineMetadata)>> =
+    let mut later: HashMap<TimelineId, Vec<(TimelineId, T)>> =
         HashMap::with_capacity(timelines.len());
 
-    for (timeline_id, metadata) in timelines {
-        if let Some(ancestor_id) = metadata.ancestor_timeline() {
+    for (timeline_id, value) in timelines {
+        if let Some(ancestor_id) = extractor(&value) {
             let children = later.entry(ancestor_id).or_default();
-            children.push((timeline_id, metadata));
+            children.push((timeline_id, value));
         } else {
-            now.push((timeline_id, metadata));
+            now.push((timeline_id, value));
         }
     }
 
@@ -2059,7 +2176,7 @@ impl Tenant {
             remote_client,
             pg_version,
             initial_logical_size_can_start.cloned(),
-            initial_logical_size_attempt.cloned(),
+            initial_logical_size_attempt.cloned().flatten(),
             state,
         );
 
@@ -2143,6 +2260,7 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
         }
     }
 
@@ -2159,6 +2277,7 @@ impl Tenant {
         // FIXME If the config file is not found, assume that we're attaching
         // a detached tenant and config is passed via attach command.
         // https://github.com/neondatabase/neon/issues/1555
+        // OR: we're loading after incomplete deletion that managed to remove config.
         if !target_config_path.exists() {
             info!("tenant config not found in {target_config_display}");
             return Ok(TenantConfOpt::default());

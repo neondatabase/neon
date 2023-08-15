@@ -4,7 +4,7 @@
 use crate::config::PageServerConf;
 use crate::page_cache::{self, ReadBufResult, WriteBufResult, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::BlockReader;
+use crate::tenant::block_io::{BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use once_cell::sync::Lazy;
 use std::cmp::min;
@@ -303,9 +303,7 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> 
 }
 
 impl BlockReader for EphemeralFile {
-    type BlockLease = page_cache::PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
@@ -313,7 +311,7 @@ impl BlockReader for EphemeralFile {
                 .read_ephemeral_buf(self.file_id, blknum)
                 .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
             {
-                ReadBufResult::Found(guard) => return Ok(guard),
+                ReadBufResult::Found(guard) => return Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
                     self.fill_buffer(write_guard.deref_mut(), blknum)?;
@@ -401,17 +399,26 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_ephemeral_blobs() -> Result<(), io::Error> {
+    #[tokio::test]
+    async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id) = harness("ephemeral_blobs")?;
 
         let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
 
         let pos_foo = file.write_blob(b"foo")?;
-        assert_eq!(b"foo", file.block_cursor().read_blob(pos_foo)?.as_slice());
+        assert_eq!(
+            b"foo",
+            file.block_cursor().read_blob(pos_foo).await?.as_slice()
+        );
         let pos_bar = file.write_blob(b"bar")?;
-        assert_eq!(b"foo", file.block_cursor().read_blob(pos_foo)?.as_slice());
-        assert_eq!(b"bar", file.block_cursor().read_blob(pos_bar)?.as_slice());
+        assert_eq!(
+            b"foo",
+            file.block_cursor().read_blob(pos_foo).await?.as_slice()
+        );
+        assert_eq!(
+            b"bar",
+            file.block_cursor().read_blob(pos_bar).await?.as_slice()
+        );
 
         let mut blobs = Vec::new();
         for i in 0..10000 {
@@ -428,7 +435,7 @@ mod tests {
 
         let cursor = BlockCursor::new(&file);
         for (pos, expected) in blobs {
-            let actual = cursor.read_blob(pos)?;
+            let actual = cursor.read_blob(pos).await?;
             assert_eq!(actual, expected);
         }
 
@@ -437,7 +444,7 @@ mod tests {
         large_data.resize(20000, 0);
         thread_rng().fill_bytes(&mut large_data);
         let pos_large = file.write_blob(&large_data)?;
-        let result = file.block_cursor().read_blob(pos_large)?;
+        let result = file.block_cursor().read_blob(pos_large).await?;
         assert_eq!(result, large_data);
 
         Ok(())

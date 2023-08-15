@@ -869,6 +869,49 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_1["config"]["id"] == env.safekeepers[0].id
 
 
+class DummyConsumer(object):
+    def __call__(self, msg):
+        pass
+
+
+def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
+    """
+    Test START_REPLICATION of uncommitted part specifying leader term. It must
+    error if safekeeper switched to different term.
+    """
+
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_start_replication_term")
+    endpoint = env.endpoints.create_start("test_start_replication_term")
+
+    endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+
+    # learn neon timeline from compute
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+
+    sk = env.safekeepers[0]
+    sk_http_cli = sk.http_client()
+    tli_status = sk_http_cli.timeline_status(tenant_id, timeline_id)
+    timeline_start_lsn = tli_status.timeline_start_lsn
+
+    conn_opts = {
+        "host": "127.0.0.1",
+        "options": f"-c timeline_id={timeline_id} tenant_id={tenant_id}",
+        "port": sk.port.pg,
+        "connection_factory": psycopg2.extras.PhysicalReplicationConnection,
+    }
+    sk_pg_conn = psycopg2.connect(**conn_opts)  # type: ignore
+    with sk_pg_conn.cursor() as cur:
+        # should fail, as first start has term 2
+        cur.start_replication_expert(f"START_REPLICATION {timeline_start_lsn} (term='3')")
+        dummy_consumer = DummyConsumer()
+        with pytest.raises(psycopg2.errors.InternalError_) as excinfo:
+            cur.consume_stream(dummy_consumer)
+        assert "failed to acquire term 3" in str(excinfo.value)
+
+
 # Test auth on WAL service (postgres protocol) ports.
 def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True

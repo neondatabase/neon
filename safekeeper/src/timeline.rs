@@ -237,7 +237,10 @@ impl SharedState {
             commit_lsn: self.sk.inmem.commit_lsn.0,
             remote_consistent_lsn: remote_consistent_lsn.0,
             peer_horizon_lsn: self.sk.inmem.peer_horizon_lsn.0,
-            safekeeper_connstr: conf.listen_pg_addr.clone(),
+            safekeeper_connstr: conf
+                .advertise_pg_addr
+                .to_owned()
+                .unwrap_or(conf.listen_pg_addr.clone()),
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
@@ -494,6 +497,19 @@ impl Timeline {
             reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn;
         }
         false
+    }
+
+    /// Ensure taht current term is t, erroring otherwise, and lock the state.
+    pub async fn acquire_term(&self, t: Term) -> Result<MutexGuard<SharedState>> {
+        let ss = self.write_shared_state().await;
+        if ss.sk.state.acceptor_state.term != t {
+            bail!(
+                "failed to acquire term {}, current term {}",
+                t,
+                ss.sk.state.acceptor_state.term
+            );
+        }
+        Ok(ss)
     }
 
     /// Returns whether s3 offloading is required and sets current status as

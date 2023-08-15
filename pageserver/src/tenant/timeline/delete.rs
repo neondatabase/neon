@@ -219,27 +219,13 @@ async fn delete_local_layer_files(
             }
         };
 
-        let r = if metadata.is_dir() {
-            // There shouldnt be any directories inside timeline dir as of current layout.
+        if metadata.is_dir() {
+            warn!(path=%entry.path().display(), "unexpected directory under timeline dir");
             tokio::fs::remove_dir(entry.path()).await
         } else {
             tokio::fs::remove_file(entry.path()).await
-        };
-
-        if let Err(e) = r {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                warn!(
-                    timeline_dir=?local_timeline_directory,
-                    path=?entry.path().display(),
-                    "got not found err while removing timeline dir, proceeding anyway"
-                );
-                continue;
-            }
-            anyhow::bail!(anyhow::anyhow!(
-                "Failed to remove: {}. Error: {e}",
-                entry.path().display()
-            ));
         }
+        .with_context(|| format!("Failed to remove: {}", entry.path().display()))?;
     }
 
     info!("finished deleting layer files, releasing layer_removal_cs.lock()");
@@ -359,10 +345,11 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip_all, fields(tenant_id=%tenant.tenant_id, %timeline_id))]
+    #[instrument(skip(tenant), fields(tenant_id=%tenant.tenant_id))]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
+        inplace: bool,
     ) -> Result<(), DeleteTimelineError> {
         let (timeline, mut guard) = Self::prepare(tenant, timeline_id)?;
 
@@ -380,7 +367,11 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
+        if inplace {
+            Self::background(guard, tenant.conf, tenant, &timeline).await?
+        } else {
+            Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
+        }
 
         Ok(())
     }
@@ -398,6 +389,8 @@ impl DeleteTimelineFlow {
     }
 
     /// Shortcut to create Timeline in stopping state and spawn deletion task.
+    /// See corresponding parts of [`crate::tenant::delete::DeleteTenantFlow`]
+    #[instrument(skip_all, fields(%timeline_id))]
     pub async fn resume_deletion(
         tenant: Arc<Tenant>,
         timeline_id: TimelineId,
@@ -444,11 +437,15 @@ impl DeleteTimelineFlow {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(%timeline_id))]
     pub async fn cleanup_remaining_timeline_fs_traces(
         tenant: &Tenant,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await
+        let r =
+            cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await;
+        info!("Done");
+        r
     }
 
     fn prepare(
@@ -494,11 +491,17 @@ impl DeleteTimelineFlow {
         // At the end of the operation we're holding the guard and need to lock timelines map
         // to remove the timeline from it.
         // Always if you have two locks that are taken in different order this can result in a deadlock.
-        let delete_lock_guard = DeletionGuard(
-            Arc::clone(&timeline.delete_progress)
-                .try_lock_owned()
-                .map_err(|_| DeleteTimelineError::AlreadyInProgress)?,
-        );
+
+        let delete_progress = Arc::clone(&timeline.delete_progress);
+        let delete_lock_guard = match delete_progress.try_lock_owned() {
+            Ok(guard) => DeletionGuard(guard),
+            Err(_) => {
+                // Unfortunately if lock fails arc is consumed.
+                return Err(DeleteTimelineError::AlreadyInProgress(Arc::clone(
+                    &timeline.delete_progress,
+                )));
+            }
+        };
 
         timeline.set_state(TimelineState::Stopping);
 
@@ -553,9 +556,13 @@ impl DeleteTimelineFlow {
 
         remove_timeline_from_tenant(tenant, timeline.timeline_id, &guard).await?;
 
-        *guard.0 = Self::Finished;
+        *guard = Self::Finished;
 
         Ok(())
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        matches!(self, Self::Finished)
     }
 }
 

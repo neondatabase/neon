@@ -32,6 +32,7 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -432,7 +433,7 @@ class NeonEnvBuilder:
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
         self.ext_remote_storage: Optional[S3Storage] = None
-        self.remote_storage_client: Optional[Any] = None
+        self.remote_storage_client: Optional[S3Client] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
@@ -875,7 +876,14 @@ class NeonEnv:
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
-        return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+
+    def tenant_dir(
+        self,
+        tenant_id: TenantId,
+    ) -> Path:
+        """Get a tenant directory's path based on the repo directory of the test environment"""
+        return self.repo_dir / "tenants" / str(tenant_id)
 
     def get_pageserver_version(self) -> str:
         bin_pageserver = str(self.neon_binpath / "pageserver")
@@ -1486,7 +1494,6 @@ class NeonPageserver(PgProtocol):
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -1519,6 +1526,8 @@ class NeonPageserver(PgProtocol):
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
+            # these can happen during shutdown, but it should not be a reason to fail a test
+            ".*completed, took longer than expected.*",
         ]
 
     def start(
@@ -2818,8 +2827,15 @@ def check_restored_datadir_content(
     endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
@@ -2834,7 +2850,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 
