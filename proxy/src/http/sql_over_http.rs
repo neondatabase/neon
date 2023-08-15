@@ -47,6 +47,7 @@ static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
+static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
@@ -195,7 +196,7 @@ pub async fn handle(
     // Allow connection pooling only if explicitly requested
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
-    // isolation level and read only
+    // isolation level, read only and deferrable
 
     let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
     let txn_isolation_level = match txn_isolation_level_raw {
@@ -209,8 +210,8 @@ pub async fn handle(
         None => None,
     };
 
-    let txn_read_only_raw = headers.get(&TXN_READ_ONLY).cloned();
-    let txn_read_only = txn_read_only_raw.as_ref() == Some(&HEADER_VALUE_TRUE);
+    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+    let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -247,6 +248,9 @@ pub async fn handle(
             if txn_read_only {
                 builder = builder.read_only(true);
             }
+            if txn_deferrable {
+                builder = builder.deferrable(true);
+            }
             let transaction = builder.start().await?;
             for query in batch_query.queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
@@ -260,12 +264,20 @@ pub async fn handle(
             }
             transaction.commit().await?;
             let mut headers = HashMap::default();
-            headers.insert(
-                TXN_READ_ONLY.clone(),
-                HeaderValue::try_from(txn_read_only.to_string())?,
-            );
-            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
-                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            if txn_read_only {
+                headers.insert(
+                    TXN_READ_ONLY.clone(),
+                    HeaderValue::try_from(txn_read_only.to_string())?,
+                );
+            }
+            if txn_deferrable {
+                headers.insert(
+                    TXN_DEFERRABLE.clone(),
+                    HeaderValue::try_from(txn_deferrable.to_string())?,
+                );
+            }
+            if let Some(txn_isolation_level) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
             }
             Ok((json!({ "results": results }), headers))
         }

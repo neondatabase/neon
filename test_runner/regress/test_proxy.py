@@ -265,7 +265,11 @@ def test_sql_over_http_output_options(static_proxy: NeonProxy):
 def test_sql_over_http_batch(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def qq(queries: List[Tuple[str, Optional[List[Any]]]], read_only: bool = False) -> Any:
+    def qq(
+        queries: List[Tuple[str, Optional[List[Any]]]],
+        read_only: bool = False,
+        deferrable: bool = False,
+    ) -> Any:
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
@@ -277,6 +281,7 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
                 "Neon-Connection-String": connstr,
                 "Neon-Batch-Isolation-Level": "Serializable",
                 "Neon-Batch-Read-Only": "true" if read_only else "false",
+                "Neon-Batch-Deferrable": "true" if deferrable else "false",
             },
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
@@ -299,7 +304,8 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
     )
 
     assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
-    assert headers["Neon-Batch-Read-Only"] == "false"
+    assert "Neon-Batch-Read-Only" not in headers
+    assert "Neon-Batch-Deferrable" not in headers
 
     assert result[0]["rows"] == [{"answer": 42}]
     assert result[1]["rows"] == [{"answer": "42"}]
@@ -327,8 +333,10 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
             ("select 42 as answer", None),
         ],
         True,
+        True,
     )
     assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
     assert headers["Neon-Batch-Read-Only"] == "true"
+    assert headers["Neon-Batch-Deferrable"] == "true"
 
     assert result[0]["rows"] == [{"answer": 42}]
