@@ -570,7 +570,7 @@ async fn collect_eviction_candidates(
         tenant_candidates
             .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
-        for (timeline, layer_info) in tenant_candidates.into_iter() {
+        for (timeline, layer_info) in tenant_candidates {
             let file_size = layer_info.file_size();
             let candidate = EvictionCandidate {
                 timeline,
