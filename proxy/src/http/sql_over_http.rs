@@ -194,7 +194,7 @@ pub async fn handle(
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
-    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool = false;
 
     // isolation level, read only and deferrable
 
