@@ -13,7 +13,7 @@ use crate::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
             AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, LayerE, PersistentLayer,
-            PersistentLayerDesc, PersistentLayerKey,
+            PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
         },
         timeline::compare_arced_layers,
     },
@@ -164,10 +164,10 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub(crate) fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
+    pub(crate) fn track_new_image_layers(&mut self, image_layers: &[ResidentLayer]) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
-            Self::insert_historic_layer(Arc::new(layer), &mut updates, &mut self.layer_fmgr);
+            Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }

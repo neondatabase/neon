@@ -93,7 +93,7 @@ use super::config::TenantConf;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
-    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStatsReset, PersistentLayerDesc,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStatsReset, PersistentLayerDesc, ResidentLayer,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -813,13 +813,15 @@ impl Timeline {
 
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
-                let layer_paths_to_upload = self
+                let layers = self
                     .create_image_layers(&partitioning, lsn, false, &image_ctx)
                     .await
                     .map_err(anyhow::Error::from)?;
                 if let Some(remote_client) = &self.remote_client {
-                    for (path, layer_metadata) in layer_paths_to_upload {
-                        remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
+                    for layer in layers {
+                        let m = LayerFileMetadata::new(layer.layer_desc().file_size);
+
+                        remote_client.schedule_layer_file_upload(layer, &m)?;
                     }
                 }
 
@@ -2922,14 +2924,14 @@ impl Timeline {
     }
 
     async fn create_image_layers(
-        &self,
+        self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         force: bool,
         ctx: &RequestContext,
-    ) -> Result<HashMap<Arc<LayerE>, LayerFileMetadata>, PageReconstructError> {
+    ) -> Result<Vec<ResidentLayer>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
-        let mut image_layers: Vec<ImageLayer> = Vec::new();
+        let mut image_layers = Vec::new();
 
         // We need to avoid holes between generated image layers.
         // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
@@ -2992,7 +2994,7 @@ impl Timeline {
                         key = key.next();
                     }
                 }
-                let image_layer = image_layer_writer.finish()?;
+                let image_layer = image_layer_writer.finish(self)?;
                 image_layers.push(image_layer);
             }
         }
@@ -3014,7 +3016,7 @@ impl Timeline {
         // and fsync them all in parallel.
         let all_paths = image_layers
             .iter()
-            .map(|layer| layer.path())
+            .map(|layer| layer.local_path().to_owned())
             .collect::<Vec<_>>();
 
         par_fsync::par_fsync_async(&all_paths)
@@ -3025,34 +3027,23 @@ impl Timeline {
             .await
             .context("fsync of timeline dir")?;
 
-        let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
-
         let mut guard = self.layers.write().await;
-        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
 
         for l in &image_layers {
-            let path = l.filename();
-            let metadata = timeline_path
-                .join(path.file_name())
-                .metadata()
-                .with_context(|| format!("reading metadata of layer file {}", path.file_name()))?;
-
-            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
-
             self.metrics
                 .resident_physical_size_gauge
-                .add(metadata.len());
+                .add(l.layer_desc().file_size);
             let l = Arc::new(l);
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
         }
-        guard.track_new_image_layers(image_layers);
+        guard.track_new_image_layers(&image_layers);
         drop_wlock(guard);
         timer.stop_and_record();
 
-        Ok(layer_paths_to_upload)
+        Ok(image_layers)
     }
 }
 
