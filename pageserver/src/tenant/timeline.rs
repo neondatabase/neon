@@ -1989,20 +1989,9 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for Arc<dyn PersistentLayer> {
+impl TraversalLayerExt for Arc<LayerE> {
     fn traversal_id(&self) -> TraversalId {
-        let timeline_id = self.layer_desc().timeline_id;
-        match self.local_path() {
-            Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", timeline_id)),
-                    "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
-                );
-                format!("{}", local_path.display())
-            }
-            None => {
-                format!("remote {}/{self}", timeline_id)
-            }
-        }
+        self.local_path().display().to_string()
     }
 }
 
@@ -2226,41 +2215,32 @@ impl Timeline {
 
                     if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                         let layer = guard.get_from_desc(&layer);
-                        // If it's a remote layer, download it and retry.
-                        if let Some(remote_layer) =
-                            super::storage_layer::downcast_remote_layer(&layer)
+                        // Get all the data needed to reconstruct the page version from this layer.
+                        // But if we have an older cached page image, no need to go past that.
+                        let lsn_floor = max(cached_lsn + 1, lsn_floor);
+                        result = match layer
+                            .get_value_reconstruct_data(
+                                key,
+                                lsn_floor..cont_lsn,
+                                reconstruct_state,
+                                ctx,
+                            )
+                            .await
                         {
-                            // TODO: push a breadcrumb to 'traversal_path' to record the fact that
-                            // we downloaded / would need to download this layer.
-                            remote_layer // download happens outside the scope of `layers` guard object
-                        } else {
-                            // Get all the data needed to reconstruct the page version from this layer.
-                            // But if we have an older cached page image, no need to go past that.
-                            let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer
-                                .get_value_reconstruct_data(
-                                    key,
-                                    lsn_floor..cont_lsn,
-                                    reconstruct_state,
-                                    ctx,
-                                )
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(e) => return Err(PageReconstructError::from(e)),
-                            };
-                            cont_lsn = lsn_floor;
-                            *read_count += 1;
-                            traversal_path.push((
-                                result,
-                                cont_lsn,
-                                Box::new({
-                                    let layer = Arc::clone(&layer);
-                                    move || layer.traversal_id()
-                                }),
-                            ));
-                            continue 'outer;
-                        }
+                            Ok(result) => result,
+                            Err(e) => return Err(PageReconstructError::from(e)),
+                        };
+                        cont_lsn = lsn_floor;
+                        *read_count += 1;
+                        traversal_path.push((
+                            result,
+                            cont_lsn,
+                            Box::new({
+                                let layer = Arc::clone(&layer);
+                                move || layer.traversal_id()
+                            }),
+                        ));
+                        continue 'outer;
                     } else if timeline.ancestor_timeline.is_some() {
                         // Nothing on this timeline. Traverse to parent
                         result = ValueReconstructResult::Continue;
@@ -2272,54 +2252,6 @@ impl Timeline {
                         continue 'outer;
                     }
                 };
-                // Download the remote_layer and replace it in the layer map.
-                // For that, we need to release the mutex. Otherwise, we'd deadlock.
-                //
-                // The control flow is so weird here because `drop(layers)` inside
-                // the if stmt above is not enough for current rustc: it requires
-                // that the layers lock guard is not in scope across the download
-                // await point.
-                let remote_layer_as_persistent: Arc<dyn PersistentLayer> =
-                    Arc::clone(&remote_layer) as Arc<dyn PersistentLayer>;
-                let id = remote_layer_as_persistent.traversal_id();
-                info!(
-                    "need remote layer {} for task kind {:?}",
-                    id,
-                    ctx.task_kind()
-                );
-
-                // The next layer doesn't exist locally. Need to download it.
-                // (The control flow is a bit complicated here because we must drop the 'layers'
-                // lock before awaiting on the Future.)
-                match (
-                    ctx.download_behavior(),
-                    self.conf.ondemand_download_behavior_treat_error_as_warn,
-                ) {
-                    (DownloadBehavior::Download, _) => {
-                        info!(
-                            "on-demand downloading remote layer {id} for task kind {:?}",
-                            ctx.task_kind()
-                        );
-                        timeline.download_remote_layer(remote_layer).await?;
-                        continue 'layer_map_search;
-                    }
-                    (DownloadBehavior::Warn, _) | (DownloadBehavior::Error, true) => {
-                        warn!(
-                            "unexpectedly on-demand downloading remote layer {} for task kind {:?}",
-                            id,
-                            ctx.task_kind()
-                        );
-                        UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
-                        timeline.download_remote_layer(remote_layer).await?;
-                        continue 'layer_map_search;
-                    }
-                    (DownloadBehavior::Error, false) => {
-                        return Err(PageReconstructError::NeedsDownload(
-                            TenantTimelineId::new(self.tenant_id, self.timeline_id),
-                            remote_layer.filename(),
-                        ))
-                    }
-                }
             }
         }
     }
