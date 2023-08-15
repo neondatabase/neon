@@ -1053,6 +1053,12 @@ impl std::fmt::Display for ResidentLayer {
     }
 }
 
+impl std::fmt::Debug for ResidentLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.owner)
+    }
+}
+
 impl ResidentLayer {
     pub(crate) fn local_path(&self) -> &std::path::Path {
         &self.owner.path

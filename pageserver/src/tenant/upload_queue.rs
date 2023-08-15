@@ -1,6 +1,7 @@
 use crate::metrics::RemoteOpFileKind;
 
 use super::storage_layer::LayerFileName;
+use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -210,7 +211,7 @@ pub(crate) struct Delete {
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
@@ -225,13 +226,8 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
-                write!(
-                    f,
-                    "UploadLayer({}, size={:?})",
-                    path.file_name(),
-                    metadata.file_size()
-                )
+            UploadOp::UploadLayer(layer, metadata) => {
+                write!(f, "UploadLayer({}, size={:?})", layer, metadata.file_size())
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
             UploadOp::Delete(delete) => write!(
