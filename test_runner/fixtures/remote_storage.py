@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 from fixtures.log_helper import log
+from fixtures.types import TenantId, TimelineId
+
+TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 
 
 class MockS3Server:
@@ -88,6 +91,16 @@ def available_s3_storages() -> List[RemoteStorageKind]:
 @dataclass
 class LocalFsStorage:
     root: Path
+
+    def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+        return self.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+
+    def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+        return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME
+
+    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
+        with self.index_path(tenant_id, timeline_id).open("r") as f:
+            return json.load(f)
 
 
 @dataclass
