@@ -1346,7 +1346,6 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::{LayerE, PersistentLayerDesc},
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
