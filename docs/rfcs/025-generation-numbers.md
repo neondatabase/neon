@@ -426,6 +426,104 @@ This "downward-facing" or "south-facing" API should be kept distinct from the
 general control plane API: the pageserver should only have access to the endpoints
 it needs for synchronization, and not the broader control plane functionality.
 
+#### Timeline/Branch creation
+
+All of the previous arguments for safety have described operations within
+a timeline, where we may describe a sequence that includes updates to
+index_part.json, and where reads and writes are coming from a postgres
+endpoint (writes via the safekeeper).
+
+Creating or destroying timeline is a bit different, because writes
+are coming from the control plane.
+
+We must be safe against scenarios such as:
+
+- A tenant is attached to pageserver B while pageserver A is
+  in the middle of servicing an RPC from the control plane to
+  create or delete a tenant.
+- A pageserver A has been sent a timeline creation request
+  but becomes unresponsive. The tenant is attached to a
+  different pageserver B, and the timeline creation request
+  is sent there too.
+
+To properly complete a timeline create/delete request, we must
+be sure _after_ the pageserver write to remote storage, that its
+generation number is still up to date:
+
+- The pageserver can do this by calling into the control plane
+  before responding to a request.
+- Alternatively, the pageserver can include its generation in
+  the response, and let the control plane validate that this
+  generation is still current after receiving the response.
+
+If some very slow node tries to do a timeline creation _after_
+a more recent generation node has already created the timeline
+and written some data into it, that must not cause harm. This
+is provided in timeline creations by the way all the objects
+within the timeline's remote path include a generation ID:
+a slow node in an old generation that attempts to "create" a timeline
+that already exists will just emit an index_part.json with
+an old generation suffix.
+
+Timeline IDs are never reused, so we don't have
+to worry about the case of create/delete/create cycles.
+
+**During timeline/tenant deletion, the control plane must not regard an operation
+as complete when it receives a `202 Accepted` response**, because the node
+that sent that response might become permanently unavailable. The control
+plane must wait for the deletion to be truly complete (e.g. by polling
+for 404 while the tenant is still attached to the same pageserver), and
+handle the case where the pageserver becomes unavailable, either by waiting
+for a replacement with the same node_id, or by re-attaching the tenant elsewhere.
+
+**Sending a tenant/timeline deletion to a stale pageserver will still result
+in deletion** -- the control plane must persist its intent to delete
+a timeline/tenant before issuing any RPCs, and then once it starts, it must
+keep retrying until the tenant/timeline is gone. This is already handled
+by using a persistent `Operation` record that is retried indefinitely.
+
+Tenant/timeline deletion operations don't necessarily have to go through
+the deletion queue, as they are not subject to generation gating: once a
+delete is issued by the control plane, it is a promise that the
+control plane will keep trying until the deletion is done, so even stale
+pageservers are permitted to go ahead and delete the objects. However,
+using the deletion queue will still make sense in practice so that the
+pageserver can use the same logic for coalescing deletions in DeleteObjects
+requests.
+
+Timeline deletion may result in a special kind of object leak, where
+the latest generation attachment completes a deletion (including erasing
+all objects in the timeline path), but some slow/partitioned node is
+writing into the timeline path with a stale generation number. This would
+not be caught by any per-timeline scrubbing (see [scrubbing](#cleaning-up-orphan-objects-scrubbing)), since scrubbing happens on the
+attached pageserver, and once the timeline is deleted it isn't attached anywhere.
+This scenario should be pretty rare, and the control plane can make it even
+rarer by ensuring that if a tenant is in a multi-attached state (e.g. during
+migration), we wait for that to complete before processing the deletion. Beyond
+that, we may implement some other top-level scrub of timelines in
+an external tool, to identify any tenant/timeline paths that are not found
+in the control plane database.
+
+Examples:
+
+- Deletion, node restarts partway through:
+  - By the time we returned 204, we have written a remote delete marker
+  - Any subsequent incarnation of the same node_id will see the remote
+    delete marker and continue to process the deletion
+  - We only require that the control plane does not change the tenant's
+    attachment while waiting for the deletion.
+  - If the original pageserver is lost permanently and no replacement
+    with the same node_id is available, then the control plane must recover
+    by re-attaching the tenant to a different node.
+- Creation, node becomes unresponsive partway through.
+  - Control plane will see HTTP request timeout, keep re-issuing
+    request to whoever is the latest attachment point for the tenant
+    until it succeeds.
+  - Stale nodes may be trying to execute timeline creation: they will
+    write out index_part.json files with stale node generation or
+    stale attachment generation: these will be eventually cleaned up
+    by the same mechanism as other old indices.
+
 ## Implementation Part 2: Optimizations
 
 ### Persistent deletion queue
