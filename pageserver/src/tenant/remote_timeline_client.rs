@@ -1486,7 +1486,7 @@ mod tests {
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline,
+            timeline: _timeline,
             tenant_ctx: _tenant_ctx,
             remote_fs_dir,
             client,
@@ -1637,7 +1637,7 @@ mod tests {
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline,
+            timeline: _timeline,
             client,
             ..
         } = TestSetup::new("metrics").await.unwrap();
