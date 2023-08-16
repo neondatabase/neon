@@ -175,7 +175,7 @@ impl LayerManager {
     /// Flush a frozen layer and add the written delta layer to the layer map.
     pub(crate) fn finish_flush_l0_layer(
         &mut self,
-        delta_layer: Option<DeltaLayer>,
+        delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
     ) {
         let l = self.layer_map.frozen_layers.pop_front();
@@ -187,7 +187,11 @@ impl LayerManager {
         assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
 
         if let Some(delta_layer) = delta_layer {
-            Self::insert_historic_layer(Arc::new(delta_layer), &mut updates, &mut self.layer_fmgr);
+            Self::insert_historic_layer(
+                delta_layer.as_ref().clone(),
+                &mut updates,
+                &mut self.layer_fmgr,
+            );
         }
         updates.flush();
     }
