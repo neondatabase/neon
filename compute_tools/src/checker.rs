@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Ok, Result};
 use postgres::Client;
 use tokio_postgres::NoTls;
-use tracing::{error, warn, instrument};
+use tracing::{error, instrument, warn};
 
 use crate::compute::ComputeNode;
 
