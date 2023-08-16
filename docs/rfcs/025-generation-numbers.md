@@ -434,35 +434,33 @@ deletions over long timescale has side benefits:
   to objects eliminated in a recent compaction, but can still service reads
   without refreshing metadata as long as the old objects deletion is delayed.
 
-### Optional: Synchronizing attachments on pageserver startup
+### Synchronizing attachments on pageserver startup
 
 For correctness, it is not necessary for a node to synchronize its attachments on startup: it
 may continue to ingest+serve tenants on stale attachment generation numbers harmlessly.
 
-As an optimization, the control plane should endeavor to help the pageserver avoid doing
-unnecessary ingestion work and writes to S3: the control plane could maintain a "dirty" flag
-for pageservers that tracks whether any of their attachments were assigned to a new pageserver without explicitly
-detaching from the old one: this could be used to pass an advisory state to the pageserver when issuing
-its generation number on startup, with one of the following states:
+As an optimization, we may avoid doing spurious S3 writes within a stale generation,
+by using the same generation-checking API that is used for deletions. On startup,
+concurrently with loading state from disk, the pageserver may issue RPCs to
+the control plane to discover if any of its attachments are stale.
 
-- Clean: no attachments were changed, continue operating.
-- Dirty: some attachments were changed, the pageserver is advised to check with the control plane
-  that all attachments are still current before proceeding.
-- Empty: all attachments were re-attached elsewhere, detach everything.
+If an attachment is stale, then the pageserver will not do any S3 writes. However,
+the attachment will still ingest the WAL and serve reads: this is necessary
+for high availability, as some endpoint might still be using this
+node for reads. To avoid overwhelming local disk with data that cannot be
+offloaded to remote storage, we may impose some time/space threshold on
+the attachment when operating in this mode: when exceeded, the attachment
+would go into Broken state. It is the responsibility of the control plane
+to ensure that endpoints are using the latest attachment location before this
+happens.
 
-The Clean case would usually happen when a pageserver is simply restarted without any other actions:
-if it restarts quickly, it will come back up before any HA mechanism has moved attachments elsewhere.
-
-The Empty case would usually happen when a pageserver comes back up after a failure, where the
-control plane has responded to the failure by moving all its attachments away.
-
-The Dirty case would happen when the pageserver comes back up partway through having its
-workload migrated away by the control plane.
-
-As mentioned above, all this is an optimization rather than a requirement for safety. Newer attachments
-will never be interfered with by stale attachments, because the stale attachments write with a different
-key suffix, and because the stale pageserver will check its attachments' generation number before processing
-deletions for those attachments.
+In principle we could avoid the need to exchange O(attachment_count) information
+at startup by having the control plane keep track of whether any changes
+happened that would affect the pageserver's attachments while it was unavailable,
+but this would impose complexity on the control plane code to track such
+dirty/clean state. It is simpler to just check all the attachments, and
+relatively inexpensive since validating generation numbers is a read-only
+request to the control plane.
 
 ### Optional: Cleaning up orphan objects
 
