@@ -205,7 +205,7 @@ impl BlobWriter for EphemeralFile {
             ephemeral_file: &'a mut EphemeralFile,
             blknum: u32,
             off: usize,
-            buf: Option<MemoizedPageWriteGuard>,
+            buf: MemoizedPageWriteGuard,
         }
         struct MemoizedPageWriteGuard {
             guard: page_cache::PageWriteGuard<'static>,
@@ -217,10 +217,10 @@ impl BlobWriter for EphemeralFile {
                 Ok(Writer {
                     blknum,
                     off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
-                    buf: Some(MemoizedPageWriteGuard {
+                    buf: MemoizedPageWriteGuard {
                         guard: ephemeral_file.get_buf_for_write(blknum)?,
                         blknum,
-                    }),
+                    },
                     ephemeral_file,
                 })
             }
@@ -228,20 +228,12 @@ impl BlobWriter for EphemeralFile {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     {
-                        let head_page = match &mut self.buf {
-                            Some(MemoizedPageWriteGuard { blknum, guard })
-                                if *blknum == self.blknum =>
-                            {
-                                guard
-                            }
-                            _ => {
-                                let buf = self.ephemeral_file.get_buf_for_write(self.blknum)?;
-                                self.buf = Some(MemoizedPageWriteGuard {
-                                    guard: buf,
-                                    blknum: self.blknum,
-                                });
-                                &mut self.buf.as_mut().unwrap().guard
-                            }
+                        let head_page = if self.buf.blknum == self.blknum {
+                            &mut self.buf.guard
+                        } else {
+                            self.buf.guard = self.ephemeral_file.get_buf_for_write(self.blknum)?;
+                            self.buf.blknum = self.blknum;
+                            &mut self.buf.guard
                         };
                         let dst_remaining = &mut head_page[self.off..];
                         let n = min(dst_remaining.len(), src_remaining.len());
