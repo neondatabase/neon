@@ -1486,9 +1486,9 @@ mod tests {
 
         let TestSetup {
             harness,
-            tenant,
+            tenant: _tenant,
             timeline,
-            tenant_ctx,
+            tenant_ctx: _tenant_ctx,
             remote_fs_dir,
             client,
         } = TestSetup::new("upload_scheduling").await.unwrap();
@@ -1504,11 +1504,6 @@ mod tests {
         let metadata = dummy_metadata(Lsn(0x10));
         client
             .init_upload_queue_for_empty_remote(&metadata)
-            .unwrap();
-
-        let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x100), 14, &tenant_ctx)
-            .await
             .unwrap();
 
         // Create a couple of dummy files,  schedule upload for them
@@ -1642,7 +1637,7 @@ mod tests {
 
         let TestSetup {
             harness,
-            tenant,
+            tenant: _tenant,
             timeline,
             client,
             ..
