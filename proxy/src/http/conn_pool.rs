@@ -2,8 +2,11 @@ use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use pbkdf2::{
+    password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
+    Params, Pbkdf2,
+};
 use pq_proto::StartupMessageParams;
-use std::collections::hash_map;
 use std::fmt;
 use std::sync::atomic::{self, AtomicUsize};
 use std::{collections::HashMap, sync::Arc};
@@ -56,9 +59,20 @@ pub struct EndpointConnPool {
     total_conns: usize,
 }
 
+/// This is cheap and not hugely secure.
+/// But probably good enough for in memory only hashes.
+///
+/// Still takes 3.5ms to hash on my hardware.
+/// We don't want to ruin the latency improvements of using the pool by making password verification take too long
+const PARAMS: Params = Params {
+    rounds: 10_000,
+    output_length: 32,
+};
+
+#[derive(Default)]
 pub struct DbUserConnPool {
     conns: Vec<ConnPoolEntry>,
-    password_hash: String,
+    password_hash: Option<PasswordHashString>,
 }
 
 pub struct GlobalConnPool {
@@ -109,7 +123,7 @@ impl GlobalConnPool {
                 let pool = pool.read();
                 if let Some(pool_entries) = pool.pools.get(&conn_info.db_and_user()) {
                     if !pool_entries.conns.is_empty() {
-                        hash = Some(pool_entries.password_hash.clone());
+                        hash = pool_entries.password_hash.clone();
                     }
                 }
             }
@@ -117,10 +131,10 @@ impl GlobalConnPool {
             // a connection exists in the pool, verify the password hash
             if let Some(hash) = hash {
                 let pw = conn_info.password.clone();
-                let validate =
-                    tokio::task::spawn_blocking(move || password_auth::verify_password(pw, &hash))
-                        .await
-                        .expect("verify_password should not panic");
+                let validate = tokio::task::spawn_blocking(move || {
+                    Pbkdf2.verify_password(pw.as_bytes(), &hash.password_hash())
+                })
+                .await?;
 
                 // if the hash is invalid, don't error
                 // we will continue with the regular connection flow
@@ -158,28 +172,26 @@ impl GlobalConnPool {
                 let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
                 let mut pool = pool.write();
                 if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {
-                    entry.password_hash.clear();
+                    entry.password_hash = None;
                 }
             }
             // new password is valid and we should insert/update it
             Ok(_) if !force_new && !hash_valid => {
                 let pw = conn_info.password.clone();
-                let new_hash =
-                    tokio::task::spawn_blocking(move || password_auth::generate_hash(pw))
-                        .await
-                        .unwrap();
+                let new_hash = tokio::task::spawn_blocking(move || {
+                    let salt = SaltString::generate(rand::rngs::OsRng);
+                    Pbkdf2
+                        .hash_password_customized(pw.as_bytes(), None, None, PARAMS, &salt)
+                        .map(|s| s.serialize())
+                })
+                .await??;
 
                 let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
                 let mut pool = pool.write();
-                match pool.pools.entry(conn_info.db_and_user()) {
-                    hash_map::Entry::Occupied(mut o) => o.get_mut().password_hash = new_hash,
-                    hash_map::Entry::Vacant(v) => {
-                        v.insert(DbUserConnPool {
-                            conns: Vec::new(),
-                            password_hash: new_hash,
-                        });
-                    }
-                }
+                pool.pools
+                    .entry(conn_info.db_and_user())
+                    .or_default()
+                    .password_hash = Some(new_hash);
             }
             _ => {}
         }

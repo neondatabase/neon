@@ -30,8 +30,7 @@ metrics.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
-password-auth.workspace = true
-pbkdf2.workspace = true
+pbkdf2 = { workspace = true, features = ["simple", "std"] }
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true
