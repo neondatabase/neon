@@ -573,17 +573,33 @@ impl PageServerConf {
     }
 
     pub fn remote_deletion_list_path(&self, sequence: u64) -> RemotePath {
-        RemotePath::new(
-            &self
-                .remote_deletion_node_prefix()
-                .join(format!("{:016x}.list", sequence)),
-        )
+        // Encode a version in the key, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        // Placeholder, pending implementation of generation numbers
+        const GENERATION: u32 = 0;
+
+        RemotePath::new(&self.remote_deletion_node_prefix().join(format!(
+            "{sequence:016x}-{GENERATION:08x}-{VERSION:02x}.list"
+        )))
         .expect("This should always be convertible, it is relative")
     }
 
     pub fn remote_deletion_header_path(&self) -> RemotePath {
-        RemotePath::new(&self.remote_deletion_node_prefix().join("header"))
-            .expect("This should always be convertible, it is relative")
+        // Encode a version in the key, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        // Placeholder, pending implementation of generation numbers
+        const GENERATION: u32 = 0;
+
+        RemotePath::new(
+            &self
+                .remote_deletion_node_prefix()
+                .join(format!("header-{GENERATION:08x}-{VERSION:02x}")),
+        )
+        .expect("This should always be convertible, it is relative")
     }
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {

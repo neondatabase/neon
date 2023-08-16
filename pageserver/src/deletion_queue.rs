@@ -598,7 +598,6 @@ impl FrontendQueueWorker {
         .await?;
 
         debug!("Loaded {} keys in deletion prefix {}", lists.len(), prefix);
-
         let list_name_pattern =
             Regex::new("([a-zA-Z0-9]{16})-([a-zA-Z0-9]{8})-([a-zA-Z0-9]{2}).list").unwrap();
 
@@ -629,8 +628,6 @@ impl FrontendQueueWorker {
                 warn!("Unexpected key in deletion queue: {basename}");
                 continue;
             };
-
-            info!("seq_part {seq_part}");
 
             let seq: u64 = match u64::from_str_radix(seq_part, 16) {
                 Ok(s) => s,
