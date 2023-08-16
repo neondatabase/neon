@@ -201,7 +201,6 @@ impl LayerManager {
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<LayerE>>,
         compact_to: &[ResidentLayer],
-        metrics: &TimelineMetrics,
     ) -> Result<()> {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
@@ -215,13 +214,7 @@ impl LayerManager {
             // NB: the layer file identified by descriptor `l` is guaranteed to be present
             // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
             // time, even though we dropped `Timeline::layers` inbetween.
-            Self::delete_historic_layer(
-                &layer_removal_cs,
-                l,
-                &mut updates,
-                metrics,
-                &mut self.layer_fmgr,
-            )?;
+            Self::delete_historic_layer(&layer_removal_cs, l, &mut updates, &mut self.layer_fmgr)?;
         }
         updates.flush();
         Ok(())
@@ -232,7 +225,6 @@ impl LayerManager {
         &mut self,
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         gc_layers: Vec<Arc<LayerE>>,
-        metrics: &TimelineMetrics,
     ) -> Result<ApplyGcResultGuard> {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
@@ -240,7 +232,6 @@ impl LayerManager {
                 layer_removal_cs,
                 doomed_layer,
                 &mut updates,
-                metrics,
                 &mut self.layer_fmgr,
             )?; // FIXME: schedule succeeded deletions in timeline.rs `gc_timeline` instead of in batch?
         }
@@ -264,8 +255,6 @@ impl LayerManager {
         _layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<LayerE>,
         updates: &mut BatchedUpdates<'_>,
-        // FIXME: why unused?
-        metrics: &TimelineMetrics,
         mapping: &mut LayerFileManager<LayerE>,
     ) -> anyhow::Result<()> {
         let desc = layer.layer_desc();
