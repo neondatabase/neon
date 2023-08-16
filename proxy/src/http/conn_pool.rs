@@ -168,7 +168,9 @@ impl GlobalConnPool {
         match &new_client {
             // clear the hash. it's no longer valid
             // TODO: update tokio-postgres fork to allow access to this error kind directly
-            Err(err) if hash_valid && err.to_string().contains("authentication error") => {
+            Err(err)
+                if hash_valid && err.to_string().contains("password authentication failed") =>
+            {
                 let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
                 let mut pool = pool.write();
                 if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {

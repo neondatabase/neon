@@ -343,11 +343,11 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
 
 
 def test_sql_over_http_pool(static_proxy: NeonProxy):
-    static_proxy.safe_psql("create role http with login password 'http' superuser")
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
-    def q(sql: str, pw: str, params: Optional[List[Any]] = None) -> Any:
+    def q(status: int, sql: str, pw: str, params: Optional[List[Any]] = None) -> Any:
         params = params or []
-        connstr = f"postgresql://http:{pw}@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        connstr = f"postgresql://http_auth:{pw}@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
             data=json.dumps({"query": sql, "params": params}),
@@ -358,21 +358,29 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
             },
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
-        assert response.status_code == 200
+        assert response.status_code == status
         return response.json()
 
-    pid1 = q("SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http")["rows"][0]["pid"]
+    pid1 = q(200, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http")["rows"][0]["pid"]
 
     # query should be on the same connection
-    rows = q("SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http")["rows"]
+    rows = q(200, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http")["rows"]
     assert rows == [{"pid": pid1}]
 
-    static_proxy.safe_psql("alter user http with password 'http2'")
+    # incorrect password should not work
+    res = q(400, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "foobar")
+    assert "password authentication failed for user" in res["message"]
+
+    static_proxy.safe_psql("alter user http_auth with password 'http2'")
 
     # after password change, should open a new connection to verify it
-    pid2 = q("SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http2")["rows"][0]["pid"]
+    pid2 = q(200, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http2")["rows"][0]["pid"]
     assert pid1 != pid2
 
     # query should be on an existing connection
-    pid = q("SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http2")["rows"][0]["pid"]
+    pid = q(200, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http2")["rows"][0]["pid"]
     assert pid in [pid1, pid2]
+
+    # old password should not work
+    res = q(400, "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "http")
+    assert "password authentication failed for user" in res["message"]
