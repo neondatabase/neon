@@ -8,7 +8,7 @@ pub fn write_blob(c: &mut Criterion) {
         let mut old = old::EphemeralFile::default();
         let srcbuf = [0u8; 1];
         let page_cache = FakePageCache::new();
-        b.iter(|| old.write_blob(&srcbuf, page_cache))
+        b.iter(|| old.write_blob(&srcbuf, page_cache).unwrap())
     });
     group.bench_function("pr-5004-writer", |b| {
         let srcbuf = [0u8; 1];
@@ -16,12 +16,12 @@ pub fn write_blob(c: &mut Criterion) {
             size: 0,
             page_cache: FakePageCache::new(),
         };
-        b.iter(|| new.write_blob(&srcbuf))
+        b.iter(|| new.write_blob(&srcbuf).unwrap())
     });
     group.bench_function("pr-4994-nopagecache", |b| {
         let mut new = pr4994::EphemeralFile::default();
         let srcbuf = [0u8; 1];
-        b.iter(|| new.write_blob(&srcbuf))
+        b.iter(|| new.write_blob(&srcbuf).unwrap())
     });
 }
 
