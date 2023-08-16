@@ -3792,14 +3792,10 @@ impl Timeline {
                 layer_names_to_delete.push(doomed_layer.filename());
                 result.layers_removed += 1;
             }
-            let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers, &self.metrics)?;
+            let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers)?;
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");
-            }
-
-            if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
             }
 
             apply.flush();
