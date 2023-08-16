@@ -622,7 +622,7 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(
+    pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -2807,7 +2807,7 @@ struct CompactLevel0Phase1Result {
 
 /// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
-enum CompactionError {
+pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
