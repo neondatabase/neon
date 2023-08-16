@@ -12,12 +12,11 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
+use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
-
-use std::os::unix::fs::FileExt;
 
 ///
 /// This is the global cache of file descriptors (File objects).
@@ -124,75 +123,6 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
         rest.parse::<u32>().is_ok()
     } else {
         false
-    }
-}
-
-impl FileExt for EphemeralFile {
-    fn read_at(&self, dstbuf: &mut [u8], offset: u64) -> Result<usize, io::Error> {
-        // Look up the right page
-        let blkno = (offset / PAGE_SZ as u64) as u32;
-        let off = offset as usize % PAGE_SZ;
-        let len = min(PAGE_SZ - off, dstbuf.len());
-
-        let read_guard;
-        let mut write_guard;
-
-        let cache = page_cache::get();
-        let buf = match cache
-            .read_ephemeral_buf(self.file_id, blkno)
-            .map_err(|e| to_io_error(e, "Failed to read ephemeral buf"))?
-        {
-            ReadBufResult::Found(guard) => {
-                read_guard = guard;
-                read_guard.as_ref()
-            }
-            ReadBufResult::NotFound(guard) => {
-                // Read the page from disk into the buffer
-                write_guard = guard;
-                self.fill_buffer(write_guard.deref_mut(), blkno)?;
-                write_guard.mark_valid();
-
-                // And then fall through to read the requested slice from the
-                // buffer.
-                write_guard.as_ref()
-            }
-        };
-
-        dstbuf[0..len].copy_from_slice(&buf[off..(off + len)]);
-        Ok(len)
-    }
-
-    fn write_at(&self, srcbuf: &[u8], offset: u64) -> Result<usize, io::Error> {
-        // Look up the right page
-        let blkno = (offset / PAGE_SZ as u64) as u32;
-        let off = offset as usize % PAGE_SZ;
-        let len = min(PAGE_SZ - off, srcbuf.len());
-
-        let mut write_guard;
-        let cache = page_cache::get();
-        let buf = match cache
-            .write_ephemeral_buf(self.file_id, blkno)
-            .map_err(|e| to_io_error(e, "Failed to write ephemeral buf"))?
-        {
-            WriteBufResult::Found(guard) => {
-                write_guard = guard;
-                write_guard.deref_mut()
-            }
-            WriteBufResult::NotFound(guard) => {
-                // Read the page from disk into the buffer
-                // TODO: if we're overwriting the whole page, no need to read it in first
-                write_guard = guard;
-                self.fill_buffer(write_guard.deref_mut(), blkno)?;
-                write_guard.mark_valid();
-
-                // And then fall through to modify it.
-                write_guard.deref_mut()
-            }
-        };
-
-        buf[off..(off + len)].copy_from_slice(&srcbuf[0..len]);
-        write_guard.mark_dirty();
-        Ok(len)
     }
 }
 
@@ -334,7 +264,7 @@ mod tests {
     use super::*;
     use crate::tenant::blob_io::BlobWriter;
     use crate::tenant::block_io::BlockCursor;
-    use rand::{seq::SliceRandom, thread_rng, RngCore};
+    use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
 
@@ -353,50 +283,6 @@ mod tests {
         fs::create_dir_all(conf.timeline_path(&tenant_id, &timeline_id))?;
 
         Ok((conf, tenant_id, timeline_id))
-    }
-
-    // Helper function to slurp contents of a file, starting at the current position,
-    // into a string
-    fn read_string(efile: &EphemeralFile, offset: u64, len: usize) -> Result<String, io::Error> {
-        let mut buf = Vec::new();
-        buf.resize(len, 0u8);
-
-        efile.read_exact_at(&mut buf, offset)?;
-
-        Ok(String::from_utf8_lossy(&buf)
-            .trim_end_matches('\0')
-            .to_string())
-    }
-
-    #[test]
-    fn test_ephemeral_files() -> Result<(), io::Error> {
-        let (conf, tenant_id, timeline_id) = harness("ephemeral_files")?;
-
-        let file_a = EphemeralFile::create(conf, tenant_id, timeline_id)?;
-
-        file_a.write_all_at(b"foo", 0)?;
-        assert_eq!("foo", read_string(&file_a, 0, 20)?);
-
-        file_a.write_all_at(b"bar", 3)?;
-        assert_eq!("foobar", read_string(&file_a, 0, 20)?);
-
-        // Open a lot of files, enough to cause some page evictions.
-        let mut efiles = Vec::new();
-        for fileno in 0..100 {
-            let efile = EphemeralFile::create(conf, tenant_id, timeline_id)?;
-            efile.write_all_at(format!("file {}", fileno).as_bytes(), 0)?;
-            assert_eq!(format!("file {}", fileno), read_string(&efile, 0, 10)?);
-            efiles.push((fileno, efile));
-        }
-
-        // Check that all the files can still be read from. Use them in random order for
-        // good measure.
-        efiles.as_mut_slice().shuffle(&mut thread_rng());
-        for (fileno, efile) in efiles.iter_mut() {
-            assert_eq!(format!("file {}", fileno), read_string(efile, 0, 10)?);
-        }
-
-        Ok(())
     }
 
     #[tokio::test]
