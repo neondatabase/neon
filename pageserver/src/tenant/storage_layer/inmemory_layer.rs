@@ -29,7 +29,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, Layer, ResidentLayer};
+use super::{DeltaLayerWriter, Layer, ResidentLayer};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
