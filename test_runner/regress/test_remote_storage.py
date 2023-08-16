@@ -269,7 +269,7 @@ def test_remote_storage_upload_queue_retries(
                 f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
+               FROM generate_series(1, 20000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
                """,
@@ -370,7 +370,7 @@ def test_remote_storage_upload_queue_retries(
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
@@ -418,7 +418,7 @@ def test_remote_timeline_client_calls_started_metric(
                 f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
+               FROM generate_series(1, 20000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
                """,
@@ -509,7 +509,7 @@ def test_remote_timeline_client_calls_started_metric(
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
     # ensure that we updated the calls_started download metric
     fetch_calls_started()
