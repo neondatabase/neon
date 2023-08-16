@@ -206,24 +206,22 @@ mod pr5004 {
                     let mut src_remaining = src;
                     while !src_remaining.is_empty() {
                         {
-                            let head_page = loop {
-                                match &mut self.buf {
-                                    Some(MemoizedPageWriteGuard { blknum, guard })
-                                        if *blknum == self.blknum =>
-                                    {
-                                        break guard;
-                                    }
-                                    _ => {
-                                        let buf = self
-                                            .ephemeral_file
-                                            .page_cache
-                                            .get_buf_for_write(self.blknum)?;
-                                        self.buf = Some(MemoizedPageWriteGuard {
-                                            guard: buf,
-                                            blknum: self.blknum,
-                                        });
-                                        continue;
-                                    }
+                            let head_page = match &mut self.buf {
+                                Some(MemoizedPageWriteGuard { blknum, guard })
+                                    if *blknum == self.blknum =>
+                                {
+                                    guard
+                                }
+                                _ => {
+                                    let buf = self
+                                        .ephemeral_file
+                                        .page_cache
+                                        .get_buf_for_write(self.blknum)?;
+                                    self.buf = Some(MemoizedPageWriteGuard {
+                                        guard: buf,
+                                        blknum: self.blknum,
+                                    });
+                                    &mut self.buf.as_mut().unwrap().guard
                                 }
                             };
                             let dst_remaining = &mut head_page[self.off..];
