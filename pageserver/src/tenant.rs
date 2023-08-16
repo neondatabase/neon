@@ -133,7 +133,7 @@ pub(crate) mod timeline;
 pub mod size;
 
 pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
-pub use timeline::{
+pub(crate) use timeline::{
     LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
 };
 
