@@ -133,9 +133,7 @@ pub(crate) mod timeline;
 pub mod size;
 
 pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
-pub(crate) use timeline::{
-    LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
-};
+pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 // re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
