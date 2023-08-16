@@ -13,7 +13,7 @@ use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-    LayerResidenceStatus, TimelineState,
+    LayerResidenceEventReason, LayerResidenceStatus, TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
@@ -2782,10 +2782,10 @@ impl Timeline {
         let mut guard = self.layers.write().await;
 
         for l in &image_layers {
+            // FIXME: these should be in guard
             self.metrics
                 .resident_physical_size_gauge
                 .add(l.layer_desc().file_size);
-            let l = Arc::new(l);
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,

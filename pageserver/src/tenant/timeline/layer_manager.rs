@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
+use pageserver_api::models::{LayerResidenceEventReason, LayerResidenceStatus};
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
@@ -167,6 +168,10 @@ impl LayerManager {
     pub(crate) fn track_new_image_layers(&mut self, image_layers: &[ResidentLayer]) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
+            layer.access_stats().record_residence_event(
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::LayerCreate,
+            );
             Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
@@ -178,20 +183,24 @@ impl LayerManager {
         delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
     ) {
-        let l = self.layer_map.frozen_layers.pop_front();
+        let inmem = self
+            .layer_map
+            .frozen_layers
+            .pop_front()
+            .expect("there must be a inmem layer to flush");
         let mut updates = self.layer_map.batch_update();
 
-        // Only one thread may call this function at a time (for this
-        // timeline). If two threads tried to flush the same frozen
+        // Only one task may call this function at a time (for this
+        // timeline). If two tasks tried to flush the same frozen
         // layer to disk at the same time, that would not work.
-        assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
+        assert_eq!(Arc::as_ptr(&inmem), Arc::as_ptr(frozen_layer_for_check));
 
-        if let Some(delta_layer) = delta_layer {
-            Self::insert_historic_layer(
-                delta_layer.as_ref().clone(),
-                &mut updates,
-                &mut self.layer_fmgr,
+        if let Some(l) = delta_layer {
+            l.access_stats().record_residence_event(
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::LayerCreate,
             );
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }
@@ -207,7 +216,6 @@ impl LayerManager {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
             l.access_stats().record_residence_event(
-                &guard,
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
