@@ -1010,8 +1010,8 @@ impl DeltaLayerInner {
 /// cloning DeltaLayerInner.
 pub(crate) struct Ref<T>(T);
 
-impl<'a> AsRef<DeltaLayerInner> for Ref<&'a DeltaLayerInner> {
-    fn as_ref(&self) -> &DeltaLayerInner {
+impl<'a, T> AsRef<T> for Ref<&'a T> {
+    fn as_ref(&self) -> &T {
         self.0
     }
 }
