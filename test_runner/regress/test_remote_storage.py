@@ -861,10 +861,8 @@ def test_compaction_delete_before_upload(
     # Ensure that this actually terminates
     wait_upload_queue_empty(client, tenant_id, timeline_id)
 
-    # For now we are hitting this message.
-    # Maybe in the future the underlying race condition will be fixed,
-    # but until then, ensure that this message is hit instead.
-    assert env.pageserver.log_contains(
+    # fixed in #4938
+    assert not env.pageserver.log_contains(
         "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
     )
 
