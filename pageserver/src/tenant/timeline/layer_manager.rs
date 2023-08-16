@@ -13,10 +13,9 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, LayerE, PersistentLayer,
-            PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
+            AsLayerDesc, InMemoryLayer, LayerE, PersistentLayerDesc, PersistentLayerKey,
+            ResidentLayer,
         },
-        timeline::compare_arced_layers,
     },
 };
 
@@ -54,15 +53,6 @@ impl LayerManager {
     /// they should use the below semantic APIs. This design makes us step closer to immutable storage state.
     pub(crate) fn layer_map(&self) -> &LayerMap {
         &self.layer_map
-    }
-
-    /// Replace layers in the layer file manager, used in evictions and layer downloads.
-    pub(crate) fn replace_and_verify(
-        &mut self,
-        expected: Arc<LayerE>,
-        new: Arc<LayerE>,
-    ) -> Result<()> {
-        self.layer_fmgr.replace_and_verify(expected, new)
     }
 
     /// Called from `load_layer_map`. Initialize the layer manager with:
@@ -274,6 +264,7 @@ impl LayerManager {
         _layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<LayerE>,
         updates: &mut BatchedUpdates<'_>,
+        // FIXME: why unused?
         metrics: &TimelineMetrics,
         mapping: &mut LayerFileManager<LayerE>,
     ) -> anyhow::Result<()> {
@@ -331,41 +322,6 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
                 "removing layer that is not present in layer mapping: {:?}",
                 layer.layer_desc()
             )
-        }
-    }
-
-    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
-        let key = expected.layer_desc().key();
-        let other = new.layer_desc().key();
-
-        let expected_l0 = LayerMap::is_l0(expected.layer_desc());
-        let new_l0 = LayerMap::is_l0(new.layer_desc());
-
-        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
-            "layermap-replace-notfound"
-        ));
-
-        anyhow::ensure!(
-            key == other,
-            "expected and new layer have different keys: {key:?} != {other:?}"
-        );
-
-        anyhow::ensure!(
-            expected_l0 == new_l0,
-            "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
-        );
-
-        if let Some(layer) = self.0.get_mut(&key) {
-            anyhow::ensure!(
-                compare_arced_layers(&expected, layer),
-                "another layer was found instead of expected, expected={expected:?}, new={new:?}",
-                expected = Arc::as_ptr(&expected),
-                new = Arc::as_ptr(layer),
-            );
-            *layer = new;
-            Ok(())
-        } else {
-            anyhow::bail!("layer was not found");
         }
     }
 }
