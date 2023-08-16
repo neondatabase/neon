@@ -197,7 +197,7 @@ enabling safe multi-attachment of tenants:
 - Multiple attachments of the same tenant will not try to write to the same objects, as
   each attachment would have a distinct attachment generation.
 
-### Deletion Part 1: Remote oject deletions
+### Deletion Part 1: Remote object deletions
 
 While writes are de-conflicted by writers always using their own generation number in the key,
 deletions are slightly more challenging: if a pageserver A is isolated, and the true active node is
@@ -222,38 +222,25 @@ The order of operations for correctness is:
 3. Confirm we hold a non-stale generation for the node and the attachment(s) doing deletion.
 4. Actually delete the objects
 
-Because step 3 puts load on the control plane, deletion lists should be executed lazily: write
-them out to S3 and then execute them as a low priority batch operation in the background. Persisting
-deletion lists to S3 is not strictly necessary for correctness (deletions can always be accomplished
-later by object listing & scrub), but provides more flexibility in the case of a given node ID being
-executed on a fresh node with an empty disk: it can recover the deletion queue from the previous
-incarnation of the node ID.
+Note that at stage 3 we are only confirming that deletions of objects no longer referenced
+by the metadata written in step 2 are safe. While Step 3 is in flight, new deletions may
+be enqueued, but these are not safe to execute until a subsequent iteration of the
+generation check.
 
-Deletion lists have an a couple of additional benefits:
+Because step 3 puts load on the control plane, deletion lists should be executed lazily,
+accumulating many deletions before executing them behind a batched generation check message
+to the control plane, which would contain a list of tenant generation numbers to validate.
 
-- efficiency: accumulate enough objects
-  to populate plural DeleteObjects requests, rather than issuing many smaller `DeleteObject` requests.
-- read replicas: if some other node is reading data in S3 via some older metadata, the longer we delay
-  deletions in a deletion list, the less up-to-date we require that read replica to be when serving
-  reads for a historical LSN (i.e. for historical reads, leaving some stale objects around is
-  a good thing). In practice this race is relatively short, just the duration of an in-flight read operation
-  that might be traversing some slightly stale metadata.
+The result of the request to the control plane may indicate that only some of the attachment
+generations are fresh: if this is the case, then the pageserver must selectively drop the
+deletions from a stale generation, but still execute the deletions for attachments
+that had a fresh generation.
 
-There is some flexibility in exactly how deletion should work, but a simple implementation would look
-like this:
-
-- All Tenant objects hold a buffer of object keys to delete, which is flushed to the next step whenever
-  they write their index file (i.e. step 2 in the steps above)
-- On flush of the per-tenant buffer, keys to delete are gathered into a shared DeletionAccumulator,
-  which writes out deletion lists to S3 in batches of some size chosen for efficiency.
-- A background task wakes up and processes deletion lists. Before executing the actual deletion, it must call
-  into the control plane (step 3 in the steps above).
-
-Deletion lists in S3 may _not_ be executed as-is by future writers for the tenant: they
-are only valid within a particular node generation. Future writers may either drop the deletion
-list and let orphan object cleanup handle the objects (see below), or they may reconcile the
-deletion objects with latest metadata to ensure all victim objects are really not referenced by
-latest metadata.
+The only correctness requirement for deletions is that they are _not_ executed prior
+to the barrier in step 3. It is safe to delay a deletion, or indeed to never execute
+it at all, if a node restarts while an in-memory queue of deletions is pending. Minimizing
+leaking objects is an optimization, accomplished by making this queue persistent: see
+[Persistent Deletion Queue](#persistent-deletion-queue) in the optimizations section.
 
 ### Deletion Part 2: WAL trim changes
 
@@ -383,6 +370,69 @@ general control plane API: the pageserver should only have access to the endpoin
 it needs for synchronization, and not the broader control plane functionality.
 
 ## Implementation Part 2: Optimizations
+
+### Persistent deletion queue
+
+Between writing our a new index_part.json that doesn't reference an object,
+and executing the deletion, an object passes through a window where it is
+only referenced in memory, and could be leaked if the pageserver is stopped
+uncleanly. That introduces conflicting incentives: we would like to delay
+deletions to minimize control plane load and allow aggregation of full-sized
+DeleteObjects requests, but we would also like to minimize leakage by executing
+deletions promptly.
+
+To resolve this, we may make the deletion queue persistent, writing out
+deletion lists as S3 objects for later execution. This shrinks the window
+of possible object loss to the gap between writing index_part.json, and
+writing the next deletion list ot S3. The actual deletion of objects
+(with its requirement to sync with the control plane) may happen much
+later.
+
+The flow of deletion becomes:
+
+1. Enqueue in memory
+2. Enqueue persistently by writing out a deletion list, storing the
+   attachment generations and node generation.
+3. Validate the deletion list by calling to the control plane
+4. Execute the valid parts of the deletion list (i.e. call DeleteObjects)
+
+There is existing work (https://github.com/neondatabase/neon/pull/4960) to
+create a deletion queue: this would be extended by adding the "step 3" validation
+step.
+
+Since this whole section is an optimization, there is a lot of flexibility
+in exactly how the deletion queue should work, especially in the timing
+of the validation step:
+
+- A (simplest):validate the
+  deletion list before persisting it. This has the downside of delaying
+  persistence of deletes until the control plane is available.
+- B: validate a list at the point of executing it. This has the downside
+  that because we're doing the validation much later, there is a good chance
+  some attachments might have changed, and we will end up leaking objects.
+- C (preferred): validate lazily in the background after persistence of the list, maintaining
+  an "executable" pointer into the list of deletion lists to reflect
+  which ones are elegible for execution, and re-writing deletion lists if
+  they are found to contain some operations not elegible for execution. This
+  is the most efficient approach in terms of I/O, at the cost of some complexity
+  in implementation.
+
+Persistence is to S3 rather than local disk so that if a pageserver
+is stopped uncleanly and then the same node_id is started on a fresh
+physical machine, the deletion queue can still continue without leaking
+objects.
+
+As well as reducing leakage, the ability of a persistent queue to accumulate
+deletions over long timescale has side benefits:
+
+- Over enough time we will always accumulate enough keys to issue full-sized
+  (1000 object) DeleteObjects requests, minimizing overall request count.
+- If in future we implement a read-only mode for pageservers to read the
+  data of tenants, then delaying deletions avoids the need for that remote
+  pageserver to be fully up to date with the latest index when serving reads
+  from old LSNs. The read-only node might be using stale metadata that refers
+  to objects eliminated in a recent compaction, but can still service reads
+  without refreshing metadata as long as the old objects deletion is delayed.
 
 ### Optional: Synchronizing attachments on pageserver startup
 
