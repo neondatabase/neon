@@ -49,7 +49,6 @@ bindgen = "0.65"
 bstr = "1.0"
 byteorder = "1.4"
 bytes = "1.0"
-cgroups-rs = "0.3.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
 close_fds = "0.3.2"
@@ -138,7 +137,7 @@ tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.19.0"
-tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter"] }
+tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 url = "2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
 walkdir = "2.3.2"

@@ -1,9 +1,12 @@
+#![cfg(target_os = "linux")]
+
 use anyhow::Context;
 use axum::{
     extract::{ws::WebSocket, State, WebSocketUpgrade},
     response::Response,
 };
 use axum::{routing::get, Router, Server};
+use clap::Parser;
 use std::{fmt::Debug, time::Duration};
 use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::sync::broadcast;
@@ -19,11 +22,14 @@ pub mod cgroup;
 pub mod filecache;
 pub mod runner;
 
-/// Arguments (previously command-line) to configure the monitor.
-#[derive(Debug)]
+/// Arguments to configure the monitor.
+#[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(short, long)]
     pub cgroup: Option<String>,
+    #[arg(short, long)]
     pub pgconnstr: Option<String>,
+    #[arg(short, long)]
     pub addr: String,
 }
 
