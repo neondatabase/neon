@@ -5,7 +5,6 @@ mod filename;
 mod image_layer;
 mod inmemory_layer;
 mod layer_desc;
-mod remote_layer;
 
 use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -42,7 +41,6 @@ pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
-pub use remote_layer::RemoteLayer;
 
 use self::delta_layer::DeltaEntry;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -1306,10 +1304,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
     /// Permanently remove this layer from disk.
     fn delete_resident_layer_file(&self) -> Result<()>;
 
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
-    }
-
     fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
         None
     }
@@ -1321,16 +1315,6 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
     fn access_stats(&self) -> &LayerAccessStats;
-}
-
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
-    }
 }
 
 pub mod tests {

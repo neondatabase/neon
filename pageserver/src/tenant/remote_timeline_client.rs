@@ -163,8 +163,6 @@
 //!   - download their remote [`IndexPart`]s
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
 //!   - initialize the client's upload queue with its `IndexPart`
-//!   - create [`RemoteLayer`](super::storage_layer::RemoteLayer) instances
-//!     for layers that are referenced by `IndexPart` but not present locally
 //!   - schedule uploads for layers that are only present locally.
 //!   - if the remote `IndexPart`'s metadata was newer than the metadata in
 //!     the local filesystem, write the remote metadata to the local filesystem
