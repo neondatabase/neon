@@ -2066,7 +2066,9 @@ impl Timeline {
             }
 
             #[allow(clippy::never_loop)] // see comment at bottom of this loop
+            #[allow(unused_labels)]
             'layer_map_search: loop {
+                #[allow(unused_variables)] // it'll be indentation change to remove these
                 let remote_layer = {
                     let guard = timeline.layers.read().await;
                     let layers = guard.layer_map();
