@@ -551,6 +551,8 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
+    #[allow(dead_code)] // for now, until I know if this can be done with borrows and
+                        // ResidentDeltaLayer
     pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
