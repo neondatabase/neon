@@ -55,12 +55,6 @@ impl LayerManager {
         &self.layer_map
     }
 
-    /// Get a mutable reference to the layer map. This function will be removed once `flush_frozen_layer`
-    /// gets a refactor.
-    pub(crate) fn layer_map_mut(&mut self) -> &mut LayerMap {
-        &mut self.layer_map
-    }
-
     /// Replace layers in the layer file manager, used in evictions and layer downloads.
     pub(crate) fn replace_and_verify(
         &mut self,
