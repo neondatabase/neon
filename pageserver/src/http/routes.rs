@@ -1028,7 +1028,7 @@ async fn timeline_compact_handler(
         timeline
             .compact(&cancel, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_compaction", %tenant_id, %timeline_id))
@@ -1053,7 +1053,7 @@ async fn timeline_checkpoint_handler(
         timeline
             .compact(&cancel, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         json_response(StatusCode::OK, ())
     }
