@@ -99,6 +99,7 @@ impl GlobalConnPool {
     ) -> anyhow::Result<tokio_postgres::Client> {
         let mut client: Option<tokio_postgres::Client> = None;
 
+        let mut hash_valid = false;
         if !force_new {
             let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
             let mut hash = None;
@@ -119,11 +120,12 @@ impl GlobalConnPool {
                 let validate =
                     tokio::task::spawn_blocking(move || password_auth::verify_password(pw, &hash))
                         .await
-                        .unwrap();
+                        .expect("verify_password should not panic");
 
                 // if the hash is invalid, don't error
                 // we will continue with the regular connection flow
                 if validate.is_ok() {
+                    hash_valid = true;
                     let mut pool = pool.write();
                     if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
                         if let Some(entry) = pool_entries.conns.pop() {
@@ -139,37 +141,50 @@ impl GlobalConnPool {
         let new_client = if let Some(client) = client {
             if client.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info).await?
+                connect_to_compute(self.proxy_config, conn_info).await
             } else {
                 info!("pool: reusing connection '{conn_info}'");
                 return Ok(client);
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info).await?
+            connect_to_compute(self.proxy_config, conn_info).await
         };
 
-        if !force_new {
-            // we need to store the new password hash incase it has been updated
-            let pw = conn_info.password.clone();
-            let new_hash = tokio::task::spawn_blocking(move || password_auth::generate_hash(pw))
-                .await
-                .unwrap();
-
-            let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
-            let mut pool = pool.write();
-            match pool.pools.entry(conn_info.db_and_user()) {
-                hash_map::Entry::Occupied(mut o) => o.get_mut().password_hash = new_hash,
-                hash_map::Entry::Vacant(v) => {
-                    v.insert(DbUserConnPool {
-                        conns: Vec::new(),
-                        password_hash: new_hash,
-                    });
+        match &new_client {
+            // clear the hash. it's no longer valid
+            // TODO: update tokio-postgres fork to allow access to this error kind directly
+            Err(err) if hash_valid && err.to_string().contains("authentication error") => {
+                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let mut pool = pool.write();
+                if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {
+                    entry.password_hash.clear();
                 }
             }
+            // new password is valid and we should insert/update it
+            Ok(_) if !force_new && !hash_valid => {
+                let pw = conn_info.password.clone();
+                let new_hash =
+                    tokio::task::spawn_blocking(move || password_auth::generate_hash(pw))
+                        .await
+                        .unwrap();
+
+                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let mut pool = pool.write();
+                match pool.pools.entry(conn_info.db_and_user()) {
+                    hash_map::Entry::Occupied(mut o) => o.get_mut().password_hash = new_hash,
+                    hash_map::Entry::Vacant(v) => {
+                        v.insert(DbUserConnPool {
+                            conns: Vec::new(),
+                            password_hash: new_hash,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
 
-        Ok(new_client)
+        new_client
     }
 
     pub async fn put(
