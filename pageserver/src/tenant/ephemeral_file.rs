@@ -94,7 +94,10 @@ impl EphemeralFile {
         Ok(())
     }
 
-    fn get_buf_for_write(&self, blkno: u32) -> Result<page_cache::PageWriteGuard, io::Error> {
+    fn get_buf_for_write(
+        &self,
+        blkno: u32,
+    ) -> Result<page_cache::PageWriteGuard<'static>, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         let mut write_guard = match cache
@@ -202,6 +205,11 @@ impl BlobWriter for EphemeralFile {
             ephemeral_file: &'a mut EphemeralFile,
             blknum: u32,
             off: usize,
+            buf: Option<MemoizedPageWriteGuard>,
+        }
+        struct MemoizedPageWriteGuard {
+            guard: page_cache::PageWriteGuard<'static>,
+            blknum: u32,
         }
         impl<'a> Writer<'a> {
             fn new(ephemeral_file: &'a mut EphemeralFile) -> Writer<'a> {
@@ -209,13 +217,30 @@ impl BlobWriter for EphemeralFile {
                     blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
                     off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
                     ephemeral_file,
+                    buf: None,
                 }
             }
             fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     {
-                        let mut head_page = self.ephemeral_file.get_buf_for_write(self.blknum)?;
+                        let head_page = loop {
+                            match &mut self.buf {
+                                Some(MemoizedPageWriteGuard { blknum, guard })
+                                    if *blknum == self.blknum =>
+                                {
+                                    break guard;
+                                }
+                                _ => {
+                                    let buf = self.ephemeral_file.get_buf_for_write(self.blknum)?;
+                                    self.buf = Some(MemoizedPageWriteGuard {
+                                        guard: buf,
+                                        blknum: self.blknum,
+                                    });
+                                    continue;
+                                }
+                            }
+                        };
                         let dst_remaining = &mut head_page[self.off..];
                         let n = min(dst_remaining.len(), src_remaining.len());
                         dst_remaining[..n].copy_from_slice(&src_remaining[..n]);

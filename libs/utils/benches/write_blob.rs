@@ -174,7 +174,7 @@ mod old {
 mod pr5004 {
     use std::{cmp::min, io};
 
-    use crate::{FakePageCache, PAGE_SZ};
+    use crate::{FakePageCache, PAGE_SZ, FakePageWriteGuard};
 
     pub struct EphemeralFile {
         pub size: u64,
@@ -187,6 +187,11 @@ mod pr5004 {
                 ephemeral_file: &'f mut EphemeralFile,
                 blknum: u32,
                 off: usize,
+                buf: Option<MemoizedPageWriteGuard>,
+            }
+            struct MemoizedPageWriteGuard {
+                guard: FakePageWriteGuard<'static>,
+                blknum: u32,
             }
             impl<'f> Writer<'f> {
                 fn new(ephemeral_file: &'f mut EphemeralFile) -> Writer<'f> {
@@ -194,18 +199,34 @@ mod pr5004 {
                         blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
                         off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
                         ephemeral_file,
+                        buf: None,
                     }
                 }
                 fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                     let mut src_remaining = src;
                     while !src_remaining.is_empty() {
                         {
-                            // in real impl, we get the page_cache singleton, which is more expensive
-                            let mut buf = self
-                                .ephemeral_file
-                                .page_cache
-                                .get_buf_for_write(self.blknum)?;
-                            let dst_remaining = &mut buf[self.off..];
+                            let head_page = loop {
+                                match &mut self.buf {
+                                    Some(MemoizedPageWriteGuard { blknum, guard })
+                                        if *blknum == self.blknum =>
+                                    {
+                                        break guard;
+                                    }
+                                    _ => {
+                                        let buf = self
+                                            .ephemeral_file
+                                            .page_cache
+                                            .get_buf_for_write(self.blknum)?;
+                                        self.buf = Some(MemoizedPageWriteGuard {
+                                            guard: buf,
+                                            blknum: self.blknum,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            };
+                            let dst_remaining = &mut head_page[self.off..];
                             let n = min(dst_remaining.len(), src_remaining.len());
                             dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
                             self.off += n;
