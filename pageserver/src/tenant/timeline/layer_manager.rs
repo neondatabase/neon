@@ -12,7 +12,7 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, Layer, PersistentLayer,
+            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, PersistentLayer,
             PersistentLayerDesc, PersistentLayerKey, RemoteLayer,
         },
         timeline::compare_arced_layers,
