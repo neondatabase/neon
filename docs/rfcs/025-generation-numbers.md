@@ -526,7 +526,7 @@ the S3 capacity cost.
 Item 3. is an issue if safekeepers are low on disk space and the control plane is unavailable for a long time.
 
 For a managed service, the general approach should be to make sure we are monitoring & respond fast enough
-that control plane outages are bounded in time. The separate of console and control plane will also help
+that control plane outages are bounded in time. The separation of console and control plane will also help
 to keep the control plane itself simple and robust.
 
 We should also implement an "escape hatch" config for node generation numbers, where in a major disaster outage,
