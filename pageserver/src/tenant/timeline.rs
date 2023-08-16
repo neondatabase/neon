@@ -2519,9 +2519,9 @@ impl Timeline {
                 // is still not fully async. Otherwise executor threads would
                 // be blocked.
                 let _g = span.entered();
-                let new_delta =
-                    Handle::current().block_on(frozen_layer.write_to_disk(&self_clone))?;
-                let new_delta_path = new_delta.path();
+                let new_delta = tokio::runtime::Handle::current()
+                    .block_on(frozen_layer.write_to_disk(&self_clone))?;
+                let new_delta_path = new_delta.local_path().to_owned();
 
                 // Sync it to disk.
                 //
