@@ -237,7 +237,9 @@ impl BlobWriter for EphemeralFile {
 
         // Write the length field
         if srcbuf.len() < 0x80 {
-            writer.push_bytes(&[srcbuf.len() as u8])?;
+            // short one-byte length header
+            let len_buf = [srcbuf.len() as u8];
+            writer.push_bytes(&len_buf)?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
