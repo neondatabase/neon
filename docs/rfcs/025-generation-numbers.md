@@ -365,9 +365,29 @@ to load them:
   to enumerate the indices and pick the most recent one by attachment generation. The listing would
   typically only return 1-2 indices.
 
-Once the new attachment has written out its index_part.json, it may clean up historic index_part.json
-files that were found, unless the control plane has indicated to us that the tenant is multiply attached
+The tenant should never load an index with an attachment generation _newer_ than its own: tenants
+are allowed to be attached with stale attachment generations during a multiply-attached
+phase in a migration, and in this instance if the old location's pageserver restarts,
+it should not try and load the newer generation's index.
+
+#### Cleaning up previous generations' remote indices
+
+Deletion of old indices is not necessary for correctness, although it is necessary
+to avoid the ListObjects fallback in the previous section becoming ever more expensive.
+
+Once the new attachment has written out its index_part.json, it may asynchronously clean up historic index_part.json
+objects that were found, unless the control plane has indicated to us that the tenant is multiply attached
 (see the subsequent HA RFC for this concept).
+
+Deletion of historic index_part.json files doesn't necessarily have to go through
+the deletion queue (it is always safe to drop these files once a more recent generation
+has written its index), but it is beneficial to delay the deletions, for the benefit of
+other nodes trying to read from the previous generation's data (e.g. some future read
+replica feature) to delay these deletions, so the deletion queue should be used anyway.
+
+We may choose to implement this deletion either as an explicit step after we
+write out index_part for the first time in a pageserver's lifetime, or for
+simplicity just do it periodically as part of the background scrub (see [scrubbing](#cleaning-up-orphan-objects-scrubbing));
 
 ### Control Plane Changes
 
@@ -548,7 +568,7 @@ dirty/clean state. It is simpler to just check all the attachments, and
 relatively inexpensive since validating generation numbers is a read-only
 request to the control plane.
 
-### Optional: Cleaning up orphan objects (scrubbing)
+### Cleaning up orphan objects (scrubbing)
 
 An orphan object is any object which is no longer referenced by a running node or by metadata.
 
