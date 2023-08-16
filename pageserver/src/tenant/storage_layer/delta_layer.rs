@@ -1018,10 +1018,11 @@ impl<'a> AsRef<DeltaLayerInner> for Ref<&'a DeltaLayerInner> {
 
 impl<'a, T> Clone for Ref<&'a T> {
     fn clone(&self) -> Self {
-        // this is just a copy
-        Self(self.0)
+        *self
     }
 }
+
+impl<'a, T> Copy for Ref<&'a T> {}
 
 /// A set of data associated with a delta layer key and its value
 pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
