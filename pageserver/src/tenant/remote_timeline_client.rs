@@ -1563,7 +1563,7 @@ mod tests {
         }
 
         // Wait for the uploads to finish
-        client.wait_completion().await;
+        client.wait_completion().await.unwrap();
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
