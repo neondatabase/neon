@@ -184,7 +184,7 @@ To avoid unreasonably long keys, we may make some reasonable assumptions about m
 of these integers:
 
 - 32 bit attachment generation (this easily accommodates reasonable worst case scenarios like
-  a node restarting every minute for 5 years)
+  having to migrate a tenant every minute for 5 years)
 - 16 bit node ID (this doesn't have to accommodate all pageservers ever, just all the pageservers
   that act together in a logical cluster)
 - 32 bit node generation (as with attachment generation, this can handle even very frequent restarts)
