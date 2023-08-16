@@ -4,7 +4,6 @@
 
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
 
@@ -13,20 +12,20 @@ use std::os::unix::fs::FileExt;
 ///
 /// There are currently two implementations: EphemeralFile, and FileBlockReader
 /// below.
-pub trait BlockReader<'a> {
+pub trait BlockReader {
     ///
     /// Read a block. Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     ///
-    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, std::io::Error>;
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error>;
 
     ///
     /// Create a new "cursor" for reading from this reader.
     ///
     /// A cursor caches the last accessed page, allowing for faster
     /// access if the same block is accessed repeatedly.
-    fn block_cursor(&'a self) -> BlockCursor<&Self>
+    fn block_cursor(&self) -> BlockCursor<&Self>
     where
         Self: Sized,
     {
@@ -34,11 +33,11 @@ pub trait BlockReader<'a> {
     }
 }
 
-impl<'a, B> BlockReader<'a> for &'a B
+impl<B> BlockReader for &B
 where
-    B: BlockReader<'a>,
+    B: BlockReader,
 {
-    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         (*self).read_blk(blknum)
     }
 }
@@ -99,26 +98,22 @@ impl<'a> Deref for BlockLease<'a> {
 /// // do stuff with 'buf'
 /// ```
 ///
-pub struct BlockCursor<'a, R>
+pub struct BlockCursor<R>
 where
-    R: BlockReader<'a>,
+    R: BlockReader,
 {
-    _marker: PhantomData<&'a R>,
     reader: R,
 }
 
-impl<'a, R> BlockCursor<'a, R>
+impl<R> BlockCursor<R>
 where
-    R: BlockReader<'a>,
+    R: BlockReader,
 {
     pub fn new(reader: R) -> Self {
-        BlockCursor {
-            _marker: PhantomData,
-            reader,
-        }
+        BlockCursor { reader }
     }
 
-    pub fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.reader.read_blk(blknum)
     }
 }
@@ -151,11 +146,11 @@ where
     }
 }
 
-impl<'a, F> BlockReader<'a> for FileBlockReader<F>
+impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache

@@ -224,8 +224,8 @@ impl Drop for EphemeralFile {
     }
 }
 
-impl<'a> BlockReader<'a> for EphemeralFile {
-    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, io::Error> {
+impl BlockReader for EphemeralFile {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
         let flushed_blknums = 0..self.size / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();

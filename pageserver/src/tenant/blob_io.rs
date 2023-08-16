@@ -16,12 +16,12 @@ use crate::tenant::block_io::{BlockCursor, BlockReader};
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
-impl<'a, R> BlockCursor<'a, R>
+impl<R> BlockCursor<R>
 where
-    R: BlockReader<'a>,
+    R: BlockReader,
 {
     /// Read a blob into a new buffer.
-    pub async fn read_blob(&'a self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
+    pub async fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf).await?;
         Ok(buf)
@@ -29,7 +29,7 @@ where
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
     pub async fn read_blob_into_buf(
-        &'a self,
+        &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
     ) -> Result<(), std::io::Error> {

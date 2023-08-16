@@ -47,7 +47,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
-use std::marker::PhantomData;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -557,7 +556,7 @@ impl DeltaLayer {
     pub async fn load_val_refs<'a>(
         &'a self,
         ctx: &RequestContext,
-    ) -> Result<Vec<(Key, Lsn, ValueRef<'static, Arc<DeltaLayerInner>>)>> {
+    ) -> Result<Vec<(Key, Lsn, ValueRef<Arc<DeltaLayerInner>>)>> {
         let inner = self
             .load(LayerAccessKind::Iter, ctx)
             .await
@@ -958,7 +957,7 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_val_refs(
         this: &Arc<DeltaLayerInner>,
-    ) -> Result<Vec<(Key, Lsn, ValueRef<'static, Arc<DeltaLayerInner>>)>> {
+    ) -> Result<Vec<(Key, Lsn, ValueRef<Arc<DeltaLayerInner>>)>> {
         let dl = this.as_ref();
         let file = &dl.file;
         let tree_reader =
@@ -973,7 +972,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(this.clone(), PhantomData)),
+                        reader: BlockCursor::new(Adapter(this.clone())),
                     };
                     all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
                     true
@@ -1024,14 +1023,14 @@ impl DeltaLayerInner {
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef<'a, T: AsRef<DeltaLayerInner> + 'a> {
+pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
     blob_ref: BlobRef,
-    reader: BlockCursor<'a, Adapter<'a, T>>,
+    reader: BlockCursor<Adapter<T>>,
 }
 
-impl<'a, T: AsRef<DeltaLayerInner> + 'a> ValueRef<'a, T> {
+impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     /// Loads the value from disk
-    pub async fn load(&'a self) -> Result<Value> {
+    pub async fn load(&self) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
         let buf = self.reader.read_blob(self.blob_ref.pos()).await?;
         let val = Value::des(&buf)?;
@@ -1039,10 +1038,10 @@ impl<'a, T: AsRef<DeltaLayerInner> + 'a> ValueRef<'a, T> {
     }
 }
 
-struct Adapter<'a, T: AsRef<DeltaLayerInner> + 'a>(T, PhantomData<&'a ()>);
+struct Adapter<T: AsRef<DeltaLayerInner>>(T);
 
-impl<'a, T: AsRef<DeltaLayerInner>> BlockReader<'a> for Adapter<'a, T> {
-    fn read_blk(&'a self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.0.as_ref().file.read_blk(blknum)
     }
 }
