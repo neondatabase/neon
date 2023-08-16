@@ -35,8 +35,9 @@ use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
+    LayerE, PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
+use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -62,7 +63,7 @@ use utils::{
 
 use super::{
     AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, PathOrConf,
-    PersistentLayerDesc,
+    PersistentLayerDesc, ResidentLayer,
 };
 
 ///
@@ -662,7 +663,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    fn finish(self, key_end: Key, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -708,18 +709,16 @@ impl DeltaLayerWriterInner {
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
-        let layer = DeltaLayer {
-            path_or_conf: PathOrConf::Conf(self.conf),
-            desc: PersistentLayerDesc::new_delta(
-                self.tenant_id,
-                self.timeline_id,
-                self.key_start..key_end,
-                self.lsn_range.clone(),
-                metadata.len(),
-            ),
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: OnceCell::new(),
-        };
+
+        let desc = PersistentLayerDesc::new_delta(
+            self.tenant_id,
+            self.timeline_id,
+            self.key_start..key_end,
+            self.lsn_range.clone(),
+            metadata.len(),
+        );
+
+        let layer = LayerE::for_written(self.conf, timeline, desc)?;
 
         // fsync the file
         file.sync_all()?;
@@ -727,18 +726,9 @@ impl DeltaLayerWriterInner {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let final_path = DeltaLayer::path_for(
-            &PathOrConf::Conf(self.conf),
-            &self.tenant_id,
-            &self.timeline_id,
-            &DeltaFileName {
-                key_range: self.key_start..key_end,
-                lsn_range: self.lsn_range,
-            },
-        );
-        std::fs::rename(self.path, &final_path)?;
+        std::fs::rename(self.path, layer.local_path())?;
 
-        trace!("created delta layer {}", final_path.display());
+        trace!("created delta layer {}", layer.local_path().display());
 
         Ok(layer)
     }
@@ -821,8 +811,12 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        self.inner.take().unwrap().finish(key_end)
+    pub(crate) fn finish(
+        mut self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+    ) -> anyhow::Result<ResidentLayer> {
+        self.inner.take().unwrap().finish(key_end, timeline)
     }
 }
 
