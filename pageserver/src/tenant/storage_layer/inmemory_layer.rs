@@ -10,11 +10,12 @@ use crate::repository::{Key, Value};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
+use crate::tenant::Timeline;
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
@@ -28,7 +29,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, Layer};
+use super::{DeltaLayer, DeltaLayerWriter, Layer, ResidentLayer};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -313,7 +314,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub(crate) async fn write_to_disk(&self, timeline: &Arc<Timeline>) -> Result<ResidentLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -352,7 +353,7 @@ impl InMemoryLayer {
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX)?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline)?;
         Ok(delta_layer)
     }
 }
