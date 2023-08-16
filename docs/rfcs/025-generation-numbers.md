@@ -170,6 +170,10 @@ All object keys (layer objects and index objects) will have a suffix as follows:
    <attachment generation>-<node id>-<node generation>
 ```
 
+The ordering of elements in the suffix is not important for correctness. As a speculative
+optimization, the attachment generation is first in case we want to use this when searching
+using a prefixed ListObjects2 for the most recent index from the current or previous attachment generation.
+
 To avoid unreasonably long keys, we may make some reasonable assumptions about max lengths
 of these integers:
 
