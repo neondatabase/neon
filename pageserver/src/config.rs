@@ -581,6 +581,11 @@ impl PageServerConf {
         .expect("This should always be convertible, it is relative")
     }
 
+    pub fn remote_deletion_header_path(&self) -> RemotePath {
+        RemotePath::new(&self.remote_deletion_node_prefix().join("header"))
+            .expect("This should always be convertible, it is relative")
+    }
+
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenants_path().join(tenant_id.to_string())
     }
