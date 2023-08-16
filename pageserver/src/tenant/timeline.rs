@@ -18,7 +18,6 @@ use pageserver_api::models::{
 use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
-use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -39,22 +38,22 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerE, LayerFileName,
-    RemoteLayer,
+    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats,
+    LayerAccessStatsReset, LayerE, LayerFileName, ResidentLayer, ValueReconstructResult,
+    ValueReconstructState,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
-    storage_layer::{PersistentLayer, ValueReconstructResult, ValueReconstructState},
 };
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-    RECONSTRUCT_TIME, UNEXPECTED_ONDEMAND_DOWNLOADS,
+    RECONSTRUCT_TIME,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -90,9 +89,6 @@ use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::config::TenantConf;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{
-    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStatsReset, PersistentLayerDesc, ResidentLayer,
-};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -1523,6 +1519,7 @@ impl Timeline {
 
                     let layer = match (name, &decision) {
                         (name, UseLocal(m) | NeedsUpload(m)) => {
+                            // FIXME: needsupload need to be ResidentLayers
                             total_physical_size += m.file_size();
                             Arc::new(LayerE::new(conf, &this, &name, m.file_size(), stats))
                         }
@@ -1555,7 +1552,7 @@ impl Timeline {
         if let Some(rtc) = self.remote_client.as_ref() {
             let (needs_upload, needs_cleanup) = to_sync;
             for (layer, m) in needs_upload {
-                rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
+                rtc.schedule_layer_file_upload(layer, &m)?;
             }
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
