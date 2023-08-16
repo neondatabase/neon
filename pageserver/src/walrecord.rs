@@ -270,20 +270,17 @@ pub struct XlHeapDelete {
 
 impl XlHeapDelete {
     pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
+        let neon_format = buf.remaining() == pg_constants::SIZE_OF_HEAP_DELETE;
         let xmax = buf.get_u32_le();
         let offnum = buf.get_u16_le();
         let _padding;
         let t_cid;
-        let neon_format;
-        if buf.remaining() == pg_constants::SIZE_OF_HEAP_DELETE {
-            // Neon format
+        if neon_format {
             _padding = buf.get_u16_le();
             t_cid = buf.get_u32_le();
-            neon_format = true;
         } else {
             _padding = 0;
             t_cid = 0;
-            neon_format = false;
         }
         let infobits_set = buf.get_u8();
         let flags = buf.get_u8();
@@ -312,20 +309,17 @@ pub struct XlHeapLock {
 
 impl XlHeapLock {
     pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+        let neon_format = buf.remaining() == pg_constants::SIZE_OF_HEAP_LOCK;
         let locking_xid = buf.get_u32_le();
         let offnum = buf.get_u16_le();
         let _padding;
         let t_cid;
-        let neon_format;
-        if buf.remaining() == pg_constants::SIZE_OF_HEAP_LOCK {
-            // Neon format
+        if neon_format {
             _padding = buf.get_u16_le();
             t_cid = buf.get_u32_le();
-            neon_format = true;
         } else {
             _padding = 0;
             t_cid = 0;
-            neon_format = false;
         }
         let infobits_set = buf.get_u8();
         let flags = buf.get_u8();
