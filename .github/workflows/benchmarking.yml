@@ -2,8 +2,8 @@ name: Benchmarking
 
 on:
   # uncomment to run on push for debugging your PR
-  # push:
-  #   branches: [ your branch ]
+  push:
+    branches: [ bayandin/bigger-tpc-h ]
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
