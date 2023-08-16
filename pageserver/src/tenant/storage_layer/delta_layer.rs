@@ -552,7 +552,10 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry>> {
+    pub async fn load_keys(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<DeltaEntry<Arc<DeltaLayerInner>>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -953,14 +956,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<DeltaEntry>> {
+    ) -> Result<Vec<DeltaEntry<T>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<DeltaEntry> = Vec::new();
+        let mut all_keys: Vec<DeltaEntry<T>> = Vec::new();
 
         tree_reader
             .visit(
@@ -970,7 +973,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(dl)),
+                        reader: BlockCursor::new(Adapter(this.clone())),
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -1000,13 +1003,13 @@ impl DeltaLayerInner {
 }
 
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<'a> {
+pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<&'a DeltaLayerInner>,
+    pub val: ValueRef<T>,
 }
 
 /// Reference to an on-disk value
