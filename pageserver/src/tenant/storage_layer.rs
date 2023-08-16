@@ -184,26 +184,6 @@ impl LayerAccessStats {
         new
     }
 
-    /// Creates a clone of `self` and records `new_status` in the clone.
-    ///
-    /// The `new_status` is not recorded in `self`.
-    ///
-    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    ///
-    /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn clone_for_residence_change(
-        &self,
-        new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats {
-        let clone = {
-            let inner = self.0.lock().unwrap();
-            inner.clone()
-        };
-        let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
-        new
-    }
-
     /// Record a change in layer residency.
     ///
     /// Recording the event must happen while holding the layer map lock to
