@@ -410,23 +410,18 @@ Since this whole section is an optimization, there is a lot of flexibility
 in exactly how the deletion queue should work, especially in the timing
 of the validation step:
 
-- A (simplest):validate the
+- Option A (simplest):validate the
   deletion list before persisting it. This has the downside of delaying
   persistence of deletes until the control plane is available.
-- B: validate a list at the point of executing it. This has the downside
+- Option B: validate a list at the point of executing it. This has the downside
   that because we're doing the validation much later, there is a good chance
   some attachments might have changed, and we will end up leaking objects.
-- C (preferred): validate lazily in the background after persistence of the list, maintaining
+- Option C (preferred): validate lazily in the background after persistence of the list, maintaining
   an "executable" pointer into the list of deletion lists to reflect
   which ones are elegible for execution, and re-writing deletion lists if
   they are found to contain some operations not elegible for execution. This
   is the most efficient approach in terms of I/O, at the cost of some complexity
   in implementation.
-
-Persistence is to S3 rather than local disk so that if a pageserver
-is stopped uncleanly and then the same node_id is started on a fresh
-physical machine, the deletion queue can still continue without leaking
-objects.
 
 As well as reducing leakage, the ability of a persistent queue to accumulate
 deletions over long timescale has side benefits:
@@ -439,6 +434,54 @@ deletions over long timescale has side benefits:
   from old LSNs. The read-only node might be using stale metadata that refers
   to objects eliminated in a recent compaction, but can still service reads
   without refreshing metadata as long as the old objects deletion is delayed.
+
+#### Deletion queue persistence format
+
+Persistence is to S3 rather than local disk so that if a pageserver
+is stopped uncleanly and then the same node_id is started on a fresh
+physical machine, the deletion queue can still continue without leaking
+objects.
+
+The persisted queue is broken up into a series of lists, written out
+once some threshold number of deletions are accumulated. This should
+be tuned to target an object size of ~1MB to avoid the expense of
+writing and reading many tiny objects.
+
+Each deletion list has a sequence number: this records the logical
+ordering of the lists, so that we may use sequence numbers to succinctly
+store knowledge about up to which point the deletions have been validated.
+
+In addition to the lists themselves, a header object would be used
+to store state about how far validation has proceeded (in the "Option C" case
+above, for background validation), and to record the next sequence number in
+case there are no deletion lists at present.
+
+Deletion queue objects will be stored outside the `tenants/` path, and
+with the node generation ID in the name. The paths would look something like:
+
+```
+  # Deletion List
+  deletion/<node id>/<sequence>-<generation>.list
+
+  # Header object, st
+  deletion/<node id>/header-<generation>
+```
+
+#### Deletion queue replay on startup
+
+When starting up with a new generation number, a pageserver should avoid
+leaking objects by ingesting the deletion queue from its previous lifetime, but
+ignore any un-validated content:
+
+1. List all objects in `deletion/<node id>`. Load the header.
+2. Drop any that are not below the validated horizon in the header
+3. Write a new header in the current generation number
+4. Process the validated lists from the previous generation in the same
+   way as any lists that would be generated within this generation.
+
+The number of objects leaked in this process depends on how frequently we
+do validation during normal operations, and whether the previous pageserver
+instance was terminated cleanly and validated its lists in the process.
 
 ### Synchronizing attachments on pageserver startup
 
@@ -468,7 +511,7 @@ dirty/clean state. It is simpler to just check all the attachments, and
 relatively inexpensive since validating generation numbers is a read-only
 request to the control plane.
 
-### Optional: Cleaning up orphan objects
+### Optional: Cleaning up orphan objects (scrubbing)
 
 An orphan object is any object which is no longer referenced by a running node or by metadata.
 
@@ -481,7 +524,15 @@ Examples of how orphan objects arise:
 
 Orphan objects are functionally harmless, but have a small cost due to S3 capacity consumed. We
 may clean them up at some time in the future, but doing a ListObjectsv2 operation and cross
-referencing with the latest metadata to identify objects which are not referenced. This kind
+referencing with the latest metadata to identify objects which are not referenced.
+
+Scrubbing will be done only by an attached pageserver (not some third party process), and deletions requested during scrub will go through the same
+validation as all other deletions: the attachment generation must be
+fresh. This avoids the possibility of a stale pageserver incorrectly
+thinking than an object written by a newer generation is stale, and deleting
+it.
+
+This kind
 of deletion would go through the same deletion queue as other object deletions, and be subject
 to the same checks for generation number freshness.
 
