@@ -1138,7 +1138,7 @@ async fn deletion_queue_flush_execute(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&r);
 
-    if let None = state.remote_storage {
+    if state.remote_storage.is_none() {
         // Nothing to do if remote storage is disabled.
         return json_response(StatusCode::OK, ());
     }

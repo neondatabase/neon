@@ -184,7 +184,7 @@ impl DeletionQueueClient {
             tenant_id,
             timeline_id,
             layers: Vec::new(),
-            objects: objects,
+            objects,
         }))
         .await;
     }
@@ -245,7 +245,7 @@ impl BackendQueueWorker {
             DELETION_QUEUE_ERRORS
                 .with_label_values(&["failpoint"])
                 .inc();
-            return false;
+            false
         });
 
         if self.accumulator.is_empty() {
@@ -478,7 +478,7 @@ impl FrontendQueueWorker {
             return;
         }
 
-        match self.remote_storage.upload(source, size, &key, None).await {
+        match self.remote_storage.upload(source, size, key, None).await {
             Ok(_) => {
                 info!(
                     "Stored deletion list {key} ({0}..{1})",
