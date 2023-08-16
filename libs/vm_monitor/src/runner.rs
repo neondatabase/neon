@@ -17,9 +17,7 @@ use tracing::{info, warn};
 use crate::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
-use crate::protocol::{
-    InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources,
-};
+use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
 use crate::{bytes_to_mebibytes, get_total_system_memory, Args, MiB};
 
 /// Central struct that interacts with informant, dispatcher, and cgroup to handle

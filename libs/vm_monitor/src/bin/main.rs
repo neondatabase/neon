@@ -1,9 +1,9 @@
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use clap::Parser;
     use tracing_subscriber::EnvFilter;
     use vm_monitor::Args;
-    use clap::Parser;
 
     let subscriber = tracing_subscriber::fmt::Subscriber::builder()
         .json()

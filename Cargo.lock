@@ -5518,7 +5518,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
- "tracing-subscriber",
  "url",
 ]
 

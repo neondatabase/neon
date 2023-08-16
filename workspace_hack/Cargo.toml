@@ -57,7 +57,6 @@ toml_edit = { version = "0.19", features = ["serde"] }
 tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "smallvec", "tracing-log"] }
 url = { version = "2", features = ["serde"] }
 
 [build-dependencies]
