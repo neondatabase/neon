@@ -238,6 +238,30 @@ async fn cleanup_remaining_fs_traces(
     Ok(())
 }
 
+pub(crate) async fn remote_delete_mark_exists(
+    conf: &PageServerConf,
+    tenant_id: &TenantId,
+    remote_storage: &GenericRemoteStorage,
+) -> anyhow::Result<bool> {
+    // If remote storage is there we rely on it
+    let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id).context("path")?;
+
+    let result = backoff::retry(
+        || async { remote_storage.download(&remote_mark_path).await },
+        |e| matches!(e, DownloadError::NotFound),
+        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+        "fetch_tenant_deletion_mark",
+    )
+    .await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(DownloadError::NotFound) => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(e)).context("remote_delete_mark_exists")?,
+    }
+}
+
 /// Orchestrates tenant shut down of all tasks, removes its in-memory structures,
 /// and deletes its data from both disk and s3.
 /// The sequence of steps:
@@ -372,22 +396,10 @@ impl DeleteTenantFlow {
             None => return Ok(None),
         };
 
-        // If remote storage is there we rely on it
-        let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
-
-        let result = backoff::retry(
-            || async { remote_storage.download(&remote_mark_path).await },
-            |e| matches!(e, DownloadError::NotFound),
-            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-            "fetch_tenant_deletion_mark",
-        )
-        .await;
-
-        match result {
-            Ok(_) => Ok(acquire(tenant)),
-            Err(DownloadError::NotFound) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)).context("should_resume_deletion")?,
+        if remote_delete_mark_exists(conf, &tenant_id, remote_storage).await? {
+            Ok(acquire(tenant))
+        } else {
+            Ok(None)
         }
     }
 

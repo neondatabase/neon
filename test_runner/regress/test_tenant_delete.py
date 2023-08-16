@@ -1,5 +1,7 @@
 import enum
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +15,7 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
+    assert_prefix_not_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
     wait_tenant_status_404,
@@ -78,6 +81,7 @@ def test_tenant_delete_smoke(
             neon_env_builder,
             prefix="/".join(
                 (
+                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -247,6 +251,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             neon_env_builder,
             prefix="/".join(
                 (
+                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -258,5 +263,106 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     assert not tenant_dir.exists()
 
 
+# TODO resume deletion (https://github.com/neondatabase/neon/issues/5006)
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+def test_deleted_tenant_ignored_on_attach(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+    pg_bin: PgBin,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_deleted_tenant_ignored_on_attach",
+    )
+
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+
+    tenant_id = env.initial_tenant
+
+    ps_http = env.pageserver.http_client()
+    # create two timelines
+    for timeline in ["first", "second"]:
+        timeline_id = env.neon_cli.create_timeline(timeline, tenant_id=tenant_id)
+        with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
+            run_pg_bench_small(pg_bin, endpoint.connstr())
+            wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
+
+    # failpoint before we remove index_part from s3
+    failpoint = "timeline-delete-before-index-delete"
+    ps_http.configure_failpoints((failpoint, "return"))
+
+    env.pageserver.allowed_errors.extend(
+        (
+            # allow errors caused by failpoints
+            f".*failpoint: {failpoint}",
+            # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
+            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            # error from http response is also logged
+            ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
+        )
+    )
+
+    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+
+    ps_http.tenant_delete(tenant_id)
+
+    tenant_info = wait_until_tenant_state(
+        pageserver_http=ps_http,
+        tenant_id=tenant_id,
+        expected_state="Broken",
+        iterations=iterations,
+    )
+
+    if remote_storage_kind in [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]:
+        assert_prefix_not_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "pageserver",
+                    "tenants",
+                    str(tenant_id),
+                )
+            ),
+        )
+
+    reason = tenant_info["state"]["data"]["reason"]
+    # failpoint may not be the only error in the stack
+    assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    # now we stop pageserver and remove local tenant state
+    env.endpoints.stop_all()
+    env.pageserver.stop()
+
+    dir_to_clear = Path(env.repo_dir) / "tenants"
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
+
+    env.pageserver.start()
+
+    # now we call attach
+    with pytest.raises(
+        PageserverApiException, match="Tenant is marked as deleted on remote storage"
+    ):
+        ps_http.tenant_attach(tenant_id=tenant_id)
+
+    # delete should be resumed (not yet)
+    # wait_tenant_status_404(ps_http, tenant_id, iterations)
+
+    # we shouldn've created tenant dir on disk
+    tenant_path = env.tenant_dir(tenant_id=tenant_id)
+    assert not tenant_path.exists()
+
+    if remote_storage_kind in [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]:
+        assert_prefix_not_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "pageserver",
+                    "tenants",
+                    str(tenant_id),
+                )
+            ),
+        )
+
+
 # TODO test concurrent deletions with "hang" failpoint
-# TODO test tenant delete continues after attach

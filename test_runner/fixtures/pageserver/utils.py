@@ -1,6 +1,8 @@
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef
+
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorageKind, S3Storage
@@ -230,6 +232,21 @@ if TYPE_CHECKING:
 
 
 def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    response = list_prefix(neon_env_builder, prefix)
+    objects = response.get("Contents")
+    assert (
+        response["KeyCount"] == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+
+
+def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    response = list_prefix(neon_env_builder, prefix)
+    assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
+
+
+def list_prefix(
+    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None
+) -> ListObjectsV2OutputTypeDef:
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert neon_env_builder.remote_storage_kind in (
         RemoteStorageKind.MOCK_S3,
@@ -244,10 +261,7 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
         Bucket=neon_env_builder.remote_storage.bucket_name,
         Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
     )
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    return response
 
 
 def wait_tenant_status_404(

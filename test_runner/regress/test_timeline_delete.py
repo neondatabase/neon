@@ -304,6 +304,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             neon_env_builder,
             prefix="/".join(
                 (
+                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -496,6 +497,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         neon_env_builder,
         prefix="/".join(
             (
+                "pageserver",
                 "tenants",
                 str(env.initial_tenant),
                 "timelines",
@@ -515,6 +517,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
             neon_env_builder,
             prefix="/".join(
                 (
+                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -528,7 +531,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+        lambda: assert_prefix_empty(neon_env_builder, prefix="pageserver"),
     )
 
 
@@ -748,6 +751,7 @@ def test_timeline_delete_works_for_remote_smoke(
             neon_env_builder,
             prefix="/".join(
                 (
+                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -758,11 +762,7 @@ def test_timeline_delete_works_for_remote_smoke(
 
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
-    wait_until(
-        2,
-        0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
-    )
+    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder, prefix="pageserver"))
 
 
 def test_delete_orphaned_objects(
