@@ -174,7 +174,7 @@ mod old {
 mod pr5004 {
     use std::{cmp::min, io};
 
-    use crate::{FakePageCache, PAGE_SZ, FakePageWriteGuard};
+    use crate::{FakePageCache, FakePageWriteGuard, PAGE_SZ};
 
     pub struct EphemeralFile {
         pub size: u64,
