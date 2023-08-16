@@ -428,12 +428,21 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("vm-monitor-addr")
                 .long("vm-monitor-addr")
+                .default_value("127.0.0.1:10369")
                 .value_name("VM_MONITOR_ADDR"),
         )
-        .arg(Arg::new("cgroup").long("cgroup").value_name("CGROUP"))
+        .arg(
+            Arg::new("cgroup")
+                .long("cgroup")
+                .default_value("neon-postgres")
+                .value_name("CGROUP"),
+        )
         .arg(
             Arg::new("filecache-connstr")
                 .long("filecache-connstr")
+                .default_value(
+                    "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
+                )
                 .value_name("FILECACHE_CONNSTR"),
         )
 }
