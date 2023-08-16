@@ -29,8 +29,9 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayerWriter, Layer, ResidentLayer};
+use super::{DeltaLayerWriter, ResidentLayer};
 
+/// InMemoryLayer is always incremental.
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -201,20 +202,6 @@ impl InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl Layer for InMemoryLayer {
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
-            .await
     }
 }
 
