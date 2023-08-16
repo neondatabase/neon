@@ -131,8 +131,7 @@ impl BlobWriter for EphemeralFile {
                     // Zero the buffer for re-use.
                     // Zeroing is critical for correcntess because the write_blob code below
                     // and similarly read_blk expect zeroed pages.
-                    const ZERO: [u8; PAGE_SZ] = [0u8; PAGE_SZ];
-                    head.copy_from_slice(&ZERO);
+                    head.fill(0);
                     Ok(())
                 }
                 Err(e) => Err(std::io::Error::new(
