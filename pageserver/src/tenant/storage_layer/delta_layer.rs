@@ -552,15 +552,17 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_keys(
+    pub(crate) async fn load_keys(
         &self,
         ctx: &RequestContext,
-    ) -> Result<Vec<DeltaEntry<Arc<DeltaLayerInner>>>> {
+    ) -> Result<Vec<DeltaEntry<Ref<&'_ DeltaLayerInner>>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-        DeltaLayerInner::load_keys(inner)
+
+        let inner = Ref(&**inner);
+        DeltaLayerInner::load_keys(&inner)
             .await
             .context("Layer index is corrupted")
     }
@@ -999,6 +1001,25 @@ impl DeltaLayerInner {
             last.size = dl.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
         }
         Ok(all_keys)
+    }
+}
+
+/// Cloneable borrow wrapper to make borrows behave like smart pointers.
+///
+/// Shared references are trivially copyable. This wrapper avoids (confusion) to otherwise attempt
+/// cloning DeltaLayerInner.
+pub(crate) struct Ref<T>(T);
+
+impl<'a> AsRef<DeltaLayerInner> for Ref<&'a DeltaLayerInner> {
+    fn as_ref(&self) -> &DeltaLayerInner {
+        self.0
+    }
+}
+
+impl<'a, T> Clone for Ref<&'a T> {
+    fn clone(&self) -> Self {
+        // this is just a copy
+        Self(self.0)
     }
 }
 
