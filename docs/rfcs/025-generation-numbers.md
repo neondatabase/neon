@@ -79,7 +79,14 @@ pageserver, control plane, safekeeper (optional)
 
 ### Summary
 
-- **Generation numbers** are introduced for pageserver node lifetimes tenant attachments
+- **Generation numbers** are introduced for pageserver node lifetimes and tenant attachments.
+
+  - node generation increments each time a pageserver starts, before it can write to S3
+  - attachment generation increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver (an _attachment_'s lifetime is the association between a tenant and a pageserver)
+  - the two generations are independent: a pageserver may restart while keeping the same
+    attachment generation numbers, and attachments may be changed while a pageserver's
+    generation number stays the same.
+
 - **Object keys are suffixed** with the generation numbers
 - **Safety in split brain for multiple nodes running with
   the same node ID** is provided by the pageserver node generation in the object key: the concurrent nodes
