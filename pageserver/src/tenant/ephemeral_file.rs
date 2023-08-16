@@ -61,6 +61,46 @@ impl EphemeralFile {
         self.len
     }
 
+    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
+        if flushed_blknums.contains(&(blknum as u64)) {
+            let cache = page_cache::get();
+            loop {
+                match cache
+                    .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            // order path before error because error is anyhow::Error => might have many contexts
+                            format!(
+                                "ephemeral file: read immutable page #{}: {}: {:#}",
+                                blknum,
+                                self.file.path.display(),
+                                e,
+                            ),
+                        )
+                    })? {
+                    page_cache::ReadBufResult::Found(guard) => {
+                        return Ok(BlockLease::PageReadGuard(guard))
+                    }
+                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                        let buf: &mut [u8] = write_guard.deref_mut();
+                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                        self.file
+                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
+                        write_guard.mark_valid();
+
+                        // Swap for read lock
+                        continue;
+                    }
+                };
+            }
+        } else {
+            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
+            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
+        }
+    }
+
     pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
@@ -204,45 +244,6 @@ impl Drop for EphemeralFile {
 }
 
 impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
-        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
-        if flushed_blknums.contains(&(blknum as u64)) {
-            let cache = page_cache::get();
-            loop {
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum)
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.file.path.display(),
-                                e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
-                        write_guard.mark_valid();
-
-                        // Swap for read lock
-                        continue;
-                    }
-                };
-            }
-        } else {
-            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
-            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
-        }
-    }
     fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
         BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
     }

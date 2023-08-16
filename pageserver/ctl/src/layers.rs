@@ -44,8 +44,6 @@ pub(crate) enum LayerCmd {
 }
 
 async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    use pageserver::tenant::block_io::BlockReader;
-
     let path = path.as_ref();
     virtual_file::init(10);
     page_cache::init(100);

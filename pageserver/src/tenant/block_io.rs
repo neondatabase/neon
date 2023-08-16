@@ -18,13 +18,6 @@ use std::os::unix::fs::FileExt;
 /// below.
 pub trait BlockReader {
     ///
-    /// Read a block. Returns a "lease" object that can be used to
-    /// access to the contents of the page. (For the page cache, the
-    /// lease object represents a lock on the buffer.)
-    ///
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error>;
-
-    ///
     /// Create a new "cursor" for reading from this reader.
     ///
     /// A cursor caches the last accessed page, allowing for faster
@@ -36,9 +29,6 @@ impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        (*self).read_blk(blknum)
-    }
     fn block_cursor(&self) -> BlockCursor<'_> {
         (*self).block_cursor()
     }
@@ -171,7 +161,12 @@ where
         assert!(buf.len() == PAGE_SZ);
         self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
     }
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    /// Read a block.
+    ///
+    /// Returns a "lease" object that can be used to
+    /// access to the contents of the page. (For the page cache, the
+    /// lease object represents a lock on the buffer.)
+    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache
@@ -197,18 +192,12 @@ where
 }
 
 impl BlockReader for FileBlockReader<File> {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.read_blk(blknum)
-    }
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReaderFile(self))
     }
 }
 
 impl BlockReader for FileBlockReader<VirtualFile> {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.read_blk(blknum)
-    }
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReaderVirtual(self))
     }

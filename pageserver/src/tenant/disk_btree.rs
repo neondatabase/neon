@@ -701,13 +701,13 @@ pub(crate) mod tests {
         fn new() -> Self {
             Self::default()
         }
-    }
-    impl BlockReader for TestDisk {
-        fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
+        pub(crate) fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
             Ok(std::rc::Rc::new(buf).into())
         }
+    }
+    impl BlockReader for TestDisk {
         fn block_cursor(&self) -> BlockCursor<'_> {
             BlockCursor::new(BlockReaderRef::TestDisk(self))
         }
