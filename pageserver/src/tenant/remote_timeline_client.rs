@@ -851,7 +851,7 @@ impl RemoteTimelineClient {
         let remaining = backoff::retry(
             || async {
                 self.storage_impl
-                    .list_prefixes(Some(&timeline_storage_path))
+                    .list_files(Some(&timeline_storage_path))
                     .await
             },
             |_e| false,

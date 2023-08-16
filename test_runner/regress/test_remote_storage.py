@@ -24,6 +24,7 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import (
+    TIMELINE_INDEX_PART_FILE_NAME,
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
@@ -615,9 +616,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
     # to please mypy
     assert isinstance(env.remote_storage, LocalFsStorage)
-    remote_timeline_path = (
-        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    remote_timeline_path = env.remote_storage.timeline_path(tenant_id, timeline_id)
 
     assert not list(remote_timeline_path.iterdir())
 
@@ -722,15 +721,14 @@ def test_empty_branch_remote_storage_upload_on_restart(
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    timeline_path = (
-        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
-    )
-
-    local_metadata = env.repo_dir / timeline_path / "metadata"
+    local_metadata = env.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
     assert local_metadata.is_file()
 
     assert isinstance(env.remote_storage, LocalFsStorage)
-    new_branch_on_remote_storage = env.remote_storage.root / timeline_path
+
+    new_branch_on_remote_storage = env.remote_storage.timeline_path(
+        env.initial_tenant, new_branch_timeline_id
+    )
     assert (
         not new_branch_on_remote_storage.exists()
     ), "failpoint should had prohibited index_part.json upload"
@@ -779,7 +777,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
         assert (
-            new_branch_on_remote_storage / "index_part.json"
+            new_branch_on_remote_storage / TIMELINE_INDEX_PART_FILE_NAME
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
         create_thread.join()
