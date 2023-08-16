@@ -194,13 +194,17 @@ mod pr5004 {
                 blknum: u32,
             }
             impl<'f> Writer<'f> {
-                fn new(ephemeral_file: &'f mut EphemeralFile) -> Writer<'f> {
-                    Writer {
-                        blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
+                fn new(ephemeral_file: &'f mut EphemeralFile) -> io::Result<Writer<'f>> {
+                    let blknum = (ephemeral_file.size / PAGE_SZ as u64) as u32;
+                    Ok(Writer {
+                        blknum,
                         off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
+                        buf: Some(MemoizedPageWriteGuard {
+                            guard: ephemeral_file.page_cache.get_buf_for_write(blknum)?,
+                            blknum,
+                        }),
                         ephemeral_file,
-                        buf: None,
-                    }
+                    })
                 }
                 fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                     let mut src_remaining = src;
@@ -240,7 +244,7 @@ mod pr5004 {
             }
 
             let pos = self.size;
-            let mut writer = Writer::new(self);
+            let mut writer = Writer::new(self)?;
 
             // Write the length field
             if srcbuf.len() < 0x80 {

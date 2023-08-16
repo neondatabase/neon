@@ -212,13 +212,17 @@ impl BlobWriter for EphemeralFile {
             blknum: u32,
         }
         impl<'a> Writer<'a> {
-            fn new(ephemeral_file: &'a mut EphemeralFile) -> Writer<'a> {
-                Writer {
-                    blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
+            fn new(ephemeral_file: &'a mut EphemeralFile) -> io::Result<Writer<'a>> {
+                let blknum = (ephemeral_file.size / PAGE_SZ as u64) as u32;
+                Ok(Writer {
+                    blknum,
                     off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
+                    buf: Some(MemoizedPageWriteGuard {
+                        guard: ephemeral_file.get_buf_for_write(blknum)?,
+                        blknum,
+                    }),
                     ephemeral_file,
-                    buf: None,
-                }
+                })
             }
             fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
@@ -256,7 +260,7 @@ impl BlobWriter for EphemeralFile {
         }
 
         let pos = self.size;
-        let mut writer = Writer::new(self);
+        let mut writer = Writer::new(self)?;
 
         // Write the length field
         if srcbuf.len() < 0x80 {
