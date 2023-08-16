@@ -3301,7 +3301,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), &self)?);
+            new_layers.push(writer.finish(prev_key.unwrap().next(), self)?);
         }
 
         // Sync layers
