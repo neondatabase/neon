@@ -53,7 +53,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::tenant::writeback_ephemeral_file;
+use crate::tenant::{block_io, ephemeral_file, writeback_ephemeral_file};
 use crate::{metrics::PageCacheSizeMetrics, repository::Key};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
@@ -98,11 +98,11 @@ enum CacheKey {
         lsn: Lsn,
     },
     EphemeralPage {
-        file_id: u64,
+        file_id: ephemeral_file::FileId,
         blkno: u32,
     },
     ImmutableFilePage {
-        file_id: u64,
+        file_id: block_io::FileId,
         blkno: u32,
     },
 }
@@ -177,9 +177,9 @@ pub struct PageCache {
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    ephemeral_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    ephemeral_page_map: RwLock<HashMap<(ephemeral_file::FileId, u32), usize>>,
 
-    immutable_page_map: RwLock<HashMap<(u64, u32), usize>>,
+    immutable_page_map: RwLock<HashMap<(block_io::FileId, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -390,20 +390,28 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with Ephemeral pages.
 
-    pub fn read_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
+    pub fn read_ephemeral_buf(
+        &self,
+        file_id: ephemeral_file::FileId,
+        blkno: u32,
+    ) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
-    pub fn write_ephemeral_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<WriteBufResult> {
+    pub fn write_ephemeral_buf(
+        &self,
+        file_id: ephemeral_file::FileId,
+        blkno: u32,
+    ) -> anyhow::Result<WriteBufResult> {
         let cache_key = CacheKey::EphemeralPage { file_id, blkno };
 
         self.lock_for_write(&cache_key)
     }
 
     /// Immediately drop all buffers belonging to given file, without writeback
-    pub fn drop_buffers_for_ephemeral(&self, drop_file_id: u64) {
+    pub fn drop_buffers_for_ephemeral(&self, drop_file_id: ephemeral_file::FileId) {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
@@ -424,14 +432,18 @@ impl PageCache {
 
     // Section 1.3: Public interface functions for working with immutable file pages.
 
-    pub fn read_immutable_buf(&self, file_id: u64, blkno: u32) -> anyhow::Result<ReadBufResult> {
+    pub fn read_immutable_buf(
+        &self,
+        file_id: block_io::FileId,
+        blkno: u32,
+    ) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key)
     }
 
     /// Immediately drop all buffers belonging to given file, without writeback
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: u64) {
+    pub fn drop_buffers_for_immutable(&self, drop_file_id: block_io::FileId) {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
