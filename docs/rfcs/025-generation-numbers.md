@@ -248,13 +248,13 @@ it at all, if a node restarts while an in-memory queue of deletions is pending. 
 leaking objects is an optimization, accomplished by making this queue persistent: see
 [Persistent Deletion Queue](#persistent-deletion-queue) in the optimizations section.
 
-### Deletion Part 2: WAL trim changes
+### Deletion Part 2: WAL trim changes (delay `remote_consistent_lsn` updates)
 
 Remote objects are not the only kind of deletion the pageserver does: it also indirectly deletes
 WAL data, by feeding back remote_consistent_lsn to safekeepers, as a hint to the safekeepers that
 they may drop data below this LSN.
 
-We may solve for safety issues here in the same way as for deletions: before indicating to safekeepers
+We may solve for safety of remote_consistent_lsn updates in the same way as for deletions: before indicating to safekeepers
 that they may trim up to a particular LSN, pageservers should communicate with the control plane
 to confirm that their node generation is current. This guarantees that any future generation will
 be starting from the last metadata that this generation wrote out, i.e. the S3 state which contains
@@ -265,8 +265,18 @@ the safekeeper. The pageservers will change to only advertise the true remote_co
 after they have periodically checked the validity of their generation: this will slightly
 delay WAL trimming by whatever period we decide to make that control plane check-in.
 
-When discussing correctness, read "deletion" as meaning both the deletion of remote objects,
-and publishing updates to remote_consistent_lsn.
+The `remote_consistent_lsn` advertised to a safekeeper is the value from _before_ the
+validation request to the control plane started, not the value at the time the
+pageserver receives a response. This will require an extra field internally to
+the pageserver, to store some "pending remote_consistent_lsn" that may be shared
+with the safekeeper after validation completes.
+
+The control plane remains unaware of `remote_consistent_lsn`: it only has to validate
+the freshness of generation numbers, thereby granting the pageserver permission to
+share the information with the safekeeper.
+
+In subsequent sections and RFCs, when discussing correctness, read "deletion" as meaning
+both the deletion of remote objects, and publishing updates to remote_consistent_lsn.
 
 ### Index changes
 
@@ -531,10 +541,6 @@ validation as all other deletions: the attachment generation must be
 fresh. This avoids the possibility of a stale pageserver incorrectly
 thinking than an object written by a newer generation is stale, and deleting
 it.
-
-This kind
-of deletion would go through the same deletion queue as other object deletions, and be subject
-to the same checks for generation number freshness.
 
 ### Optional: Safekeeper optimization for stale pageservers
 
