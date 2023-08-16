@@ -9,7 +9,6 @@ use utils::{
 
 use crate::{
     config::PageServerConf,
-    metrics::TimelineMetrics,
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
@@ -214,7 +213,7 @@ impl LayerManager {
             // NB: the layer file identified by descriptor `l` is guaranteed to be present
             // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
             // time, even though we dropped `Timeline::layers` inbetween.
-            Self::delete_historic_layer(&layer_removal_cs, l, &mut updates, &mut self.layer_fmgr)?;
+            Self::delete_historic_layer(layer_removal_cs, l, &mut updates, &mut self.layer_fmgr)?;
         }
         updates.flush();
         Ok(())
