@@ -599,7 +599,7 @@ impl RemoteTimelineClient {
     ///
     /// Launch an upload operation in the background.
     ///
-    pub fn schedule_layer_file_upload(
+    pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
         layer_metadata: &LayerFileMetadata,
