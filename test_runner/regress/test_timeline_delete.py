@@ -298,7 +298,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             ps_http, env.initial_tenant, timeline_id, iterations=iterations
         )
 
-    # Check remote is impty
+    # Check remote is empty
     if remote_storage_kind is RemoteStorageKind.MOCK_S3:
         assert_prefix_empty(
             neon_env_builder,

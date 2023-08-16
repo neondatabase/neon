@@ -22,7 +22,11 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
     wait_until_tenant_state,
 )
-from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    available_remote_storages,
+    available_s3_storages,
+)
 from fixtures.types import TenantId
 from fixtures.utils import run_pg_bench_small
 
@@ -76,7 +80,7 @@ def test_tenant_delete_smoke(
     tenant_path = env.tenant_dir(tenant_id=tenant_id)
     assert not tenant_path.exists()
 
-    if remote_storage_kind in [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]:
+    if remote_storage_kind in available_s3_storages():
         assert_prefix_empty(
             neon_env_builder,
             prefix="/".join(
@@ -245,8 +249,12 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
         tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
 
-    # Check remote is impty
-    if remote_storage_kind is RemoteStorageKind.MOCK_S3:
+    tenant_dir = env.tenant_dir(tenant_id)
+    # Check local is empty
+    assert not tenant_dir.exists()
+
+    # Check remote is empty
+    if remote_storage_kind in available_s3_storages():
         assert_prefix_empty(
             neon_env_builder,
             prefix="/".join(
@@ -257,10 +265,6 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
                 )
             ),
         )
-
-    tenant_dir = env.tenant_dir(tenant_id)
-    # Check local is empty
-    assert not tenant_dir.exists()
 
 
 # TODO resume deletion (https://github.com/neondatabase/neon/issues/5006)
@@ -286,6 +290,19 @@ def test_deleted_tenant_ignored_on_attach(
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
+
+    # sanity check, data should be there
+    if remote_storage_kind in available_s3_storages():
+        assert_prefix_not_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "pageserver",
+                    "tenants",
+                    str(tenant_id),
+                )
+            ),
+        )
 
     # failpoint before we remove index_part from s3
     failpoint = "timeline-delete-before-index-delete"
@@ -313,7 +330,7 @@ def test_deleted_tenant_ignored_on_attach(
         iterations=iterations,
     )
 
-    if remote_storage_kind in [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]:
+    if remote_storage_kind in available_s3_storages():
         assert_prefix_not_empty(
             neon_env_builder,
             prefix="/".join(
@@ -352,7 +369,7 @@ def test_deleted_tenant_ignored_on_attach(
     tenant_path = env.tenant_dir(tenant_id=tenant_id)
     assert not tenant_path.exists()
 
-    if remote_storage_kind in [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]:
+    if remote_storage_kind in available_s3_storages():
         assert_prefix_not_empty(
             neon_env_builder,
             prefix="/".join(
