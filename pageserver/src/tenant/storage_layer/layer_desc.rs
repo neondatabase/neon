@@ -103,6 +103,23 @@ impl PersistentLayerDesc {
         }
     }
 
+    pub fn from_filename(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        filename: LayerFileName,
+        file_size: u64,
+    ) -> Self {
+        match filename {
+            LayerFileName::Image(i) => {
+                // FIXME: can we incremental image layers or is this ffu?
+                Self::new_img(tenant_id, timeline_id, i.key_range, i.lsn, false, file_size)
+            }
+            LayerFileName::Delta(d) => {
+                Self::new_delta(tenant_id, timeline_id, d.key_range, d.lsn_range, file_size)
+            }
+        }
+    }
+
     /// Get the LSN that the image layer covers.
     pub fn image_layer_lsn(&self) -> Lsn {
         assert!(!self.is_delta);
