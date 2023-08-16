@@ -302,7 +302,7 @@ def test_deleted_tenant_ignored_on_attach(
         )
     )
 
-    iterations = 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 4
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
     ps_http.tenant_delete(tenant_id)
 

@@ -258,6 +258,7 @@ def list_prefix(
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = neon_env_builder.remote_storage_client.list_objects_v2(
+        Delimiter="/",
         Bucket=neon_env_builder.remote_storage.bucket_name,
         Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
     )
