@@ -299,14 +299,55 @@ the index storage format is migrated to a binary format from JSON.
 
 ### `pageserver::Tenant` startup changes
 
-#### Attachment
+#### Metadata reconciliation
 
-We already reconcile with remote metadata during attachment. It is necessary to synchronize
-with remote metadata even if there is some local metadata that could be brought up to
-date by ingesting the WAL, because if another node updated
-the remote storage, it might have advanced the remote_consistent_lsn such that the safekeeper drops WAL
-content that would be needed for this node to recover. Reconcilation with remote metadata also acts as an optimization, to avoid redundantly
-re-ingesting WAL data that is already in S3.
+Whether for a new attachment or just a pageserver restart, Tenant _should_
+reconcile with remote metadata.
+
+If the remote index reaches a lower LSN than the pageserver's local state,
+then the pageserver is free to ignore the remote index and use its local
+state as-is.
+
+If the remote index reaches a higher LSN than the pageserver's local state,
+then this indicates that the local state may not be safely used, unless the
+safekeepers still have the WAL that spans the range between the local state
+and the remote state. In this case, the pageserver may choose between replaying
+the WAL to bring its local state up to date, or reconciling its local state with
+the contents of S3 without replaying the WAL again:
+
+- Option 1: Always reconcile with S3 when a tenant starts up
+- Option 2: Prefer to recover by ingesting WAL, only do recovery from S3 if
+  some needed LSN region is not available from the safekeeper (because some
+  other node already deleted it by advertising its `remote_consistent_lsn`).
+
+Option 1 is preferred over option 2, because:
+
+- Option 1 is simpler to implement and test, since there is one code path always taken, rather than a conditional behavior.
+- If there are already image layers
+  in S3, it is cheaper to download them than to re-calculate them based on the WAL.
+- Option 1 places less load on the safekeepers (a few nodes) and more on S3 (a
+  very high scale service).
+- Option 2 will leak objects referenced by the old pageserver's metadata, if the
+  new pageserver is independently replaying based on their local state and generating
+  alternative remote objects to represent the same data. This creates more work
+  for scrub to clean up later.
+- Option 2 will wastefully re-upload data that has already been uploaded to remote
+  storage by an earlier node that already consumed the WAL.
+- In option 2, then the `remote_consistent_lsn` could go _backwards_ from the
+  perspective of the rest of the system, when tenant attachment is moved and some
+  new pageserver starts from an earlier LSN than the previous pageserver had already
+  advertised as being remote consistent. The rest of the system could handle this
+  in principle, but it's rather an odd behavior, and ideally
+  other components shouldn't have to handle this case.
+
+There are scenarios where reconciling with remote storage imposes a longer startup
+time for a tenant, if it happens to have some very fresh local state but is quite
+far behind the remote state: it will have to download substantial data from S3
+to serve the same LSNs that it could have served from local delta layers. The solution
+to this will be a "warm secondary location" mode that pre-downloads data from S3,
+which is described in a subsequent RFC.
+
+#### Finding the remote index
 
 Because index files are now suffixed with generation numbers, some changes are needed
 to load them:
@@ -327,20 +368,6 @@ to load them:
 Once the new attachment has written out its index_part.json, it may clean up historic index_part.json
 files that were found, unless the control plane has indicated to us that the tenant is multiply attached
 (see the subsequent HA RFC for this concept).
-
-#### Node Startup with existing Attachment
-
-During attachment, we must also write out the attachment generation number to local storage,
-so that on subsequent node startup we can tell if our attachment is still current. On node startup, when we see an already-attached tenant, it is possible that the tenant was attached to a different node while this node was offline.
-We may still safely start ingesting data and serving reads, but we may not process deletions: deletions
-will be blocked when the deletion queue checks the attachment's generation and finds that it is
-not the latest. We may continue operating the attachment as normal until the control plane
-asks us to detach: while we are not the latest generation, it is possible that some endpoint
-is still configured to use us for reads, so we should continue operating until the control plane
-asks us to detach.
-
-On a new attachment (i.e. we do not have local disk state that was written within the attachment's
-generation number), we must recover metadata from remote storage. We can find the latest index_part.json as follows:
 
 ### Control Plane Changes
 
