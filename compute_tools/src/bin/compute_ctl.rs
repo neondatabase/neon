@@ -288,7 +288,11 @@ fn main() -> Result<()> {
     // the vm-monitor only runs on linux because it requires cgroups
     #[cfg(target_os = "linux")]
     let vm_monitor = vm_monitor_addr.map(|addr| {
-        tokio::spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create rt");
+        rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
             cgroup: cgroup.cloned(),
             pgconnstr: file_cache_connstr.cloned(),
             addr: addr.clone(),
