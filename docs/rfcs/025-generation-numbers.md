@@ -355,15 +355,9 @@ to load them:
 - In a clean migration of a tenant, the control plane may remember the tenant's most recent
   generation numbers, and provide them to the new node in the attach request. This is sufficient
   for the new node to directly GET the latest index.
-- Alternatively, we may use the storage broker for this: if we are continuously publishing the generation
-  information to the broker, then a newly attached tenant may query this information back and if
-  the attachment generation is exactly 1 less than the current attachment, or if the attachment is
-  the same but the node generation is exactly 1 less and the node ID is the same, then we may use that
-  information to calculate the most recent index key. See "Optional Safekeeper changes" below for where
-  we publish generation info to the safekeeper & in turn to the storage broker.
-- As a fallback, newly attached tenants may issue a ListObjectsv2 request using index_part as a prefix
-  to enumerate the indices and pick the most recent one by attachment generation. The listing would
-  typically only return 1-2 indices.
+- As an alternative optimization, we may use the storage broker for this (see [Publishing generation numbers ot storage brokers](#publishing-generation-numbers-to-storage-broker)). If we get the generation information
+  this way, we must check that the old attachment generation is exactly 1 less than the current attachment, or if the attachment is the same but the node generation is exactly 1 less and the node ID is the same. Otherwise we must fall back to listing indices.
+- As a fallback, newly attached tenants may issue a ListObjectsv2 request using index_part as a prefix to enumerate the indices and pick the most recent one by attachment generation (or node generation within attachment generation). The listing would typically only return 1-2 indices, assuming that we have promptly cleaned up old ones (see next section).
 
 The tenant should never load an index with an attachment generation _newer_ than its own: tenants
 are allowed to be attached with stale attachment generations during a multiply-attached
@@ -589,14 +583,34 @@ fresh. This avoids the possibility of a stale pageserver incorrectly
 thinking than an object written by a newer generation is stale, and deleting
 it.
 
-### Optional: Safekeeper optimization for stale pageservers
+### Publishing generation numbers to storage broker
+
+The storage broker acts as an ephemeral store of some per-timeline
+metadata, updated by the safekeeper.
+
+Generation numbers may be passed from pageserver back to safekeeper
+in the feedback messages on wal connections and stored in the storage
+broker by the safekeeper. This is the same data path already used
+for `remote_consistent_lsn` updates.
+
+Nothing we publish to the storage broker is for use in correctness, just
+certain optimizations like:
+
+- Discovering the latest generation's index without doing a ListObjects
+  request
+- Retaining safekeeper knowledge of which pageserver generations are
+  stale across restarts.
+- In future, for remote nodes doing passive reads of historical LSNs from
+  S3 to notice when the current generation for a tenant changes.
+
+### Safekeeper optimization for stale pageservers
 
 As an optimization, we may extend the safekeeper to be asynchronously updated about pageserver node
 generation numbers. We may do this by including the generation in messages from pageserver to safekeeper,
 and having the safekeeper write the highest generation number it has seen for each node to the storage broker.
 
 Once the safekeeper has visibility of the most recent generation, it may reject requests from pageservers
-with stale generation numbers: this would reduce any possible extra load on the safekeeper from stale pageservers,
+with stale node generation numbers: this would reduce any possible extra load on the safekeeper from stale pageservers,
 and provide feedback to stale pageservers that they should shut down.
 
 This is not required for safety: reads from a stale pageserver are functionally harmless and only
@@ -651,7 +665,8 @@ The pageserver is deployed with some special config to:
 - Always act like everything is generation 1 and do not wait for a control plane issued generation on startup.
 - Skip the places in deletion and remote_consistent_lsn updates where we would call into control plane
 
-The storage broker will tolerate the timeline state omitting generation numbers.
+The storage broker will tolerate the timeline state omitting generation numbers (only
+relevant if we implement [publishing generation numbers to the storage broker](#publishing-generation-numbers-to-storage-broker).
 
 The safekeeper will be aware of both new and old versions of `PageserverFeedback` message, and tolerate
 the old version.
@@ -688,7 +703,9 @@ have some of the read-side code ready before the overall functionality is ready:
 2. Deploy pageservers that write objects with generation numbers in the keys.
 
 Old pageservers will be oblivious to generation numbers. That means that they can't
-read objects with generation numbers in the name.
+read objects with generation numbers in the name. This is why we must
+first step must deploy the ability to read, before the second step
+starts writing them.
 
 # Appendix A: Examples of use in high availability/failover
 
@@ -789,8 +806,7 @@ page moves around as compaction happens).
 
 A read replica needs to be aware of generations in remote data in order to read the latest
 metadata (find the index_part.json with the latest suffix). It may either query this
-from the control plane, or more efficiently read it from the storage broker -- publishing
-generation information to the storage broker.
+from the control plane, or more efficiently read it from the storage broker (see [storage broker section in optimizations](#publishing-generation-numbers-to-storage-broker)).
 
 ## Seamless migration
 
