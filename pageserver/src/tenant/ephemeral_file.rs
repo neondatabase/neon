@@ -23,19 +23,28 @@ use utils::id::{TenantId, TimelineId};
 ///
 static EPHEMERAL_FILES: Lazy<RwLock<EphemeralFiles>> = Lazy::new(|| {
     RwLock::new(EphemeralFiles {
-        next_file_id: 1,
+        next_file_id: FileId(1),
         files: HashMap::new(),
     })
 });
 
-pub struct EphemeralFiles {
-    next_file_id: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId(u64);
 
-    files: HashMap<u64, Arc<VirtualFile>>,
+impl std::fmt::Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+pub struct EphemeralFiles {
+    next_file_id: FileId,
+
+    files: HashMap<FileId, Arc<VirtualFile>>,
 }
 
 pub struct EphemeralFile {
-    file_id: u64,
+    file_id: FileId,
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
     file: Arc<VirtualFile>,
@@ -51,7 +60,7 @@ impl EphemeralFile {
     ) -> Result<EphemeralFile, io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
         let file_id = l.next_file_id;
-        l.next_file_id += 1;
+        l.next_file_id = FileId(l.next_file_id.0 + 1);
 
         let filename = conf
             .timeline_path(&tenant_id, &timeline_id)
@@ -211,7 +220,7 @@ impl Drop for EphemeralFile {
     }
 }
 
-pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> {
+pub fn writeback(file_id: FileId, blkno: u32, buf: &[u8]) -> Result<(), io::Error> {
     if let Some(file) = EPHEMERAL_FILES.read().unwrap().files.get(&file_id) {
         match file.write_all_at(buf, blkno as u64 * PAGE_SZ as u64) {
             Ok(_) => Ok(()),

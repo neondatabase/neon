@@ -117,6 +117,12 @@ where
     }
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct FileId(u64);
+
+fn next_file_id() -> FileId {
+    FileId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
 
 /// An adapter for reading a (virtual) file using the page cache.
 ///
@@ -126,7 +132,7 @@ pub struct FileBlockReader<F> {
     pub file: F,
 
     /// Unique ID of this file, used as key in the page cache.
-    file_id: u64,
+    file_id: FileId,
 }
 
 impl<F> FileBlockReader<F>
@@ -134,7 +140,7 @@ where
     F: FileExt,
 {
     pub fn new(file: F) -> Self {
-        let file_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file_id = next_file_id();
 
         FileBlockReader { file_id, file }
     }
