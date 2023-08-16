@@ -3461,20 +3461,9 @@ impl Timeline {
             layer_names_to_delete.push(delta.layer_desc().filename());
         }
 
-        guard.finish_compact_l0(
-            &layer_removal_cs,
-            remove_layers,
-            &insert_layers,
-            &self.metrics,
-        )?;
+        guard.finish_compact_l0(&layer_removal_cs, remove_layers, &insert_layers)?;
 
         drop_wlock(guard);
-
-        // Also schedule the deletions in remote storage
-        if let Some(remote_client) = &self.remote_client {
-            // FIXME: this needs to be moved to LayerE::drop possibly?
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
-        }
 
         Ok(())
     }
