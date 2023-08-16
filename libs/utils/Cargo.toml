@@ -56,3 +56,7 @@ tempfile.workspace = true
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[bench]]
+name = "write_blob"
+harness = false
