@@ -636,7 +636,7 @@ unresponsive node might be network partitioned and still writing to S3.
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
    written by node 0 are just garbage that can be cleaned up at leisure. Node 0 will
-   not do any deletions because it can't synchronize with control plane.
+   not do any deletions because it can't synchronize with control plane, or if it could, it would be informed that is no longer the most recent generation and hence not do the garbage collection.
 
 Eventually, node 0 will somehow realize it should stop running by some means, although
 this is not necessary for correctness:
