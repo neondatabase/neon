@@ -2062,118 +2062,106 @@ impl Timeline {
                 continue 'outer;
             }
 
-            #[allow(clippy::never_loop)] // see comment at bottom of this loop
-            #[allow(unused_labels)]
-            'layer_map_search: loop {
-                #[allow(unused_variables)] // it'll be indentation change to remove these
-                let remote_layer = {
-                    let guard = timeline.layers.read().await;
-                    let layers = guard.layer_map();
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
 
-                    // Check the open and frozen in-memory layers first, in order from newest
-                    // to oldest.
-                    if let Some(open_layer) = &layers.open_layer {
-                        let start_lsn = open_layer.get_lsn_range().start;
-                        if cont_lsn > start_lsn {
-                            //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
-                            // Get all the data needed to reconstruct the page version from this layer.
-                            // But if we have an older cached page image, no need to go past that.
-                            let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match open_layer
-                                .get_value_reconstruct_data(
-                                    key,
-                                    lsn_floor..cont_lsn,
-                                    reconstruct_state,
-                                    ctx,
-                                )
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(e) => return Err(PageReconstructError::from(e)),
-                            };
-                            cont_lsn = lsn_floor;
-                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                            traversal_path.push((
-                                result,
-                                cont_lsn,
-                                Box::new({
-                                    let open_layer = Arc::clone(open_layer);
-                                    move || open_layer.traversal_id()
-                                }),
-                            ));
-                            continue 'outer;
-                        }
-                    }
-                    for frozen_layer in layers.frozen_layers.iter().rev() {
-                        let start_lsn = frozen_layer.get_lsn_range().start;
-                        if cont_lsn > start_lsn {
-                            //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
-                            let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match frozen_layer
-                                .get_value_reconstruct_data(
-                                    key,
-                                    lsn_floor..cont_lsn,
-                                    reconstruct_state,
-                                    ctx,
-                                )
-                                .await
-                            {
-                                Ok(result) => result,
-                                Err(e) => return Err(PageReconstructError::from(e)),
-                            };
-                            cont_lsn = lsn_floor;
-                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                            traversal_path.push((
-                                result,
-                                cont_lsn,
-                                Box::new({
-                                    let frozen_layer = Arc::clone(frozen_layer);
-                                    move || frozen_layer.traversal_id()
-                                }),
-                            ));
-                            continue 'outer;
-                        }
-                    }
+            // Check the open and frozen in-memory layers first, in order from newest
+            // to oldest.
+            if let Some(open_layer) = &layers.open_layer {
+                let start_lsn = open_layer.get_lsn_range().start;
+                if cont_lsn > start_lsn {
+                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
+                    // Get all the data needed to reconstruct the page version from this layer.
+                    // But if we have an older cached page image, no need to go past that.
+                    let lsn_floor = max(cached_lsn + 1, start_lsn);
+                    result = match open_layer
+                        .get_value_reconstruct_data(
+                            key,
+                            lsn_floor..cont_lsn,
+                            reconstruct_state,
+                            ctx,
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => return Err(PageReconstructError::from(e)),
+                    };
+                    cont_lsn = lsn_floor;
+                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    traversal_path.push((
+                        result,
+                        cont_lsn,
+                        Box::new({
+                            let open_layer = Arc::clone(open_layer);
+                            move || open_layer.traversal_id()
+                        }),
+                    ));
+                    continue 'outer;
+                }
+            }
+            for frozen_layer in layers.frozen_layers.iter().rev() {
+                let start_lsn = frozen_layer.get_lsn_range().start;
+                if cont_lsn > start_lsn {
+                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
+                    let lsn_floor = max(cached_lsn + 1, start_lsn);
+                    result = match frozen_layer
+                        .get_value_reconstruct_data(
+                            key,
+                            lsn_floor..cont_lsn,
+                            reconstruct_state,
+                            ctx,
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => return Err(PageReconstructError::from(e)),
+                    };
+                    cont_lsn = lsn_floor;
+                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    traversal_path.push((
+                        result,
+                        cont_lsn,
+                        Box::new({
+                            let frozen_layer = Arc::clone(frozen_layer);
+                            move || frozen_layer.traversal_id()
+                        }),
+                    ));
+                    continue 'outer;
+                }
+            }
 
-                    if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
-                        let layer = guard.get_from_desc(&layer);
-                        // Get all the data needed to reconstruct the page version from this layer.
-                        // But if we have an older cached page image, no need to go past that.
-                        let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                        result = match layer
-                            .get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            )
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(e) => return Err(PageReconstructError::from(e)),
-                        };
-                        cont_lsn = lsn_floor;
-                        *read_count += 1;
-                        traversal_path.push((
-                            result,
-                            cont_lsn,
-                            Box::new({
-                                let layer = Arc::clone(&layer);
-                                move || layer.traversal_id()
-                            }),
-                        ));
-                        continue 'outer;
-                    } else if timeline.ancestor_timeline.is_some() {
-                        // Nothing on this timeline. Traverse to parent
-                        result = ValueReconstructResult::Continue;
-                        cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
-                        continue 'outer;
-                    } else {
-                        // Nothing found
-                        result = ValueReconstructResult::Missing;
-                        continue 'outer;
-                    }
+            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                let layer = guard.get_from_desc(&layer);
+                // Get all the data needed to reconstruct the page version from this layer.
+                // But if we have an older cached page image, no need to go past that.
+                let lsn_floor = max(cached_lsn + 1, lsn_floor);
+                result = match layer
+                    .get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state, ctx)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return Err(PageReconstructError::from(e)),
                 };
+                cont_lsn = lsn_floor;
+                *read_count += 1;
+                traversal_path.push((
+                    result,
+                    cont_lsn,
+                    Box::new({
+                        let layer = Arc::clone(&layer);
+                        move || layer.traversal_id()
+                    }),
+                ));
+                continue 'outer;
+            } else if timeline.ancestor_timeline.is_some() {
+                // Nothing on this timeline. Traverse to parent
+                result = ValueReconstructResult::Continue;
+                cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+                continue 'outer;
+            } else {
+                // Nothing found
+                result = ValueReconstructResult::Missing;
+                continue 'outer;
             }
         }
     }
