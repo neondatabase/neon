@@ -465,7 +465,7 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
+        let cached_page_img = match self.lookup_cached_page(&key, lsn).await {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
@@ -494,6 +494,7 @@ impl Timeline {
 
         RECONSTRUCT_TIME
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+            .await
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -2443,13 +2444,14 @@ impl Timeline {
         }
     }
 
-    fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    async fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) =
-            cache.lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)?;
+        let (lsn, read_guard) = cache
+            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)
+            .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
     }
@@ -4131,7 +4133,7 @@ impl Timeline {
     ///
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
     ///
-    fn reconstruct_value(
+    async fn reconstruct_value(
         &self,
         key: Key,
         request_lsn: Lsn,
@@ -4200,6 +4202,7 @@ impl Timeline {
                             last_rec_lsn,
                             &img,
                         )
+                        .await
                         .context("Materialized page memoization failed")
                     {
                         return Err(PageReconstructError::from(e));
