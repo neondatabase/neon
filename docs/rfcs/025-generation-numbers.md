@@ -130,7 +130,7 @@ Distinction between generation numbers and Node ID:
   in the event of starting a replacement node after an original node is network partitioned, or
   in the event of a human error starting a replacement node that re-uses a node ID.
 - Node ID is written to disk in a pageserver's configuration, whereas generation number is
-  received at runtime just after startup.
+  received at runtime just after startup (this does incur an availability dependency, see [availability](#availability)).
 - The two concepts could be collapsed into one if we used ephemeral node IDs that were only ever used one time,
   but this makes it harder to efficiently handle the case of the same physical node restarting, where we may want
   to retain the same attachments as it had before restart, without having to map them to a different node ID.
