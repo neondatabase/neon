@@ -340,3 +340,50 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
     assert headers["Neon-Batch-Deferrable"] == "true"
 
     assert result[0]["rows"] == [{"answer": 42}]
+
+
+def test_sql_over_http_pool(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    def get_pid(status: int, pw: str) -> Any:
+        connstr = (
+            f"postgresql://http_auth:{pw}@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        )
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps(
+                {"query": "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "params": []}
+            ),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == status
+        return response.json()
+
+    pid1 = get_pid(200, "http")["rows"][0]["pid"]
+
+    # query should be on the same connection
+    rows = get_pid(200, "http")["rows"]
+    assert rows == [{"pid": pid1}]
+
+    # incorrect password should not work
+    res = get_pid(400, "foobar")
+    assert "password authentication failed for user" in res["message"]
+
+    static_proxy.safe_psql("alter user http_auth with password 'http2'")
+
+    # after password change, should open a new connection to verify it
+    pid2 = get_pid(200, "http2")["rows"][0]["pid"]
+    assert pid1 != pid2
+
+    # query should be on an existing connection
+    pid = get_pid(200, "http2")["rows"][0]["pid"]
+    assert pid in [pid1, pid2]
+
+    # old password should not work
+    res = get_pid(400, "http")
+    assert "password authentication failed for user" in res["message"]

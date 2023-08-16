@@ -1769,6 +1769,15 @@ class VanillaPostgres(PgProtocol):
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
 
+    def edit_hba(self, hba: List[str]):
+        """Prepend hba lines into pg_hba.conf file."""
+        assert not self.running
+        with open(os.path.join(self.pgdatadir, "pg_hba.conf"), "r+") as conf_file:
+            data = conf_file.read()
+            conf_file.seek(0)
+            conf_file.write("\n".join(hba) + "\n")
+            conf_file.write(data)
+
     def start(self, log_path: Optional[str] = None):
         assert not self.running
         self.running = True
@@ -2166,14 +2175,17 @@ def static_proxy(
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
-    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
-
     port = vanilla_pg.default_options["port"]
     host = vanilla_pg.default_options["host"]
     dbname = vanilla_pg.default_options["dbname"]
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
+
+    # require password for 'http_auth' user
+    vanilla_pg.edit_hba([f"host {dbname} http_auth {host} password"])
+
+    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
