@@ -79,19 +79,6 @@ fn main() -> Result<()> {
         init_remote_storage(x).expect("cannot initialize remote extension storage from config")
     });
 
-    let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
-    if env::var("AUTOSCALING").is_ok() && vm_monitor_addr.is_none() {
-        panic!("autoscaling enabled but --vm-monitor-addr option not set")
-    }
-
-    // the vm-monitor only runs on linux because it requires cgroups, and these
-    // options are only used when for the monitor
-    #[cfg(target_os = "linux")]
-    let (cgroup, file_cache_connstr) = (
-        matches.get_one::<String>("filecache-connstr"),
-        matches.get_one::<String>("cgroup"),
-    );
-
     let http_port = *matches
         .get_one::<u16>("http-port")
         .expect("http-port is required");
@@ -287,17 +274,33 @@ fn main() -> Result<()> {
     // start the vm-monitor if directed to
     // the vm-monitor only runs on linux because it requires cgroups
     #[cfg(target_os = "linux")]
-    let vm_monitor = vm_monitor_addr.map(|addr| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create rt");
-        rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
-            cgroup: cgroup.cloned(),
-            pgconnstr: file_cache_connstr.cloned(),
-            addr: addr.clone(),
-        }))))
-    });
+    let vm_monitor = {
+        let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+        let cgroup = matches.get_one::<String>("filecache-connstr");
+        let file_cache_connstr = matches.get_one::<String>("cgroup");
+        match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
+            (None, None) => (),
+            (None, Some(_)) => {
+                panic!("--vm-monitor-addr option set but AUTOSCALING env var not present")
+            }
+            (Some(_), None) => {
+                panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
+            }
+            (Some(_), Some(_)) => (),
+        }
+
+        vm_monitor_addr.map(|addr| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+            rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+                cgroup: cgroup.cloned(),
+                pgconnstr: file_cache_connstr.cloned(),
+                addr: addr.clone(),
+            }))))
+        })
+    };
 
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
@@ -429,6 +432,9 @@ fn cli() -> clap::Command {
                 .long("remote-ext-config")
                 .value_name("REMOTE_EXT_CONFIG"),
         )
+        // TODO(fprasx): we currently have default arguments because the cloud PR
+        // to pass them in hasn't been merged yet. We should get rid of them once
+        // the PR is merged.
         .arg(
             Arg::new("vm-monitor-addr")
                 .long("vm-monitor-addr")
