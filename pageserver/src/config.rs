@@ -566,11 +566,19 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
-    pub fn remote_deletion_list_path(&self, sequence: u64) -> PathBuf {
+    pub fn remote_deletion_node_prefix(&self) -> PathBuf {
         PathBuf::from_str("deletion")
             .unwrap()
             .join(self.id.to_string())
-            .join(sequence.to_string())
+    }
+
+    pub fn remote_deletion_list_path(&self, sequence: u64) -> RemotePath {
+        RemotePath::new(
+            &self
+                .remote_deletion_node_prefix()
+                .join(format!("{:016x}.list", sequence)),
+        )
+        .expect("This should always be convertible, it is relative")
     }
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {

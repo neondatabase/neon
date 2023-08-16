@@ -6,6 +6,7 @@ use serde_with::serde_as;
 use tokio;
 use tokio::time::Duration;
 use tracing::{self, debug, error, info, warn};
+use utils::backoff;
 use utils::id::{TenantId, TimelineId};
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
@@ -331,10 +332,7 @@ impl BackendQueueWorker {
                         .iter()
                         .rev()
                         .take(MAX_KEYS_PER_DELETE)
-                        .map(|l| {
-                            RemotePath::new(&self.conf.remote_deletion_list_path(l.sequence))
-                                .expect("Failed to compose deletion list path")
-                        })
+                        .map(|l| self.conf.remote_deletion_list_path(l.sequence))
                         .collect();
 
                     match self.remote_storage.delete_objects(&executed_keys).await {
@@ -398,8 +396,7 @@ impl FrontendQueueWorker {
     /// This does not return errors, because on failure to flush we do not lose
     /// any state: flushing will be retried implicitly on the next deadline
     async fn flush(&mut self) {
-        let key = RemotePath::new(&self.conf.remote_deletion_list_path(self.pending.sequence))
-            .expect("Failed to compose deletion list path");
+        let key = &self.conf.remote_deletion_list_path(self.pending.sequence);
 
         let bytes = serde_json::to_vec(&self.pending).expect("Failed to serialize deletion list");
         let size = bytes.len();
@@ -458,10 +455,106 @@ impl FrontendQueueWorker {
         }
     }
 
+    async fn recover(&mut self) -> Result<(), anyhow::Error> {
+        // TODO: this needs a CancellationToken or equivalent: usual worker teardown happens via the channel
+        let prefix = RemotePath::new(&self.conf.remote_deletion_node_prefix())
+            .expect("Failed to compose path");
+        let lists = backoff::retry(
+            || async { self.remote_storage.list_prefixes(Some(&prefix)).await },
+            |_| false, // TODO impl is_permanent
+            3,
+            u32::MAX, // There's no point giving up, since once we do that the deletion queue is stuck
+            "Recovering deletion lists",
+        )
+        .await?;
+
+        const LIST_EXTENSION: &str = "list";
+
+        let mut seqs: Vec<u64> = Vec::new();
+        for l in &lists {
+            let basename = l
+                .strip_prefix(&prefix)
+                .expect("Stripping prefix frrom a prefix listobjects should always work");
+            let basename = match basename.to_str() {
+                Some(s) => s,
+                None => {
+                    // Should never happen, we are the only ones writing objects here
+                    warn!("Unexpected key encoding in deletion queue object");
+                    continue;
+                }
+            };
+
+            let (seq_part, extension) = match basename.split_once(".") {
+                Some(parts) => parts,
+                None => {
+                    warn!("Unexpected key in deletion queue: {basename}");
+                    continue;
+                }
+            };
+
+            if extension != LIST_EXTENSION {
+                continue;
+            }
+
+            let seq: u64 = match seq_part.parse() {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Malformed key '{basename}': {e}");
+                    continue;
+                }
+            };
+            seqs.push(seq);
+        }
+
+        seqs.sort();
+
+        for s in seqs {
+            let list_path = self.conf.remote_deletion_list_path(s);
+            let lists_body = backoff::retry(
+                || self.remote_storage.download_all(&list_path),
+                |_| false,
+                3,
+                u32::MAX,
+                "Reading a deletion list",
+            )
+            .await?;
+
+            let deletion_list = match serde_json::from_slice::<DeletionList>(lists_body.as_slice())
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    // Drop the list on the floor: any objects it referenced will be left behind
+                    // for scrubbing to clean up.  This should never happen unless we have a serialization bug.
+                    warn!(sequence = s, "Failed to deserialize deletion list: {e}");
+                    continue;
+                }
+            };
+
+            // We will drop out of recovery if this fails: it indicates that we are shutting down
+            // or the backend has panicked
+            self.tx
+                .send(BackendQueueMessage::Delete(deletion_list))
+                .await?;
+
+            self.pending.sequence = s + 1;
+        }
+
+        Ok(())
+    }
+
     /// This is the front-end ingest, where we bundle up deletion requests into DeletionList
     /// and write them out, for later
     pub async fn background(&mut self) {
         info!("Started deletion frontend worker");
+
+        // Before accepting any input from this pageserver lifetime, recover all deletion lists that are in S3
+        if let Err(e) = self.recover().await {
+            // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
+            // queue receiver has been dropped.
+            info!("Deletion queue recover aborted, deletion queue will not proceed ({e:#})");
+            return;
+        }
+
         loop {
             let msg = match tokio::time::timeout(self.timeout, self.rx.recv()).await {
                 Ok(Some(msg)) => msg,
@@ -561,9 +654,7 @@ impl DeletionQueue {
         (
             Self { tx },
             Some(FrontendQueueWorker {
-                // TODO: on startup, recover sequence number by listing persistent list objects,
-                // *or* if we implement generation numbers, we may start from 0 every time
-                pending: DeletionList::new(0xdeadbeef),
+                pending: DeletionList::new(1),
                 remote_storage: remote_storage.clone(),
                 conf,
                 rx,
