@@ -259,6 +259,9 @@ jobs:
         fi
         psql ${CONNSTR} -c "${QUERY}"
 
+        # Print `tenant_id` and `timeline_id` to ease debugging
+        psql ${CONNSTR} -C "SHOW neon.tenant_id; SHOW neon.timeline_id;" || true
+
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
       with:
@@ -388,6 +391,9 @@ jobs:
         fi
         psql ${CONNSTR} -c "${QUERY}"
 
+        # Print `tenant_id` and `timeline_id` to ease debugging
+        psql ${CONNSTR} -C "SHOW neon.tenant_id; SHOW neon.timeline_id;" || true
+
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
       with:
@@ -492,6 +498,9 @@ jobs:
         fi
         psql ${CONNSTR} -c "${QUERY}"
 
+        # Print `tenant_id` and `timeline_id` to ease debugging
+        psql ${CONNSTR} -C "SHOW neon.tenant_id; SHOW neon.timeline_id;" || true
+
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
       with:
@@ -581,6 +590,9 @@ jobs:
           QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
         fi
         psql ${CONNSTR} -c "${QUERY}"
+
+        # Print `tenant_id` and `timeline_id` to ease debugging
+        psql ${CONNSTR} -C "SHOW neon.tenant_id; SHOW neon.timeline_id;" || true
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
