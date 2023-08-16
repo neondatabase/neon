@@ -234,21 +234,7 @@ pub(super) async fn download_index_part(
         .map_err(DownloadError::BadInput)?;
 
     let index_part_bytes = download_retry(
-        || async {
-            let mut index_part_download = storage.download(&part_storage_path).await?;
-
-            let mut index_part_bytes = Vec::new();
-            tokio::io::copy(
-                &mut index_part_download.download_stream,
-                &mut index_part_bytes,
-            )
-            .await
-            .with_context(|| {
-                format!("Failed to download an index part into file {index_part_path:?}")
-            })
-            .map_err(DownloadError::Other)?;
-            Ok(index_part_bytes)
-        },
+        || storage.download_all(&part_storage_path),
         &format!("download {part_storage_path:?}"),
     )
     .await?;

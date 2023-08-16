@@ -13,7 +13,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, StripPrefixError},
     pin::Pin,
     sync::Arc,
 };
@@ -107,6 +107,10 @@ impl RemotePath {
 
     pub fn extension(&self) -> Option<&str> {
         self.0.extension()?.to_str()
+    }
+
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, StripPrefixError> {
+        self.0.strip_prefix(&p.0)
     }
 }
 
@@ -259,6 +263,18 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.download(from).await,
             Self::Unreliable(s) => s.download(from).await,
         }
+    }
+
+    /// For small, simple downloads where caller doesn't want to handle the streaming: return the full body
+    pub async fn download_all(&self, from: &RemotePath) -> Result<Vec<u8>, DownloadError> {
+        let mut download = self.download(from).await?;
+
+        let mut bytes = Vec::new();
+        tokio::io::copy(&mut download.download_stream, &mut bytes)
+            .await
+            .with_context(|| format!("Failed to download body from {from}"))
+            .map_err(DownloadError::Other)?;
+        Ok(bytes)
     }
 
     pub async fn download_byte_range(
