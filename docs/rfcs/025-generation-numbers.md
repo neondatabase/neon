@@ -94,8 +94,7 @@ pageserver, control plane, safekeeper (optional)
 - **Safety for multiply-attached tenants** is provided by the
   tenant attach generation in the object key: the competing pageservers will not
   try to write to the same keys.
-- **Safety for deletions** is provided by pageservers batching up deletions, then calling out to the control plane
-  to validate that their generation is still current before executing these batches.
+- **Safety for deletions** is provided by pageservers enqueing deletions until calling out to the control plane to validate that the node & attachment generation numbers have not changed since the deletions were enqueued.
 - **The control plane is used to issue generation numbers** to avoid the need for
   a built-in consensus system in the pageserver, although this could in principle
   be changed without changing the storage format.
