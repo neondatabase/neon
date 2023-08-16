@@ -71,6 +71,17 @@ def test_tenant_delete_smoke(
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
+            if remote_storage_kind in available_s3_storages():
+                assert_prefix_not_empty(
+                    neon_env_builder,
+                    prefix="/".join(
+                        (
+                            "tenants",
+                            str(tenant_id),
+                        )
+                    ),
+                )
+
         parent = timeline
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
@@ -85,7 +96,6 @@ def test_tenant_delete_smoke(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -197,6 +207,17 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         else:
             last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
+            if remote_storage_kind in available_s3_storages():
+                assert_prefix_not_empty(
+                    neon_env_builder,
+                    prefix="/".join(
+                        (
+                            "tenants",
+                            str(tenant_id),
+                        )
+                    ),
+                )
+
     ps_http.configure_failpoints((failpoint, "return"))
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
@@ -259,7 +280,6 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -297,7 +317,6 @@ def test_deleted_tenant_ignored_on_attach(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -335,7 +354,6 @@ def test_deleted_tenant_ignored_on_attach(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )
@@ -374,7 +392,6 @@ def test_deleted_tenant_ignored_on_attach(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(tenant_id),
                 )

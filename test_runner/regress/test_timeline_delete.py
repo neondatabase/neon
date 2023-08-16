@@ -18,6 +18,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
+    assert_prefix_not_empty,
     poll_for_remote_storage_iterations,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -30,6 +31,7 @@ from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
+    available_s3_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -212,6 +214,19 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         else:
             last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
+            if remote_storage_kind in available_s3_storages():
+                assert_prefix_not_empty(
+                    neon_env_builder,
+                    prefix="/".join(
+                        (
+                            "tenants",
+                            str(env.initial_tenant),
+                            "timelines",
+                            str(timeline_id),
+                        )
+                    ),
+                )
+
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped
     env.pageserver.allowed_errors.append(
@@ -304,7 +319,6 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -497,7 +511,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         neon_env_builder,
         prefix="/".join(
             (
-                "pageserver",
                 "tenants",
                 str(env.initial_tenant),
                 "timelines",
@@ -517,7 +530,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -531,7 +543,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder, prefix="pageserver"),
+        lambda: assert_prefix_empty(neon_env_builder),
     )
 
 
@@ -742,6 +754,19 @@ def test_timeline_delete_works_for_remote_smoke(
 
         timeline_ids.append(timeline_id)
 
+    for timeline_id in timeline_ids:
+        assert_prefix_not_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
     for timeline_id in reversed(timeline_ids):
         # note that we need to finish previous deletion before scheduling next one
         # otherwise we can get an "HasChildren" error if deletion is not fast enough (real_s3)
@@ -751,7 +776,6 @@ def test_timeline_delete_works_for_remote_smoke(
             neon_env_builder,
             prefix="/".join(
                 (
-                    "pageserver",
                     "tenants",
                     str(env.initial_tenant),
                     "timelines",
@@ -762,7 +786,7 @@ def test_timeline_delete_works_for_remote_smoke(
 
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
-    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder, prefix="pageserver"))
+    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder))
 
 
 def test_delete_orphaned_objects(

@@ -247,6 +247,9 @@ def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional
 def list_prefix(
     neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None
 ) -> ListObjectsV2OutputTypeDef:
+    """
+    Note that this function takes into account prefix_in_bucket.
+    """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert neon_env_builder.remote_storage_kind in (
         RemoteStorageKind.MOCK_S3,
@@ -256,11 +259,19 @@ def list_prefix(
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
     assert neon_env_builder.remote_storage_client is not None
 
+    prefix_in_bucket = neon_env_builder.remote_storage.prefix_in_bucket or ""
+    if not prefix:
+        prefix = prefix_in_bucket
+    else:
+        # real s3 tests have uniqie per test prefix
+        # mock_s3 tests use special pageserver prefix for pageserver stuff
+        prefix = "/".join((prefix_in_bucket, prefix))
+
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = neon_env_builder.remote_storage_client.list_objects_v2(
         Delimiter="/",
         Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
+        Prefix=prefix,
     )
     return response
 
