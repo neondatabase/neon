@@ -116,8 +116,7 @@ impl<T: AsyncRead> WithClientIp<T> {
         loop {
             match self.state {
                 ProxyParse::NotStarted => {
-                    let Some(header) = ready!(self.as_mut().fill_buf(cx, 12)?)
-                    else {
+                    let Some(header) = ready!(self.as_mut().fill_buf(cx, 12)?) else {
                         *self.as_mut().project().state = ProxyParse::None;
                         continue;
                     };
@@ -135,8 +134,7 @@ impl<T: AsyncRead> WithClientIp<T> {
                     };
                 }
                 ProxyParse::FoundHeader => {
-                    let Some(mut bytes) = ready!(self.as_mut().fill_buf(cx, 4)?)
-                    else {
+                    let Some(mut bytes) = ready!(self.as_mut().fill_buf(cx, 4)?) else {
                         let this = self.as_mut().project();
                         *this.state = ProxyParse::None;
                         continue;
@@ -230,7 +228,9 @@ impl AsyncAccept for ProxyProtocolAccept {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
         let conn = ready!(self.project().incoming.poll_accept(cx)?);
-        let Some(conn) = conn else { return Poll::Ready(None) };
+        let Some(conn) = conn else {
+            return Poll::Ready(None);
+        };
 
         Poll::Ready(Some(Ok(WithClientIp::new(conn))))
     }
