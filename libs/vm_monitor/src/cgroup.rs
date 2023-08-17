@@ -1,6 +1,7 @@
 use std::{
     fmt::{Debug, Display},
-    fs, pin::pin,
+    fs,
+    pin::pin,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -469,8 +470,9 @@ impl CgroupWatcher {
         // We'll use this for logging durations
         let start_time = Instant::now();
 
-        // Start a timer for the maximum time we'll leave the cgroup frozen for:
-        let thaw_deadline = tokio::time::sleep(self.config.max_upscale_wait);
+        // Await the upscale until we have to unfreeze
+        let timed =
+            tokio::time::timeout(self.config.max_upscale_wait, self.await_upscale(upscales));
 
         // Request the upscale
         info!(
@@ -482,20 +484,23 @@ impl CgroupWatcher {
             .await
             .context("failed to request upscale")?;
 
-        let mut waiting_on_upscale = true;
-        tokio::select! {
-            // Deadline passed without us receiving upscale
-            _ = thaw_deadline => {
-                info!(elapsed = ?start_time.elapsed(), "timed out waiting for upscale");
-            }
-
-            // Upscaled :)
-            res = self.await_upscale(upscales) => {
-                res.context("failed to await upscale")?;
+        let waiting_on_upscale = match timed.await {
+            Ok(Ok(())) => {
                 info!(elapsed = ?start_time.elapsed(), "received upscale in time");
-                waiting_on_upscale = false;
+                false
             }
-        }
+            // **important**: unfreeze the cgroup before ?-reporting the error
+            Ok(Err(e)) => {
+                info!("error waiting for upscale -> thawing cgroup");
+                self.thaw()
+                    .context("failed to thaw cgroup after errored waiting for upscale")?;
+                Err(e.context("failed to await upscale"))?
+            }
+            Err(_) => {
+                info!(elapsed = ?self.config.max_upscale_wait, "timed out waiting for upscale");
+                true
+            }
+        };
 
         info!("thawing cgroup");
         self.thaw().context("failed to thaw cgroup")?;
