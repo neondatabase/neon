@@ -34,7 +34,6 @@
 //! ```
 //!
 use std::collections::HashMap;
-use std::env;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
@@ -44,8 +43,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -276,6 +274,9 @@ fn main() -> Result<()> {
     // because it requires cgroups.
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
+            use std::env;
+            use tokio_util::sync::CancellationToken;
+            use tracing::warn;
             let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
             let cgroup = matches.get_one::<String>("filecache-connstr");
             let file_cache_connstr = matches.get_one::<String>("cgroup");
