@@ -1104,9 +1104,9 @@ impl Tenant {
             {
                 match e {
                     LoadLocalTimelineError::Load(source) => {
-                        return Err(anyhow::anyhow!(source).with_context(|| {
+                        return Err(anyhow::anyhow!(source)).with_context(|| {
                             format!("Failed to load local timeline: {timeline_id}")
-                        }))
+                        })
                     }
                     LoadLocalTimelineError::ResumeDeletion(source) => {
                         // Make sure resumed deletion wont fail loading for entire tenant.
