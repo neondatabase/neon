@@ -142,10 +142,6 @@ impl BlobWriter for EphemeralFile {
                                     self.ephemeral_file.page_cache_file_id,
                                     self.blknum,
                                 ) {
-                                    Err(e) => {
-                                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
-                                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
-                                    }
                                     Ok(page_cache::ReadBufResult::Found(_guard)) => {
                                         // This function takes &mut self, so, it shouldn't be possible to reach this point.
                                         unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);
@@ -156,6 +152,10 @@ impl BlobWriter for EphemeralFile {
                                         buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
                                         write_guard.mark_valid();
                                         // pre-warm successful
+                                    }
+                                    Err(e) => {
+                                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
+                                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
                                     }
                                 }
                                 // Zero the buffer for re-use.
