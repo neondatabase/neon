@@ -42,12 +42,7 @@ where
     }
 }
 
-/// A block accessible for reading
-///
-/// During builds with `#[cfg(test)]`, this is a proper enum
-/// with two variants to support testing code. During normal
-/// builds, it just has one variant and is thus a cheap newtype
-/// wrapper of [`PageReadGuard`]
+/// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
     EphemeralFileMutableHead(&'a [u8; PAGE_SZ]),

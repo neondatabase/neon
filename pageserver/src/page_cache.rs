@@ -386,7 +386,7 @@ impl PageCache {
         self.lock_for_read(&mut cache_key)
     }
 
-    /// Immediately drop all buffers belonging to given file, without writeback
+    /// Immediately drop all buffers belonging to given file
     pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
