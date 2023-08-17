@@ -36,7 +36,18 @@ pub(super) async fn authenticate(
         AuthInfo::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
-            let client_key = match flow.begin(scram).await?.authenticate().await? {
+
+            let auth_flow = flow.begin(scram).await.map_err(|error| {
+                warn!(?error, "error sending scram acknowledgement");
+                error
+            })?;
+
+            let auth_outcome = auth_flow.authenticate().await.map_err(|error| {
+                warn!(?error, "error processing scram messages");
+                error
+            })?;
+
+            let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
