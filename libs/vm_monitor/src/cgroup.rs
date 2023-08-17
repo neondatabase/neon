@@ -1,6 +1,6 @@
 use std::{
     fmt::{Debug, Display},
-    fs,
+    fs, pin::pin,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -318,11 +318,9 @@ impl CgroupWatcher {
         // such as freezing the cgroup, or increasing its `memory.high`. We don't
         // want to do these things too often (because postgres needs to run, and
         // we only have so much memory). These timers serve as rate limits for this.
-        let wait_to_freeze = tokio::time::sleep(Duration::ZERO);
-        let wait_to_increase_memory_high = tokio::time::sleep(Duration::ZERO);
-
-        tokio::pin!(wait_to_freeze, wait_to_increase_memory_high);
-        tokio::pin!(events);
+        let mut wait_to_freeze = pin!(tokio::time::sleep(Duration::ZERO));
+        let mut wait_to_increase_memory_high = pin!(tokio::time::sleep(Duration::ZERO));
+        let mut events = pin!(events);
 
         // Are we waiting to be upscaled? Could be true if we request upscale due
         // to a memory.high event and it does not arrive in time.
