@@ -2,6 +2,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use clap::Parser;
+    use tokio_util::sync::CancellationToken;
     use tracing_subscriber::EnvFilter;
     use vm_monitor::Args;
 
@@ -15,7 +16,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     let args: &'static Args = Box::leak(Box::new(Args::parse()));
-    vm_monitor::start(args).await
+    let token = CancellationToken::new();
+    vm_monitor::start(args, token).await
 }
 
 #[cfg(not(target_os = "linux"))]

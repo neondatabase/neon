@@ -44,6 +44,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -300,12 +301,18 @@ fn main() -> Result<()> {
                 ),
             };
 
-            let vm_monitor = rt.map(|rt| {
-                rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
-                    cgroup: cgroup.cloned(),
-                    pgconnstr: file_cache_connstr.cloned(),
-                    addr: vm_monitor_addr.cloned().unwrap(),
-                }))))
+            // This token is used internally by the monitor to clean up all threads
+            let token = CancellationToken::new();
+
+            let vm_monitor = &rt.as_ref().map(|rt| {
+                rt.spawn(vm_monitor::start(
+                    Box::leak(Box::new(vm_monitor::Args {
+                        cgroup: cgroup.cloned(),
+                        pgconnstr: file_cache_connstr.cloned(),
+                        addr: vm_monitor_addr.cloned().unwrap(),
+                    })),
+                    token.clone(),
+                ))
             });
         }
     }
@@ -326,9 +333,17 @@ fn main() -> Result<()> {
     // Terminate the vm_monitor so it releases the file watcher on
     // /sys/fs/cgroup/neon-postgres.
     // Note: the vm-monitor only runs on linux because it requires cgroups.
-    #[cfg(target_os = "linux")]
-    if let Some(handle) = vm_monitor {
-        handle.abort()
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            if let Some(handle) = vm_monitor {
+                token.cancel();
+                handle.abort();
+
+                // If handle is some, rt must have been used to produce it, and
+                // hence is also some
+                rt.unwrap().shutdown_timeout(Duration::from_secs(2));
+            }
+        }
     }
 
     // Maybe sync safekeepers again, to speed up next startup

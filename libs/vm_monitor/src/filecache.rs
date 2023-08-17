@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 use crate::MiB;
 use anyhow::{anyhow, Context};
 use tokio_postgres::{types::ToSql, Client, NoTls, Row};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 /// Manages Postgres' file cache by keeping a connection open.
@@ -13,6 +14,9 @@ pub struct FileCacheState {
     client: Client,
     conn_str: String,
     pub(crate) config: FileCacheConfig,
+
+    /// A token for cancelling spawned threads during shutdown.
+    token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -143,28 +147,50 @@ impl FileCacheConfig {
 impl FileCacheState {
     /// Connect to the file cache.
     #[tracing::instrument]
-    pub async fn new(conn_str: &str, config: FileCacheConfig) -> anyhow::Result<Self> {
-        info!(conn_str, "connecting to Postgres file cache");
-        let (client, conn) = tokio_postgres::connect(conn_str, NoTls)
-            .await
-            .context("failed to connect to pg client")?;
-
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own. See tokio-postgres docs.
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                error!(error = ?e, "postgres error: {e}")
-            }
-        });
-
+    pub async fn new(
+        conn_str: &str,
+        config: FileCacheConfig,
+        token: CancellationToken,
+    ) -> anyhow::Result<Self> {
         config.validate().context("file cache config is invalid")?;
+
+        info!(conn_str, "connecting to Postgres file cache");
+        let client = FileCacheState::connect(conn_str, token.clone())
+            .await
+            .context("failed to connect to postgres file cache")?;
 
         let conn_str = conn_str.to_string();
         Ok(Self {
             client,
             config,
             conn_str,
+            token,
         })
+    }
+
+    /// Connect to Postgres.
+    ///
+    /// Aborts the spawned thread if the kill signal is received. This is not
+    /// a method as it is called in [`FileCacheState::new`].
+    #[tracing::instrument]
+    async fn connect(conn_str: &str, token: CancellationToken) -> anyhow::Result<Client> {
+        let (client, conn) = tokio_postgres::connect(conn_str, NoTls)
+            .await
+            .context("failed to connect to pg client")?;
+
+        // The connection object performs the actual communication with the database,
+        // so spawn it off to run on its own. See tokio-postgres docs.
+        crate::spawn_with_cancel(
+            token,
+            |res| {
+                if let Err(error) = res {
+                    error!(%error, "postgres error")
+                }
+            },
+            conn,
+        );
+
+        Ok(client)
     }
 
     /// Execute a query with a retry if necessary.
@@ -185,18 +211,10 @@ impl FileCacheState {
             Ok(rows) => Ok(rows),
             Err(e) => {
                 error!(error = ?e, "postgres error: {e} -> retrying");
-                let (client, conn) = tokio_postgres::connect(&self.conn_str, NoTls)
+
+                let client = FileCacheState::connect(&self.conn_str, self.token.clone())
                     .await
-                    .context("failed to restart to postgres client")?;
-
-                // The connection object performs the actual communication with the database,
-                // so spawn it off to run on its own. See tokio-postgres docs.
-                tokio::spawn(async move {
-                    if let Err(e) = conn.await {
-                        error!(error = ?e, "postgres error: {e}")
-                    }
-                });
-
+                    .context("failed to connect to postgres file cache")?;
                 info!("successfully reconnected to postgres client");
 
                 // Replace the old client and attempt the query with the new one

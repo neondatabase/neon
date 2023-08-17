@@ -7,9 +7,11 @@ use axum::{
 };
 use axum::{routing::get, Router, Server};
 use clap::Parser;
+use futures::Future;
 use std::{fmt::Debug, time::Duration};
 use sysinfo::{RefreshKind, System, SystemExt};
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use runner::Runner;
@@ -62,14 +64,47 @@ pub struct ServerState {
     /// connection to close.
     pub sender: broadcast::Sender<()>,
 
+    /// Used to cancel all spawned threads in the monitor.
+    pub token: CancellationToken,
+
     // The CLI args
     pub args: &'static Args,
+}
+
+/// Spawn a thread that may get cancelled by the provided [`CancellationToken`].
+///
+/// This is mainly meant to be called with futures that will be pending for a very
+/// long time, or are not mean to return. If it is not desirable for the future to
+/// ever resolve, such as in the case of [`cgroup::CgroupWatcher::watch`], the error can
+/// be logged with `f`.
+pub fn spawn_with_cancel<T, F>(
+    token: CancellationToken,
+    f: F,
+    future: T,
+) -> JoinHandle<Option<T::Output>>
+where
+    T: Future + Send + 'static,
+    T::Output: Send + 'static,
+    F: FnOnce(&T::Output) + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = token.cancelled() => {
+                info!("received global kill signal");
+                None
+            }
+            res = future => {
+                f(&res);
+                Some(res)
+            }
+        }
+    })
 }
 
 /// The entrypoint to the binary.
 ///
 /// Set up tracing, parse arguments, and start an http server.
-pub async fn start(args: &'static Args) -> anyhow::Result<()> {
+pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Result<()> {
     // This channel is used to close old connections. When a new connection is
     // made, we send a message signalling to the old connection to close.
     let (sender, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -80,7 +115,11 @@ pub async fn start(args: &'static Args) -> anyhow::Result<()> {
         // True indicates we are connected to someone and False indicates we can
         // receive connections.
         .route("/monitor", get(ws_handler))
-        .with_state(ServerState { sender, args });
+        .with_state(ServerState {
+            sender,
+            token,
+            args,
+        });
 
     let addr = args.addr();
     let bound = Server::try_bind(&addr.parse().expect("parsing address should not fail"))
@@ -101,26 +140,38 @@ pub async fn start(args: &'static Args) -> anyhow::Result<()> {
 /// If we are already to connected to an informant, we kill that old connection
 /// and accept the new one.
 #[tracing::instrument(name = "/monitor", skip(ws))]
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> Response {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(ServerState {
+        sender,
+        token,
+        args,
+    }): State<ServerState>,
+) -> Response {
     // Kill the old monitor
     info!("closing old connection if there is one");
-    let _ = state.sender.send(());
+    let _ = sender.send(());
 
     // Start the new one. Wow, the cycle of death and rebirth
-    let closer = state.sender.subscribe();
-    ws.on_upgrade(|ws| start_monitor(ws, state.args, closer))
+    let closer = sender.subscribe();
+    ws.on_upgrade(|ws| start_monitor(ws, args, closer, token))
 }
 
 /// Starts the monitor. If startup fails or the monitor exits, an error will
 /// be logged and our internal state will be reset to allow for new connections.
 #[tracing::instrument(skip_all)]
-async fn start_monitor(ws: WebSocket, args: &Args, kill: broadcast::Receiver<()>) {
+async fn start_monitor(
+    ws: WebSocket,
+    args: &Args,
+    kill: broadcast::Receiver<()>,
+    token: CancellationToken,
+) {
     info!("accepted new websocket connection -> starting monitor");
     let timeout = Duration::from_secs(4);
     let monitor = tokio::time::timeout(
         timeout,
         // Unwrap is safe because we initialize at the beginning of main
-        Runner::new(Default::default(), args, ws, kill),
+        Runner::new(Default::default(), args, ws, kill, token),
     )
     .await;
     let mut monitor = match monitor {

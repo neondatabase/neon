@@ -12,13 +12,14 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use crate::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
-use crate::{bytes_to_mebibytes, get_total_system_memory, Args, MiB};
+use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
 
 /// Central struct that interacts with informant, dispatcher, and cgroup to handle
 /// signals from the informant.
@@ -73,6 +74,7 @@ impl Runner {
         args: &Args,
         ws: WebSocket,
         kill: broadcast::Receiver<()>,
+        token: CancellationToken,
     ) -> anyhow::Result<Runner> {
         anyhow::ensure!(
             config.sys_buffer_bytes != 0,
@@ -110,7 +112,7 @@ impl Runner {
                 panic!("file cache not in-memory implemented")
             }
 
-            let mut file_cache = FileCacheState::new(connstr, config)
+            let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
                 .context("failed to create file cache")?;
 
@@ -156,9 +158,9 @@ impl Runner {
             // Some might call this . . . cgroup v2
             let cgroup_clone = Arc::clone(&cgroup);
 
-            tokio::spawn(
-                async move { cgroup_clone.watch(notified_recv, cgroup_event_stream).await },
-            );
+            spawn_with_cancel(token, |_| error!("cgroup watcher terminated"), async move {
+                cgroup_clone.watch(notified_recv, cgroup_event_stream).await
+            });
 
             state.cgroup = Some(cgroup);
         } else {
