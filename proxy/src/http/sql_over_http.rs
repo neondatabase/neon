@@ -287,9 +287,12 @@ pub async fn handle(
 
     if allow_pool {
         // return connection to the pool
-        tokio::task::spawn(async move {
-            let _ = conn_pool.put(&conn_info, client).await;
-        }.in_current_span());
+        tokio::task::spawn(
+            async move {
+                let _ = conn_pool.put(&conn_info, client).await;
+            }
+            .in_current_span(),
+        );
     }
 
     result
