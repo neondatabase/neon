@@ -228,6 +228,7 @@ impl BlobWriter for EphemeralFile {
                     ephemeral_file,
                 })
             }
+            #[inline(always)]
             fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
