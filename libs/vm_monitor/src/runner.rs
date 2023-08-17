@@ -261,7 +261,7 @@ impl Runner {
                 bytes_to_mebibytes(new_cgroup_mem_high),
                 bytes_to_mebibytes(available_memory)
             );
-            info!("downscale: message");
+            info!("downscale: {message}");
             status.push(message);
         }
 
@@ -361,8 +361,7 @@ impl Runner {
                 }),
             InboundMsgKind::InvalidMessage { error } => {
                 warn!(
-                    error,
-                    id, "received notification of an invalid message we sent"
+                    %error, id, "received notification of an invalid message we sent"
                 );
                 Ok(None)
             }
@@ -392,7 +391,7 @@ impl Runner {
                 request = self.dispatcher.request_upscale_events.recv() => {
                     if request.is_none() {
                         bail!("failed to listen for upscale event from cgroup")
-                    };
+                    }
                     info!("cgroup asking for upscale; forwarding request");
                     self.counter += 1;
                     self.dispatcher
@@ -424,10 +423,11 @@ impl Runner {
                                     Ok(Some(out)) => out,
                                     Ok(None) => continue,
                                     Err(e) => {
-                                        warn!(error = &e.to_string(), "error handling message");
+                                        let error = e.to_string();
+                                        warn!(%error, "error handling message");
                                         OutboundMsg::new(
                                             OutboundMsgKind::InternalError {
-                                                error: e.to_string()
+                                                error
                                             },
                                             message.id
                                         )

@@ -534,7 +534,6 @@ impl CgroupWatcher {
         &self,
         upscales: &mut Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<()> {
-        // If we haven't peeked the upscale, directly await it
         let Sequenced { seqnum, .. } = upscales
             .recv()
             .await
