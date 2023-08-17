@@ -62,7 +62,6 @@ pub(super) async fn authenticate(
         }
     };
 
-    info!("compute node's state has likely changed; requesting a wake-up");
     let mut num_retries = 0;
     let mut node = loop {
         let wake_res = api.wake_compute(extra, creds).await;

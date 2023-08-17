@@ -1,16 +1,21 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::future::poll_fn;
 use parking_lot::RwLock;
 use pbkdf2::{
     password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
-use std::fmt;
 use std::sync::atomic::{self, AtomicUsize};
 use std::{collections::HashMap, sync::Arc};
+use std::{
+    fmt,
+    task::{ready, Poll},
+};
 use tokio::time;
+use tokio_postgres::AsyncMessage;
 
 use crate::{auth, console};
 use crate::{compute, config};
@@ -19,8 +24,8 @@ use super::sql_over_http::MAX_RESPONSE_SIZE;
 
 use crate::proxy::ConnectMechanism;
 
-use tracing::error;
 use tracing::info;
+use tracing::{error, warn};
 
 pub const APP_NAME: &str = "sql_over_http";
 const MAX_CONNS_PER_ENDPOINT: usize = 20;
@@ -48,7 +53,7 @@ impl fmt::Display for ConnInfo {
 }
 
 struct ConnPoolEntry {
-    conn: tokio_postgres::Client,
+    conn: Client,
     _last_access: std::time::Instant,
 }
 
@@ -110,8 +115,9 @@ impl GlobalConnPool {
         &self,
         conn_info: &ConnInfo,
         force_new: bool,
-    ) -> anyhow::Result<tokio_postgres::Client> {
-        let mut client: Option<tokio_postgres::Client> = None;
+        session_id: uuid::Uuid,
+    ) -> anyhow::Result<Client> {
+        let mut client: Option<Client> = None;
 
         let mut hash_valid = false;
         if !force_new {
@@ -153,16 +159,17 @@ impl GlobalConnPool {
 
         // ok return cached connection if found and establish a new one otherwise
         let new_client = if let Some(client) = client {
-            if client.is_closed() {
+            if client.inner.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info).await
+                connect_to_compute(self.proxy_config, conn_info, session_id).await
             } else {
                 info!("pool: reusing connection '{conn_info}'");
+                client.session.send(session_id)?;
                 return Ok(client);
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info).await
+            connect_to_compute(self.proxy_config, conn_info, session_id).await
         };
 
         match &new_client {
@@ -201,11 +208,7 @@ impl GlobalConnPool {
         new_client
     }
 
-    pub async fn put(
-        &self,
-        conn_info: &ConnInfo,
-        client: tokio_postgres::Client,
-    ) -> anyhow::Result<()> {
+    pub async fn put(&self, conn_info: &ConnInfo, client: Client) -> anyhow::Result<()> {
         let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
 
         // return connection to the pool
@@ -282,11 +285,12 @@ impl GlobalConnPool {
 
 struct TokioMechanism<'a> {
     conn_info: &'a ConnInfo,
+    session_id: uuid::Uuid,
 }
 
 #[async_trait]
 impl ConnectMechanism for TokioMechanism<'_> {
-    type Connection = tokio_postgres::Client;
+    type Connection = Client;
     type ConnectError = tokio_postgres::Error;
     type Error = anyhow::Error;
 
@@ -295,7 +299,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
-        connect_to_compute_once(node_info, self.conn_info, timeout).await
+        connect_to_compute_once(node_info, self.conn_info, timeout, self.session_id).await
     }
 
     fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
@@ -308,7 +312,8 @@ impl ConnectMechanism for TokioMechanism<'_> {
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
+    session_id: uuid::Uuid,
+) -> anyhow::Result<Client> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
 
@@ -339,17 +344,27 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    crate::proxy::connect_to_compute(&TokioMechanism { conn_info }, node_info, &extra, &creds).await
+    crate::proxy::connect_to_compute(
+        &TokioMechanism {
+            conn_info,
+            session_id,
+        },
+        node_info,
+        &extra,
+        &creds,
+    )
+    .await
 }
 
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
     timeout: time::Duration,
-) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+    mut session_id: uuid::Uuid,
+) -> Result<Client, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
-    let (client, connection) = config
+    let (client, mut connection) = config
         .user(&conn_info.username)
         .password(&conn_info.password)
         .dbname(&conn_info.dbname)
@@ -358,11 +373,44 @@ async fn connect_to_compute_once(
         .connect(tokio_postgres::NoTls)
         .await?;
 
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });
+    let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
-    Ok(client)
+    let conn_info = conn_info.to_string();
+    tokio::spawn(poll_fn(move |cx| {
+        let message = ready!(connection.poll_message(cx));
+
+        if rx.has_changed().unwrap() {
+            session_id = *rx.borrow_and_update();
+        }
+
+        match message {
+            Some(Ok(AsyncMessage::Notice(notice))) => {
+                info!(%session_id, %conn_info, "notice: {}", notice);
+                Poll::Pending
+            }
+            Some(Ok(AsyncMessage::Notification(notif))) => {
+                warn!(%session_id, %conn_info, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                Poll::Pending
+            }
+            Some(Ok(_)) => {
+                warn!(%session_id, %conn_info, "unknown message");
+                Poll::Pending
+            }
+            Some(Err(e)) => {
+                error!(%session_id, %conn_info, "connection error: {}", e);
+                Poll::Ready(())
+            }
+            None => Poll::Ready(()),
+        }
+    }));
+
+    Ok(Client {
+        inner: client,
+        session: tx,
+    })
+}
+
+pub struct Client {
+    pub inner: tokio_postgres::Client,
+    session: tokio::sync::watch::Sender<uuid::Uuid>,
 }

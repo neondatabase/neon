@@ -181,6 +181,7 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
+    session_id: uuid::Uuid,
 ) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
@@ -230,18 +231,18 @@ pub async fn handle(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool.get(&conn_info, !allow_pool).await?;
+    let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
     //
     // Now execute the query and return the result
     //
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+        Payload::Single(query) => query_to_json(&client.inner, query, raw_output, array_mode)
             .await
             .map(|x| (x, HashMap::default())),
         Payload::Batch(batch_query) => {
             let mut results = Vec::new();
-            let mut builder = client.build_transaction();
+            let mut builder = client.inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
                 builder = builder.isolation_level(isolation_level);
             }
