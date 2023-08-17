@@ -55,6 +55,7 @@ use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
+use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -404,8 +405,7 @@ impl Tenant {
     async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
-        remote_client: Option<RemoteTimelineClient>,
-        deletion_queue_client: Option<DeletionQueueClient>,
+        resources: TimelineResources,
         remote_startup_data: Option<RemoteStartupData>,
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
@@ -426,8 +426,7 @@ impl Tenant {
             timeline_id,
             up_to_date_metadata,
             ancestor.clone(),
-            remote_client,
-            deletion_queue_client,
+            resources,
             init_order,
             CreateTimelineCause::Load,
         )?;
@@ -599,11 +598,6 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let deletion_queue_client = self
-            .deletion_queue_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("cannot attach without deletion queue enabled"))?;
-
         let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.conf,
@@ -678,8 +672,10 @@ impl Tenant {
                 timeline_id,
                 index_part,
                 remote_metadata,
-                remote_client,
-                deletion_queue_client.clone(),
+                TimelineResources {
+                    remote_client: Some(remote_client),
+                    deletion_queue_client: self.deletion_queue_client.clone(),
+                },
                 ctx,
             )
             .await
@@ -724,8 +720,7 @@ impl Tenant {
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        remote_client: RemoteTimelineClient,
-        deletion_queue_client: DeletionQueueClient,
+        resources: TimelineResources,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
@@ -755,8 +750,7 @@ impl Tenant {
 
         self.timeline_init_and_sync(
             timeline_id,
-            Some(remote_client),
-            Some(deletion_queue_client),
+            resources,
             Some(RemoteStartupData {
                 index_part,
                 remote_metadata,
@@ -1208,16 +1202,9 @@ impl Tenant {
     ) -> Result<(), LoadLocalTimelineError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
-            RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                self.tenant_id,
-                timeline_id,
-            )
-        });
+        let mut resources = self.build_timeline_resources(timeline_id);
 
-        let (remote_startup_data, remote_client) = match remote_client {
+        let (remote_startup_data, remote_client) = match resources.remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
                     let index_part = match index_part {
@@ -1307,9 +1294,10 @@ impl Tenant {
                     return Ok(());
                 }
 
-                (None, remote_client)
+                (None, resources.remote_client)
             }
         };
+        resources.remote_client = remote_client;
 
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
             let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
@@ -1322,8 +1310,7 @@ impl Tenant {
 
         self.timeline_init_and_sync(
             timeline_id,
-            remote_client,
-            self.deletion_queue_client.clone(),
+            resources,
             remote_startup_data,
             Some(local_metadata),
             ancestor,
@@ -2184,8 +2171,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        remote_client: Option<RemoteTimelineClient>,
-        deletion_queue: Option<DeletionQueueClient>,
+        resources: TimelineResources,
         init_order: Option<&InitializationOrder>,
         cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -2214,8 +2200,7 @@ impl Tenant {
             new_timeline_id,
             self.tenant_id,
             Arc::clone(&self.walredo_mgr),
-            remote_client,
-            deletion_queue,
+            resources,
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned().flatten(),
@@ -2871,6 +2856,26 @@ impl Tenant {
         Ok(timeline)
     }
 
+    /// Call this before constructing a timeline, to build its required structures
+    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
+        let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
+            let remote_client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            Some(remote_client)
+        } else {
+            None
+        };
+
+        TimelineResources {
+            remote_client,
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
+    }
+
     /// Creates intermediate timeline structure and its files.
     ///
     /// An empty layer map is initialized, and new data and WAL can be imported starting
@@ -2887,26 +2892,17 @@ impl Tenant {
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_id = self.tenant_id;
 
-        let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                tenant_id,
-                new_timeline_id,
-            );
+        let resources = self.build_timeline_resources(new_timeline_id);
+        if let Some(remote_client) = &resources.remote_client {
             remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
-            Some(remote_client)
-        } else {
-            None
-        };
+        }
 
         let timeline_struct = self
             .create_timeline_struct(
                 new_timeline_id,
                 new_metadata,
                 ancestor,
-                remote_client,
-                self.deletion_queue_client.clone(),
+                resources,
                 None,
                 CreateTimelineCause::Load,
             )

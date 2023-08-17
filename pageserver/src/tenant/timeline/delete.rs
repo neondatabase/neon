@@ -26,7 +26,7 @@ use crate::{
     InitializationOrder,
 };
 
-use super::Timeline;
+use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
@@ -409,8 +409,10 @@ impl DeleteTimelineFlow {
                 timeline_id,
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
-                remote_client,
-                deletion_queue_client,
+                TimelineResources {
+                    remote_client,
+                    deletion_queue_client,
+                },
                 init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.

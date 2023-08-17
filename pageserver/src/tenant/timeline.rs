@@ -141,6 +141,13 @@ fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
 fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
+
+/// The outward-facing resources required to build a Timeline
+pub struct TimelineResources {
+    pub remote_client: Option<RemoteTimelineClient>,
+    pub deletion_queue_client: Option<DeletionQueueClient>,
+}
+
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
@@ -1390,8 +1397,7 @@ impl Timeline {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        remote_client: Option<RemoteTimelineClient>,
-        deletion_queue_client: Option<DeletionQueueClient>,
+        resources: TimelineResources,
         pg_version: u32,
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
@@ -1426,8 +1432,8 @@ impl Timeline {
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
 
-                remote_client: remote_client.map(Arc::new),
-                deletion_queue_client: deletion_queue_client.map(Arc::new),
+                remote_client: resources.remote_client.map(Arc::new),
+                deletion_queue_client: resources.deletion_queue_client.map(Arc::new),
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {
