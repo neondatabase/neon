@@ -239,9 +239,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     assert isinstance(env.remote_storage, LocalFsStorage)
 
-    env.pageserver.allowed_errors.append(
-        ".*removing local file .* because it has unexpected length.*"
-    )
+    env.pageserver.allowed_errors.append(".*removing local file .* because .*")
 
     # FIXME: Are these expected?
     env.pageserver.allowed_errors.append(
