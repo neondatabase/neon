@@ -57,7 +57,6 @@ use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::deletion_queue::DeletionQueue;
 use crate::deletion_queue::DeletionQueueClient;
 use crate::import_datadir;
 use crate::is_uninit_mark;
@@ -153,6 +152,15 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
 
 pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
+
+/// References to shared objects that are passed into each tenant, such
+/// as the shared remote storage client and process initialization state.
+#[derive(Clone)]
+pub struct TenantSharedResources {
+    pub broker_client: storage_broker::BrokerClientChannel,
+    pub remote_storage: Option<GenericRemoteStorage>,
+    pub deletion_queue_client: DeletionQueueClient,
+}
 
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
@@ -510,7 +518,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: GenericRemoteStorage,
-        deletion_queue: &DeletionQueue,
+        deletion_queue_client: DeletionQueueClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
@@ -525,7 +533,7 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             Some(remote_storage),
-            Some(deletion_queue.new_client()),
+            Some(deletion_queue_client),
         ));
 
         // Do all the hard work in the background
@@ -796,9 +804,7 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        broker_client: storage_broker::BrokerClientChannel,
-        remote_storage: Option<GenericRemoteStorage>,
-        deletion_queue: &DeletionQueue,
+        resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
@@ -813,6 +819,10 @@ impl Tenant {
             }
         };
 
+        let broker_client = resources.broker_client;
+        let remote_storage = resources.remote_storage;
+        let deletion_queue_client = resources.deletion_queue_client;
+
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Tenant::new(
             TenantState::Loading,
@@ -821,7 +831,7 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             remote_storage.clone(),
-            Some(deletion_queue.new_client()),
+            Some(deletion_queue_client),
         );
         let tenant = Arc::new(tenant);
 

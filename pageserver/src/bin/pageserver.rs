@@ -13,6 +13,7 @@ use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::tenant::TenantSharedResources;
 use remote_storage::GenericRemoteStorage;
 use tokio::time::Instant;
 use tracing::*;
@@ -404,9 +405,11 @@ fn start_pageserver(
 
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
-        broker_client.clone(),
-        remote_storage.clone(),
-        deletion_queue.clone(),
+        TenantSharedResources {
+            broker_client: broker_client.clone(),
+            remote_storage: remote_storage.clone(),
+            deletion_queue_client: deletion_queue.new_client(),
+        },
         order,
     ))?;
 
