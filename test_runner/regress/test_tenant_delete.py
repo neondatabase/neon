@@ -335,6 +335,7 @@ def test_deleted_tenant_ignored_on_attach(
             ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
+            '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
         )
     )
 
