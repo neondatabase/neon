@@ -3778,7 +3778,10 @@ impl Timeline {
         // Sync layers
         if !new_layers.is_empty() {
             // Print a warning if the created layer is larger than double the target size
-            let warn_limit = target_file_size * 2;
+            // Add two pages for potential overhead. This should in theory be already
+            // accounted for in the target calculation, but for very small targets,
+            // we still might easily hit the limit otherwise.
+            let warn_limit = target_file_size * 2 + page_cache::PAGE_SZ as u64 * 2;
             for layer in new_layers.iter() {
                 if layer.desc.file_size > warn_limit {
                     warn!(
