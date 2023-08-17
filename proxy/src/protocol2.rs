@@ -1,16 +1,19 @@
 //! Proxy Protocol V2 implementation
 
 use std::{
+    future::poll_fn,
+    future::Future,
+    io,
     net::SocketAddr,
-    pin::Pin,
-    task::{ready, Context, Poll}, future::poll_fn,
+    pin::{pin, Pin},
+    task::{ready, Context, Poll},
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use hyper::server::conn::{AddrIncoming, AddrStream};
 use pin_project_lite::pin_project;
 use tls_listener::AsyncAccept;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 pin_project! {
     pub struct ProxyProtocolAccept {
@@ -47,18 +50,15 @@ impl<T: AsyncWrite> AsyncWrite for WithClientIp<T> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
+    ) -> Poll<Result<usize, io::Error>> {
         self.project().inner.poll_write(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_shutdown(cx)
     }
 }
@@ -81,54 +81,66 @@ impl<T> WithClientIp<T> {
 }
 
 impl<T: AsyncRead + Unpin> WithClientIp<T> {
-    pub async fn wait_for_socket(&mut self) -> std::io::Result<Option<SocketAddr>> {
+    pub async fn wait_for_socket(&mut self) -> io::Result<Option<SocketAddr>> {
         let mut pin = Pin::new(self);
         poll_fn(|cx| pin.as_mut().poll_client_ip(cx)).await
     }
 }
+
+/// Proxy Protocol Version 2 Header
+const HEADER: [u8; 12] = [
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+];
 
 impl<T: AsyncRead> WithClientIp<T> {
     fn fill_buf(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         len: usize,
-    ) -> Poll<std::io::Result<BytesMut>> {
+    ) -> Poll<io::Result<Option<BytesMut>>> {
         let mut this = self.project();
+        this.buf.reserve(len);
         while this.buf.len() < len {
-            let mut buf2 = ReadBuf::uninit(this.buf.spare_capacity_mut());
-            ready!(this.inner.as_mut().poll_read(cx, &mut buf2)?);
-            let filled = buf2.filled().len();
-            // TODO: can this be done safely?
-            // SAFETY: buf2 says we have filled this number of bytes
-            unsafe { this.buf.advance_mut(filled) }
+            // read_buf is cancel safe
+            if ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?) == 0 {
+                return Poll::Ready(Ok(None));
+            }
         }
-        Poll::Ready(Ok(this.buf.split_to(len)))
+        Poll::Ready(Ok(Some(this.buf.split_to(len))))
     }
 
     fn poll_client_ip(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<Option<SocketAddr>>> {
+    ) -> Poll<io::Result<Option<SocketAddr>>> {
         loop {
             match self.state {
                 ProxyParse::NotStarted => {
-                    let header = [
-                        0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
-                    ];
-                    let bytes = ready!(self.as_mut().fill_buf(cx, 12)?);
+                    let Some(header) = ready!(self.as_mut().fill_buf(cx, 12)?)
+                    else {
+                        *self.as_mut().project().state = ProxyParse::None;
+                        continue;
+                    };
+
                     let this = self.as_mut().project();
-                    if *bytes == header {
-                        *this.state = ProxyParse::FoundHeader;
+                    *this.state = if *header == HEADER {
+                        ProxyParse::FoundHeader
                     } else {
-                        *this.state = ProxyParse::None;
                         // header is incorrect. add bytes back
                         // this should be zero cost
-                        let suffix = std::mem::replace(this.buf, bytes);
+                        let suffix = std::mem::replace(this.buf, header);
                         this.buf.unsplit(suffix);
-                    }
+
+                        ProxyParse::None
+                    };
                 }
                 ProxyParse::FoundHeader => {
-                    let mut bytes = ready!(self.as_mut().fill_buf(cx, 4)?);
+                    let Some(mut bytes) = ready!(self.as_mut().fill_buf(cx, 4)?)
+                    else {
+                        let this = self.as_mut().project();
+                        *this.state = ProxyParse::None;
+                        continue;
+                    };
                     let _command = bytes.get_u8();
                     let family = bytes.get_u8();
                     let length = bytes.get_u16();
@@ -146,7 +158,12 @@ impl<T: AsyncRead> WithClientIp<T> {
                     const IPV4: u8 = 1;
                     const IPV6: u8 = 2;
 
-                    let mut bytes = ready!(self.as_mut().fill_buf(cx, length as usize)?);
+                    let Some(mut bytes) = ready!(self.as_mut().fill_buf(cx, length as usize)?)
+                    else {
+                        let this = self.as_mut().project();
+                        *this.state = ProxyParse::None;
+                        continue;
+                    };
 
                     let this = self.as_mut().project();
                     *this.state = match family >> 4 {
@@ -184,7 +201,7 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    ) -> Poll<io::Result<()>> {
         match self.state {
             ProxyParse::Finished(_) | ProxyParse::None => None,
             _ => ready!(self.as_mut().poll_client_ip(cx)?),
@@ -206,7 +223,7 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
 impl AsyncAccept for ProxyProtocolAccept {
     type Connection = WithClientIp<AddrStream>;
 
-    type Error = std::io::Error;
+    type Error = io::Error;
 
     fn poll_accept(
         self: Pin<&mut Self>,
@@ -223,63 +240,31 @@ impl AsyncAccept for ProxyProtocolAccept {
 mod tests {
     use std::pin::pin;
 
-    use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
     use crate::protocol2::{ProxyParse, WithClientIp};
 
     #[tokio::test]
     async fn test_ipv4() {
-        let data = [
-            // proxy protocol header
-            0x0D,
-            0x0A,
-            0x0D,
-            0x0A,
-            0x00,
-            0x0D,
-            0x0A,
-            0x51,
-            0x55,
-            0x49,
-            0x54,
-            0x0A,
-            // Proxy command
-            1u8,
-            // Inet << 4 | Stream
-            (1 << 4) | 1,
-            // Length beyond this: 12
-            // Let's throw in a TLV with no data; 3 bytes.
-            0,
-            15,
-            // Source IP
-            127,
-            0,
-            0,
-            1,
-            // Destination IP
-            192,
-            168,
-            0,
-            1,
-            // Source port
-            // 65535 = [255, 255]
-            255,
-            255,
-            // Destination port
-            // 257 = [1, 1]
-            1,
-            1,
+        let header = super::HEADER
+            // Proxy command, Inet << 4 | Stream
+            .chain([1u8, (1 << 4) | 1].as_slice())
+            // 12 + 3 bytes
+            .chain([0, 15].as_slice())
+            // src ip
+            .chain([127, 0, 0, 1].as_slice())
+            // dst ip
+            .chain([192, 168, 0, 1].as_slice())
+            // src port
+            .chain([255, 255].as_slice())
+            // dst port
+            .chain([1, 1].as_slice())
             // TLV
-            69,
-            0,
-            0,
-        ];
+            .chain([1, 2, 3].as_slice());
+
         let extra_data = [0x55; 256];
 
-        let mut read = pin!(WithClientIp::new(
-            Cursor::new(data).chain(Cursor::new(extra_data))
-        ));
+        let mut read = pin!(WithClientIp::new(header.chain(extra_data.as_slice())));
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
@@ -295,11 +280,58 @@ mod tests {
     async fn test_invalid() {
         let data = [0x55; 256];
 
-        let mut read = pin!(WithClientIp::new(Cursor::new(data)));
+        let mut read = pin!(WithClientIp::new(data.as_slice()));
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, data);
         assert_eq!(read.state, ProxyParse::None);
+    }
+
+    #[tokio::test]
+    async fn test_short() {
+        let data = [0x55; 10];
+
+        let mut read = pin!(WithClientIp::new(data.as_slice()));
+
+        let mut bytes = vec![];
+        read.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, data);
+        assert_eq!(read.state, ProxyParse::None);
+    }
+
+    #[tokio::test]
+    async fn test_large_tlv() {
+        let tlv = [0x55; 512];
+        let len = (12 + tlv.len() as u16).to_be_bytes();
+
+        let header = super::HEADER
+            // Proxy command, Inet << 4 | Stream
+            .chain([1u8, (1 << 4) | 1].as_slice())
+            // 12 + 3 bytes
+            .chain(len.as_slice())
+            // src ip
+            .chain([55, 56, 57, 58].as_slice())
+            // dst ip
+            .chain([192, 168, 0, 1].as_slice())
+            // src port
+            .chain([255, 255].as_slice())
+            // dst port
+            .chain([1, 1].as_slice())
+            // TLV
+            .chain(tlv.as_slice());
+
+        let extra_data = [0x55; 256];
+
+        let mut read = pin!(WithClientIp::new(header.chain(extra_data.as_slice())));
+
+        let mut bytes = vec![];
+        read.read_to_end(&mut bytes).await.unwrap();
+
+        assert_eq!(bytes, extra_data);
+        assert_eq!(
+            read.state,
+            ProxyParse::Finished(([55, 56, 57, 58], 65535).into())
+        );
     }
 }
