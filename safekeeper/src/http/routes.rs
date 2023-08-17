@@ -359,7 +359,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
-    if conf.auth.is_some() {
+    if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             #[allow(clippy::mutable_key_type)]
             static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> =
@@ -375,7 +375,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
 
     // NB: on any changes do not forget to update the OpenAPI spec
     // located nearby (/safekeeper/src/http/openapi_spec.yaml).
-    let auth = conf.auth.clone();
+    let auth = conf.http_auth.clone();
     router
         .data(Arc::new(conf))
         .data(auth)

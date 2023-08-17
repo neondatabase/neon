@@ -1,6 +1,13 @@
 name: 'Create Allure report'
 description: 'Generate Allure report from uploaded by actions/allure-report-store tests results'
 
+inputs:
+  store-test-results-into-db:
+    description: 'Whether to store test results into the database. TEST_RESULT_CONNSTR/TEST_RESULT_CONNSTR_NEW should be set'
+    type: boolean
+    required: false
+    default: false
+
 outputs:
   base-url:
     description: 'Base URL for Allure report'
@@ -139,9 +146,11 @@ runs:
         sed -i 's|<a href="." class=|<a href="https://'${BUCKET}'.s3.amazonaws.com/'${REPORT_PREFIX}'/latest/index.html?nocache='"'+Date.now()+'"'" class=|g' ${WORKDIR}/report/app.js
 
         # Upload a history and the final report (in this particular order to not to have duplicated history in 2 places)
-        # Use sync for the final report to delete files from previous runs
         time aws s3 mv --recursive --only-show-errors "${WORKDIR}/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
-        time aws s3 sync --delete --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
+
+        # Use aws s3 cp (instead of aws s3 sync) to keep files from previous runs to make old URLs work,
+        # and to keep files on the host to upload them to the database
+        time aws s3 cp --recursive --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
 
         # Generate redirect
         cat <<EOF > ${WORKDIR}/index.html
@@ -169,6 +178,41 @@ runs:
         if [ "$(cat lock.txt)" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
+
+    - name: Store Allure test stat in the DB
+      if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
+      shell: bash -euxo pipefail {0}
+      env:
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        REPORT_JSON_URL: ${{ steps.generate-report.outputs.report-json-url }}
+      run: |
+        export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR}
+
+        ./scripts/pysync
+
+        poetry run python3 scripts/ingest_regress_test_result.py \
+          --revision ${COMMIT_SHA} \
+          --reference ${GITHUB_REF} \
+          --build-type unified \
+          --ingest ${WORKDIR}/report/data/suites.json
+
+    - name: Store Allure test stat in the DB (new)
+      if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
+      shell: bash -euxo pipefail {0}
+      env:
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        BASE_S3_URL: ${{ steps.generate-report.outputs.base-s3-url }}
+      run: |
+        export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR_NEW}
+
+        ./scripts/pysync
+
+        poetry run python3 scripts/ingest_regress_test_result-new-format.py \
+          --reference ${GITHUB_REF} \
+          --revision ${COMMIT_SHA} \
+          --run-id ${GITHUB_RUN_ID} \
+          --run-attempt ${GITHUB_RUN_ATTEMPT} \
+          --test-cases-dir ${WORKDIR}/report/data/test-cases
 
     - name: Cleanup
       if: always()

@@ -12,31 +12,39 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
+use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
-
-use std::os::unix::fs::FileExt;
 
 ///
 /// This is the global cache of file descriptors (File objects).
 ///
 static EPHEMERAL_FILES: Lazy<RwLock<EphemeralFiles>> = Lazy::new(|| {
     RwLock::new(EphemeralFiles {
-        next_file_id: 1,
+        next_file_id: FileId(1),
         files: HashMap::new(),
     })
 });
 
-pub struct EphemeralFiles {
-    next_file_id: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId(u64);
 
-    files: HashMap<u64, Arc<VirtualFile>>,
+impl std::fmt::Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+pub struct EphemeralFiles {
+    next_file_id: FileId,
+
+    files: HashMap<FileId, Arc<VirtualFile>>,
 }
 
 pub struct EphemeralFile {
-    ephemeral_files_id: u64,
+    ephemeral_files_id: FileId,
     page_cache_file_id: page_cache::FileId,
 
     _tenant_id: TenantId,
@@ -55,7 +63,7 @@ impl EphemeralFile {
     ) -> Result<EphemeralFile, io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
         let file_id = l.next_file_id;
-        l.next_file_id += 1;
+        l.next_file_id = FileId(l.next_file_id.0 + 1);
 
         let filename = conf
             .timeline_path(&tenant_id, &timeline_id)

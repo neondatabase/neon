@@ -65,7 +65,9 @@ pub struct SafeKeeperConf {
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
-    pub auth: Option<Arc<JwtAuth>>,
+    pub pg_auth: Option<Arc<JwtAuth>>,
+    pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
+    pub http_auth: Option<Arc<JwtAuth>>,
     pub current_thread_runtime: bool,
 }
 
@@ -99,7 +101,9 @@ impl SafeKeeperConf {
             broker_keepalive_interval: Duration::from_secs(5),
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
-            auth: None,
+            pg_auth: None,
+            pg_tenant_only_auth: None,
+            http_auth: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,

@@ -39,6 +39,7 @@ use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
+use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
     LayerAccessStats, LayerFileName, RemoteLayer,
@@ -3312,10 +3313,10 @@ struct CompactLevel0Phase1StatsBuilder {
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
+    read_lock_held_key_sort_micros: DurationRecorder,
     read_lock_held_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
-    prepare_iterators_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
     level0_deltas_count: Option<usize>,
     new_deltas_count: Option<usize>,
@@ -3332,10 +3333,10 @@ struct CompactLevel0Phase1Stats {
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
+    read_lock_held_key_sort_micros: RecordedDuration,
     read_lock_held_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
-    prepare_iterators_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
     level0_deltas_count: usize,
     new_deltas_count: usize,
@@ -3362,6 +3363,10 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_held_spawn_blocking_startup_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
+            read_lock_held_key_sort_micros: value
+                .read_lock_held_key_sort_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
             read_lock_held_prerequisites_micros: value
                 .read_lock_held_prerequisites_micros
                 .into_recorded()
@@ -3374,10 +3379,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_drop_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_drop_micros not set"))?,
-            prepare_iterators_micros: value
-                .prepare_iterators_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow!("prepare_iterators_micros not set"))?,
             write_layer_files_micros: value
                 .write_layer_files_micros
                 .into_recorded()
@@ -3547,28 +3548,24 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
 
-        let mut all_value_refs = Vec::new();
         let mut all_keys = Vec::new();
 
-        for l in deltas_to_compact.iter() {
+        let downcast_deltas: Vec<_> = deltas_to_compact
+            .iter()
+            .map(|l| l.clone().downcast_delta_layer().expect("delta layer"))
+            .collect();
+        for dl in downcast_deltas.iter() {
             // TODO: replace this with an await once we fully go async
-            let delta = l.clone().downcast_delta_layer().expect("delta layer");
-            Handle::current().block_on(async {
-                all_value_refs.extend(delta.load_val_refs(ctx).await?);
-                all_keys.extend(delta.load_keys(ctx).await?);
-                anyhow::Ok(())
-            })?;
+            all_keys.extend(Handle::current().block_on(DeltaLayer::load_keys(dl, ctx))?);
         }
 
         // The current stdlib sorting implementation is designed in a way where it is
         // particularly fast where the slice is made up of sorted sub-ranges.
-        all_value_refs.sort_by_key(|(key, lsn, _value_ref)| (*key, *lsn));
+        all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
 
-        // The current stdlib sorting implementation is designed in a way where it is
-        // particularly fast where the slice is made up of sorted sub-ranges.
-        all_keys.sort_by_key(|(key, lsn, _size)| (*key, *lsn));
+        stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
-        for (next_key, _next_lsn, _size) in all_keys.iter() {
+        for DeltaEntry { key: next_key, .. } in all_keys.iter() {
             let next_key = *next_key;
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -3592,8 +3589,7 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
-        stats.read_lock_held_compute_holes_micros =
-            stats.read_lock_held_prerequisites_micros.till_now();
+        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
@@ -3602,12 +3598,26 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = all_value_refs.into_iter();
+        let all_values_iter = all_keys.iter();
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys.into_iter();
-
-        stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
+        let mut all_keys_iter = all_keys
+            .iter()
+            .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size))
+            .coalesce(|mut prev, cur| {
+                // Coalesce keys that belong to the same key pair.
+                // This ensures that compaction doesn't put them
+                // into different layer files.
+                // Still limit this by the target file size,
+                // so that we keep the size of the files in
+                // check.
+                if prev.0 == cur.0 && prev.2 < target_file_size {
+                    prev.2 += cur.2;
+                    Ok(prev)
+                } else {
+                    Err((prev, cur))
+                }
+            });
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -3662,8 +3672,11 @@ impl Timeline {
 
         // TODO remove this block_on wrapper once we fully go async
         Handle::current().block_on(async {
-            for (key, lsn, value_ref) in all_values_iter {
-                let value = value_ref.load().await?;
+            for &DeltaEntry {
+                key, lsn, ref val, ..
+            } in all_values_iter
+            {
+                let value = val.load().await?;
                 let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
                 // We need to check key boundaries once we reach next key or end of layer with the same key
                 if !same_key || lsn == dup_end_lsn {
@@ -3764,6 +3777,16 @@ impl Timeline {
 
         // Sync layers
         if !new_layers.is_empty() {
+            // Print a warning if the created layer is larger than double the target size
+            let warn_limit = target_file_size * 2;
+            for layer in new_layers.iter() {
+                if layer.desc.file_size > warn_limit {
+                    warn!(
+                        %layer,
+                        "created delta file of size {} larger than double of target of {target_file_size}", layer.desc.file_size
+                    );
+                }
+            }
             let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
 
             // Fsync all the layer files and directory using multiple threads to
@@ -3776,11 +3799,9 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
-        stats.write_layer_files_micros = stats.prepare_iterators_micros.till_now();
+        stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
-
-        drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
 
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
             .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))

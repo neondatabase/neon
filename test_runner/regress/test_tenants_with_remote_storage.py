@@ -7,7 +7,6 @@
 #
 
 import asyncio
-import json
 import os
 from pathlib import Path
 from typing import List, Tuple
@@ -225,10 +224,11 @@ def test_tenants_attached_after_download(
 # FIXME: test index_part.json getting downgraded from imaginary new version
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_tenant_redownloads_truncated_file_on_startup(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+    neon_env_builder: NeonEnvBuilder,
 ):
+    remote_storage_kind = RemoteStorageKind.LOCAL_FS
+
     # since we now store the layer file length metadata, we notice on startup that a layer file is of wrong size, and proceed to redownload it.
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
@@ -236,6 +236,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
     )
 
     env = neon_env_builder.init_start()
+
+    assert isinstance(env.remote_storage, LocalFsStorage)
 
     env.pageserver.allowed_errors.append(
         ".*removing local file .* because it has unexpected length.*"
@@ -279,7 +281,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     (path, expected_size) = local_layer_truncated
 
     # ensure the same size is found from the index_part.json
-    index_part = local_fs_index_part(env, tenant_id, timeline_id)
+    index_part = env.remote_storage.index_content(tenant_id, timeline_id)
     assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
     ## Start the pageserver. It will notice that the file size doesn't match, and
@@ -309,7 +311,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 
     # the remote side of local_layer_truncated
-    remote_layer_path = local_fs_index_part_path(env, tenant_id, timeline_id).parent / path.name
+    remote_layer_path = env.remote_storage.timeline_path(tenant_id, timeline_id) / path.name
 
     # if the upload ever was ongoing, this check would be racy, but at least one
     # extra http request has been made in between so assume it's enough delay
@@ -334,27 +336,3 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert (
         os.stat(remote_layer_path).st_size == expected_size
     ), "truncated file should not had been uploaded after next checkpoint"
-
-
-def local_fs_index_part(env, tenant_id, timeline_id):
-    """
-    Return json.load parsed index_part.json of tenant and timeline from LOCAL_FS
-    """
-    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
-    with open(timeline_path, "r") as timeline_file:
-        return json.load(timeline_file)
-
-
-def local_fs_index_part_path(env, tenant_id, timeline_id):
-    """
-    Return path to the LOCAL_FS index_part.json of the tenant and timeline.
-    """
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    return (
-        env.remote_storage.root
-        / "tenants"
-        / str(tenant_id)
-        / "timelines"
-        / str(timeline_id)
-        / "index_part.json"
-    )

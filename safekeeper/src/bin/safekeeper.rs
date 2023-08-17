@@ -15,6 +15,7 @@ use toml_edit::Document;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::Uri;
@@ -122,9 +123,24 @@ struct Args {
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
-    /// Path to a .pem public key which is used to check JWT tokens.
-    #[arg(long)]
-    auth_validation_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to WAL service endpoint
+    /// (--listen-pg). Value specifies path to a .pem public key used for
+    /// validations of JWT tokens. Empty string is allowed and means disabling
+    /// auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    pg_auth_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to tenant only WAL
+    /// service endpoint (--listen-pg-tenant-only). Value specifies path to a
+    /// .pem public key used for validations of JWT tokens. Empty string is
+    /// allowed and means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    pg_tenant_only_auth_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to http management
+    /// service endpoint (--listen-http). Value specifies path to a .pem public
+    /// key used for validations of JWT tokens. Empty string is allowed and
+    /// means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    http_auth_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
@@ -134,9 +150,39 @@ struct Args {
     current_thread_runtime: bool,
 }
 
+// Like PathBufValueParser, but allows empty string.
+fn opt_pathbuf_parser(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from_str(s).unwrap())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    // We want to allow multiple occurences of the same arg (taking the last) so
+    // that neon_local could generate command with defaults + overrides without
+    // getting 'argument cannot be used multiple times' error. This seems to be
+    // impossible with pure Derive API, so convert struct to Command, modify it,
+    // parse arguments, and then fill the struct back.
+    let cmd = <Args as clap::CommandFactory>::command().args_override_self(true);
+    let mut matches = cmd.get_matches();
+    let mut args = <Args as clap::FromArgMatches>::from_arg_matches_mut(&mut matches)?;
+
+    // I failed to modify opt_pathbuf_parser to return Option<PathBuf> in
+    // reasonable time, so turn empty string into option post factum.
+    if let Some(pb) = &args.pg_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.pg_tenant_only_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_tenant_only_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.http_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.http_auth_public_key_path = None;
+        }
+    }
 
     if let Some(addr) = args.dump_control_file {
         let state = control_file::FileStorage::load_control_file(addr)?;
@@ -170,13 +216,40 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let auth = match args.auth_validation_public_key_path.as_ref() {
+    let pg_auth = match args.pg_auth_public_key_path.as_ref() {
         None => {
-            info!("auth is disabled");
+            info!("pg auth is disabled");
             None
         }
         Some(path) => {
-            info!("loading JWT auth key from {}", path.display());
+            info!("loading pg auth JWT key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+    let pg_tenant_only_auth = match args.pg_tenant_only_auth_public_key_path.as_ref() {
+        None => {
+            info!("pg tenant only auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!(
+                "loading pg tenant only auth JWT key from {}",
+                path.display()
+            );
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+    let http_auth = match args.http_auth_public_key_path.as_ref() {
+        None => {
+            info!("http auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("loading http auth JWT key from {}", path.display());
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))
@@ -199,7 +272,9 @@ async fn main() -> anyhow::Result<()> {
         max_offloader_lag_bytes: args.max_offloader_lag,
         wal_backup_enabled: !args.disable_wal_backup,
         backup_parallel_jobs: args.wal_backup_parallel_jobs,
-        auth,
+        pg_auth,
+        pg_tenant_only_auth,
+        http_auth,
         current_thread_runtime: args.current_thread_runtime,
     };
 
@@ -288,7 +363,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .spawn(wal_service::task_main(
             conf_,
             pg_listener,
-            Some(Scope::SafekeeperData),
+            Scope::SafekeeperData,
         ))
         // wrap with task name for error reporting
         .map(|res| ("WAL service main".to_owned(), res));
@@ -302,7 +377,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
             .spawn(wal_service::task_main(
                 conf_,
                 pg_listener_tenant_only,
-                Some(Scope::Tenant),
+                Scope::Tenant,
             ))
             // wrap with task name for error reporting
             .map(|res| ("WAL service tenant only main".to_owned(), res));
