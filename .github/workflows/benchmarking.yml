@@ -167,9 +167,8 @@ jobs:
             "neon-captest-reuse"
           ],
           "scale": [
-            "10"
-          ],
-          "include": [{ "platform": "neon-captest-reuse", "scale": "300" }]
+            "65"
+          ]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
