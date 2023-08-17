@@ -24,8 +24,8 @@ use super::sql_over_http::MAX_RESPONSE_SIZE;
 
 use crate::proxy::ConnectMechanism;
 
-use tracing::info;
 use tracing::{error, warn};
+use tracing::{info, info_span, Instrument};
 
 pub const APP_NAME: &str = "sql_over_http";
 const MAX_CONNS_PER_ENDPOINT: usize = 20;
@@ -376,33 +376,38 @@ async fn connect_to_compute_once(
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
     let conn_info = conn_info.to_string();
-    tokio::spawn(poll_fn(move |cx| {
-        let message = ready!(connection.poll_message(cx));
+    let conn_id = uuid::Uuid::new_v4();
+    tokio::spawn(async move {
+        poll_fn(move |cx| {
+            let message = ready!(connection.poll_message(cx));
 
-        if rx.has_changed().unwrap() {
-            session_id = *rx.borrow_and_update();
-        }
+            if rx.has_changed().unwrap() {
+                session_id = *rx.borrow_and_update();
+            }
 
-        match message {
-            Some(Ok(AsyncMessage::Notice(notice))) => {
-                info!(%session_id, %conn_info, "notice: {}", notice);
-                Poll::Pending
+            match message {
+                Some(Ok(AsyncMessage::Notice(notice))) => {
+                    info!(%session_id, "notice: {}", notice);
+                    Poll::Pending
+                }
+                Some(Ok(AsyncMessage::Notification(notif))) => {
+                    warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                    Poll::Pending
+                }
+                Some(Ok(_)) => {
+                    warn!(%session_id, "unknown message");
+                    Poll::Pending
+                }
+                Some(Err(e)) => {
+                    error!(%session_id, "connection error: {}", e);
+                    Poll::Ready(())
+                }
+                None => Poll::Ready(()),
             }
-            Some(Ok(AsyncMessage::Notification(notif))) => {
-                warn!(%session_id, %conn_info, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                Poll::Pending
-            }
-            Some(Ok(_)) => {
-                warn!(%session_id, %conn_info, "unknown message");
-                Poll::Pending
-            }
-            Some(Err(e)) => {
-                error!(%session_id, %conn_info, "connection error: {}", e);
-                Poll::Ready(())
-            }
-            None => Poll::Ready(()),
-        }
-    }));
+        })
+        .instrument(info_span!("pooled connection",%conn_info, %conn_id))
+        .await
+    });
 
     Ok(Client {
         inner: client,
