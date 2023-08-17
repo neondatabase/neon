@@ -44,7 +44,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -279,27 +279,28 @@ fn main() -> Result<()> {
         let cgroup = matches.get_one::<String>("filecache-connstr");
         let file_cache_connstr = matches.get_one::<String>("cgroup");
         match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
-            (None, None) => (),
+            (None, None) => None,
             (None, Some(_)) => {
-                panic!("--vm-monitor-addr option set but AUTOSCALING env var not present")
+                warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
+                None
             }
             (Some(_), None) => {
                 panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
             }
-            (Some(_), Some(_)) => (),
+            (Some(_), Some(addr)) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create rt");
+                Some(
+                    rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+                        cgroup: cgroup.cloned(),
+                        pgconnstr: file_cache_connstr.cloned(),
+                        addr: addr.clone(),
+                    })))),
+                )
+            }
         }
-
-        vm_monitor_addr.map(|addr| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-            rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
-                cgroup: cgroup.cloned(),
-                pgconnstr: file_cache_connstr.cloned(),
-                addr: addr.clone(),
-            }))))
-        })
     };
 
     // Wait for the child Postgres process forever. In this state Ctrl+C will
