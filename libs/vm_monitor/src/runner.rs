@@ -403,7 +403,6 @@ impl Runner {
                 msg = self.dispatcher.source.next() => {
                     if let Some(msg) = msg {
                         info!(message = ?msg, "received message");
-                        // TODO: do we need to offload this work to another thread?
                         match msg {
                             Ok(msg) => {
                                 let message: InboundMsg = match msg {
