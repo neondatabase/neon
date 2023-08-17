@@ -552,12 +552,17 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry>> {
+    pub(crate) async fn load_keys(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<DeltaEntry<Ref<&'_ DeltaLayerInner>>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-        DeltaLayerInner::load_keys(inner)
+
+        let inner = Ref(&**inner);
+        DeltaLayerInner::load_keys(&inner)
             .await
             .context("Layer index is corrupted")
     }
@@ -953,14 +958,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<DeltaEntry>> {
+    ) -> Result<Vec<DeltaEntry<T>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<DeltaEntry> = Vec::new();
+        let mut all_keys: Vec<DeltaEntry<T>> = Vec::new();
 
         tree_reader
             .visit(
@@ -970,7 +975,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(dl)),
+                        reader: BlockCursor::new(Adapter(this.clone())),
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -999,14 +1004,34 @@ impl DeltaLayerInner {
     }
 }
 
+/// Cloneable borrow wrapper to make borrows behave like smart pointers.
+///
+/// Shared references are trivially copyable. This wrapper avoids (confusion) to otherwise attempt
+/// cloning DeltaLayerInner.
+pub(crate) struct Ref<T>(T);
+
+impl<'a, T> AsRef<T> for Ref<&'a T> {
+    fn as_ref(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'a, T> Clone for Ref<&'a T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, T> Copy for Ref<&'a T> {}
+
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<'a> {
+pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<&'a DeltaLayerInner>,
+    pub val: ValueRef<T>,
 }
 
 /// Reference to an on-disk value
