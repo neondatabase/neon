@@ -6,50 +6,22 @@ use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
-use once_cell::sync::Lazy;
 use std::cmp::min;
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicU64;
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
 
-///
-/// This is the global cache of file descriptors (File objects).
-///
-static EPHEMERAL_FILES: Lazy<RwLock<EphemeralFiles>> = Lazy::new(|| {
-    RwLock::new(EphemeralFiles {
-        next_file_id: FileId(1),
-        files: HashMap::new(),
-    })
-});
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FileId(u64);
-
-impl std::fmt::Display for FileId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-pub struct EphemeralFiles {
-    next_file_id: FileId,
-
-    files: HashMap<FileId, Arc<VirtualFile>>,
-}
-
 pub struct EphemeralFile {
-    ephemeral_files_id: FileId,
     page_cache_file_id: page_cache::FileId,
 
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
-    file: Arc<VirtualFile>,
+    file: VirtualFile,
     size: u64,
     /// An ephemeral file is append-only.
     /// We keep the last page, which can still be modified, in [`mutable_tail`].
@@ -63,27 +35,24 @@ impl EphemeralFile {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<EphemeralFile, io::Error> {
-        let mut l = EPHEMERAL_FILES.write().unwrap();
-        let file_id = l.next_file_id;
-        l.next_file_id = FileId(l.next_file_id.0 + 1);
+        static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
+        let filename_disambiguator =
+            NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let filename = conf
             .timeline_path(&tenant_id, &timeline_id)
-            .join(PathBuf::from(format!("ephemeral-{}", file_id)));
+            .join(PathBuf::from(format!("ephemeral-{filename_disambiguator}")));
 
         let file = VirtualFile::open_with_options(
             &filename,
             OpenOptions::new().read(true).write(true).create(true),
         )?;
-        let file_rc = Arc::new(file);
-        l.files.insert(file_id, file_rc.clone());
 
         Ok(EphemeralFile {
-            ephemeral_files_id: file_id,
             page_cache_file_id: page_cache::next_file_id(),
             _tenant_id: tenant_id,
             _timeline_id: timeline_id,
-            file: file_rc,
+            file,
             size: 0,
             mutable_tail: [0u8; PAGE_SZ],
         })
@@ -215,13 +184,6 @@ impl BlobWriter for EphemeralFile {
 
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
-        // remove entry from the hash map
-        EPHEMERAL_FILES
-            .write()
-            .unwrap()
-            .files
-            .remove(&self.ephemeral_files_id);
-
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
         if let Err(e) = res {

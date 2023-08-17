@@ -51,7 +51,7 @@ pub enum BlockLease<'a> {
 }
 
 impl<'a> From<PageReadGuard<'static>> for BlockLease<'a> {
-    fn from(value: PageReadGuard<'static>) -> Self {
+    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
         BlockLease::PageReadGuard(value)
     }
 }
