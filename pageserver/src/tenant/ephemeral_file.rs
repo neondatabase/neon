@@ -51,7 +51,9 @@ pub struct EphemeralFile {
     _timeline_id: TimelineId,
     file: Arc<VirtualFile>,
     size: u64,
-
+    /// An ephemeral file is append-only.
+    /// We keep the last page, which can still be modified, in [`mutable_head`].
+    /// The other pages, which can no longer be modified, are accessed through the page cache.
     mutable_head: [u8; PAGE_SZ],
 }
 
