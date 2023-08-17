@@ -275,7 +275,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     # Flush deletion queue before restart/retry, so that anything logically deleted before the
     # failpoint is really deleted.
-    ps_http.deletion_queue_flush_execute()
+    ps_http.deletion_queue_flush(execute=True)
 
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()

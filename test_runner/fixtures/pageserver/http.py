@@ -614,5 +614,7 @@ class PageserverHttpClient(requests.Session):
         )
         self.verbose_error(res)
 
-    def deletion_queue_flush_execute(self):
-        self.put(f"http://localhost:{self.port}/v1/deletion_queue/flush_execute").raise_for_status()
+    def deletion_queue_flush(self, execute: bool = False):
+        self.put(
+            f"http://localhost:{self.port}/v1/deletion_queue/flush?execute={'true' if execute else 'false'}"
+        ).raise_for_status()
