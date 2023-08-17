@@ -418,7 +418,7 @@ impl BackendQueueWorker {
 
                         if self.accumulator.len() == MAX_KEYS_PER_DELETE {
                             // Great, we got a full request: issue it.
-                            if self.maybe_execute().await == false {
+                            if !self.maybe_execute().await {
                                 // Failed to execute: retry delay
                                 tokio::time::sleep(EXECUTE_RETRY_DEADLINE).await;
                             };
@@ -545,13 +545,7 @@ impl FrontendQueueWorker {
         let header_path = self.conf.remote_deletion_header_path();
         let header_bytes = match backoff::retry(
             || self.remote_storage.download_all(&header_path),
-            |e| {
-                if let DownloadError::NotFound = e {
-                    true
-                } else {
-                    false
-                }
-            },
+            |e| matches!(e, DownloadError::NotFound),
             3,
             u32::MAX,
             "Reading deletion queue header",
