@@ -10,6 +10,42 @@
 //! PostgreSQL buffer size, and a Slot struct for each buffer to contain
 //! information about what's stored in the buffer.
 //!
+//! # Types Of Pages
+//!
+//! [`PageCache`] only supports immutable pages.
+//! Hence there is no need to worry about coherency.
+//!
+//! Two types of pages are supported:
+//!
+//! * **Materialized pages**, filled & used by page reconstruction
+//! * **Immutable File pages**, filled & used by `crate::tenant::block_io` and `crate::tenant::ephemeral_file`.
+//!
+//! Note that [`crate::tenant::ephemeral_file::EphemeralFile`] is generally mutable, but, it's append-only.
+//! It uses the page cache only for the blocks that are already fully written and immutable.
+//!
+//! # Filling The Page Cache
+//!
+//! Page cache maps from a cache key to a buffer slot.
+//! The cache key uniquely identifies the piece of data that is being cached.
+//!
+//! The cache key for **materialized pages** is  [`TenantId`], [`TimelineId`], [`Key`], and [`Lsn`].
+//! Use [`PageCache::memorize_materialized_page`] and [`PageCache::lookup_materialized_page`] for fill & access.
+//!
+//! The cache key for **immutable file** pages is [`FileId`] and a block number.
+//! Users of page cache that wish to page-cache an arbitrary (immutable!) on-disk file do the following:
+//! * Have a mechanism to deterministically associate the on-disk file with a [`FileId`].
+//! * Get a [`FileId`] using [`next_file_id`].
+//! * Use the mechanism to associate the on-disk file with the returned [`FileId`].
+//! * Use [`PageCache::read_immutable_buf`] to get a [`PageBufResult`].
+//! * If the page was already cached, it'll be the [`PageBufResult::Found`] variant that contains
+//!   a read guard for the page. Just use it.
+//! * If the page was not cached, it'll be the [`PageBufResult::NotFound`] variant that contains
+//!   a write guard for the page. Fill the page with the contents of the on-disk file.
+//!   Then call [`PageWriteGuard::mark_valid`] to mark the page as valid.
+//!   Then try again to [`PageCache::read_immutable_buf`].
+//!   Unless there's high cache pressure, the page should now be cached.
+//!   (TODO: allow downgrading the write guard to a read guard to ensure forward progress.)
+//!
 //! # Locking
 //!
 //! There are two levels of locking involved: There's one lock for the "mapping"
@@ -85,10 +121,13 @@ pub fn get() -> &'static PageCache {
 pub const PAGE_SZ: usize = postgres_ffi::BLCKSZ as usize;
 const MAX_USAGE_COUNT: u8 = 5;
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// See module-level comment.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct FileId(u64);
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// See module-level comment.
 pub fn next_file_id() -> FileId {
     FileId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
