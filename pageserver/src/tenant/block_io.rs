@@ -45,7 +45,7 @@ where
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
-    EphemeralFileMutableHead(&'a [u8; PAGE_SZ]),
+    EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),
 }
@@ -69,7 +69,7 @@ impl<'a> Deref for BlockLease<'a> {
     fn deref(&self) -> &Self::Target {
         match self {
             BlockLease::PageReadGuard(v) => v.deref(),
-            BlockLease::EphemeralFileMutableHead(v) => v,
+            BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
             BlockLease::Rc(v) => v.deref(),
         }

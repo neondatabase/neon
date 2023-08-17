@@ -52,9 +52,9 @@ pub struct EphemeralFile {
     file: Arc<VirtualFile>,
     size: u64,
     /// An ephemeral file is append-only.
-    /// We keep the last page, which can still be modified, in [`mutable_head`].
+    /// We keep the last page, which can still be modified, in [`mutable_tail`].
     /// The other pages, which can no longer be modified, are accessed through the page cache.
-    mutable_head: [u8; PAGE_SZ],
+    mutable_tail: [u8; PAGE_SZ],
 }
 
 impl EphemeralFile {
@@ -85,7 +85,7 @@ impl EphemeralFile {
             _timeline_id: timeline_id,
             file: file_rc,
             size: 0,
-            mutable_head: [0u8; PAGE_SZ],
+            mutable_tail: [0u8; PAGE_SZ],
         })
     }
 
@@ -124,14 +124,14 @@ impl BlobWriter for EphemeralFile {
             fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
-                    let dst_remaining = &mut self.ephemeral_file.mutable_head[self.off..];
+                    let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
                     let n = min(dst_remaining.len(), src_remaining.len());
                     dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
                     self.off += n;
                     src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
                         match self.ephemeral_file.file.write_all_at(
-                            &self.ephemeral_file.mutable_head,
+                            &self.ephemeral_file.mutable_tail,
                             self.blknum as u64 * PAGE_SZ as u64,
                         ) {
                             Ok(_) => {
@@ -153,7 +153,7 @@ impl BlobWriter for EphemeralFile {
                                     Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
                                         let buf: &mut [u8] = write_guard.deref_mut();
                                         debug_assert_eq!(buf.len(), PAGE_SZ);
-                                        buf.copy_from_slice(&self.ephemeral_file.mutable_head);
+                                        buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
                                         write_guard.mark_valid();
                                         // pre-warm successful
                                     }
@@ -161,7 +161,7 @@ impl BlobWriter for EphemeralFile {
                                 // Zero the buffer for re-use.
                                 // Zeroing is critical for correcntess because the write_blob code below
                                 // and similarly read_blk expect zeroed pages.
-                                self.ephemeral_file.mutable_head.fill(0);
+                                self.ephemeral_file.mutable_tail.fill(0);
                                 // This block is done, move to next one.
                                 self.blknum += 1;
                                 self.off = 0;
@@ -269,7 +269,7 @@ impl BlockReader for EphemeralFile {
             }
         } else {
             debug_assert_eq!(blknum as u64, self.size / PAGE_SZ as u64);
-            Ok(BlockLease::EphemeralFileMutableHead(&self.mutable_head))
+            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
         }
     }
 }
