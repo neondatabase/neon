@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use safekeeper::{safekeeper::SafeKeeperState, control_file, wal_storage};
 use anyhow::Result;
-use utils::lsn::Lsn;
 use postgres_ffi::XLogSegNo;
+use safekeeper::{control_file, safekeeper::SafeKeeperState, wal_storage};
+use utils::lsn::Lsn;
 
 pub struct InMemoryState {
     persisted_state: SafeKeeperState,
@@ -11,9 +11,7 @@ pub struct InMemoryState {
 
 impl InMemoryState {
     pub fn new(persisted_state: SafeKeeperState) -> Self {
-        InMemoryState {
-            persisted_state,
-        }
+        InMemoryState { persisted_state }
     }
 }
 

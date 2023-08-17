@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use safekeeper::{
-    simlib::{network::{Delay, NetworkOptions}, world::World},
+    simlib::{
+        network::{Delay, NetworkOptions},
+        world::World,
+    },
     simtest::{start_simulation, Options},
 };
 
@@ -27,10 +30,8 @@ fn run_rust_c_test() {
     start_simulation(Options {
         world,
         time_limit: 1_000_000,
-        client_fn: Box::new(move |_, server_id| {
-            unsafe {
-                RunClientC(server_id);
-            }
+        client_fn: Box::new(move |_, server_id| unsafe {
+            RunClientC(server_id);
         }),
         u32_data,
     });

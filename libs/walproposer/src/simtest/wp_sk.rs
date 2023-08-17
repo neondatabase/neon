@@ -18,23 +18,32 @@ use crate::{
     simtest::safekeeper::run_server,
 };
 
+use super::disk::Disk;
+
 struct SkNode {
     node: Arc<Node>,
     id: u32,
+    disk: Arc<Disk>,
 }
 
 impl SkNode {
     fn new(node: Arc<Node>) -> Self {
-        let res = Self { id: node.id, node };
+        let disk = Arc::new(Disk::new());
+        let res = Self {
+            id: node.id,
+            node,
+            disk,
+        };
         res.launch();
         res
     }
 
     fn launch(&self) {
         let id = self.id;
+        let disk = self.disk.clone();
         // start the server thread
         self.node.launch(move |os| {
-            let res = run_server(os);
+            let res = run_server(os, disk);
             println!("server {} finished: {:?}", id, res);
         });
     }
