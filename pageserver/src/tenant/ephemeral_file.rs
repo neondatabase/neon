@@ -143,7 +143,7 @@ impl BlobWriter for EphemeralFile {
                                     self.blknum,
                                 ) {
                                     Err(e) => {
-                                        error!("ephemeral_file flush_head failed to get immutable buf to pre-warm page cache: {e:?}");
+                                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
                                         // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
                                     }
                                     Ok(page_cache::ReadBufResult::Found(_guard)) => {
@@ -169,12 +169,14 @@ impl BlobWriter for EphemeralFile {
                             Err(e) => {
                                 return Err(std::io::Error::new(
                                     ErrorKind::Other,
+                                    // order error before path because path is long and error is short
                                     format!(
-                                        "failed to write back to ephemeral file at {} error: {}",
+                                        "ephemeral_file: write_blob: write-back full tail blk #{}: {:#}: {}",
+                                        self.blknum,
+                                        e,
                                         self.ephemeral_file.file.path.display(),
-                                        e
                                     ),
-                                ))
+                                ));
                             }
                         }
                     }
@@ -249,7 +251,13 @@ impl BlockReader for EphemeralFile {
                     .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
-                            format!("Failed to read immutable buf: {e:#}"),
+                            // order path before error because error is anyhow::Error => might have many contexts
+                            format!(
+                                "ephemeral file: read immutable page #{}: {}: {:#}",
+                                blknum,
+                                self.file.path.display(),
+                                e,
+                            ),
                         )
                     })? {
                     page_cache::ReadBufResult::Found(guard) => {
