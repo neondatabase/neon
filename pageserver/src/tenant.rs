@@ -150,6 +150,14 @@ pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
 
 pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 
+/// References to shared objects that are passed into each tenant, such
+/// as the shared remote storage client and process initialization state.
+#[derive(Clone)]
+pub struct TenantSharedResources {
+    pub broker_client: storage_broker::BrokerClientChannel,
+    pub remote_storage: Option<GenericRemoteStorage>,
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -840,8 +848,7 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        broker_client: storage_broker::BrokerClientChannel,
-        remote_storage: Option<GenericRemoteStorage>,
+        resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
@@ -855,6 +862,9 @@ impl Tenant {
                 return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
             }
         };
+
+        let broker_client = resources.broker_client;
+        let remote_storage = resources.remote_storage;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Tenant::new(
