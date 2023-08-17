@@ -230,22 +230,22 @@ impl BlobWriter for EphemeralFile {
             }
             #[inline(always)]
             fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+                // `src_remaining` is the remaining bytes to be written
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
-                    {
-                        let page = if self.memo_page_guard.blknum == self.blknum {
-                            &mut self.memo_page_guard.guard
-                        } else {
-                            self.memo_page_guard.guard = self.ephemeral_file.get_buf_for_write(self.blknum)?;
-                            self.memo_page_guard.blknum = self.blknum;
-                            &mut self.memo_page_guard.guard
-                        };
-                        let dst_remaining = &mut page[self.off..];
-                        let n = min(dst_remaining.len(), src_remaining.len());
-                        dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
-                        self.off += n;
-                        src_remaining = &src_remaining[n..];
-                    }
+                    let page = if self.memo_page_guard.blknum == self.blknum {
+                        &mut self.memo_page_guard.guard
+                    } else {
+                        self.memo_page_guard.guard =
+                            self.ephemeral_file.get_buf_for_write(self.blknum)?;
+                        self.memo_page_guard.blknum = self.blknum;
+                        &mut self.memo_page_guard.guard
+                    };
+                    let dst_remaining = &mut page[self.off..];
+                    let n = min(dst_remaining.len(), src_remaining.len());
+                    dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
+                    self.off += n;
+                    src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
                         // This block is done, move to next one.
                         self.blknum += 1;
