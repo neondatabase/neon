@@ -92,8 +92,11 @@ def available_s3_storages() -> List[RemoteStorageKind]:
 class LocalFsStorage:
     root: Path
 
+    def tenant_path(self, tenant_id: TenantId) -> Path:
+        return self.root / "tenants" / str(tenant_id)
+
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
-        return self.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+        return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
     def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME

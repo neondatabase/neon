@@ -105,95 +105,100 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 impl BlobWriter for EphemeralFile {
     fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
-        let pos = self.size;
-
-        // TODO: rewrite this to use bytes::BytesMut / a wrapper that
-        // auto-flushes underneath. It'd be much less error-prone.
-
-        let mut blknum = (self.size / PAGE_SZ as u64) as u32;
-        let mut off = (pos % PAGE_SZ as u64) as usize;
-
-        let buf = &mut self.mutable_head;
-        let flush_head = |head: &mut [u8], blknum: u32| {
-            debug_assert_eq!(head.len(), PAGE_SZ);
-            match self.file.write_all_at(head, blknum as u64 * PAGE_SZ as u64) {
-                Ok(_) => {
-                    // Pre-warm the page cache with what we just wrote.
-                    // This isn't necessary for coherency/correctness, but it's how we've always done it.
-                    let cache = page_cache::get();
-                    match cache.read_immutable_buf(self.page_cache_file_id, blknum) {
-                        Err(e) => {
-                            error!("ephemeral_file flush_head failed to get immutable buf to pre-warm page cache: {e:?}");
-                            // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
-                        }
-                        Ok(page_cache::ReadBufResult::Found(_guard)) => {
-                            // This function takes &mut self, so, it shouldn't be possible to reach this point.
-                            unreachable!("we just wrote blknum {blknum} and this function takes &mut self, so, no concurrent read_blk is possible");
-                        }
-                        Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
-                            let buf: &mut [u8] = write_guard.deref_mut();
-                            debug_assert_eq!(buf.len(), PAGE_SZ);
-                            buf.copy_from_slice(head);
-                            write_guard.mark_valid();
-                            // pre-warm successful
+        struct Writer<'a> {
+            ephemeral_file: &'a mut EphemeralFile,
+            /// The block to which the next [`push_bytes`] will write.
+            blknum: u32,
+            /// The offset inside the block identified by [`blknum`] to which [`push_bytes`] will write.
+            off: usize,
+        }
+        impl<'a> Writer<'a> {
+            fn new(ephemeral_file: &'a mut EphemeralFile) -> io::Result<Writer<'a>> {
+                Ok(Writer {
+                    blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
+                    off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
+                    ephemeral_file,
+                })
+            }
+            #[inline(always)]
+            fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+                let mut src_remaining = src;
+                while !src_remaining.is_empty() {
+                    let dst_remaining = &mut self.ephemeral_file.mutable_head[self.off..];
+                    let n = min(dst_remaining.len(), src_remaining.len());
+                    dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
+                    self.off += n;
+                    src_remaining = &src_remaining[n..];
+                    if self.off == PAGE_SZ {
+                        match self.ephemeral_file.file.write_all_at(
+                            &self.ephemeral_file.mutable_head,
+                            self.blknum as u64 * PAGE_SZ as u64,
+                        ) {
+                            Ok(_) => {
+                                // Pre-warm the page cache with what we just wrote.
+                                // This isn't necessary for coherency/correctness, but it's how we've always done it.
+                                let cache = page_cache::get();
+                                match cache.read_immutable_buf(
+                                    self.ephemeral_file.page_cache_file_id,
+                                    self.blknum,
+                                ) {
+                                    Err(e) => {
+                                        error!("ephemeral_file flush_head failed to get immutable buf to pre-warm page cache: {e:?}");
+                                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
+                                    }
+                                    Ok(page_cache::ReadBufResult::Found(_guard)) => {
+                                        // This function takes &mut self, so, it shouldn't be possible to reach this point.
+                                        unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);
+                                    }
+                                    Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
+                                        let buf: &mut [u8] = write_guard.deref_mut();
+                                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                                        buf.copy_from_slice(&self.ephemeral_file.mutable_head);
+                                        write_guard.mark_valid();
+                                        // pre-warm successful
+                                    }
+                                }
+                                // Zero the buffer for re-use.
+                                // Zeroing is critical for correcntess because the write_blob code below
+                                // and similarly read_blk expect zeroed pages.
+                                self.ephemeral_file.mutable_head.fill(0);
+                                // This block is done, move to next one.
+                                self.blknum += 1;
+                                self.off = 0;
+                            }
+                            Err(e) => {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::Other,
+                                    format!(
+                                        "failed to write back to ephemeral file at {} error: {}",
+                                        self.ephemeral_file.file.path.display(),
+                                        e
+                                    ),
+                                ))
+                            }
                         }
                     }
-                    // Zero the buffer for re-use.
-                    // Zeroing is critical for correcntess because the write_blob code below
-                    // and similarly read_blk expect zeroed pages.
-                    head.fill(0);
-                    Ok(())
                 }
-                Err(e) => Err(std::io::Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "failed to write back to ephemeral file at {} error: {}",
-                        self.file.path.display(),
-                        e
-                    ),
-                )),
+                Ok(())
             }
-        };
+        }
+
+        let pos = self.size;
+        let mut writer = Writer::new(self)?;
 
         // Write the length field
         if srcbuf.len() < 0x80 {
-            buf[off] = srcbuf.len() as u8;
-            off += 1;
+            // short one-byte length header
+            let len_buf = [srcbuf.len() as u8];
+            writer.push_bytes(&len_buf)?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            let thislen = PAGE_SZ - off;
-            if thislen < 4 {
-                // it needs to be split across pages
-                buf[off..(off + thislen)].copy_from_slice(&len_buf[..thislen]);
-                flush_head(buf, blknum)?;
-                blknum += 1;
-                buf[0..4 - thislen].copy_from_slice(&len_buf[thislen..]);
-                off = 4 - thislen;
-            } else {
-                buf[off..off + 4].copy_from_slice(&len_buf);
-                off += 4;
-            }
+            writer.push_bytes(&len_buf)?;
         }
 
         // Write the payload
-        let mut buf_remain = srcbuf;
-        loop {
-            let page_remain = PAGE_SZ - off;
-            if page_remain == 0 {
-                flush_head(buf, blknum)?;
-                blknum += 1;
-                off = 0;
-                continue;
-            }
-            if buf_remain.is_empty() {
-                break;
-            }
-            let this_blk_len = min(page_remain, buf_remain.len());
-            buf[off..(off + this_blk_len)].copy_from_slice(&buf_remain[..this_blk_len]);
-            off += this_blk_len;
-            buf_remain = &buf_remain[this_blk_len..];
-        }
+        writer.push_bytes(srcbuf)?;
 
         if srcbuf.len() < 0x80 {
             self.size += 1;
@@ -256,6 +261,7 @@ impl BlockReader for EphemeralFile {
                         self.file
                             .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
                         write_guard.mark_valid();
+
                         // Swap for read lock
                         continue;
                     }

@@ -892,6 +892,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "regex",
+ "remote_storage",
  "serde",
  "serde_json",
  "serde_with",
