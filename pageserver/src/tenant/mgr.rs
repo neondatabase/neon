@@ -27,7 +27,7 @@ use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
-use super::delete::DeleteTenantError;
+use super::delete::{remote_delete_mark_exists, DeleteTenantError};
 use super::timeline::delete::DeleteTimelineFlow;
 
 /// The tenants known to the pageserver.
@@ -591,6 +591,12 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
+    // Temporary solution, proper one would be to resume deletion, but that needs more plumbing around Tenant::load/Tenant::attach
+    // Corresponding issue https://github.com/neondatabase/neon/issues/5006
+    if remote_delete_mark_exists(conf, &tenant_id, &remote_storage).await? {
+        return Err(anyhow::anyhow!("Tenant is marked as deleted on remote storage").into());
+    }
+
     tenant_map_insert(tenant_id, || {
         let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach)?;
         // TODO: tenant directory remains on disk if we bail out from here on.
