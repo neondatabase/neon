@@ -385,48 +385,80 @@ simplicity just do it periodically as part of the background scrub (see [scrubbi
 
 ### Control Plane Changes
 
-#### Managing generation numbers
+#### Store generations for attaching tenants
 
-The control plane is responsible for issuing generation numbers: this work is done in the control plane
-because without adding a consensus system to the pageservers, they do not have a way to reliably
-allocate unique generation numbers while tolerating network partitions.
+- The `Project` table must store an attachment generation number for use when
+  attaching the tenant to a new pageserver.
+- The `/v1/tenant/:tenant_id/attach` pageserver API will require a generation number,
+  which the control plane can supply by simply incrementing the `Project`'s attachment
+  generation number each time the tenant is attached to a different server: the same database
+  transaction that changes the assigned pageserver should also change the attachment generation.
 
-Assigning generation numbers to attachments is very simple, because designating a particular pageserver
-as the attachment point for a tenant is already a database transaction: this transaction just needs
-to increment the generation number as well as setting the pageserver.
+#### The Generation API
 
-Assigning generation numbers to nodes at startup is a larger change: pageserver startup must be
-gated on communication from the control plane. We may either implement this via
+This section describes an API that could be provided directly by the control plane,
+or built as a separate microservice. In earlier parts of the RFC, when we
+discuss the control plane providing generation numbers, we are referring to this API.
 
-- pull: the pageserver calling up to the control plane to announce itself and request a generation number
-- push: in the opposite direction by having the control plane call down to the pageserver to give it
-  a generation number.
+The API endpoints used by the pageserver to acquire and validate generation
+numbers are quite simple, and only require access to some persistent and
+linerizable storage (such as a database).
 
-The choice of pull or push does not affect the proposed storage format changes.
+Building this into the control plane
+is proposed as a least-effort option to exploit existing infrastructure and enable
+updating attachment generations in the same transaction as updating
+the `Project` itself, but it is not mandatory: this "Generation API" could
+be built as a microservice. In practice, we will write such a miniature service
+anyway, to enable E2E pageserver/compute testing without control plane.
 
-#### Pageserver-facing API
+The endpoints required by pageservers are:
 
-The pageservers are currently only called into by control plane: the control plane does not
-expose an API for pageservers to call into.
+##### `/register/node`
 
-It would be possible to avoid this in a couple of ways:
+- Request: `{'node_id': <id>, 'metadata': {...}}`
+- Response:
+  - 200: `{'node_generation': <gen>}`
+  - 404: unknown node_id
+  - (Future: 429: flapping detected, nodes are fighting for the same node ID)
+- Purpose: issue each pageserver process in a particular node_id with a unique generation number
+- Server behavior: on each call, node generation number is persistently incremented
+  before sending a response, concurrent calls are linearized such that all responses
+  for a given node_id get a unique generation.
+- Client behavior: client will not do any writes to S3 until it receives a successful response. On a 4xx response,
+  client will terminate: this indicates to the client that is is misconfigured.
 
-- with a push-polling mechanism where the control plane
-  sends an "any requests?" POST to the pageserver and the pageserver makes its requests
-  in the response body
-- with a broadcast mechanism where the control plane sends generation information for all attachments
-  to the pageserver periodically, without knowledge of which ones the pageserver really
-  requires.
+##### `/validate`
 
-There is not a compelling reason for either of the above options though: we may simply expose an
-extra API endpoint on the control plane, and deploy pageservers with proper authentication
-tokens to access it.
+- Request: `{'node_id': <id>, 'node_gen': <gen>, 'tenants': [{tenant: <tenant id>, attach_gen: <gen>}, ...]}'`
+- Response:
+  - 200 `{'node_status': <bool>, 'tenants': [{tenant: <tenant id>, status: <bool>}...]}`
+  - 404: unknown node_id
+  - (On unknown tenants, omit tenant from `tenants` array)
+- Purpose: enable the pageserver to discover whether the generations it holds are still current
+- Server behavior: this is a read-only operation: simply compare the generations in the request with
+  the generations known to the server, and set status to `true` if they match.
+- Client behavior: clients must not do deletions within a tenant's remote data until they have
+  received a response indicating the generation they hold for the tenant is current.
 
-This "downward-facing" or "south-facing" API should be kept distinct from the
-general control plane API: the pageserver should only have access to the endpoints
-it needs for synchronization, and not the broader control plane functionality.
+If the above endpoints are implemented by the control plane, then just the two endpoints are required, as
+the control plane may advance attachment generation numbers directly in the database. However, if the
+generation API was implement in a standalone service, then that service would also expose:
 
-#### Timeline/Branch creation
+##### `/fence/tenant` (not needed if the above endpoints are built into control plane)
+
+- Request: `{'tenant_id': <id>, 'attach_gen': <gen>}`
+- Response: 200: `{'attach_gen': <gen> }`
+  - (on unknown tenant_id, intitialize attach_gen to 1)
+- Purpose: enable the control plane to safely attach a tenant to a new pageserver, without
+  being certain that the previous pageserver has detached or stopped.
+- Server behavior: increment latest attach gen by 1 and return new attach_gen
+- Client behavior: the next attachment of the tenant should use the returned attach_gen. It is forbidden
+  to attach a tenant to a different pageserver without calling this API, unless the old pageserver has
+  return 200 to a detach request. In practice this API should be called between all attachment changes.
+
+For use in automated tests of the pageserver, a stub implementation would provide all three endpoints.
+
+### Timeline/Branch creation
 
 All of the previous arguments for safety have described operations within
 a timeline, where we may describe a sequence that includes updates to
