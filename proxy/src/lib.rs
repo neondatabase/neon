@@ -22,6 +22,7 @@ pub mod scram;
 pub mod stream;
 pub mod url;
 pub mod waiters;
+pub mod protocol2;
 
 /// Handle unix signals appropriately.
 pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallible> {
