@@ -360,7 +360,7 @@ async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
     timeout: time::Duration,
-    mut session_id: uuid::Uuid,
+    mut session: uuid::Uuid,
 ) -> Result<Client, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
@@ -373,41 +373,45 @@ async fn connect_to_compute_once(
         .connect(tokio_postgres::NoTls)
         .await?;
 
-    let (tx, mut rx) = tokio::sync::watch::channel(session_id);
+    let (tx, mut rx) = tokio::sync::watch::channel(session);
 
-    let conn_info = conn_info.to_string();
     let conn_id = uuid::Uuid::new_v4();
-    tokio::spawn(async move {
-        poll_fn(move |cx| {
-            let message = ready!(connection.poll_message(cx));
+    let span = info_span!(parent: None, "connection", %conn_info, %conn_id);
+    span.in_scope(|| {
+        info!(%session, "new connection");
+    });
 
-            if rx.has_changed().unwrap() {
-                session_id = *rx.borrow_and_update();
+    tokio::spawn(
+        poll_fn(move |cx| {
+            if matches!(rx.has_changed(), Ok(true)) {
+                session = *rx.borrow_and_update();
+                info!(%session, "changed session");
             }
+
+            let message = ready!(connection.poll_message(cx));
 
             match message {
                 Some(Ok(AsyncMessage::Notice(notice))) => {
-                    info!(%session_id, "notice: {}", notice);
+                    info!(%session, "notice: {}", notice);
                     Poll::Pending
                 }
                 Some(Ok(AsyncMessage::Notification(notif))) => {
-                    warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                    warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
                     Poll::Pending
                 }
                 Some(Ok(_)) => {
-                    warn!(%session_id, "unknown message");
+                    warn!(%session, "unknown message");
                     Poll::Pending
                 }
                 Some(Err(e)) => {
-                    error!(%session_id, "connection error: {}", e);
+                    error!(%session, "connection error: {}", e);
                     Poll::Ready(())
                 }
                 None => Poll::Ready(()),
             }
         })
-        .instrument(info_span!("pooled connection",%conn_info, %conn_id))
-        .await
-    });
+        .instrument(span)
+    );
 
     Ok(Client {
         inner: client,

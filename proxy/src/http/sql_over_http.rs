@@ -16,6 +16,7 @@ use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
+use tracing::Instrument;
 use url::Url;
 
 use super::conn_pool::ConnInfo;
@@ -288,7 +289,7 @@ pub async fn handle(
         // return connection to the pool
         tokio::task::spawn(async move {
             let _ = conn_pool.put(&conn_info, client).await;
-        });
+        }.in_current_span());
     }
 
     result
