@@ -271,37 +271,44 @@ fn main() -> Result<()> {
         }
     };
 
-    // start the vm-monitor if directed to
-    // the vm-monitor only runs on linux because it requires cgroups
-    #[cfg(target_os = "linux")]
-    let vm_monitor = {
-        let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
-        let cgroup = matches.get_one::<String>("filecache-connstr");
-        let file_cache_connstr = matches.get_one::<String>("cgroup");
-        match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
-            (None, None) => None,
-            (None, Some(_)) => {
-                warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
-                None
-            }
-            (Some(_), None) => {
-                panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
-            }
-            (Some(_), Some(addr)) => {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to create rt");
-                Some(
-                    rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
-                        cgroup: cgroup.cloned(),
-                        pgconnstr: file_cache_connstr.cloned(),
-                        addr: addr.clone(),
-                    })))),
-                )
-            }
+    // Start the vm-monitor if directed to. The vm-monitor only runs on linux
+    // because it requires cgroups.
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+            let cgroup = matches.get_one::<String>("filecache-connstr");
+            let file_cache_connstr = matches.get_one::<String>("cgroup");
+
+            // Only make a runtime if we need to.
+            // Note: it seems like you can make a runtime in an inner scope and
+            // if you start a task in it it won't be dropped. However, make it
+            // in the outermost scope just to be safe.
+            let rt = match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
+                (None, None) => None,
+                (None, Some(_)) => {
+                    warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
+                    None
+                }
+                (Some(_), None) => {
+                    panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
+                }
+                (Some(_), Some(_)) => Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to create tokio runtime for monitor"),
+                ),
+            };
+
+            let vm_monitor = rt.map(|rt| {
+                rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+                    cgroup: cgroup.cloned(),
+                    pgconnstr: file_cache_connstr.cloned(),
+                    addr: vm_monitor_addr.cloned().unwrap(),
+                }))))
+            });
         }
-    };
+    }
 
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
@@ -317,8 +324,8 @@ fn main() -> Result<()> {
     }
 
     // Terminate the vm_monitor so it releases the file watcher on
-    // /sys/fs/cgroup/neon-postgres
-    // the vm-monitor only runs on linux because it requires cgroups
+    // /sys/fs/cgroup/neon-postgres.
+    // Note: the vm-monitor only runs on linux because it requires cgroups.
     #[cfg(target_os = "linux")]
     if let Some(handle) = vm_monitor {
         handle.abort()

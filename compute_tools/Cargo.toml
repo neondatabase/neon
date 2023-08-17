@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-compression.workspace = true
 chrono.workspace = true
+cfg-if.workspace = true
 clap.workspace = true
 flate2.workspace = true
 futures.workspace = true

@@ -927,6 +927,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
+ "cfg-if",
  "chrono",
  "clap",
  "compute_api",
