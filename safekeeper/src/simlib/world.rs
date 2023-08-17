@@ -221,6 +221,20 @@ impl World {
         // waking node with condition, increase the running threads counter
         self.wait_group.add(1);
     }
+
+    fn find_parked_node(&self, node: &Node) -> Option<Arc<Park>> {
+        let mut parking = self.unconditional_parking.lock();
+        let mut found: Option<usize> = None;
+        for (i, park) in parking.iter().enumerate() {
+            if park.node_id() == Some(node.id) {
+                if found.is_some() {
+                    panic!("found more than one parked thread for node {}", node.id);
+                }
+                found = Some(i);
+            }
+        }
+        Some(parking.swap_remove(found?))
+    }
 }
 
 thread_local! {
@@ -231,8 +245,9 @@ thread_local! {
 /// Internal node state.
 pub struct Node {
     pub id: NodeId,
-    network: Chan<NodeEvent>,
+    network: Mutex<Chan<NodeEvent>>,
     status: Mutex<NodeStatus>,
+    waiting_park: Mutex<Arc<Park>>,
     world: Arc<World>,
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub rng: Mutex<StdRng>,
@@ -254,8 +269,9 @@ impl Node {
     pub fn new(id: NodeId, world: Arc<World>, rng: StdRng) -> Node {
         Node {
             id,
-            network: Chan::new(),
+            network: Mutex::new(Chan::new()),
             status: Mutex::new(NodeStatus::NotStarted),
+            waiting_park: Mutex::new(Park::new(false)),
             world,
             join_handle: Mutex::new(None),
             rng: Mutex::new(rng),
@@ -279,7 +295,7 @@ impl Node {
             }
 
             let mut status = node.status.lock();
-            if *status != NodeStatus::NotStarted {
+            if *status != NodeStatus::NotStarted && *status != NodeStatus::Finished {
                 // clearly a caller bug, should never happen
                 panic!("node {} is already running", node.id);
             }
@@ -307,7 +323,6 @@ impl Node {
 
             let mut status = node.status.lock();
             *status = NodeStatus::Finished;
-            // TODO: log the thread is finished
         });
         *self.join_handle.lock() = Some(join_handle);
 
@@ -318,16 +333,17 @@ impl Node {
 
     /// Returns a channel to receive events from the network.
     pub fn network_chan(&self) -> Chan<NodeEvent> {
-        self.network.clone()
+        self.network.lock().clone()
     }
 
-    pub fn internal_parking_start(&self) {
+    pub fn internal_parking_start(&self, park: Arc<Park>) {
         // Node started parking (waiting for condition), and the current thread
         // is the only one running, so we need to do:
         // 1. Change the node status to Waiting
         // 2. Decrease the running threads counter
         // 3. Block the current thread until it's woken up (outside this function)
         *self.status.lock() = NodeStatus::Waiting;
+        *self.waiting_park.lock() = park;
         self.world.wait_group.done();
     }
 
@@ -371,6 +387,40 @@ impl Node {
     pub fn is_finished(&self) -> bool {
         let status = self.status.lock();
         *status == NodeStatus::Finished
+    }
+
+    pub fn crash_stop(self: &Arc<Self>) {
+        let status = self.status.lock().clone();
+        match status {
+            NodeStatus::NotStarted | NodeStatus::Finished | NodeStatus::Failed => return,
+            NodeStatus::Running => {
+                panic!("crash unexpected node state: Running")
+            }
+            NodeStatus::Waiting | NodeStatus::Parked => {}
+        }
+
+        println!("Node {} is crashing, status={:?}", self.id, status);
+        self.world.debug_print_state();
+
+        let park = self.world.find_parked_node(self);
+
+        let park = if park.is_some() {
+            assert!(status == NodeStatus::Parked);
+            park.unwrap()
+        } else {
+            assert!(status == NodeStatus::Waiting);
+            self.waiting_park.lock().clone()
+        };
+
+        park.debug_print();
+
+        // unplug old network socket, and create a new one
+        *self.network.lock() = Chan::new();
+
+        self.world.wait_group.add(1);
+        park.crash_panic();
+        // self.world.debug_print_state();
+        self.world.wait_group.wait();
     }
 }
 

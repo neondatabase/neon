@@ -87,6 +87,8 @@ struct ParkState {
     /// world simulation to wake it up. True means that the parking is
     /// finished and the thread can continue.
     finished: bool,
+    /// True means that the thread should wake up and panic.
+    panic: bool,
     node_id: Option<NodeId>,
     backtrace: Option<Backtrace>,
 }
@@ -97,6 +99,7 @@ impl Park {
             lock: Mutex::new(ParkState {
                 can_continue,
                 finished: false,
+                panic: false,
                 node_id: None,
                 backtrace: None,
             }),
@@ -131,12 +134,16 @@ impl Park {
 
             parking_lot::MutexGuard::unlocked(&mut state, || {
                 // conditional parking, decrease the running threads counter without parking
-                node.internal_parking_start();
+                node.internal_parking_start(self.clone());
             });
 
             // wait for condition
             while !state.can_continue {
                 self.cvar.wait(&mut state);
+            }
+
+            if state.panic {
+                panic!("thread was crashed by the simulation");
             }
 
             // println!("CONDITION MET: node {:?}", node.id);
@@ -153,6 +160,10 @@ impl Park {
         // condition is met, wait for world simulation to wake us up
         while !state.finished {
             self.cvar.wait(state);
+        }
+
+        if state.panic {
+            panic!("thread was crashed by the simulation");
         }
 
         // println!("PARKING ENDED: node {:?}", node.id);
@@ -187,11 +198,11 @@ impl Park {
                 "WARN wake() called on a thread that is already waked, node {:?}",
                 state.node_id
             );
-            return;
+        } else {
+            state.can_continue = true;
+            // and here we park the waiting thread
+            self.cvar.notify_all();
         }
-        state.can_continue = true;
-        // and here we park the waiting thread
-        self.cvar.notify_all();
         drop(state);
 
         // and here we block the thread that called wake() by defer
@@ -206,16 +217,16 @@ impl Park {
     /// 2. Wake up the waiting thread (it will park itself in the world)
     pub fn external_wake(&self) {
         let world = World::current();
-        world.internal_parking_wake();
 
         let mut state = self.lock.lock();
         if state.can_continue {
             println!(
-                "WARN wake() called on a thread that is already waked, node {:?}",
+                "WARN external_wake() called on a thread that is already waked, node {:?}",
                 state.node_id
             );
             return;
         }
+        world.internal_parking_wake();
         state.can_continue = true;
         // and here we park the waiting thread
         self.cvar.notify_all();
@@ -236,9 +247,19 @@ impl Park {
         self.cvar.notify_all();
     }
 
+    /// Will wake up thread to panic instantly.
+    pub fn crash_panic(&self) {
+        let mut state = self.lock.lock();
+        state.can_continue = true;
+        state.finished = true;
+        state.panic = true;
+        self.cvar.notify_all();
+        drop(state);
+    }
+
     /// Print debug info about the parked thread.
     pub fn debug_print(&self) {
-        let _state = self.lock.lock();
+        // let state = self.lock.lock();
         // println!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
         // println!("DEBUG: node {:?} wake1={} wake2={}, trace={:?}", state.node_id, state.can_continue, state.finished, state.backtrace);
     }

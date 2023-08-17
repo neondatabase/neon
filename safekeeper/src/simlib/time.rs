@@ -35,7 +35,7 @@ impl Timing {
 
         if !self.is_event_ready() {
             let next_time = self.timers.peek().unwrap().time;
-            println!("CLK(time={})", next_time);
+            // println!("CLK(time={})", next_time);
             self.current_time = next_time;
             assert!(self.is_event_ready());
         }

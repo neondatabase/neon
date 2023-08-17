@@ -80,7 +80,7 @@ void MyContextInit() {
         if (!SelectConfigFiles(NULL, progname))
             exit(1);
 
-        log_min_messages = DEBUG5;
+        log_min_messages = LOG;
 
         InitializeMaxBackends();
         ChangeToDataDir();

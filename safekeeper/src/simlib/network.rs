@@ -8,6 +8,7 @@ use std::{
 use rand::{rngs::StdRng, Rng};
 
 use super::{
+    chan::Chan,
     proto::AnyMessage,
     sync::Mutex,
     time::NetworkEvent,
@@ -70,6 +71,7 @@ pub struct VirtualConnection {
     pub connection_id: u64,
     pub world: Arc<World>,
     pub nodes: [Arc<Node>; 2],
+    dst_sockets: [Chan<NodeEvent>; 2],
     state: Mutex<ConnectionState>,
     options: Arc<NetworkOptions>,
 }
@@ -93,6 +95,7 @@ impl VirtualConnection {
         let conn = Arc::new(Self {
             connection_id: id,
             world,
+            dst_sockets: [src.network_chan(), dst.network_chan()],
             nodes: [src, dst],
             state: Mutex::new(ConnectionState {
                 buffers: [NetworkBuffer::new(None), NetworkBuffer::new(Some(now))],
@@ -105,7 +108,7 @@ impl VirtualConnection {
         conn.send_connect();
 
         // TODO: add connection to the dst node
-        // conn.nodes[1].network_chan().send(NodeEvent::Connection(conn.clone()));
+        // conn.dst_sockets[1].send(NodeEvent::Connection(conn.clone()));
 
         conn
     }
@@ -128,8 +131,7 @@ impl VirtualConnection {
                 state.deref_mut(),
                 now,
                 direction as MessageDirection,
-                &self.nodes[direction],
-                &self.nodes[direction ^ 1],
+                &self.dst_sockets[direction ^ 1],
             );
         }
 
@@ -171,8 +173,7 @@ impl VirtualConnection {
         state: &mut ConnectionState,
         now: u64,
         direction: MessageDirection,
-        from_node: &Arc<Node>,
-        to_node: &Arc<Node>,
+        to_socket: &Chan<NodeEvent>,
     ) {
         let buffer = &mut state.buffers[direction as usize];
         if buffer.recv_closed {
@@ -183,19 +184,17 @@ impl VirtualConnection {
             let msg = buffer.buf.pop_front().unwrap().1;
             let callback = TCP::new(self.clone(), direction ^ 1);
 
-            println!(
-                "NET(time={}): {:?} delivered, {}=>{}",
-                now, msg, from_node.id, to_node.id
-            );
+            // println!(
+            //     "NET(time={}): {:?} delivered, {}=>{}",
+            //     now, msg, from_node.id, to_node.id
+            // );
             buffer.last_recv = Some(now);
             self.schedule_timeout();
 
             if let AnyMessage::InternalConnect = msg {
-                to_node.network_chan().send(NodeEvent::Accept(callback));
+                to_socket.send(NodeEvent::Accept(callback));
             } else {
-                to_node
-                    .network_chan()
-                    .send(NodeEvent::Message((msg, callback)));
+                to_socket.send(NodeEvent::Message((msg, callback)));
             }
         }
     }
@@ -299,8 +298,7 @@ impl VirtualConnection {
         send_buffer.send_closed = true;
         // TODO: notify the other side?
 
-        node.network_chan()
-            .send(NodeEvent::Closed(TCP::new(self.clone(), node_idx as u8)));
+        self.dst_sockets[node_idx].send(NodeEvent::Closed(TCP::new(self.clone(), node_idx as u8)));
     }
 
     /// Get an event suitable for scheduling.

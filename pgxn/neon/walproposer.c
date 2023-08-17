@@ -2332,6 +2332,16 @@ HandleSafekeeperResponse(void)
 								quorumFeedback.rf.ps_flushlsn,
 								GetCurrentTimestamp(), false);
 	#endif
+
+	#ifdef SIMLIB
+		if (!syncSafekeepers)
+		{
+			char lsn_str[8 + 1 + 8 + 1];
+
+			snprintf(lsn_str, sizeof(lsn_str), "%X/%X", LSN_FORMAT_ARGS(quorumFeedback.flushLsn));
+			sim_set_result(1, lsn_str);
+		}
+	#endif
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback);
@@ -2466,10 +2476,10 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 	if (!(AsyncRead(sk, &buf, &buf_size)))
 		return false;
 
-	for (int i = 0; i < buf_size; i++) {
-		fprintf(stderr, "%02x", buf[i]);
-	}
-	fprintf(stderr, "\n");
+	// for (int i = 0; i < buf_size; i++) {
+	// 	fprintf(stderr, "%02x", buf[i]);
+	// }
+	// fprintf(stderr, "\n");
 
 	/* parse it */  
 	s.data = buf;

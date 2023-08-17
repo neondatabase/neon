@@ -4,14 +4,25 @@
 
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
+use anyhow::{bail, Result};
 use bytes::BytesMut;
 use hyper::Uri;
 use log::info;
-use safekeeper::{simlib::{node_os::NodeOs, network::TCP, world::NodeEvent, proto::AnyMessage}, safekeeper::{ProposerAcceptorMessage, ServerInfo, SafeKeeperState, UNKNOWN_SERVER_VERSION, SafeKeeper, AcceptorProposerMessage}, timeline::{TimelineError}, SafeKeeperConf};
-use utils::{id::{TenantTimelineId, NodeId}, lsn::Lsn};
-use anyhow::{Result, bail};
+use safekeeper::{
+    safekeeper::{
+        AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
+        UNKNOWN_SERVER_VERSION,
+    },
+    simlib::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent},
+    timeline::TimelineError,
+    SafeKeeperConf,
+};
+use utils::{
+    id::{NodeId, TenantTimelineId},
+    lsn::Lsn,
+};
 
-use crate::simtest::storage::{InMemoryState, DummyWalStore};
+use crate::simtest::storage::{DummyWalStore, InMemoryState};
 
 struct ConnState {
     tcp: TCP,
@@ -60,14 +71,17 @@ pub fn run_server(os: NodeOs) -> Result<()> {
 
             match event {
                 NodeEvent::Accept(tcp) => {
-                    conns.insert(tcp.id(), ConnState {
-                        tcp,
-                        conf: conf.clone(),
-                        greeting: false,
-                        ttid: TenantTimelineId::empty(),
-                        tli: None,
-                        flush_pending: false,
-                    });
+                    conns.insert(
+                        tcp.id(),
+                        ConnState {
+                            tcp,
+                            conf: conf.clone(),
+                            greeting: false,
+                            ttid: TenantTimelineId::empty(),
+                            tli: None,
+                            flush_pending: false,
+                        },
+                    );
                 }
                 NodeEvent::Message((msg, tcp)) => {
                     let conn = conns.get_mut(&tcp.id());
@@ -104,7 +118,7 @@ impl ConnState {
     fn process_any(&mut self, any: AnyMessage) -> Result<()> {
         if let AnyMessage::Bytes(copy_data) = any {
             let msg = ProposerAcceptorMessage::parse(copy_data)?;
-            println!("got msg: {:?}", msg);
+            // println!("got msg: {:?}", msg);
             return self.process(msg);
         } else {
             bail!("unexpected message, expected AnyMessage::Bytes");
@@ -120,7 +134,7 @@ impl ConnState {
 
         // TODO: load state from in-memory storage
         let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
-        
+
         if state.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(ttid));
         }
@@ -142,12 +156,10 @@ impl ConnState {
 
         // TODO: implement "persistent" storage for tests
         let wal_store = DummyWalStore::new();
-        
+
         let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
 
-        self.tli = Some(SharedState {
-            sk,
-        });
+        self.tli = Some(SharedState { sk });
 
         Ok(())
     }
@@ -155,7 +167,7 @@ impl ConnState {
     fn process(&mut self, msg: ProposerAcceptorMessage) -> Result<()> {
         if !self.greeting {
             self.greeting = true;
-            
+
             match msg {
                 ProposerAcceptorMessage::Greeting(ref greeting) => {
                     info!(
@@ -171,9 +183,7 @@ impl ConnState {
                     self.create_timeline(ttid, server_info)?
                 }
                 _ => {
-                    bail!(
-                        "unexpected message {msg:?} instead of greeting"
-                    );
+                    bail!("unexpected message {msg:?} instead of greeting");
                 }
             }
         }
@@ -181,7 +191,9 @@ impl ConnState {
         match msg {
             ProposerAcceptorMessage::AppendRequest(append_request) => {
                 self.flush_pending = true;
-                self.process_sk_msg(&ProposerAcceptorMessage::NoFlushAppendRequest(append_request))?;
+                self.process_sk_msg(&ProposerAcceptorMessage::NoFlushAppendRequest(
+                    append_request,
+                ))?;
             }
             other => {
                 self.process_sk_msg(&other)?;
@@ -211,12 +223,12 @@ impl ConnState {
             //     // TODO:
             // }
 
-            println!("sending reply: {:?}", reply);
+            // println!("sending reply: {:?}", reply);
 
             let mut buf = BytesMut::with_capacity(128);
             reply.serialize(&mut buf)?;
 
-            println!("sending reply len={}: {}", buf.len(), hex::encode(&buf));
+            // println!("sending reply len={}: {}", buf.len(), hex::encode(&buf));
 
             self.tcp.send(AnyMessage::Bytes(buf.into()));
         }
@@ -227,7 +239,9 @@ impl ConnState {
 impl Drop for ConnState {
     fn drop(&mut self) {
         println!("dropping conn: {:?}", self.tcp);
-        self.tcp.close();
+        if !std::thread::panicking() {
+            self.tcp.close();
+        }
         // TODO: clean up non-fsynced WAL
     }
 }

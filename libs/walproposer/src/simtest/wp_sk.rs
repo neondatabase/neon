@@ -1,20 +1,49 @@
-use std::{ffi::CString, str::FromStr, sync::Arc};
+use std::{ffi::CString, path::Path, str::FromStr, sync::Arc};
 
 use safekeeper::simlib::{
     network::{Delay, NetworkOptions},
+    proto::AnyMessage,
+    world::World,
     world::{Node, NodeEvent},
-    world::World, proto::AnyMessage,
 };
 use utils::{id::TenantTimelineId, logging, lsn::Lsn};
 
 use crate::{
     bindings::{
-        neon_tenant_walproposer, neon_timeline_walproposer, wal_acceptor_connection_timeout,
-        wal_acceptor_reconnect_timeout, wal_acceptors_list, WalProposerRust, WalProposerCleanup, syncSafekeepers, sim_redo_start_lsn, MyInsertRecord,
+        neon_tenant_walproposer, neon_timeline_walproposer, sim_redo_start_lsn, syncSafekeepers,
+        wal_acceptor_connection_timeout, wal_acceptor_reconnect_timeout, wal_acceptors_list,
+        MyInsertRecord, WalProposerCleanup, WalProposerRust,
     },
     c_context,
     simtest::safekeeper::run_server,
 };
+
+struct SkNode {
+    node: Arc<Node>,
+    id: u32,
+}
+
+impl SkNode {
+    fn new(node: Arc<Node>) -> Self {
+        let res = Self { id: node.id, node };
+        res.launch();
+        res
+    }
+
+    fn launch(&self) {
+        let id = self.id;
+        // start the server thread
+        self.node.launch(move |os| {
+            let res = run_server(os);
+            println!("server {} finished: {:?}", id, res);
+        });
+    }
+
+    fn restart(&self) {
+        self.node.crash_stop();
+        self.launch();
+    }
+}
 
 struct TestConfig {
     network: NetworkOptions,
@@ -42,42 +71,73 @@ impl TestConfig {
     }
 
     fn start(&self, seed: u64) -> Test {
-        let world = Arc::new(World::new(seed, Arc::new(self.network.clone()), c_context()));
+        let world = Arc::new(World::new(
+            seed,
+            Arc::new(self.network.clone()),
+            c_context(),
+        ));
         world.register_world();
 
-        let servers = [world.new_node(), world.new_node(), world.new_node()];
+        let servers = [
+            SkNode::new(world.new_node()),
+            SkNode::new(world.new_node()),
+            SkNode::new(world.new_node()),
+        ];
+
         let server_ids = [servers[0].id, servers[1].id, servers[2].id];
         let safekeepers_guc = server_ids.map(|id| format!("node:{}", id)).join(",");
         let ttid = TenantTimelineId::generate();
 
-        // start the server threads
-        for ptr in servers.iter() {
-            let server = ptr.clone();
-            let id = server.id;
-            server.launch(move |os| {
-                let res = run_server(os);
-                println!("server {} finished: {:?}", id, res);
-            });
-        }
-
         // wait init for all servers
         world.await_all();
+
+        // clean up pgdata directory
+        self.init_pgdata();
 
         Test {
             world,
             servers,
-            server_ids,
             safekeepers_guc,
             ttid,
             timeout: self.timeout,
         }
     }
+
+    fn init_pgdata(&self) {
+        let pgdata = Path::new("/home/admin/simulator/libs/walproposer/pgdata");
+        if pgdata.exists() {
+            std::fs::remove_dir_all(pgdata).unwrap();
+        }
+        std::fs::create_dir(pgdata).unwrap();
+
+        // create empty pg_wal and pg_notify subdirs
+        std::fs::create_dir(pgdata.join("pg_wal")).unwrap();
+        std::fs::create_dir(pgdata.join("pg_notify")).unwrap();
+
+        // write postgresql.conf
+        let mut conf = std::fs::File::create(pgdata.join("postgresql.conf")).unwrap();
+        let content = "
+wal_log_hints=off
+hot_standby=on
+fsync=off
+wal_level=replica
+restart_after_crash=off
+shared_preload_libraries=neon
+neon.pageserver_connstring=''
+neon.tenant_id=cc6e67313d57283bad411600fbf5c142
+neon.timeline_id=de6fa815c1e45aa61491c3d34c4eb33e
+synchronous_standby_names=walproposer
+neon.safekeepers='node:1,node:2,node:3'
+max_connections=100
+";
+
+        std::io::Write::write_all(&mut conf, content.as_bytes()).unwrap();
+    }
 }
 
 struct Test {
     world: Arc<World>,
-    servers: [Arc<Node>; 3],
-    server_ids: [u32; 3],
+    servers: [SkNode; 3],
     safekeepers_guc: String,
     ttid: TenantTimelineId,
     timeout: u64,
@@ -162,8 +222,11 @@ impl Test {
 
         self.world.await_all();
 
-        WalProposer { 
+        WalProposer {
             node: client_node,
+            txes: Vec::new(),
+            last_committed_tx: 0,
+            commit_lsn: Lsn(0),
         }
     }
 
@@ -175,17 +238,54 @@ impl Test {
 
 struct WalProposer {
     node: Arc<Node>,
+    txes: Vec<Lsn>,
+    last_committed_tx: usize,
+    commit_lsn: Lsn,
 }
 
 impl WalProposer {
-    fn gen_wal_record(&self) -> Lsn {
+    fn write_tx(&mut self) -> usize {
         let new_ptr = unsafe { MyInsertRecord() };
 
-        self.node.network_chan().send(NodeEvent::Internal(
-            AnyMessage::LSN(new_ptr as u64),
-        ));
+        self.node
+            .network_chan()
+            .send(NodeEvent::Internal(AnyMessage::LSN(new_ptr as u64)));
 
-        return Lsn(new_ptr as u64);
+        let tx_id = self.txes.len();
+        self.txes.push(Lsn(new_ptr as u64));
+
+        tx_id
+    }
+
+    /// Updates committed status.
+    fn update(&mut self) {
+        let last_result = self.node.result.lock().clone();
+        if last_result.0 != 1 {
+            // not an LSN update
+            return;
+        }
+
+        let lsn_str = last_result.1;
+        let lsn = Lsn::from_str(&lsn_str);
+        match lsn {
+            Ok(lsn) => {
+                self.commit_lsn = lsn;
+                println!("commit_lsn: {}", lsn);
+
+                while self.last_committed_tx < self.txes.len()
+                    && self.txes[self.last_committed_tx] <= lsn
+                {
+                    println!(
+                        "Tx #{} was commited at {}, last_commit_lsn={}",
+                        self.last_committed_tx, self.txes[self.last_committed_tx], self.commit_lsn
+                    );
+                    self.last_committed_tx += 1;
+                }
+            }
+            Err(e) => {
+                println!("failed to parse LSN: {:?}", e);
+            }
+        }
     }
 }
 
@@ -202,7 +302,7 @@ fn sync_empty_safekeepers() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced empty safekeepers at 0/0");
+    println!("Sucessfully synced (again) empty safekeepers at 0/0");
 }
 
 #[test]
@@ -217,13 +317,43 @@ fn run_walproposer_generate_wal() {
     assert_eq!(lsn, Lsn(0));
     println!("Sucessfully synced empty safekeepers at 0/0");
 
-    let wp = test.launch_walproposer(lsn);
-    // let rec1 = wp.gen_wal_record();
+    let mut wp = test.launch_walproposer(lsn);
 
     test.poll_for_duration(30);
 
     for i in 0..100 {
-        wp.gen_wal_record();
+        wp.write_tx();
         test.poll_for_duration(5);
+        wp.update();
     }
+}
+
+#[test]
+fn crash_safekeeper() {
+    logging::init(logging::LogFormat::Plain).unwrap();
+
+    let mut config = TestConfig::new();
+    // config.network.timeout = Some(250);
+    let test = config.start(1337);
+
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    println!("Sucessfully synced empty safekeepers at 0/0");
+
+    let mut wp = test.launch_walproposer(lsn);
+
+    test.poll_for_duration(30);
+    wp.update();
+
+    wp.write_tx();
+    wp.write_tx();
+    wp.write_tx();
+
+    test.servers[0].restart();
+
+    test.poll_for_duration(100);
+    wp.update();
+
+    test.poll_for_duration(1000);
+    wp.update();
 }

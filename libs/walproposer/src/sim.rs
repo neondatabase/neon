@@ -150,20 +150,16 @@ pub extern "C" fn sim_epoll_peek(timeout: i64) -> Event {
             tcp: tcp_save(tcp),
             any_message: AnyMessageTag::None,
         },
-        NodeEvent::Message((message, tcp)) => {
-            Event {
-                tag: EventTag::Message,
-                tcp: tcp_save(tcp),
-                any_message: anymessage_tag(&message),
-            }
-        }
-        NodeEvent::Internal(message) => {
-            Event {
-                tag: EventTag::Internal,
-                tcp: 0,
-                any_message: anymessage_tag(&message),
-            }
-        }
+        NodeEvent::Message((message, tcp)) => Event {
+            tag: EventTag::Message,
+            tcp: tcp_save(tcp),
+            any_message: anymessage_tag(&message),
+        },
+        NodeEvent::Internal(message) => Event {
+            tag: EventTag::Internal,
+            tcp: 0,
+            any_message: anymessage_tag(&message),
+        },
         NodeEvent::WakeTimeout(_) => {
             // can't happen
             unreachable!()
@@ -178,10 +174,8 @@ pub extern "C" fn sim_now() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
-    let msg = unsafe { CStr::from_ptr(msg as *const i8) };
-    let msg = msg.to_string_lossy().into_owned();
     println!("sim_exit({}, {:?})", code, msg);
-    os().set_result(code, msg);
+    sim_set_result(code, msg);
 
     // I tried to make use of pthread_exit, but it doesn't work.
     // https://github.com/rust-lang/unsafe-code-guidelines/issues/211
@@ -191,4 +185,11 @@ pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
     // Everyone on the internet saying this is UB, but it works for me,
     // so I'm going to use it for now.
     panic!("sim_exit() called from C code")
+}
+
+#[no_mangle]
+pub extern "C" fn sim_set_result(code: i32, msg: *const u8) {
+    let msg = unsafe { CStr::from_ptr(msg as *const i8) };
+    let msg = msg.to_string_lossy().into_owned();
+    os().set_result(code, msg);
 }
