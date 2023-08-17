@@ -271,10 +271,7 @@ fn main() -> Result<()> {
         }
     };
 
-    // Start the vm-monitor if directed to.
-    // We store the runtime in this outer scope so it doesn't get dropped.
-    let mut rt = None;
-
+    // start the vm-monitor if directed to
     // the vm-monitor only runs on linux because it requires cgroups
     #[cfg(target_os = "linux")]
     let vm_monitor = {
@@ -293,20 +290,15 @@ fn main() -> Result<()> {
         }
 
         vm_monitor_addr.map(|addr| {
-            rt = Some(
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to create tokio runtime to run vm-monitor"),
-            );
-            match &rt {
-                Some(rt) => rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
-                    cgroup: cgroup.cloned(),
-                    pgconnstr: file_cache_connstr.cloned(),
-                    addr: addr.clone(),
-                })))),
-                None => unreachable!("we just set rt to Some(_)"),
-            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+            rt.spawn(vm_monitor::start(Box::leak(Box::new(vm_monitor::Args {
+                cgroup: cgroup.cloned(),
+                pgconnstr: file_cache_connstr.cloned(),
+                addr: addr.clone(),
+            }))))
         })
     };
 
