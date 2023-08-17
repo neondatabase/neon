@@ -1132,7 +1132,7 @@ async fn always_panic_handler(
     json_response(StatusCode::NO_CONTENT, ())
 }
 
-async fn deletion_queue_flush_execute(
+async fn deletion_queue_flush(
     r: Request<Body>,
     cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -1143,9 +1143,18 @@ async fn deletion_queue_flush_execute(
         return json_response(StatusCode::OK, ());
     }
 
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
     let queue_client = state.deletion_queue.new_client();
+
     tokio::select! {
-        _ = queue_client.flush_execute()=> {
+        _ = async {
+            if execute {
+                queue_client.flush_execute().await;
+            } else {
+                queue_client.flush().await;
+            }
+        } => {
             json_response(StatusCode::OK, ())
         },
         _ = cancel.cancelled() => {
@@ -1478,8 +1487,8 @@ pub fn make_router(
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })
-        .put("/v1/deletion_queue/flush_execute", |r| {
-            api_handler(r, deletion_queue_flush_execute)
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

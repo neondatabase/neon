@@ -52,7 +52,15 @@ paths:
               schema:
                 type: object
 
-  /v1/deletion_queue/flush_execute:
+  /v1/deletion_queue/flush:
+    parameters:
+      - name: execute
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description:
+          If true, attempt to execute deletions.  If false, just flush deletions to persistent deletion lists.
     put:
       description: Execute any deletions currently enqueued
       security: []
