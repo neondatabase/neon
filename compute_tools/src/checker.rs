@@ -71,7 +71,7 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
                     return Ok(());
                 }
             }
-            error!("connection error: {}", err);
+            return Err(e.into());
         }
     }
 
