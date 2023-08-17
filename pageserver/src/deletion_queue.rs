@@ -974,7 +974,7 @@ mod test {
         std::fs::create_dir_all(&remote_timeline_path)?;
         std::fs::write(
             remote_timeline_path.join(layer_file_name_1.to_string()),
-            &content,
+            content,
         )?;
         assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
 
@@ -1029,7 +1029,7 @@ mod test {
         std::fs::create_dir_all(&remote_timeline_path)?;
         std::fs::write(
             remote_timeline_path.join(layer_file_name_1.to_string()),
-            &content,
+            content,
         )?;
         ctx.runtime.block_on(client.push_layers(
             tenant_id,
@@ -1153,7 +1153,7 @@ pub mod mock {
             });
 
             Self {
-                tx: tx,
+                tx,
                 tx_pump,
                 executed,
             }
