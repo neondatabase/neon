@@ -45,8 +45,9 @@ pub fn init() -> fail::FailScenario<'static> {
                 .unwrap_or((s, None))
         });
 
+        // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
+        // We want non-default behavior for `exit`, though, so, we handle it separately.
         let mut s = String::new();
-
         for (name, action) in parsed {
             if action == Some("exit") {
                 // we'll need to handle this separatedly
