@@ -3769,7 +3769,7 @@ impl Timeline {
         }
 
         guard.finish_compact_l0(
-            layer_removal_cs,
+            &layer_removal_cs,
             remove_layers,
             insert_layers,
             &self.metrics,
@@ -4106,7 +4106,7 @@ impl Timeline {
                 layer_names_to_delete.push(doomed_layer.filename());
                 result.layers_removed += 1;
             }
-            let apply = guard.finish_gc_timeline(layer_removal_cs, gc_layers, &self.metrics)?;
+            let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers, &self.metrics)?;
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");
