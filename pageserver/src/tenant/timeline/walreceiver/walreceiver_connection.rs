@@ -8,14 +8,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{anyhow, Context};
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
 use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
-use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
+use postgres_ffi::{v14::xlog_utils::normalize_lsn, waldecoder::WalDecodeError};
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
@@ -60,6 +60,50 @@ pub(super) struct WalConnectionStatus {
     pub node: NodeId,
 }
 
+pub(super) enum WalReceiverError {
+    /// An error of a type that does not indicate an issue, e.g. a connection closing
+    ExpectedSafekeeperError(postgres::Error),
+    /// An "error" message that carries a SUCCESSFUL_COMPLETION status code.  Carries
+    /// the message part of the original postgres error
+    SuccessfulCompletion(String),
+    /// Generic error
+    Other(anyhow::Error),
+}
+
+impl From<tokio_postgres::Error> for WalReceiverError {
+    fn from(err: tokio_postgres::Error) -> Self {
+        if let Some(dberror) = err.as_db_error().filter(|db_error| {
+            db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+                && db_error.message().contains("ending streaming")
+        }) {
+            // Strip the outer DbError, which carries a misleading "error" severity
+            Self::SuccessfulCompletion(dberror.message().to_string())
+        } else if err.is_closed()
+            || err
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(is_expected_io_error)
+                .unwrap_or(false)
+        {
+            Self::ExpectedSafekeeperError(err)
+        } else {
+            Self::Other(anyhow::Error::new(err))
+        }
+    }
+}
+
+impl From<anyhow::Error> for WalReceiverError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+impl From<WalDecodeError> for WalReceiverError {
+    fn from(err: WalDecodeError) -> Self {
+        Self::Other(anyhow::Error::new(err))
+    }
+}
+
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
 pub(super) async fn handle_walreceiver_connection(
@@ -70,7 +114,7 @@ pub(super) async fn handle_walreceiver_connection(
     connect_timeout: Duration,
     ctx: RequestContext,
     node: NodeId,
-) -> anyhow::Result<()> {
+) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     WALRECEIVER_STARTED_CONNECTIONS.inc();
@@ -130,11 +174,15 @@ pub(super) async fn handle_walreceiver_connection(
                 connection_result = connection => match connection_result {
                     Ok(()) => debug!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if connection_error.is_expected() {
-                            // silence, because most likely we've already exited the outer call
-                            // with a similar error.
-                        } else {
-                            warn!("Connection aborted: {connection_error:#}")
+                        match WalReceiverError::from(connection_error) {
+                            WalReceiverError::ExpectedSafekeeperError(_) => {
+                                // silence, because most likely we've already exited the outer call
+                                // with a similar error.
+                            },
+                            WalReceiverError::SuccessfulCompletion(_) => {}
+                            WalReceiverError::Other(err) => {
+                                warn!("Connection aborted: {err:#}")
+                            }
                         }
                     }
                 },
@@ -180,7 +228,7 @@ pub(super) async fn handle_walreceiver_connection(
     let mut startpoint = last_rec_lsn;
 
     if startpoint == Lsn(0) {
-        bail!("No previous WAL position");
+        return Err(WalReceiverError::Other(anyhow!("No previous WAL position")));
     }
 
     // There might be some padding after the last full record, skip it.
@@ -262,7 +310,9 @@ pub(super) async fn handle_walreceiver_connection(
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
-                        ensure!(lsn.is_aligned());
+                        if !lsn.is_aligned() {
+                            return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
+                        }
 
                         walingest
                             .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
@@ -417,53 +467,5 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
         })
     } else {
         Err(IdentifyError.into())
-    }
-}
-
-/// Trait for avoid reporting walreceiver specific expected or "normal" or "ok" errors.
-pub(super) trait ExpectedError {
-    /// Test if this error is an ok error.
-    ///
-    /// We don't want to report connectivity problems as real errors towards connection manager because
-    /// 1. they happen frequently enough to make server logs hard to read and
-    /// 2. the connection manager can retry other safekeeper.
-    ///
-    /// If this function returns `true`, it's such an error.
-    /// The caller should log it at info level and then report to connection manager that we're done handling this connection.
-    /// Connection manager will then handle reconnections.
-    ///
-    /// If this function returns an `false` the error should be propagated and the connection manager
-    /// will log the error at ERROR level.
-    fn is_expected(&self) -> bool;
-}
-
-impl ExpectedError for postgres::Error {
-    fn is_expected(&self) -> bool {
-        self.is_closed()
-            || self
-                .source()
-                .and_then(|source| source.downcast_ref::<std::io::Error>())
-                .map(is_expected_io_error)
-                .unwrap_or(false)
-            || self
-                .as_db_error()
-                .filter(|db_error| {
-                    db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
-                        && db_error.message().contains("ending streaming")
-                })
-                .is_some()
-    }
-}
-
-impl ExpectedError for anyhow::Error {
-    fn is_expected(&self) -> bool {
-        let head = self.downcast_ref::<postgres::Error>();
-
-        let tail = self
-            .chain()
-            .filter_map(|e| e.downcast_ref::<postgres::Error>());
-
-        // check if self or any of the chained/sourced errors are expected
-        head.into_iter().chain(tail).any(|e| e.is_expected())
     }
 }

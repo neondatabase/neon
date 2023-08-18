@@ -66,7 +66,7 @@ use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLay
 /// the 'index' starts at the block indicated by 'index_start_blk'
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Summary {
+pub(super) struct Summary {
     /// Magic value to identify this as a neon image file. Always IMAGE_FILE_MAGIC.
     magic: u16,
     format_version: u16,
@@ -85,13 +85,29 @@ struct Summary {
 
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
+        Self::expected(
+            layer.desc.tenant_id,
+            layer.desc.timeline_id,
+            layer.desc.key_range.clone(),
+            layer.lsn,
+        )
+    }
+}
+
+impl Summary {
+    pub(super) fn expected(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        key_range: Range<Key>,
+        lsn: Lsn,
+    ) -> Self {
         Self {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: layer.desc.tenant_id,
-            timeline_id: layer.desc.timeline_id,
-            key_range: layer.desc.key_range.clone(),
-            lsn: layer.lsn,
+            tenant_id,
+            timeline_id,
+            key_range,
+            lsn,
 
             index_start_blk: 0,
             index_root_blk: 0,
@@ -135,6 +151,8 @@ pub struct ImageLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
+
+    lsn: Lsn,
 
     /// Reader object for reading blocks from the file.
     file: FileBlockReader<VirtualFile>,
@@ -200,27 +218,11 @@ impl Layer for ImageLayer {
         let inner = self
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
-
-        let file = &inner.file;
-        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf).await? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.path().display(),
-                    offset
-                )
-            })?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
+        inner
+            .get_value_reconstruct_data(key, reconstruct_state)
+            .await
+            // FIXME: makes no sense to dump paths
+            .with_context(|| format!("read {}", self.path().display()))
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
@@ -321,58 +323,36 @@ impl ImageLayer {
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
     ) -> Result<&ImageLayerInner> {
-        self.access_stats
-            .record_access(access_kind, ctx.task_kind());
-        loop {
-            if let Some(inner) = self.inner.get() {
-                return Ok(inner);
-            }
-            self.inner
-                .get_or_try_init(|| self.load_inner())
-                .await
-                .with_context(|| format!("Failed to load image layer {}", self.path().display()))?;
-        }
+        self.access_stats.record_access(access_kind, ctx);
+        self.inner
+            .get_or_try_init(|| self.load_inner())
+            .await
+            .with_context(|| format!("Failed to load image layer {}", self.path().display()))
     }
 
     async fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        // Open the file if it's not open already.
-        let file = VirtualFile::open(&path)
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0)?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let expected_summary = match &self.path_or_conf {
+            PathOrConf::Conf(_) => Some(Summary::from(self)),
+            PathOrConf::Path(_) => None,
+        };
 
-        match &self.path_or_conf {
-            PathOrConf::Conf(_) => {
-                let mut expected_summary = Summary::from(self);
-                expected_summary.index_start_blk = actual_summary.index_start_blk;
-                expected_summary.index_root_blk = actual_summary.index_root_blk;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary)?;
 
-                if actual_summary != expected_summary {
-                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                }
-            }
-            PathOrConf::Path(path) => {
-                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+        if let PathOrConf::Path(ref path) = self.path_or_conf {
+            // not production code
+            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let expected_filename = self.filename().file_name();
 
-                if actual_filename != expected_filename {
-                    println!(
-                        "warning: filename does not match what is expected from in-file summary"
-                    );
-                    println!("actual: {:?}", actual_filename);
-                    println!("expected: {:?}", expected_filename);
-                }
+            if actual_filename != expected_filename {
+                println!("warning: filename does not match what is expected from in-file summary");
+                println!("actual: {:?}", actual_filename);
+                println!("expected: {:?}", expected_filename);
             }
         }
 
-        Ok(ImageLayerInner {
-            index_start_blk: actual_summary.index_start_blk,
-            index_root_blk: actual_summary.index_root_blk,
-            file,
-        })
+        Ok(loaded)
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -439,6 +419,66 @@ impl ImageLayer {
             self.desc.tenant_id,
             &self.layer_name(),
         )
+    }
+}
+
+impl ImageLayerInner {
+    pub(super) fn load(
+        path: &std::path::Path,
+        lsn: Lsn,
+        summary: Option<Summary>,
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0)?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+
+        if let Some(mut expected_summary) = summary {
+            // production code path
+            expected_summary.index_start_blk = actual_summary.index_start_blk;
+            expected_summary.index_root_blk = actual_summary.index_root_blk;
+
+            if actual_summary != expected_summary {
+                bail!(
+                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                    actual_summary,
+                    expected_summary
+                );
+            }
+        }
+
+        Ok(ImageLayerInner {
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+            lsn,
+            file,
+        })
+    }
+
+    pub(super) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf).await? {
+            let blob = file
+                .block_cursor()
+                .read_blob(offset)
+                .await
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+
+            reconstruct_state.img = Some((self.lsn, value));
+            Ok(ValueReconstructResult::Complete)
+        } else {
+            Ok(ValueReconstructResult::Missing)
+        }
     }
 }
 

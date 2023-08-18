@@ -825,6 +825,16 @@ fn get_safekeeper(env: &local_env::LocalEnv, id: NodeId) -> Result<SafekeeperNod
     }
 }
 
+// Get list of options to append to safekeeper command invocation.
+fn safekeeper_extra_opts(init_match: &ArgMatches) -> Vec<String> {
+    init_match
+        .get_many::<String>("safekeeper-extra-opt")
+        .into_iter()
+        .flatten()
+        .map(|s| s.to_owned())
+        .collect()
+}
+
 fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let (sub_name, sub_args) = match sub_match.subcommand() {
         Some(safekeeper_command_data) => safekeeper_command_data,
@@ -841,7 +851,9 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 
     match sub_name {
         "start" => {
-            if let Err(e) = safekeeper.start() {
+            let extra_opts = safekeeper_extra_opts(sub_args);
+
+            if let Err(e) = safekeeper.start(extra_opts) {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -866,7 +878,8 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
 
-            if let Err(e) = safekeeper.start() {
+            let extra_opts = safekeeper_extra_opts(sub_args);
+            if let Err(e) = safekeeper.start(extra_opts) {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -893,7 +906,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start() {
+        if let Err(e) = safekeeper.start(vec![]) {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false);
             exit(1);
@@ -955,6 +968,14 @@ fn cli() -> Command {
         .required(false);
 
     let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
+
+    let safekeeper_extra_opt_arg = Arg::new("safekeeper-extra-opt")
+        .short('e')
+        .long("safekeeper-extra-opt")
+        .num_args(1)
+        .action(ArgAction::Append)
+        .help("Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo")
+        .required(false);
 
     let tenant_id_arg = Arg::new("tenant-id")
         .long("tenant-id")
@@ -1124,6 +1145,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("start")
                             .about("Start local safekeeper")
                             .arg(safekeeper_id_arg.clone())
+                            .arg(safekeeper_extra_opt_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                             .about("Stop local safekeeper")
@@ -1134,6 +1156,7 @@ fn cli() -> Command {
                             .about("Restart local safekeeper")
                             .arg(safekeeper_id_arg)
                             .arg(stop_mode_arg.clone())
+                            .arg(safekeeper_extra_opt_arg)
                 )
         )
         .subcommand(

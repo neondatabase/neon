@@ -121,7 +121,7 @@ impl BatchedUpdates<'_> {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer_desc: PersistentLayerDesc) {
+    pub fn remove_historic(&mut self, layer_desc: &PersistentLayerDesc) {
         self.layer_map.remove_historic_noflush(layer_desc)
     }
 
@@ -253,11 +253,11 @@ impl LayerMap {
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer_desc: PersistentLayerDesc) {
+    pub fn remove_historic_noflush(&mut self, layer_desc: &PersistentLayerDesc) {
         self.historic
-            .remove(historic_layer_coverage::LayerKey::from(&layer_desc));
+            .remove(historic_layer_coverage::LayerKey::from(layer_desc));
         let layer_key = layer_desc.key();
-        if Self::is_l0(&layer_desc) {
+        if Self::is_l0(layer_desc) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| other.key() != layer_key);
@@ -766,8 +766,7 @@ mod tests {
                 expected_in_counts
             );
 
-            map.batch_update()
-                .remove_historic(downloaded.layer_desc().clone());
+            map.batch_update().remove_historic(downloaded.layer_desc());
             assert_eq!(count_layer_in(&map, downloaded.layer_desc()), (0, 0));
         }
 

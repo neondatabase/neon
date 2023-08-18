@@ -5,7 +5,7 @@ use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
-    proxy::handle_try_wake,
+    proxy::{handle_try_wake, retry_after},
     sasl, scram,
     stream::PqStream,
 };
@@ -36,7 +36,18 @@ pub(super) async fn authenticate(
         AuthInfo::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
-            let client_key = match flow.begin(scram).await?.authenticate().await? {
+
+            let auth_flow = flow.begin(scram).await.map_err(|error| {
+                warn!(?error, "error sending scram acknowledgement");
+                error
+            })?;
+
+            let auth_outcome = auth_flow.authenticate().await.map_err(|error| {
+                warn!(?error, "error processing scram messages");
+                error
+            })?;
+
+            let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
@@ -51,7 +62,6 @@ pub(super) async fn authenticate(
         }
     };
 
-    info!("compute node's state has likely changed; requesting a wake-up");
     let mut num_retries = 0;
     let mut node = loop {
         let wake_res = api.wake_compute(extra, creds).await;
@@ -62,10 +72,13 @@ pub(super) async fn authenticate(
             }
             Ok(ControlFlow::Continue(e)) => {
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-                num_retries += 1;
             }
             Ok(ControlFlow::Break(n)) => break n,
         }
+
+        let wait_duration = retry_after(num_retries);
+        num_retries += 1;
+        tokio::time::sleep(wait_duration).await;
     };
     if let Some(keys) = scram_keys {
         use tokio_postgres::config::AuthKeys;

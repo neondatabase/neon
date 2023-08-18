@@ -16,6 +16,7 @@ use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
+use tracing::Instrument;
 use url::Url;
 
 use super::conn_pool::ConnInfo;
@@ -28,13 +29,18 @@ struct QueryData {
 }
 
 #[derive(serde::Deserialize)]
+struct BatchQueryData {
+    queries: Vec<QueryData>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Payload {
     Single(QueryData),
-    Batch(Vec<QueryData>),
+    Batch(BatchQueryData),
 }
 
-pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
+pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -42,6 +48,7 @@ static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
 static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
 static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
+static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
@@ -175,6 +182,7 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
+    session_id: uuid::Uuid,
 ) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
@@ -190,7 +198,7 @@ pub async fn handle(
     // Allow connection pooling only if explicitly requested
     let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
-    // isolation level and read only
+    // isolation level, read only and deferrable
 
     let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
     let txn_isolation_level = match txn_isolation_level_raw {
@@ -204,8 +212,8 @@ pub async fn handle(
         None => None,
     };
 
-    let txn_read_only_raw = headers.get(&TXN_READ_ONLY).cloned();
-    let txn_read_only = txn_read_only_raw.as_ref() == Some(&HEADER_VALUE_TRUE);
+    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+    let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -214,7 +222,7 @@ pub async fn handle(
 
     if request_content_length > MAX_REQUEST_SIZE {
         return Err(anyhow::anyhow!(
-            "request is too large (max {MAX_REQUEST_SIZE} bytes)"
+            "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
         ));
     }
 
@@ -224,26 +232,29 @@ pub async fn handle(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool.get(&conn_info, !allow_pool).await?;
+    let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
     //
     // Now execute the query and return the result
     //
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client, query, raw_output, array_mode)
+        Payload::Single(query) => query_to_json(&client.inner, query, raw_output, array_mode)
             .await
             .map(|x| (x, HashMap::default())),
-        Payload::Batch(queries) => {
+        Payload::Batch(batch_query) => {
             let mut results = Vec::new();
-            let mut builder = client.build_transaction();
+            let mut builder = client.inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
                 builder = builder.isolation_level(isolation_level);
             }
             if txn_read_only {
                 builder = builder.read_only(true);
             }
+            if txn_deferrable {
+                builder = builder.deferrable(true);
+            }
             let transaction = builder.start().await?;
-            for query in queries {
+            for query in batch_query.queries {
                 let result = query_to_json(&transaction, query, raw_output, array_mode).await;
                 match result {
                     Ok(r) => results.push(r),
@@ -255,12 +266,20 @@ pub async fn handle(
             }
             transaction.commit().await?;
             let mut headers = HashMap::default();
-            headers.insert(
-                TXN_READ_ONLY.clone(),
-                HeaderValue::try_from(txn_read_only.to_string())?,
-            );
-            if let Some(txn_isolation_level_raw) = txn_isolation_level_raw {
-                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level_raw);
+            if txn_read_only {
+                headers.insert(
+                    TXN_READ_ONLY.clone(),
+                    HeaderValue::try_from(txn_read_only.to_string())?,
+                );
+            }
+            if txn_deferrable {
+                headers.insert(
+                    TXN_DEFERRABLE.clone(),
+                    HeaderValue::try_from(txn_deferrable.to_string())?,
+                );
+            }
+            if let Some(txn_isolation_level) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
             }
             Ok((json!({ "results": results }), headers))
         }
@@ -268,9 +287,12 @@ pub async fn handle(
 
     if allow_pool {
         // return connection to the pool
-        tokio::task::spawn(async move {
-            let _ = conn_pool.put(&conn_info, client).await;
-        });
+        tokio::task::spawn(
+            async move {
+                let _ = conn_pool.put(&conn_info, client).await;
+            }
+            .in_current_span(),
+        );
     }
 
     result
@@ -292,13 +314,15 @@ async fn query_to_json<T: GenericClient>(
     // big.
     pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
-    let mut curret_size = 0;
+    let mut current_size = 0;
     while let Some(row) = row_stream.next().await {
         let row = row?;
-        curret_size += row.body_len();
+        current_size += row.body_len();
         rows.push(row);
-        if curret_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!("response too large"));
+        if current_size > MAX_RESPONSE_SIZE {
+            return Err(anyhow::anyhow!(
+                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
+            ));
         }
     }
 

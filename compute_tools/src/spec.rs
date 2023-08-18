@@ -270,7 +270,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             }
             RoleAction::Create => {
                 let mut query: String = format!(
-                    "CREATE ROLE {} CREATEROLE CREATEDB IN ROLE neon_superuser",
+                    "CREATE ROLE {} CREATEROLE CREATEDB BYPASSRLS IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);

@@ -432,6 +432,11 @@ jobs:
         if: ${{ !cancelled() }}
         id: create-allure-report
         uses: ./.github/actions/allure-report-generate
+        with:
+          store-test-results-into-db: true
+        env:
+          REGRESS_TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - uses: actions/github-script@v6
         if: ${{ !cancelled() }}
@@ -451,25 +456,6 @@ jobs:
               fetch,
               report,
             })
-
-      - name: Store Allure test stat in the DB
-        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
-        env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        run: |
-          ./scripts/pysync
-
-          curl --fail --output suites.json "${REPORT_JSON_URL}"
-          export BUILD_TYPE=unified
-          export DATABASE_URL="$TEST_RESULT_CONNSTR"
-
-          poetry run python3 scripts/ingest_regress_test_result.py \
-            --revision ${COMMIT_SHA} \
-            --reference ${GITHUB_REF} \
-            --build-type ${BUILD_TYPE} \
-            --ingest suites.json
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
@@ -794,7 +780,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.15.0-alpha1
+      VM_BUILDER_VERSION: v0.16.2
 
     steps:
       - name: Checkout
@@ -819,8 +805,9 @@ jobs:
         run: |
           ./vm-builder \
             -enable-file-cache \
-            -informant="neondatabase/vm-informant:v0.15.0-alpha1" \
-            -monitor="neondatabase/vm-monitor:v0.15.0-alpha1" \
+            -enable-monitor \
+            -enable-informant \
+            -cgroup-uid=postgres \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
@@ -1074,7 +1061,7 @@ jobs:
             OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
             FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
 
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
             if [ -z "${S3_KEY}" ]; then
               echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
               exit 1

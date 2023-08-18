@@ -31,7 +31,7 @@ runs:
         BUCKET=neon-github-public-dev
         FILENAME=$(basename $ARCHIVE)
 
-        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+        S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${PREFIX%$GITHUB_RUN_ATTEMPT} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
         if [ -z "${S3_KEY}" ]; then
           if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
             echo 'SKIPPED=true' >> $GITHUB_OUTPUT

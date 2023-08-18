@@ -72,7 +72,7 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
         .await?;
     let cursor = BlockCursor::new(&file);
     for (k, v) in all {
-        let value = cursor.read_blob(v.pos())?;
+        let value = cursor.read_blob(v.pos()).await?;
         println!("key:{} value_len:{}", k, value.len());
     }
     // TODO(chi): special handling for last key?

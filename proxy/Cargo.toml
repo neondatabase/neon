@@ -13,6 +13,7 @@ bytes = { workspace = true, features = ["serde"] }
 chrono.workspace = true
 clap.workspace = true
 consumption_metrics.workspace = true
+dashmap.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
@@ -29,7 +30,7 @@ metrics.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
-pbkdf2.workspace = true
+pbkdf2 = { workspace = true, features = ["simple", "std"] }
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true

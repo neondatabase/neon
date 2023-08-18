@@ -210,6 +210,10 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
 
+    def tenant_delete(self, tenant_id: TenantId):
+        res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+        self.verbose_error(res)
+
     def tenant_load(self, tenant_id: TenantId):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
         self.verbose_error(res)

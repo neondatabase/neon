@@ -2,12 +2,10 @@
 //! Low-level Block-oriented I/O functions
 //!
 
-use crate::page_cache;
-use crate::page_cache::{ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
-use std::sync::atomic::AtomicU64;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -15,14 +13,12 @@ use std::sync::atomic::AtomicU64;
 /// There are currently two implementations: EphemeralFile, and FileBlockReader
 /// below.
 pub trait BlockReader {
-    type BlockLease: Deref<Target = [u8; PAGE_SZ]> + 'static;
-
     ///
     /// Read a block. Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     ///
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error>;
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error>;
 
     ///
     /// Create a new "cursor" for reading from this reader.
@@ -41,10 +37,42 @@ impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    type BlockLease = B::BlockLease;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         (*self).read_blk(blknum)
+    }
+}
+
+/// Reference to an in-memory copy of an immutable on-disk block.
+pub enum BlockLease<'a> {
+    PageReadGuard(PageReadGuard<'static>),
+    EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
+    #[cfg(test)]
+    Rc(std::rc::Rc<[u8; PAGE_SZ]>),
+}
+
+impl From<PageReadGuard<'static>> for BlockLease<'static> {
+    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
+        BlockLease::PageReadGuard(value)
+    }
+}
+
+#[cfg(test)]
+impl<'a> From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+    fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
+        BlockLease::Rc(value)
+    }
+}
+
+impl<'a> Deref for BlockLease<'a> {
+    type Target = [u8; PAGE_SZ];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            BlockLease::PageReadGuard(v) => v.deref(),
+            BlockLease::EphemeralFileMutableTail(v) => v,
+            #[cfg(test)]
+            BlockLease::Rc(v) => v.deref(),
+        }
     }
 }
 
@@ -80,11 +108,10 @@ where
         BlockCursor { reader }
     }
 
-    pub fn read_blk(&self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
+    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.reader.read_blk(blknum)
     }
 }
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An adapter for reading a (virtual) file using the page cache.
 ///
@@ -94,7 +121,7 @@ pub struct FileBlockReader<F> {
     pub file: F,
 
     /// Unique ID of this file, used as key in the page cache.
-    file_id: u64,
+    file_id: page_cache::FileId,
 }
 
 impl<F> FileBlockReader<F>
@@ -102,7 +129,7 @@ where
     F: FileExt,
 {
     pub fn new(file: F) -> Self {
-        let file_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
     }
@@ -118,10 +145,7 @@ impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    type BlockLease = page_cache::PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        // Look up the right page
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache
@@ -132,7 +156,7 @@ where
                         format!("Failed to read immutable buf: {e:#}"),
                     )
                 })? {
-                ReadBufResult::Found(guard) => break Ok(guard),
+                ReadBufResult::Found(guard) => break Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
                     self.fill_buffer(write_guard.deref_mut(), blknum)?;

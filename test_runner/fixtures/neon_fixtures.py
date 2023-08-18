@@ -32,6 +32,7 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -86,19 +87,6 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-WORKER_PORT_NUM: int = 1000
-
-
-def pytest_configure(config: Config):
-    """
-    Check that we do not overflow available ports range.
-    """
-
-    numprocesses = config.getoption("numprocesses")
-    if (
-        numprocesses is not None and BASE_PORT + numprocesses * WORKER_PORT_NUM > 32768
-    ):  # do not use ephemeral ports
-        raise Exception("Too many workers configured. Cannot distribute ports for services.")
 
 
 @pytest.fixture(scope="session")
@@ -201,6 +189,11 @@ def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "fu
 
 
 @pytest.fixture(scope="session")
+def worker_port_num():
+    return (32768 - BASE_PORT) // int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
+
+
+@pytest.fixture(scope="session")
 def worker_seq_no(worker_id: str) -> int:
     # worker_id is a pytest-xdist fixture
     # it can be master or gw<number>
@@ -212,10 +205,10 @@ def worker_seq_no(worker_id: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def worker_base_port(worker_seq_no: int) -> int:
-    # so we divide ports in ranges of 100 ports
+def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
+    # so we divide ports in ranges of ports
     # so workers have disjoint set of ports for services
-    return BASE_PORT + worker_seq_no * WORKER_PORT_NUM
+    return BASE_PORT + worker_seq_no * worker_port_num
 
 
 def get_dir_size(path: str) -> int:
@@ -229,8 +222,8 @@ def get_dir_size(path: str) -> int:
 
 
 @pytest.fixture(scope="session")
-def port_distributor(worker_base_port: int) -> PortDistributor:
-    return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
+def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistributor:
+    return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
 @pytest.fixture(scope="session")
@@ -440,7 +433,7 @@ class NeonEnvBuilder:
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
         self.ext_remote_storage: Optional[S3Storage] = None
-        self.remote_storage_client: Optional[Any] = None
+        self.remote_storage_client: Optional[S3Client] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
@@ -883,7 +876,14 @@ class NeonEnv:
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
-        return self.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+
+    def tenant_dir(
+        self,
+        tenant_id: TenantId,
+    ) -> Path:
+        """Get a tenant directory's path based on the repo directory of the test environment"""
+        return self.repo_dir / "tenants" / str(tenant_id)
 
     def get_pageserver_version(self) -> str:
         bin_pageserver = str(self.neon_binpath / "pageserver")
@@ -1313,12 +1313,20 @@ class NeonCli(AbstractNeonCli):
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
-    def safekeeper_start(self, id: int) -> "subprocess.CompletedProcess[str]":
+    def safekeeper_start(
+        self, id: int, extra_opts: Optional[List[str]] = None
+    ) -> "subprocess.CompletedProcess[str]":
         s3_env_vars = None
         if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
             s3_env_vars = self.env.remote_storage.access_env_vars()
 
-        return self.raw_cli(["safekeeper", "start", str(id)], extra_env_vars=s3_env_vars)
+        if extra_opts is not None:
+            extra_opts = [f"-e={opt}" for opt in extra_opts]
+        else:
+            extra_opts = []
+        return self.raw_cli(
+            ["safekeeper", "start", str(id), *extra_opts], extra_env_vars=s3_env_vars
+        )
 
     def safekeeper_stop(
         self, id: Optional[int] = None, immediate=False
@@ -1494,7 +1502,6 @@ class NeonPageserver(PgProtocol):
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -1527,6 +1534,8 @@ class NeonPageserver(PgProtocol):
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
+            # these can happen during shutdown, but it should not be a reason to fail a test
+            ".*completed, took longer than expected.*",
         ]
 
     def start(
@@ -1759,6 +1768,15 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+
+    def edit_hba(self, hba: List[str]):
+        """Prepend hba lines into pg_hba.conf file."""
+        assert not self.running
+        with open(os.path.join(self.pgdatadir, "pg_hba.conf"), "r+") as conf_file:
+            data = conf_file.read()
+            conf_file.seek(0)
+            conf_file.write("\n".join(hba) + "\n")
+            conf_file.write(data)
 
     def start(self, log_path: Optional[str] = None):
         assert not self.running
@@ -2157,14 +2175,17 @@ def static_proxy(
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
-    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
-    vanilla_pg.start()
-    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
-
     port = vanilla_pg.default_options["port"]
     host = vanilla_pg.default_options["host"]
     dbname = vanilla_pg.default_options["dbname"]
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
+
+    # require password for 'http_auth' user
+    vanilla_pg.edit_hba([f"host {dbname} http_auth {host} password"])
+
+    # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
@@ -2506,9 +2527,9 @@ class Safekeeper:
     id: int
     running: bool = False
 
-    def start(self) -> "Safekeeper":
+    def start(self, extra_opts: Optional[List[str]] = None) -> "Safekeeper":
         assert self.running is False
-        self.env.neon_cli.safekeeper_start(self.id)
+        self.env.neon_cli.safekeeper_start(self.id, extra_opts=extra_opts)
         self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()
@@ -2826,8 +2847,15 @@ def check_restored_datadir_content(
     endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
@@ -2842,7 +2870,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 

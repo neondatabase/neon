@@ -2,8 +2,9 @@
 //! protocol commands.
 
 use anyhow::Context;
-use std::str;
 use std::str::FromStr;
+use std::str::{self};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
@@ -11,6 +12,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -19,7 +21,7 @@ use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
-use utils::auth::{Claims, Scope};
+use utils::auth::{Claims, JwtAuth, Scope};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -35,8 +37,8 @@ pub struct SafekeeperPostgresHandler {
     pub ttid: TenantTimelineId,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
-    /// Auth scope allowed on the connections. None if auth is not configured.
-    allowed_auth_scope: Option<Scope>,
+    /// Auth scope allowed on the connections and public key used to check auth tokens. None if auth is not configured.
+    auth: Option<(Scope, Arc<JwtAuth>)>,
     claims: Option<Claims>,
     io_metrics: Option<TrafficMetrics>,
 }
@@ -44,7 +46,7 @@ pub struct SafekeeperPostgresHandler {
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
     StartWalPush,
-    StartReplication { start_lsn: Lsn },
+    StartReplication { start_lsn: Lsn, term: Option<Term> },
     IdentifySystem,
     TimelineStatus,
     JSONCtrl { cmd: AppendLogicalMessage },
@@ -55,15 +57,21 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
-            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)",
+            // We follow postgres START_REPLICATION LOGICAL options to pass term.
+            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)(?: \(term='(\d+)'\))?",
         )
         .unwrap();
-        let mut caps = re.captures_iter(cmd);
-        let start_lsn = caps
-            .next()
-            .map(|cap| Lsn::from_str(&cap[1]))
-            .context("parse start LSN from START_REPLICATION command")??;
-        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
+        let caps = re
+            .captures(cmd)
+            .context(format!("failed to parse START_REPLICATION command {}", cmd))?;
+        let start_lsn =
+            Lsn::from_str(&caps[1]).context("parse start LSN from START_REPLICATION command")?;
+        let term = if let Some(m) = caps.get(2) {
+            Some(m.as_str().parse::<u64>().context("invalid term")?)
+        } else {
+            None
+        };
+        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn, term })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
@@ -147,18 +155,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
-        let data = self
-            .conf
+        let (allowed_auth_scope, auth) = self
             .auth
             .as_ref()
-            .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .expect("auth_type is configured but .auth of handler is missing");
+        let data =
+            auth.decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
-        let scope = self
-            .allowed_auth_scope
-            .expect("auth is enabled but scope is not configured");
         // The handler might be configured to allow only tenant scope tokens.
-        if matches!(scope, Scope::Tenant) && !matches!(data.claims.scope, Scope::Tenant) {
+        if matches!(allowed_auth_scope, Scope::Tenant)
+            && !matches!(data.claims.scope, Scope::Tenant)
+        {
             return Err(QueryError::Other(anyhow::anyhow!(
                 "passed JWT token is for full access, but only tenant scope is allowed"
             )));
@@ -218,8 +225,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     .instrument(info_span!("WAL receiver", ttid = %span_ttid))
                     .await
             }
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                self.handle_start_replication(pgb, start_lsn)
+            SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
+                self.handle_start_replication(pgb, start_lsn, term)
                     .instrument(info_span!("WAL sender", ttid = %span_ttid))
                     .await
             }
@@ -237,7 +244,7 @@ impl SafekeeperPostgresHandler {
         conf: SafeKeeperConf,
         conn_id: u32,
         io_metrics: Option<TrafficMetrics>,
-        allowed_auth_scope: Option<Scope>,
+        auth: Option<(Scope, Arc<JwtAuth>)>,
     ) -> Self {
         SafekeeperPostgresHandler {
             conf,
@@ -247,7 +254,7 @@ impl SafekeeperPostgresHandler {
             ttid: TenantTimelineId::empty(),
             conn_id,
             claims: None,
-            allowed_auth_scope,
+            auth,
             io_metrics,
         }
     }
@@ -255,7 +262,7 @@ impl SafekeeperPostgresHandler {
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
-        if self.conf.auth.is_none() {
+        if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
         }

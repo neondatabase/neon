@@ -187,19 +187,23 @@ async fn ws_handler(
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
-            {
-                error!(session_id = ?session_id, "error in websocket connection: {e:?}");
+        tokio::spawn(
+            async move {
+                if let Err(e) =
+                    serve_websocket(websocket, config, &cancel_map, session_id, host).await
+                {
+                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         // Return the response so the spawned future can continue.
         Ok(response)
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = sql_over_http::handle(request, sni_hostname, conn_pool)
+        let result = sql_over_http::handle(request, sni_hostname, conn_pool, session_id)
             .instrument(info_span!("sql-over-http"))
             .await;
         let status_code = match result {
@@ -217,6 +221,10 @@ async fn ws_handler(
                     },
                     None => Value::Null,
                 };
+                error!(
+                    ?code,
+                    "sql-over-http per-client task finished with an error: {e:#}"
+                );
                 (
                     json!({ "message": message, "code": code }),
                     HashMap::default(),
@@ -299,7 +307,7 @@ pub async fn task_main(
                         ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
                             .instrument(info_span!(
                                 "ws-client",
-                                session = format_args!("{session_id}")
+                                session = %session_id
                             ))
                             .await
                     }

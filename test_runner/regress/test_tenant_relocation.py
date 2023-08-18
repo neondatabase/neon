@@ -17,9 +17,9 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
-    tenant_exists,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_tenant_status_404,
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
@@ -29,7 +29,6 @@ from fixtures.utils import (
     start_in_background,
     subprocess_capture,
     wait_until,
-    wait_while,
 )
 
 
@@ -269,10 +268,15 @@ def test_tenant_relocation(
 
     env = neon_env_builder.init_start()
 
+    tenant_id = TenantId("74ee8b079a0e437eb0afea7d26a07209")
+
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
+
+    # Needed for detach polling.
+    env.pageserver.allowed_errors.append(f".*NotFound: tenant {tenant_id}.*")
 
     # create folder for remote storage mock
     remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
@@ -283,9 +287,7 @@ def test_tenant_relocation(
 
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, initial_timeline_id = env.neon_cli.create_tenant(
-        TenantId("74ee8b079a0e437eb0afea7d26a07209")
-    )
+    _, initial_timeline_id = env.neon_cli.create_tenant(tenant_id)
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 
     env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
@@ -469,11 +471,8 @@ def test_tenant_relocation(
         pageserver_http.tenant_detach(tenant_id)
 
         # Wait a little, so that the detach operation has time to finish.
-        wait_while(
-            number_of_iterations=100,
-            interval=1,
-            func=lambda: tenant_exists(pageserver_http, tenant_id),
-        )
+        wait_tenant_status_404(pageserver_http, tenant_id, iterations=100, interval=1)
+
         post_migration_check(ep_main, 500500, old_local_path_main)
         post_migration_check(ep_second, 1001000, old_local_path_second)
 

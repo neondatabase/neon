@@ -1,10 +1,8 @@
 import time
 
-import pytest
 from fixtures.neon_fixtures import NeonEnv
 
 
-@pytest.mark.timeout(1800)
 def test_hot_standby(neon_simple_env: NeonEnv):
     env = neon_simple_env
 

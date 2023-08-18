@@ -545,7 +545,7 @@ impl ShouldRetry for compute::ConnectionError {
     }
 }
 
-fn retry_after(num_retries: u32) -> time::Duration {
+pub fn retry_after(num_retries: u32) -> time::Duration {
     // 1.5 seems to be an ok growth factor heuristic
     BASE_RETRY_WAIT_DURATION.mul_f64(1.5_f64.powi(num_retries as i32))
 }

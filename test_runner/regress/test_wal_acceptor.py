@@ -543,8 +543,13 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             last_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
             for sk in env.safekeepers:
-                # require WAL to be trimmed, so no more than one segment is left on disk
-                target_size_mb = 16 * 1.5
+                # require WAL to be trimmed, so no more than one segment is left
+                # on disk
+                # TODO: WAL removal uses persistent values and control
+                # file is fsynced roughly once in a segment, so there is a small
+                # chance that two segments are left on disk, not one. We can
+                # force persist cf and have 16 instead of 32 here.
+                target_size_mb = 32 * 1.5
                 wait(
                     partial(is_wal_trimmed, sk, tenant_id, timeline_id, target_size_mb),
                     f"sk_id={sk.id} to trim WAL to {target_size_mb:.2f}MB",
@@ -869,7 +874,50 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_1["config"]["id"] == env.safekeepers[0].id
 
 
-# Test auth on WAL service (postgres protocol) ports.
+class DummyConsumer(object):
+    def __call__(self, msg):
+        pass
+
+
+def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
+    """
+    Test START_REPLICATION of uncommitted part specifying leader term. It must
+    error if safekeeper switched to different term.
+    """
+
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_start_replication_term")
+    endpoint = env.endpoints.create_start("test_start_replication_term")
+
+    endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+
+    # learn neon timeline from compute
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+
+    sk = env.safekeepers[0]
+    sk_http_cli = sk.http_client()
+    tli_status = sk_http_cli.timeline_status(tenant_id, timeline_id)
+    timeline_start_lsn = tli_status.timeline_start_lsn
+
+    conn_opts = {
+        "host": "127.0.0.1",
+        "options": f"-c timeline_id={timeline_id} tenant_id={tenant_id}",
+        "port": sk.port.pg,
+        "connection_factory": psycopg2.extras.PhysicalReplicationConnection,
+    }
+    sk_pg_conn = psycopg2.connect(**conn_opts)  # type: ignore
+    with sk_pg_conn.cursor() as cur:
+        # should fail, as first start has term 2
+        cur.start_replication_expert(f"START_REPLICATION {timeline_start_lsn} (term='3')")
+        dummy_consumer = DummyConsumer()
+        with pytest.raises(psycopg2.errors.InternalError_) as excinfo:
+            cur.consume_stream(dummy_consumer)
+        assert "failed to acquire term 3" in str(excinfo.value)
+
+
+# Test auth on all ports: WAL service (postgres protocol), WAL service tenant only and http.
 def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
@@ -902,6 +950,64 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     # but full token should fail
     with pytest.raises(psycopg2.OperationalError):
         connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=full_token)
+
+    # Now test that auth on http/pg can be enabled separately.
+
+    # By default, neon_local enables auth on all services if auth is configured,
+    # so http must require the token.
+    sk_http_cli_noauth = sk.http_client()
+    sk_http_cli_auth = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
+    with pytest.raises(sk_http_cli_noauth.HTTPError, match="Forbidden|Unauthorized"):
+        sk_http_cli_noauth.timeline_status(tenant_id, timeline_id)
+    sk_http_cli_auth.timeline_status(tenant_id, timeline_id)
+
+    # now, disable auth on http
+    sk.stop()
+    sk.start(extra_opts=["--http-auth-public-key-path="])
+    sk_http_cli_noauth.timeline_status(tenant_id, timeline_id)  # must work without token
+    # but pg should still require the token
+    with pytest.raises(psycopg2.OperationalError):
+        connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg)
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg, password=tenant_token)
+
+    # now also disable auth on pg, but leave on pg tenant only
+    sk.stop()
+    sk.start(extra_opts=["--http-auth-public-key-path=", "--pg-auth-public-key-path="])
+    sk_http_cli_noauth.timeline_status(tenant_id, timeline_id)  # must work without token
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg)  # must work without token
+    # but pg tenant only should still require the token
+    with pytest.raises(psycopg2.OperationalError):
+        connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only)
+    connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=tenant_token)
+
+
+# Try restarting endpoint with enabled auth.
+def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+    endpoint = env.endpoints.create_start("test_sk_auth_restart_endpoint")
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("create table t(i int)")
+
+    # Restarting endpoints and random safekeepers, to trigger recovery.
+    for _i in range(3):
+        random_sk = random.choice(env.safekeepers)
+        random_sk.stop()
+
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                start = random.randint(1, 100000)
+                end = start + random.randint(1, 10000)
+                cur.execute("insert into t select generate_series(%s,%s)", (start, end))
+
+        endpoint.stop()
+        random_sk.start()
+        endpoint.start()
 
 
 class SafekeeperEnv:

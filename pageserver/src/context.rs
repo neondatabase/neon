@@ -85,6 +85,7 @@
 //! The solution is that all code paths are infected with precisely one
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
+
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
@@ -92,6 +93,7 @@ use crate::task_mgr::TaskKind;
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
+    access_stats_behavior: AccessStatsBehavior,
 }
 
 /// Desired behavior if the operation requires an on-demand download
@@ -109,6 +111,67 @@ pub enum DownloadBehavior {
     Error,
 }
 
+/// Whether this request should update access times used in LRU eviction
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AccessStatsBehavior {
+    /// Update access times: this request's access to data should be taken
+    /// as a hint that the accessed layer is likely to be accessed again
+    Update,
+
+    /// Do not update access times: this request is accessing the layer
+    /// but does not want to indicate that the layer should be retained in cache,
+    /// perhaps because the requestor is a compaction routine that will soon cover
+    /// this layer with another.
+    Skip,
+}
+
+pub struct RequestContextBuilder {
+    inner: RequestContext,
+}
+
+impl RequestContextBuilder {
+    /// A new builder with default settings
+    pub fn new(task_kind: TaskKind) -> Self {
+        Self {
+            inner: RequestContext {
+                task_kind,
+                download_behavior: DownloadBehavior::Download,
+                access_stats_behavior: AccessStatsBehavior::Update,
+            },
+        }
+    }
+
+    pub fn extend(original: &RequestContext) -> Self {
+        Self {
+            // This is like a Copy, but avoid implementing Copy because ordinary users of
+            // RequestContext should always move or ref it.
+            inner: RequestContext {
+                task_kind: original.task_kind,
+                download_behavior: original.download_behavior,
+                access_stats_behavior: original.access_stats_behavior,
+            },
+        }
+    }
+
+    /// Configure the DownloadBehavior of the context: whether to
+    /// download missing layers, and/or warn on the download.
+    pub fn download_behavior(mut self, b: DownloadBehavior) -> Self {
+        self.inner.download_behavior = b;
+        self
+    }
+
+    /// Configure the AccessStatsBehavior of the context: whether layer
+    /// accesses should update the access time of the layer.
+    pub(crate) fn access_stats_behavior(mut self, b: AccessStatsBehavior) -> Self {
+        self.inner.access_stats_behavior = b;
+        self
+    }
+
+    pub fn build(self) -> RequestContext {
+        self.inner
+    }
+}
+
 impl RequestContext {
     /// Create a new RequestContext that has no parent.
     ///
@@ -123,10 +186,9 @@ impl RequestContext {
     /// because someone explicitly canceled it.
     /// It has no parent, so it cannot inherit cancellation from there.
     pub fn new(task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContext {
-            task_kind,
-            download_behavior,
-        }
+        RequestContextBuilder::new(task_kind)
+            .download_behavior(download_behavior)
+            .build()
     }
 
     /// Create a detached child context for a task that may outlive `self`.
@@ -187,10 +249,7 @@ impl RequestContext {
     }
 
     fn child_impl(&self, task_kind: TaskKind, download_behavior: DownloadBehavior) -> Self {
-        RequestContext {
-            task_kind,
-            download_behavior,
-        }
+        Self::new(task_kind, download_behavior)
     }
 
     pub fn task_kind(&self) -> TaskKind {
@@ -199,5 +258,9 @@ impl RequestContext {
 
     pub fn download_behavior(&self) -> DownloadBehavior {
         self.download_behavior
+    }
+
+    pub(crate) fn access_stats_behavior(&self) -> AccessStatsBehavior {
+        self.access_stats_behavior
     }
 }

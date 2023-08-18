@@ -1,6 +1,8 @@
 //! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
 
+pub mod backoff;
+
 /// `Lsn` type implements common tasks on Log Sequence Numbers
 pub mod lsn;
 /// SeqWait allows waiting for a future sequence number to arrive

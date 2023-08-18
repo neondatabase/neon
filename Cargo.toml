@@ -54,6 +54,7 @@ comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
 crossbeam-utils = "0.8.5"
+dashmap = "5.5.0"
 either = "1.8"
 enum-map = "2.4.2"
 enumset = "1.0.12"
@@ -88,7 +89,7 @@ opentelemetry = "0.19.0"
 opentelemetry-otlp = { version = "0.12.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.11.0"
 parking_lot = "0.12"
-pbkdf2 = "0.12.1"
+pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"

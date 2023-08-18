@@ -1,9 +1,9 @@
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
-    register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge,
-    register_uint_gauge_vec, Counter, CounterVec, Histogram, HistogramVec, IntCounter,
-    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
+    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
+    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use strum::VariantNames;
@@ -392,6 +392,35 @@ pub(crate) static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(||
          We log more context for each increment, so, forgo any labels in this metric.",
     )
     .expect("failed to define a metric")
+});
+
+/// How long did we take to start up?  Broken down by labels to describe
+/// different phases of startup.
+pub static STARTUP_DURATION: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "pageserver_startup_duration_seconds",
+        "Time taken by phases of pageserver startup, in seconds",
+        &["phase"]
+    )
+    .expect("Failed to register pageserver_startup_duration_seconds metric")
+});
+
+pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_startup_is_loading",
+        "1 while in initial startup load of tenants, 0 at other times"
+    )
+    .expect("Failed to register pageserver_startup_is_loading")
+});
+
+/// How long did tenants take to go from construction to active state?
+pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_tenant_activation_seconds",
+        "Time taken by tenants to activate, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register pageserver_tenant_activation_seconds metric")
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
