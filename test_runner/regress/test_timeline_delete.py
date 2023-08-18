@@ -745,7 +745,7 @@ def test_timeline_delete_works_for_remote_smoke(
             wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
             log.info("upload of checkpoint is done")
 
-        timeline_ids.append(timeline_id)
+        timeline_ids.append(branch_timeline_id)
 
     for timeline_id in timeline_ids:
         assert_prefix_not_empty(
