@@ -200,13 +200,18 @@ impl LayerManager {
     pub(crate) fn finish_compact_l0(
         &mut self,
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
-        compact_from: Vec<Arc<dyn PersistentLayer>>,
-        compact_to: Vec<Arc<dyn PersistentLayer>>,
+        compact_from: Vec<Arc<LayerE>>,
+        compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
     ) -> Result<()> {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
-            Self::insert_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+            l.access_stats().record_residence_event(
+                &guard,
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::LayerCreate,
+            );
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         for l in compact_from {
             // NB: the layer file identified by descriptor `l` is guaranteed to be present
