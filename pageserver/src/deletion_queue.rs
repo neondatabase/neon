@@ -33,7 +33,7 @@ const EXECUTE_IDLE_DEADLINE: Duration = Duration::from_secs(60);
 
 // If the last attempt to execute failed, wait only this long before
 // trying again.
-const EXECUTE_RETRY_DEADLINE: Duration = Duration::from_secs(1);
+const EXECUTE_RETRY_DEADLINE: Duration = Duration::from_millis(100);
 
 // From the S3 spec
 const MAX_KEYS_PER_DELETE: usize = 1000;
@@ -227,13 +227,16 @@ impl DeletionQueueClient {
 
     // Wait until all previous deletions are executed
     pub async fn flush_execute(&self) {
+        debug!("flush_execute: flushing to deletion lists...");
         // Flush any buffered work to deletion lists
         self.flush().await;
 
         // Flush execution of deletion lists
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        debug!("flush_execute: flushing execution...");
         self.do_flush(FrontendQueueMessage::FlushExecute(FlushOp { tx }), rx)
-            .await
+            .await;
+        debug!("flush_execute: finished flushing execution...");
     }
 }
 
@@ -253,6 +256,9 @@ pub struct BackendQueueWorker {
     // from remote storage.
     executed_lists: Vec<DeletionList>,
 
+    // These FlushOps should fire the next time we flush
+    pending_flushes: Vec<FlushOp>,
+
     // How long to wait for a message before executing anyway
     timeout: Duration,
 }
@@ -264,10 +270,16 @@ impl BackendQueueWorker {
             DELETION_QUEUE_ERRORS
                 .with_label_values(&["failpoint"])
                 .inc();
+
+            // Retry fast when failpoint is active, so that when it is disabled we resume promptly
+            self.timeout = EXECUTE_RETRY_DEADLINE;
             false
         });
 
         if self.accumulator.is_empty() {
+            for f in self.pending_flushes.drain(..) {
+                f.fire();
+            }
             return true;
         }
 
@@ -285,6 +297,10 @@ impl BackendQueueWorker {
                 );
                 self.accumulator.clear();
                 self.executed_lists.append(&mut self.pending_lists);
+
+                for f in self.pending_flushes.drain(..) {
+                    f.fire();
+                }
                 self.timeout = EXECUTE_IDLE_DEADLINE;
                 true
             }
@@ -436,11 +452,22 @@ impl BackendQueueWorker {
                     self.cleanup_lists().await;
                 }
                 BackendQueueMessage::Flush(op) => {
+                    if self.accumulator.is_empty() {
+                        op.fire();
+                        continue;
+                    }
+
                     self.maybe_execute().await;
 
-                    self.cleanup_lists().await;
-
-                    op.fire();
+                    if self.accumulator.is_empty() {
+                        // Successful flush.  Clean up lists before firing, for the benefit of tests that would
+                        // like to have a deterministic state post-flush.
+                        self.cleanup_lists().await;
+                        op.fire();
+                    } else {
+                        // We didn't flush inline: defer until next time we successfully drain accumulatorr
+                        self.pending_flushes.push(op);
+                    }
                 }
             }
         }
@@ -482,12 +509,6 @@ impl FrontendQueueWorker {
     /// This does not return errors, because on failure to flush we do not lose
     /// any state: flushing will be retried implicitly on the next deadline
     async fn flush(&mut self) {
-        let key = &self.conf.remote_deletion_list_path(self.pending.sequence);
-
-        let bytes = serde_json::to_vec(&self.pending).expect("Failed to serialize deletion list");
-        let size = bytes.len();
-        let source = tokio::io::BufReader::new(std::io::Cursor::new(bytes));
-
         if self.pending.objects.is_empty() {
             // We do not expect to be called in this state, but handle it so that later
             // logging code can be assured that therre is always a first+last key to print
@@ -496,6 +517,12 @@ impl FrontendQueueWorker {
             }
             return;
         }
+
+        let key = &self.conf.remote_deletion_list_path(self.pending.sequence);
+
+        let bytes = serde_json::to_vec(&self.pending).expect("Failed to serialize deletion list");
+        let size = bytes.len();
+        let source = tokio::io::BufReader::new(std::io::Cursor::new(bytes));
 
         match self.remote_storage.upload(source, size, key, None).await {
             Ok(_) => {
@@ -682,13 +709,7 @@ impl FrontendQueueWorker {
     pub async fn background(&mut self) {
         info!("Started deletion frontend worker");
 
-        // Before accepting any input from this pageserver lifetime, recover all deletion lists that are in S3
-        if let Err(e) = self.recover().await {
-            // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
-            // queue receiver has been dropped.
-            info!("Deletion queue recover aborted, deletion queue will not proceed ({e:#})");
-            return;
-        }
+        let mut recovered: bool = false;
 
         loop {
             let msg = match tokio::time::timeout(self.timeout, self.rx.recv()).await {
@@ -704,16 +725,38 @@ impl FrontendQueueWorker {
                 }
             };
 
+            // On first message, do recovery.  This avoids unnecessary recovery very
+            // early in startup, and simplifies testing by avoiding a 404 reading the
+            // header on every first pageserver startup.
+            if !recovered {
+                // Before accepting any input from this pageserver lifetime, recover all deletion lists that are in S3
+                if let Err(e) = self.recover().await {
+                    // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
+                    // queue receiver has been dropped.
+                    info!(
+                        "Deletion queue recover aborted, deletion queue will not proceed ({e:#})"
+                    );
+                    return;
+                } else {
+                    recovered = true;
+                }
+            }
+
             match msg {
                 FrontendQueueMessage::Delete(op) => {
-                    let timeline_path = self.conf.timeline_path(&op.tenant_id, &op.timeline_id);
-
                     let _span = tracing::info_span!(
                         "deletion_frontend_enqueue",
                         tenant_id = %op.tenant_id,
                         timeline_id = %op.timeline_id,
                     );
 
+                    debug!(
+                        "Deletion enqueue {0} layers, {1} other objects",
+                        op.layers.len(),
+                        op.objects.len()
+                    );
+
+                    let timeline_path = self.conf.timeline_path(&op.tenant_id, &op.timeline_id);
                     for layer in op.layers {
                         // TODO go directly to remote path without composing local path
                         let local_path = timeline_path.join(layer.file_name());
@@ -731,6 +774,7 @@ impl FrontendQueueWorker {
                 FrontendQueueMessage::Flush(op) => {
                     if self.pending.objects.is_empty() {
                         // Execute immediately
+                        debug!("No pending objects, flushing immediately");
                         op.fire()
                     } else {
                         // Execute next time we flush
@@ -805,6 +849,7 @@ impl DeletionQueue {
                 pending_lists: Vec::new(),
                 executed_lists: Vec::new(),
                 timeout: EXECUTE_IDLE_DEADLINE,
+                pending_flushes: Vec::new(),
             }),
         )
     }
@@ -1002,6 +1047,12 @@ mod test {
         ctx.runtime.block_on(client.flush_execute());
         assert_remote_files(&[], &remote_timeline_path);
         assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
+
+        // Flushing on an empty queue should succeed immediately, and not write any lists
+        info!("Flush-executing on empty");
+        ctx.runtime.block_on(client.flush_execute());
+        assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
+
         Ok(())
     }
 

@@ -67,8 +67,8 @@ paths:
       responses:
         "200":
           description: |
-            Flush completed: deletion has been attempted for enqueued objects.  This does not guarantee
-            that deletion executed successfully.
+            Flush completed: if execute was true, then enqueued deletions have been completed.  If execute was false,
+            then enqueued deletions have been persisted to deletion lists, and may have been completed.
           content:
             application/json:
               schema:

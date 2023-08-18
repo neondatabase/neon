@@ -273,10 +273,6 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
-    # Flush deletion queue before restart/retry, so that anything logically deleted before the
-    # failpoint is really deleted.
-    ps_http.deletion_queue_flush(execute=True)
-
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
@@ -710,7 +706,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=4)
 
 
 @pytest.mark.parametrize(
@@ -857,6 +853,8 @@ def test_delete_orphaned_objects(
 
     reason = timeline_info["state"]["Broken"]["reason"]
     assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    ps_http.deletion_queue_flush(execute=True)
 
     for orphan in orphans:
         assert not orphan.exists()

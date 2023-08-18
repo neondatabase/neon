@@ -349,7 +349,7 @@ def test_remote_storage_upload_queue_retries(
 
         # Deletion queue should not grow, because deletions wait for upload of
         # metadata, and we blocked that upload.
-        wait_until(2, 1, lambda: assert_deletion_queue(client, lambda v: v == 0))
+        wait_until(10, 0.5, lambda: assert_deletion_queue(client, lambda v: v == 0))
 
         # No more deletions should have executed
         assert get_deletions_executed() == deletions_executed_pre_failpoint
@@ -366,19 +366,31 @@ def test_remote_storage_upload_queue_retries(
         log.info("Waiting to see deletions enqueued")
         wait_until(5, 1, lambda: assert_deletion_queue(client, lambda v: v > 0))
 
-        # Deletions should not be processed while failpoint is still active.
-        client.deletion_queue_flush(execute=True)
+        # Run flush in the backgrorund because it will block on the failpoint
+        class background_flush(threading.Thread):
+            def run(self):
+                client.deletion_queue_flush(execute=True)
+
+        flusher = background_flush()
+        flusher.start()
+
+        def assert_failpoint_hit():
+            assert get_deletion_errors("failpoint") > 0
+
+        # Our background flush thread should induce us to hit the failpoint
+        wait_until(20, 0.25, assert_failpoint_hit)
+
+        # Deletions should not have been executed while failpoint is still active.
         assert get_deletion_queue_depth(client) is not None
         assert get_deletion_queue_depth(client) > 0
         assert get_deletions_executed() == deletions_executed_pre_failpoint
-        assert get_deletion_errors("failpoint") > 0
 
         log.info("Unblocking remote deletes")
         configure_storage_delete_failpoints("off")
 
-        # issue a flush to the deletion queue -- otherwise it won't retry until hits
-        # a deadline.
-        client.deletion_queue_flush(execute=True)
+        # An API flush should now complete
+        flusher.join()
+
         # Queue should drain, which should involve executing some deletions
         wait_until(2, 1, lambda: assert_deletion_queue(client, lambda v: v == 0))
         assert get_deletions_executed() > deletions_executed_pre_failpoint
@@ -1109,11 +1121,9 @@ def test_deletion_queue_recovery(
     def assert_deletions_submitted(n: int):
         assert ps_http.get_metric_value("pageserver_deletion_queue_submitted_total") == n
 
-    # Wait for recovery to complete (this is fast but async, so need a wait_until)
-    #
-    # After restart the failpoint is reset: execution may proceed.  If we deleted enough layers
-    # to fill a DeleteObjects request, those will have executed already, so we check the total
-    # number of deletions recovered ("submitted") rather than the queue length.
+    # After restart, issue a flush to kick the deletion frorntend to do recovery.
+    # It should recover all the operations we submitted before the restart.
+    ps_http.deletion_queue_flush(execute=False)
     wait_until(20, 0.25, lambda: assert_deletions_submitted(before_restart_depth))
 
     # The queue should drain through completely if we flush it
