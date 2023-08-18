@@ -3928,6 +3928,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn layer_dumping() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+
+        let layers = tline.layers.read().await;
+        let level0_deltas = layers.layer_map().get_level0_deltas()?;
+
+        assert!(level0_deltas.len() > 0);
+
+        for delta in level0_deltas {
+            let delta = layers.get_from_desc(&delta);
+            delta.dump(false, &ctx).await.unwrap();
+            delta.dump(true, &ctx).await.unwrap();
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn corrupt_metadata() -> anyhow::Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";
         let harness = TenantHarness::create(TEST_NAME)?;
