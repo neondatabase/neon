@@ -403,8 +403,7 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 
@@ -542,8 +541,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         }
     )
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
@@ -808,8 +806,7 @@ def test_compaction_delete_before_upload(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 
