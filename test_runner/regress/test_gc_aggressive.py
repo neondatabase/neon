@@ -71,13 +71,11 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_gc_aggressive", "main")
+    timeline = env.neon_cli.create_branch("test_gc_aggressive", "main")
     endpoint = env.endpoints.create_start("test_gc_aggressive")
     log.info("postgres is running on test_gc_aggressive branch")
 
     with endpoint.cursor() as cur:
-        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
-
         # Create table, and insert the first 100 rows
         cur.execute("CREATE TABLE foo (id int, counter int, t text)")
         cur.execute(
@@ -109,16 +107,14 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
     )
 
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_gc_index_upload", "main")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_gc_index_upload", "main")
     endpoint = env.endpoints.create_start("test_gc_index_upload")
 
     pageserver_http = env.pageserver.http_client()
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     cur.execute("CREATE TABLE foo (id int, counter int, t text)")
     cur.execute(
