@@ -26,13 +26,14 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     )
 
     pageserver_http = env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
     # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
     tenant_id = env.initial_tenant
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
+
+    pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
     for _ in range(5):
         with pytest.raises(subprocess.SubprocessError):
