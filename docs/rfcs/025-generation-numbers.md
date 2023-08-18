@@ -820,7 +820,7 @@ Backward compatibility with existing data is straightforward:
 - When locating the index file on attachment, we may use the "fallback" listing path
   and if there is only a generation-less index, that is the one we load.
 
-It is not necessary to re-write an existing layers: even new index files will be able
+It is not necessary to re-write existing layers: even new index files will be able
 to represent generation-less layers.
 
 ### On-disk forward compatibility
