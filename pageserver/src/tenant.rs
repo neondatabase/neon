@@ -533,6 +533,19 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                let make_broken = |t: &Tenant, err: anyhow::Error| {
+                    error!("attach failed, setting tenant state to Broken: {err:?}");
+                    t.state.send_modify(|state| {
+                        assert_eq!(
+                            *state,
+                            TenantState::Attaching,
+                            "the attach task owns the tenant state until activation is complete"
+                        );
+                        *state = TenantState::broken_from_reason(err.to_string());
+                    });
+                };
+
                 let pending_deletion = {
                     match DeleteTenantFlow::should_resume_deletion(
                         conf,
@@ -543,7 +556,7 @@ impl Tenant {
                     {
                         Ok(should_resume_deletion) => should_resume_deletion,
                         Err(err) => {
-                            tenant_clone.set_broken_no_wait(err.to_string());
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
                             return Ok(());
                         }
                     }
@@ -561,7 +574,7 @@ impl Tenant {
                     .await
                     {
                         Err(err) => {
-                            tenant_clone.set_broken_no_wait(err);
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
                             return Ok(());
                         }
                         Ok(()) => return Ok(()),
@@ -574,8 +587,7 @@ impl Tenant {
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        error!("attach failed, setting tenant state to Broken: {:?}", e);
-                        tenant_clone.set_broken_no_wait(e.to_string());
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
                 Ok(())
