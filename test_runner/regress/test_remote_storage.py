@@ -295,12 +295,16 @@ def test_remote_storage_upload_queue_retries(
         else:
             return int(executed)
 
+    def assert_queued_count(file_kind: str, op_kind: str, fn):
+        v = get_queued_count(file_kind="layer", op_kind="upload")
+        assert fn(v)
+
     # Push some uploads into the remote_timeline_client queues, before failpoints
     # are enabled: these should execute and the queue should revert to zero depth
     generate_uploads_and_deletions(env, tenant_id=tenant_id, timeline_id=timeline_id)
 
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
+    wait_until(2, 1, lambda: assert_queued_count("layer", "upload", lambda v: v == 0))
+    wait_until(2, 1, lambda: assert_queued_count("index", "upload", lambda v: v == 0))
 
     # Wait for some deletions to happen in the above compactions, assert that
     # our metrics of interest exist
@@ -340,8 +344,8 @@ def test_remote_storage_upload_queue_retries(
 
     try:
         # wait for churn thread's data to get stuck in the upload queue
-        wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="upload") > 0)
-        wait_until(10, 0.1, lambda: get_queued_count(file_kind="index", op_kind="upload") >= 2)
+        wait_until(10, 0.1, lambda: assert_queued_count("layer", "upload", lambda v: v > 0))
+        wait_until(10, 0.1, lambda: assert_queued_count("index", "upload", lambda v: v >= 2))
 
         # Deletion queue should not grow, because deletions wait for upload of
         # metadata, and we blocked that upload.
@@ -355,8 +359,8 @@ def test_remote_storage_upload_queue_retries(
         configure_storage_write_failpoints("off")
 
         # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
-        wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-        wait_until(30, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
+        wait_until(30, 1, lambda: assert_queued_count("layer", "upload", lambda v: v == 0))
+        wait_until(30, 1, lambda: assert_queued_count("index", "upload", lambda v: v == 0))
 
         # Deletions should have been enqueued now that index uploads proceeded
         log.info("Waiting to see deletions enqueued")
