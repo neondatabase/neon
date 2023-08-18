@@ -488,15 +488,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
-    try:
-        data = ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
-        log.debug(f"detail {data}")
-    except PageserverApiException as e:
-        log.debug(e)
-        if e.status_code != 404:
-            raise
-    else:
-        raise Exception("detail succeeded (it should return 404)")
+    wait_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id, iterations=4)
 
     assert (
         not leaf_timeline_path.exists()

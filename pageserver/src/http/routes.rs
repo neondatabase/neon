@@ -517,7 +517,6 @@ async fn timeline_delete_handler(
         .instrument(info_span!("timeline_delete", %tenant_id, %timeline_id))
         .await?;
 
-    // FIXME: needs to be an error for console to retry it. Ideally Accepted should be used and retried until 404.
     json_response(StatusCode::ACCEPTED, ())
 }
 
