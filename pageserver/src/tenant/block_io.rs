@@ -6,7 +6,6 @@ use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
-use std::sync::atomic::AtomicU64;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -43,37 +42,34 @@ where
     }
 }
 
-/// A block accessible for reading
-///
-/// During builds with `#[cfg(test)]`, this is a proper enum
-/// with two variants to support testing code. During normal
-/// builds, it just has one variant and is thus a cheap newtype
-/// wrapper of [`PageReadGuard`]
-pub enum BlockLease {
+/// Reference to an in-memory copy of an immutable on-disk block.
+pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
+    EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),
 }
 
-impl From<PageReadGuard<'static>> for BlockLease {
-    fn from(value: PageReadGuard<'static>) -> Self {
+impl From<PageReadGuard<'static>> for BlockLease<'static> {
+    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
         BlockLease::PageReadGuard(value)
     }
 }
 
 #[cfg(test)]
-impl From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease {
+impl<'a> From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease<'a> {
     fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
         BlockLease::Rc(value)
     }
 }
 
-impl Deref for BlockLease {
+impl<'a> Deref for BlockLease<'a> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
         match self {
             BlockLease::PageReadGuard(v) => v.deref(),
+            BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
             BlockLease::Rc(v) => v.deref(),
         }
@@ -116,13 +112,6 @@ where
         self.reader.read_blk(blknum)
     }
 }
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct FileId(u64);
-
-fn next_file_id() -> FileId {
-    FileId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-}
 
 /// An adapter for reading a (virtual) file using the page cache.
 ///
@@ -132,7 +121,7 @@ pub struct FileBlockReader<F> {
     pub file: F,
 
     /// Unique ID of this file, used as key in the page cache.
-    file_id: FileId,
+    file_id: page_cache::FileId,
 }
 
 impl<F> FileBlockReader<F>
@@ -140,7 +129,7 @@ where
     F: FileExt,
 {
     pub fn new(file: F) -> Self {
-        let file_id = next_file_id();
+        let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
     }
@@ -157,7 +146,6 @@ where
     F: FileExt,
 {
     fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        // Look up the right page
         let cache = page_cache::get();
         loop {
             match cache
