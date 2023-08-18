@@ -29,6 +29,7 @@ use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -502,6 +503,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -516,7 +518,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            Some(remote_storage),
+            Some(remote_storage.clone()),
         ));
 
         // Do all the hard work in the background
@@ -531,6 +533,41 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                let pending_deletion = {
+                    match DeleteTenantFlow::should_resume_deletion(
+                        conf,
+                        Some(&remote_storage),
+                        &tenant_clone,
+                    )
+                    .await
+                    {
+                        Ok(should_resume_deletion) => should_resume_deletion,
+                        Err(err) => {
+                            tenant_clone.set_broken_no_wait(err.to_string());
+                            return Ok(());
+                        }
+                    }
+                };
+
+                info!("pending_deletion {}", pending_deletion.is_some());
+
+                if let Some(deletion) = pending_deletion {
+                    match DeleteTenantFlow::resume_from_attach(
+                        deletion,
+                        &tenant_clone,
+                        tenants,
+                        &ctx,
+                    )
+                    .await
+                    {
+                        Err(err) => {
+                            tenant_clone.set_broken_no_wait(err);
+                            return Ok(());
+                        }
+                        Ok(()) => return Ok(()),
+                    }
+                }
+
                 match tenant_clone.attach(&ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
@@ -538,10 +575,7 @@ impl Tenant {
                     }
                     Err(e) => {
                         error!("attach failed, setting tenant state to Broken: {:?}", e);
-                        tenant_clone.state.send_modify(|state| {
-                            assert_eq!(*state, TenantState::Attaching, "the attach task owns the tenant state until activation is complete");
-                            *state = TenantState::broken_from_reason(e.to_string());
-                        });
+                        tenant_clone.set_broken_no_wait(e.to_string());
                     }
                 }
                 Ok(())
@@ -836,17 +870,6 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                let make_broken = |t: &Tenant, err: anyhow::Error| {
-                    error!("load failed, setting tenant state to Broken: {err:?}");
-                    t.state.send_modify(|state| {
-                        assert!(
-                            matches!(*state, TenantState::Loading | TenantState::Stopping { .. }),
-                            "the loading task owns the tenant state until activation is complete"
-                        );
-                        *state = TenantState::broken_from_reason(err.to_string());
-                    });
-                };
-
                 let mut init_order = init_order;
 
                 // take the completion because initial tenant loading will complete when all of
@@ -866,7 +889,7 @@ impl Tenant {
                     {
                         Ok(should_resume_deletion) => should_resume_deletion,
                         Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            tenant_clone.set_broken_no_wait(err.to_string());
                             return Ok(());
                         }
                     }
@@ -883,7 +906,7 @@ impl Tenant {
                         .as_mut()
                         .and_then(|x| x.initial_logical_size_attempt.take());
 
-                    match DeleteTenantFlow::resume(
+                    match DeleteTenantFlow::resume_from_load(
                         deletion,
                         &tenant_clone,
                         init_order.as_ref(),
@@ -893,7 +916,7 @@ impl Tenant {
                     .await
                     {
                         Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            tenant_clone.set_broken_no_wait(err);
                             return Ok(());
                         }
                         Ok(()) => return Ok(()),
@@ -909,7 +932,7 @@ impl Tenant {
 
                         tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
-                    Err(err) => make_broken(&tenant_clone, err),
+                    Err(err) => tenant_clone.set_broken_no_wait(err),
                 }
 
                 Ok(())
@@ -1798,7 +1821,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress, false).await {
+        match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -1844,11 +1867,13 @@ impl Tenant {
         &self,
         progress: completion::Barrier,
         allow_transition_from_loading: bool,
+        allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
+            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
@@ -1865,8 +1890,15 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) | TenantState::Attaching => {
+            TenantState::Activating(_) => {
                 unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Attaching => {
+                if !allow_transition_from_attaching {
+                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                };
+                *current_state = TenantState::Stopping { progress };
+                true
             }
             TenantState::Loading => {
                 if !allow_transition_from_loading {
@@ -1946,7 +1978,8 @@ impl Tenant {
         self.set_broken_no_wait(reason)
     }
 
-    pub(crate) fn set_broken_no_wait(&self, reason: String) {
+    pub(crate) fn set_broken_no_wait(&self, reason: impl Display) {
+        let reason = reason.to_string();
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {

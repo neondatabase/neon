@@ -403,7 +403,7 @@ impl DeleteTenantFlow {
         }
     }
 
-    pub(crate) async fn resume(
+    pub(crate) async fn resume_from_load(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         init_order: Option<&InitializationOrder>,
@@ -413,7 +413,7 @@ impl DeleteTenantFlow {
         let (_, progress) = completion::channel();
 
         tenant
-            .set_stopping(progress, true)
+            .set_stopping(progress, true, false)
             .await
             .expect("cant be stopping or broken");
 
@@ -430,6 +430,31 @@ impl DeleteTenantFlow {
         if timelines_path.exists() {
             tenant.load(init_order, ctx).await.context("load")?;
         }
+
+        Self::background(
+            guard,
+            tenant.conf,
+            tenant.remote_storage.clone(),
+            tenants,
+            tenant,
+        )
+        .await
+    }
+
+    pub(crate) async fn resume_from_attach(
+        guard: DeletionGuard,
+        tenant: &Arc<Tenant>,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        ctx: &RequestContext,
+    ) -> Result<(), DeleteTenantError> {
+        let (_, progress) = completion::channel();
+
+        tenant
+            .set_stopping(progress, false, true)
+            .await
+            .expect("cant be stopping or broken");
+
+        tenant.attach(ctx).await.context("attach")?;
 
         Self::background(
             guard,
