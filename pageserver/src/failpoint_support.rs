@@ -35,42 +35,37 @@ pub(crate) async fn failpoint_sleep_helper(name: &'static str, duration_str: Str
 }
 
 pub fn init() -> fail::FailScenario<'static> {
-    let mut exits = Vec::new();
-
-    if let Ok(val) = std::env::var("FAILPOINTS") {
-        // pre-process to allow using "exit" from `env.pageserver.start(extra_env_vars={"FAILPOINTS"=...})`
-        let parsed = val.split(';').map(|s| {
-            s.split_once('=')
-                .map(|tuple| (tuple.0, Some(tuple.1)))
-                .unwrap_or((s, None))
-        });
-
-        // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
-        // We want non-default behavior for `exit`, though, so, we handle it separately.
-        let mut s = String::new();
-        for (name, action) in parsed {
-            if action == Some("exit") {
-                // we'll need to handle this separatedly
-                exits.push(String::from(name));
-                continue;
-            }
-
-            if !s.is_empty() {
-                s.push(';');
-            }
-            s.push_str(name);
-            if let Some(action) = action {
-                s.push('=');
-                s.push_str(action);
-            }
-        }
-        std::env::set_var("FAILPOINTS", s);
-    };
+    // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
+    // We want non-default behavior for `exit`, though, so, we handle it separately.
+    //
+    // Format for FAILPOINTS is "name=actions" separated by ";".
+    let actions = std::env::var("FAILPOINTS");
+    if actions.is_ok() {
+        std::env::remove_var("FAILPOINTS");
+    } else {
+        // let the library handle non-utf8, or nothing for not present
+    }
 
     let scenario = fail::FailScenario::setup();
 
-    for name in exits {
-        fail::cfg_callback(name, exit_failpoint).unwrap();
+    if let Ok(val) = actions {
+        val.split(';')
+            .enumerate()
+            .map(|(i, s)| s.split_once('=').ok_or(Err((i, s))))
+            .for_each(|res| {
+                let (name, action) = match res {
+                    Ok(t) => t,
+                    Err((i, s)) => {
+                        panic!(
+                            "startup failpoints: missing action on the {}th failpoint; try `{s}=return`",
+                            i + 1,
+                        );
+                    }
+                };
+                if let Err(e) = apply_failpoint(name, actions) {
+                    panic!("startup failpoints: failed to apply failpoint {name}={actions}: {e}");
+                }
+            });
     }
 
     scenario
