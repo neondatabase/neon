@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
+use hyper::header::CONTENT_TYPE;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -1236,6 +1237,117 @@ async fn deletion_queue_flush(
     }
 }
 
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+async fn getpage_at_lsn_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    struct Key(crate::repository::Key);
+
+    impl std::str::FromStr for Key {
+        type Err = anyhow::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            crate::repository::Key::from_hex(s).map(Key)
+        }
+    }
+
+    let key: Key = parse_query_param(&request, "key")?
+        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'key' query parameter")))?;
+    let lsn: Lsn = parse_query_param(&request, "lsn")?
+        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+
+        let page = timeline.get(key.0, lsn, &ctx).await?;
+
+        Result::<_, ApiError>::Ok(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(hyper::Body::from(page))
+                .unwrap(),
+        )
+    }
+    .instrument(info_span!("timeline_get", %tenant_id, %timeline_id))
+    .await
+}
+
+async fn timeline_get_partioning(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    #[derive(Default)]
+    enum Collect {
+        Always,
+        IfNone,
+        #[default]
+        Never,
+    }
+
+    impl std::str::FromStr for Collect {
+        type Err = anyhow::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            Ok(match s {
+                "always" | "yes" | "true" => Collect::Always,
+                "if-none" => Collect::IfNone,
+                "never" | "no" | "false" => Collect::Never,
+                s => return Err(anyhow::anyhow!("invalid value: {s:?}")),
+            })
+        }
+    }
+
+    #[serde_with::serde_as]
+    #[derive(serde::Serialize)]
+    struct Partitioning {
+        keys: crate::keyspace::KeyPartitioning,
+
+        #[serde_as = "serde_with::DisplayFromStr"]
+        at_lsn: Lsn,
+    }
+
+    let collect: Option<Collect> = parse_query_param(&request, "collect");
+    let collect = collect.unwrap_or_default();
+
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+
+        let partitioning = match collect {
+            Collect::Always => {
+                let lsn = timeline.get_last_record_lsn();
+                Some((timeline.collect_keyspace(lsn, &ctx).await, lsn))
+            }
+            _ => {
+                let p = timeline.partitioning();
+
+                match (collect, p) {
+                    (Collect::IfNone, None) => {
+                        let lsn = timeline.get_last_record_lsn();
+                        Some((timeline.collect_keyspace(lsn, &ctx).await, lsn))
+                    }
+                    (_, p) => p,
+                }
+            }
+        };
+
+        todo!()
+    }
+    .instrument(info_span!("timeline_get", %tenant_id, %timeline_id))
+    .await
+}
+
 async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1582,6 +1694,13 @@ pub fn make_router(
         .get("/v1/panic", |r| api_handler(r, always_panic_handler))
         .post("/v1/tracing/event", |r| {
             testing_api_handler("emit a tracing event", r, post_tracing_event_handler)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/get", |r| {
+            testing_api_handler(
+                "check if page at lsn is successful",
+                r,
+                try_timeline_get_handler,
+            )
         })
         .any(handler_404))
 }
