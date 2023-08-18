@@ -1043,14 +1043,13 @@ impl Timeline {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
-        let Some(remote_layer) = layer.downcast_remote_layer() else {
-            return Ok(Some(false));
-        };
+
         if self.remote_client.is_none() {
             return Ok(Some(false));
         }
 
-        self.download_remote_layer(remote_layer).await?;
+        layer.guard_against_eviction(true).await?;
+
         Ok(Some(true))
     }
 
@@ -1060,6 +1059,11 @@ impl Timeline {
         let Some(local_layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
+
+        let Ok(local_layer) = local_layer.guard_against_eviction(false).await else { return Ok(Some(false)); };
+
+        let local_layer: Arc<LayerE> = local_layer.into();
+
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1067,7 +1071,7 @@ impl Timeline {
 
         let cancel = CancellationToken::new();
         let results = self
-            .evict_layer_batch(remote_client, &[local_layer], cancel)
+            .evict_layer_batch(remote_client, &[local_layer], &cancel)
             .await?;
         assert_eq!(results.len(), 1);
         let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
@@ -1079,30 +1083,21 @@ impl Timeline {
     }
 
     /// Evict a batch of layers.
-    ///
-    /// GenericRemoteStorage reference is required as a (witness)[witness_article] for "remote storage is configured."
-    ///
-    /// [witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
     pub(crate) async fn evict_layers(
         &self,
-        _: &GenericRemoteStorage,
-        layers_to_evict: &[Arc<dyn PersistentLayer>],
-        cancel: CancellationToken,
+        layers_to_evict: &[Arc<LayerE>],
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        let remote_client = self.remote_client.clone().expect(
-            "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
-        );
+        let remote_client = self
+            .remote_client
+            .as_ref()
+            .context("timeline must have RemoteTimelineClient")?;
 
-        self.evict_layer_batch(&remote_client, layers_to_evict, cancel)
+        self.evict_layer_batch(remote_client, layers_to_evict, &cancel)
             .await
     }
 
     /// Evict multiple layers at once, continuing through errors.
-    ///
-    /// Try to evict the given `layers_to_evict` by
-    ///
-    /// 1. Replacing the given layer object in the layer map with a corresponding [`RemoteLayer`] object.
-    /// 2. Deleting the now unreferenced layer file from disk.
     ///
     /// The `remote_client` should be this timeline's `self.remote_client`.
     /// We make the caller provide it so that they are responsible for handling the case
@@ -1112,17 +1107,15 @@ impl Timeline {
     /// If `Err()` is returned, no eviction was attempted.
     /// Each position of `Ok(results)` corresponds to the layer in `layers_to_evict`.
     /// Meaning of each `result[i]`:
-    /// - `Some(Err(...))` if layer replacement failed for an unexpected reason
-    /// - `Some(Ok(true))` if everything went well.
-    /// - `Some(Ok(false))` if there was an expected reason why the layer could not be replaced, e.g.:
-    ///    - evictee was not yet downloaded
+    /// - `Some(Err(...))` if layer replacement failed for some reason
     ///    - replacement failed for an expectable reason (e.g., layer removed by GC before we grabbed all locks)
+    /// - `Some(Ok(()))` if everything went well.
     /// - `None` if no eviction attempt was made for the layer because `cancel.is_cancelled() == true`.
     async fn evict_layer_batch(
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[Arc<dyn PersistentLayer>],
-        cancel: CancellationToken,
+        layers_to_evict: &[Arc<LayerE>],
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -1132,7 +1125,7 @@ impl Timeline {
             .context("wait for layer upload ops to complete")?;
 
         // now lock out layer removal (compaction, gc, timeline deletion)
-        let layer_removal_guard = self.layer_removal_cs.lock().await;
+        let _layer_removal_guard = self.layer_removal_cs.lock().await;
 
         {
             // to avoid racing with detach and delete_timeline
@@ -1144,145 +1137,49 @@ impl Timeline {
         }
 
         // start the batch update
-        let mut guard = self.layers.write().await;
         let mut results = Vec::with_capacity(layers_to_evict.len());
-
-        for l in layers_to_evict.iter() {
-            let res = if cancel.is_cancelled() {
-                None
-            } else {
-                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut guard))
-            };
-            results.push(res);
+        for _ in 0..layers_to_evict.len() {
+            results.push(None);
         }
 
-        // commit the updates & release locks
-        drop_wlock(guard);
-        drop(layer_removal_guard);
+        let mut js = tokio::task::JoinSet::new();
+
+        for (i, l) in layers_to_evict.into_iter().enumerate() {
+            js.spawn({
+                let l = l.to_owned();
+                async move { (i, l.evict_and_wait().await) }
+            });
+        }
+
+        let join = async {
+            while let Some(next) = js.join_next().await {
+                match next {
+                    Ok((i, res)) => results[i] = Some(res),
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => { /* already logged */ }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = cancel.cancelled() => {},
+            _ = join => {}
+        }
 
         assert_eq!(results.len(), layers_to_evict.len());
         Ok(results)
-    }
-
-    fn evict_layer_batch_impl(
-        &self,
-        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
-        local_layer: &Arc<dyn PersistentLayer>,
-        layer_mgr: &mut LayerManager,
-    ) -> Result<(), EvictionError> {
-        if local_layer.is_remote_layer() {
-            return Err(EvictionError::CannotEvictRemoteLayer);
-        }
-
-        let layer_file_size = local_layer.layer_desc().file_size;
-
-        let local_layer_mtime = local_layer
-            .local_path()
-            .expect("local layer should have a local path")
-            .metadata()
-            // when the eviction fails because we have already deleted the layer in compaction for
-            // example, a NotFound error bubbles up from here.
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    EvictionError::FileNotFound
-                } else {
-                    EvictionError::StatFailed(e)
-                }
-            })?
-            .modified()
-            .map_err(EvictionError::StatFailed)?;
-
-        let local_layer_residence_duration =
-            match SystemTime::now().duration_since(local_layer_mtime) {
-                Err(e) => {
-                    warn!(layer = %local_layer, "layer mtime is in the future: {}", e);
-                    None
-                }
-                Ok(delta) => Some(delta),
-            };
-
-        let layer_metadata = LayerFileMetadata::new(layer_file_size);
-
-        let new_remote_layer = Arc::new(match local_layer.filename() {
-            LayerFileName::Image(image_name) => RemoteLayer::new_img(
-                self.tenant_id,
-                self.timeline_id,
-                &image_name,
-                &layer_metadata,
-                local_layer
-                    .access_stats()
-                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
-            ),
-            LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
-                self.tenant_id,
-                self.timeline_id,
-                &delta_name,
-                &layer_metadata,
-                local_layer
-                    .access_stats()
-                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
-            ),
-        });
-
-        assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
-
-        layer_mgr
-            .replace_and_verify(local_layer.clone(), new_remote_layer)
-            .map_err(EvictionError::LayerNotFound)?;
-
-        if let Err(e) = local_layer.delete_resident_layer_file() {
-            // this should never happen, because of layer_removal_cs usage and above stat
-            // access for mtime
-            error!("failed to remove layer file on evict after replacement: {e:#?}");
-        }
-        // Always decrement the physical size gauge, even if we failed to delete the file.
-        // Rationale: we already replaced the layer with a remote layer in the layer map,
-        // and any subsequent download_remote_layer will
-        // 1. overwrite the file on disk and
-        // 2. add the downloaded size to the resident size gauge.
-        //
-        // If there is no re-download, and we restart the pageserver, then load_layer_map
-        // will treat the file as a local layer again, count it towards resident size,
-        // and it'll be like the layer removal never happened.
-        // The bump in resident size is perhaps unexpected but overall a robust behavior.
-        self.metrics
-            .resident_physical_size_gauge
-            .sub(layer_file_size);
-
-        self.metrics.evictions.inc();
-
-        if let Some(delta) = local_layer_residence_duration {
-            self.metrics
-                .evictions_with_low_residence_duration
-                .read()
-                .unwrap()
-                .observe(delta);
-            info!(layer=%local_layer, residence_millis=delta.as_millis(), "evicted layer after known residence period");
-        } else {
-            info!(layer=%local_layer, "evicted layer after unknown residence period");
-        }
-
-        Ok(())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EvictionError {
-    #[error("cannot evict a remote layer")]
-    CannotEvictRemoteLayer,
-    /// Most likely the to-be evicted layer has been deleted by compaction or gc which use the same
-    /// locks, so they got to execute before the eviction.
-    #[error("file backing the layer has been removed already")]
-    FileNotFound,
-    #[error("stat failed")]
-    StatFailed(#[source] std::io::Error),
-    /// In practice, this can be a number of things, but lets assume it means only this.
-    ///
-    /// This case includes situations such as the Layer was evicted and redownloaded in between,
-    /// because the file existed before an replacement attempt was made but now the Layers are
-    /// different objects in memory.
-    #[error("layer was no longer part of LayerMap")]
-    LayerNotFound(#[source] anyhow::Error),
+    #[error("layer was already evicted")]
+    NotFound,
+
+    /// Evictions must always lose to downloads in races, and this time it happened.
+    #[error("layer was downloaded instead")]
+    Downloaded,
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
@@ -2073,7 +1970,7 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<LayerE>> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
@@ -4465,15 +4362,15 @@ impl Timeline {
     }
 }
 
-pub struct DiskUsageEvictionInfo {
+pub(crate) struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
     pub max_layer_size: Option<u64>,
     /// Timeline's resident layers
     pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
 }
 
-pub struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: Arc<dyn PersistentLayer>,
+pub(crate) struct LocalLayerInfoForDiskUsageEviction {
+    pub layer: Arc<LayerE>,
     pub last_activity_ts: SystemTime,
 }
 
@@ -4483,8 +4380,14 @@ impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
         // having to allocate a string to this is bad, but it will rarely be formatted
         let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
         let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        struct DisplayIsDebug<'a, T>(&'a T);
+        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
         f.debug_struct("LocalLayerInfoForDiskUsageEviction")
-            .field("layer", &self.layer)
+            .field("layer", &DisplayIsDebug(&self.layer))
             .field("last_activity", &ts)
             .finish()
     }
@@ -4511,9 +4414,7 @@ impl Timeline {
 
             let l = guard.get_from_desc(&l);
 
-            if l.is_remote_layer() {
-                continue;
-            }
+            let Ok(l) = l.guard_against_eviction(false).await else { continue; };
 
             let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
                 // We only use this fallback if there's an implementation error.
@@ -4523,7 +4424,8 @@ impl Timeline {
             });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
-                layer: l,
+                // we explicitly don't want to keep this layer downloaded
+                layer: l.drop_eviction_guard(),
                 last_activity_ts,
             });
         }
@@ -4675,9 +4577,7 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
-
-    use super::{EvictionError, Timeline};
+    use crate::tenant::{harness::TenantHarness, storage_layer::LayerE, Timeline};
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
@@ -4711,22 +4611,25 @@ mod tests {
             .expect("just configured this");
 
         let layer = find_some_layer(&timeline).await;
+        let layer = layer.guard_against_eviction(false).await.unwrap();
+        let layer = layer.drop_eviction_guard();
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
 
         let first = {
-            let cancel = cancel.clone();
+            let cancel = cancel.child_token();
             async {
+                let cancel = cancel;
                 timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
+                    .evict_layer_batch(&rc, &batch, &cancel)
                     .await
                     .unwrap()
             }
         };
         let second = async {
             timeline
-                .evict_layer_batch(&rc, &batch, cancel)
+                .evict_layer_batch(&rc, &batch, &cancel)
                 .await
                 .unwrap()
         };
@@ -4735,88 +4638,20 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
+        assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
+
+        let layer: Arc<LayerE> = batch[0].clone();
+        let mut evicted = std::pin::pin!(layer.wait_evicted());
+        assert_eq!(futures::future::poll_immediate(&mut evicted).await, None);
+
+        // both seemingly succeed, but only one will actually evict
         match (first, second) {
-            (Ok(()), Err(EvictionError::FileNotFound))
-            | (Err(EvictionError::FileNotFound), Ok(())) => {
-                // one of the evictions gets to do it,
-                // other one gets FileNotFound. all is good.
-            }
+            (Ok(()), Ok(())) => {}
             other => unreachable!("unexpected {:?}", other),
         }
-    }
 
-    #[tokio::test]
-    async fn layer_eviction_aba_fails() {
-        let harness = TenantHarness::create("layer_eviction_aba_fails").unwrap();
-
-        let remote_storage = {
-            // this is never used for anything, because of how the create_test_timeline works, but
-            // it is with us in spirit and a Some.
-            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
-            let path = harness.conf.workdir.join("localfs");
-            std::fs::create_dir_all(&path).unwrap();
-            let config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
-                storage: RemoteStorageKind::LocalFs(path),
-            };
-            GenericRemoteStorage::from_config(&config).unwrap()
-        };
-
-        let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
-        let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
-            .await
-            .unwrap();
-
-        let _e = tracing::info_span!("foobar", tenant_id = %tenant.tenant_id, timeline_id = %timeline.timeline_id).entered();
-
-        let rc = timeline.remote_client.clone().unwrap();
-
-        // TenantHarness allows uploads to happen given GenericRemoteStorage is configured
-        let layer = find_some_layer(&timeline).await;
-
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let batch = [layer];
-
-        let first = {
-            let cancel = cancel.clone();
-            async {
-                timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-
-        // lets imagine this is stuck somehow, still referencing the original `Arc<dyn PersistentLayer>`
-        let second = {
-            let cancel = cancel.clone();
-            async {
-                timeline
-                    .evict_layer_batch(&rc, &batch, cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-
-        // while it's stuck, we evict and end up redownloading it
-        only_one(first.await).expect("eviction succeeded");
-
-        let layer = find_some_layer(&timeline).await;
-        let layer = layer.downcast_remote_layer().unwrap();
-        timeline.download_remote_layer(layer).await.unwrap();
-
-        let res = only_one(second.await);
-
-        assert!(
-            matches!(res, Err(EvictionError::LayerNotFound(_))),
-            "{res:?}"
-        );
-
-        // no more specific asserting, outside of preconds this is the only valid replacement
-        // failure
+        // after eviction has been requested, we will eventually evict
+        evicted.await;
     }
 
     fn any_context() -> crate::context::RequestContext {
@@ -4833,7 +4668,7 @@ mod tests {
             .expect("no cancellation")
     }
 
-    async fn find_some_layer(timeline: &Timeline) -> Arc<dyn PersistentLayer> {
+    async fn find_some_layer(timeline: &Timeline) -> Arc<LayerE> {
         let layers = timeline.layers.read().await;
         let desc = layers
             .layer_map()

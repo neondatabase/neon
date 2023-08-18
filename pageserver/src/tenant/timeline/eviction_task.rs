@@ -29,7 +29,6 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        storage_layer::PersistentLayer,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -194,15 +193,16 @@ impl Timeline {
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
-        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+        let candidates: Vec<_> = {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
-                if hist_layer.is_remote_layer() {
-                    continue;
-                }
+
+                // funny: this is the best way to get local layers is to lock them into
+                // memory for the duration of eviction
+                let Ok(guard) = hist_layer.guard_against_eviction(false).await else { continue; };
 
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
@@ -233,7 +233,7 @@ impl Timeline {
                     }
                 };
                 if no_activity_for > p.threshold {
-                    candidates.push(hist_layer)
+                    candidates.push(guard.drop_eviction_guard())
                 }
             }
             candidates
@@ -252,7 +252,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
+            .evict_layer_batch(remote_client, &candidates, cancel)
             .await
         {
             Err(pre_err) => {
@@ -263,7 +263,8 @@ impl Timeline {
             Ok(results) => results,
         };
         assert_eq!(results.len(), candidates.len());
-        for (l, result) in candidates.iter().zip(results) {
+        drop(candidates);
+        for result in results {
             match result {
                 None => {
                     stats.skipped_for_shutdown += 1;
@@ -271,18 +272,8 @@ impl Timeline {
                 Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                    stats.not_evictable += 1;
-                }
-                Some(Err(EvictionError::FileNotFound)) => {
+                Some(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
                     // compaction/gc removed the file while we were waiting on layer_removal_cs
-                    stats.not_evictable += 1;
-                }
-                Some(Err(
-                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
-                )) => {
-                    let e = utils::error::report_compact_sources(&e);
-                    warn!(layer = %l, "failed to evict layer: {e}");
                     stats.not_evictable += 1;
                 }
             }
