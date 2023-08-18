@@ -981,6 +981,35 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=tenant_token)
 
 
+# Try restarting endpoint with enabled auth.
+def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+    endpoint = env.endpoints.create_start("test_sk_auth_restart_endpoint")
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("create table t(i int)")
+
+    # Restarting endpoints and random safekeepers, to trigger recovery.
+    for _i in range(3):
+        random_sk = random.choice(env.safekeepers)
+        random_sk.stop()
+
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                start = random.randint(1, 100000)
+                end = start + random.randint(1, 10000)
+                cur.execute("insert into t select generate_series(%s,%s)", (start, end))
+
+        endpoint.stop()
+        random_sk.start()
+        endpoint.start()
+
+
 class SafekeeperEnv:
     def __init__(
         self,
