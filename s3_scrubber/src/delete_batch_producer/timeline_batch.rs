@@ -41,7 +41,7 @@ pub async fn schedule_cleanup_deleted_timelines(
 
         let new_stats = async move {
             let tenant_id_to_check = project_to_check.tenant;
-            let check_target = check_root.timelines_root(tenant_id_to_check);
+            let check_target = check_root.timelines_root(&tenant_id_to_check);
             let stats = super::process_s3_target_recursively(
                 &check_s3_client,
                 &check_target,
