@@ -8,7 +8,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
