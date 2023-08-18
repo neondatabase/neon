@@ -24,7 +24,7 @@ pub struct EphemeralFile {
     file: VirtualFile,
     size: u64,
     /// An ephemeral file is append-only.
-    /// We keep the last page, which can still be modified, in [`mutable_tail`].
+    /// We keep the last page, which can still be modified, in [`Self::mutable_tail`].
     /// The other pages, which can no longer be modified, are accessed through the page cache.
     mutable_tail: [u8; PAGE_SZ],
 }

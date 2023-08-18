@@ -36,10 +36,10 @@
 //! * Have a mechanism to deterministically associate the on-disk file with a [`FileId`].
 //! * Get a [`FileId`] using [`next_file_id`].
 //! * Use the mechanism to associate the on-disk file with the returned [`FileId`].
-//! * Use [`PageCache::read_immutable_buf`] to get a [`PageBufResult`].
-//! * If the page was already cached, it'll be the [`PageBufResult::Found`] variant that contains
+//! * Use [`PageCache::read_immutable_buf`] to get a [`ReadBufResult`].
+//! * If the page was already cached, it'll be the [`ReadBufResult::Found`] variant that contains
 //!   a read guard for the page. Just use it.
-//! * If the page was not cached, it'll be the [`PageBufResult::NotFound`] variant that contains
+//! * If the page was not cached, it'll be the [`ReadBufResult::NotFound`] variant that contains
 //!   a write guard for the page. Fill the page with the contents of the on-disk file.
 //!   Then call [`PageWriteGuard::mark_valid`] to mark the page as valid.
 //!   Then try again to [`PageCache::read_immutable_buf`].
