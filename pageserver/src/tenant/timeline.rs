@@ -3444,13 +3444,7 @@ impl Timeline {
             deltas_to_compact
         };
 
-        // Now that we have reshuffled the data to set of new delta layers, we can
-        // delete the old ones
-        let mut layer_names_to_delete = Vec::with_capacity(remove_layers.len());
-
-        for delta in &remove_layers {
-            layer_names_to_delete.push(delta.layer_desc().filename());
-        }
+        // deletion will happen later, the layer file manager sets wanted_garbage_collected
 
         guard.finish_compact_l0(&layer_removal_cs, remove_layers, &insert_layers)?;
 
@@ -3756,7 +3750,7 @@ impl Timeline {
                 l.filename(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(&l));
+            layers_to_remove.push(l);
         }
         self.wanted_image_layers
             .lock()
@@ -3771,15 +3765,13 @@ impl Timeline {
             // Actually delete the layers from disk and remove them from the map.
             // (couldn't do this in the loop above, because you cannot modify a collection
             // while iterating it. BTreeMap::retain() would be another option)
-            let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
             let gc_layers = layers_to_remove
                 .iter()
                 .map(|x| guard.get_from_desc(x))
-                .collect();
-            for doomed_layer in layers_to_remove {
-                layer_names_to_delete.push(doomed_layer.filename());
-                result.layers_removed += 1;
-            }
+                .collect::<Vec<Arc<LayerE>>>();
+
+            result.layers_removed = gc_layers.len() as u64;
+
             let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers)?;
 
             if result.layers_removed != 0 {

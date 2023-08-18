@@ -232,7 +232,7 @@ impl LayerManager {
                 doomed_layer,
                 &mut updates,
                 &mut self.layer_fmgr,
-            )?; // FIXME: schedule succeeded deletions in timeline.rs `gc_timeline` instead of in batch?
+            )?;
         }
         Ok(ApplyGcResultGuard(updates))
     }
@@ -257,7 +257,6 @@ impl LayerManager {
         mapping: &mut LayerFileManager<LayerE>,
     ) -> anyhow::Result<()> {
         let desc = layer.layer_desc();
-        layer.garbage_collect();
 
         // TODO Removing from the bottom of the layer map is expensive.
         //      Maybe instead discard all layer map historic versions that
@@ -265,7 +264,8 @@ impl LayerManager {
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
         updates.remove_historic(desc);
-        mapping.remove(layer);
+        mapping.remove(&layer);
+        layer.garbage_collect();
 
         Ok(())
     }
@@ -303,7 +303,7 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         Self(HashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: Arc<T>) {
+    pub(crate) fn remove(&mut self, layer: &Arc<T>) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
