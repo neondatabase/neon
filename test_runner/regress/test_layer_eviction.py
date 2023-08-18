@@ -34,8 +34,8 @@ def test_basic_eviction(
     client = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Create a number of layers in the tenant
     with endpoint.cursor() as cur:
