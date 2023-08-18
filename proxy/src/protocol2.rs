@@ -35,8 +35,6 @@ pin_project! {
 #[derive(Clone, PartialEq, Debug)]
 enum ProxyParse {
     NotStarted,
-    FoundHeader,
-    Header,
 
     Finished(SocketAddr),
     None,
@@ -89,6 +87,8 @@ impl<T: AsyncRead + Unpin> WithClientIp<T> {
 const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
+const IPV4: u8 = 1;
+const IPV6: u8 = 2;
 
 impl<T: AsyncRead> WithClientIp<T> {
     fn fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>, len: usize) -> Poll<io::Result<bool>> {
@@ -109,31 +109,18 @@ impl<T: AsyncRead> WithClientIp<T> {
         loop {
             match self.state {
                 ProxyParse::NotStarted => {
-                    if !ready!(self.as_mut().fill_buf(cx, 12)?) {
+                    if !ready!(self.as_mut().fill_buf(cx, 16)?) {
                         *self.as_mut().project().state = ProxyParse::None;
                         continue;
                     };
 
-                    let this = self.as_mut().project();
-                    *this.state = if **this.buf == HEADER {
-                        ProxyParse::FoundHeader
-                    } else {
-                        ProxyParse::None
-                    };
-                }
-                ProxyParse::FoundHeader => {
-                    if !ready!(self.as_mut().fill_buf(cx, 12 + 4)?) {
+                    if self.buf[..12] != HEADER {
                         *self.as_mut().project().state = ProxyParse::None;
                         continue;
-                    };
-                    *self.as_mut().project().state = ProxyParse::Header;
-                }
-                ProxyParse::Header => {
-                    const IPV4: u8 = 1;
-                    const IPV6: u8 = 2;
+                    }
 
                     let family = self.buf[13] >> 4;
-                    let read = match family {
+                    let ip_bytes = match family {
                         // 2 IPV4s and 2 ports
                         IPV4 => (4 + 2) * 2,
                         // 2 IPV6s and 2 ports
@@ -141,7 +128,7 @@ impl<T: AsyncRead> WithClientIp<T> {
                         _ => 0,
                     };
 
-                    if !ready!(self.as_mut().fill_buf(cx, 12 + 4 + read)?) {
+                    if !ready!(self.as_mut().fill_buf(cx, 16 + ip_bytes)?) {
                         *self.as_mut().project().state = ProxyParse::None;
                         continue;
                     }
@@ -151,16 +138,16 @@ impl<T: AsyncRead> WithClientIp<T> {
                     let this = self.as_mut().project();
                     *this.state = match family {
                         // 2 IPV4s and 2 ports
-                        IPV4 if length >= read => {
-                            *this.tlv_bytes = length - read;
-                            let buf = this.buf.split_to(12 + 4 + read);
+                        IPV4 if length >= ip_bytes => {
+                            *this.tlv_bytes = length - ip_bytes;
+                            let buf = this.buf.split_to(16 + ip_bytes);
                             let src_addr: [u8; 4] = buf[16..20].try_into().unwrap();
                             let src_port = u16::from_be_bytes(buf[24..26].try_into().unwrap());
                             ProxyParse::Finished(SocketAddr::from((src_addr, src_port)))
                         }
-                        IPV6 if length >= read => {
-                            *this.tlv_bytes = length - read;
-                            let buf = this.buf.split_to(12 + 4 + read);
+                        IPV6 if length >= ip_bytes => {
+                            *this.tlv_bytes = length - ip_bytes;
+                            let buf = this.buf.split_to(16 + ip_bytes);
                             let src_addr: [u8; 16] = buf[16..32].try_into().unwrap();
                             let src_port = u16::from_be_bytes(buf[48..50].try_into().unwrap());
                             ProxyParse::Finished(SocketAddr::from((src_addr, src_port)))
@@ -197,9 +184,9 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
             debug_assert_eq!(this.buf.len(), 0);
 
             let n = ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?);
-            let read = usize::min(n, *this.tlv_bytes);
-            *this.tlv_bytes -= read;
-            this.buf.advance(read);
+            let tlv_bytes_read = usize::min(n, *this.tlv_bytes);
+            *this.tlv_bytes -= tlv_bytes_read;
+            this.buf.advance(tlv_bytes_read);
         }
 
         if !this.buf.is_empty() {
