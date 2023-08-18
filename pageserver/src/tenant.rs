@@ -3938,7 +3938,7 @@ mod tests {
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
 
-        assert!(level0_deltas.len() > 0);
+        assert!(!level0_deltas.is_empty());
 
         for delta in level0_deltas {
             let delta = layer_map.get_from_desc(&delta);
