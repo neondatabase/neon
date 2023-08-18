@@ -616,6 +616,9 @@ impl Tenant {
                 .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
+
+        let mut timelines_to_resume_deletions = vec![];
+
         // Wait for all the download tasks to complete & collect results.
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
@@ -632,9 +635,12 @@ impl Tenant {
                     );
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
-                MaybeDeletedIndexPart::Deleted(_) => {
-                    info!("timeline {} is deleted, skipping", timeline_id);
-                    continue;
+                MaybeDeletedIndexPart::Deleted(index_part) => {
+                    info!(
+                        "timeline {} is deleted, picking to resume deletion",
+                        timeline_id
+                    );
+                    timelines_to_resume_deletions.push((timeline_id, index_part, client));
                 }
             }
         }
@@ -657,6 +663,25 @@ impl Tenant {
                         timeline_id, self.tenant_id
                     )
                 })?;
+        }
+
+        // Walk through deleted timelines, resume deletion
+        for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
+            remote_timeline_client
+                .init_upload_queue_stopped_to_continue_deletion(&index_part)
+                .context("init queue stopped")
+                .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+
+            DeleteTimelineFlow::resume_deletion(
+                Arc::clone(self),
+                timeline_id,
+                &index_part.parse_metadata().context("parse_metadata")?,
+                Some(remote_timeline_client),
+                None,
+            )
+            .await
+            .context("resume_deletion")
+            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
         std::fs::remove_file(&marker_file)
