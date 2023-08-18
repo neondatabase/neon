@@ -689,7 +689,7 @@ impl Tenant {
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
-        utils::failpoint_sleep_millis_async!("attach-before-activate");
+        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
 
         info!("Done");
 
@@ -1098,7 +1098,7 @@ impl Tenant {
 
         debug!("loading tenant task");
 
-        utils::failpoint_sleep_millis_async!("before-loading-tenant");
+        crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Load in-memory state to reflect the local files on disk
         //
@@ -2438,7 +2438,9 @@ impl Tenant {
             .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
             .await?;
 
-        utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
+        crate::failpoint_support::sleep_millis_async!(
+            "gc_iteration_internal_after_getting_gc_timelines"
+        );
 
         // If there is nothing to GC, we don't want any messages in the INFO log.
         if !gc_timelines.is_empty() {
