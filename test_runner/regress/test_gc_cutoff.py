@@ -38,5 +38,4 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         with pytest.raises(subprocess.SubprocessError):
             pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
         env.pageserver.stop()
-        env.pageserver.start()
-        pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
+        env.pageserver.start(extra_env_vars={"FAILPOINTS": "after-timeline-gc-removed-layers=exit"})
