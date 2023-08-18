@@ -780,7 +780,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.15.4
+      VM_BUILDER_VERSION: v0.16.2
 
     steps:
       - name: Checkout
@@ -801,7 +801,12 @@ jobs:
 
       - name: Build vm image
         run: |
-          ./vm-builder -enable-file-cache -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder \
+            -enable-file-cache \
+            -enable-monitor \
+            -enable-informant \
+            -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+            -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
