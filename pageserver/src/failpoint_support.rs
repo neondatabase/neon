@@ -51,9 +51,9 @@ pub fn init() -> fail::FailScenario<'static> {
     if let Ok(val) = actions {
         val.split(';')
             .enumerate()
-            .map(|(i, s)| s.split_once('=').ok_or(Err((i, s))))
+            .map(|(i, s)| s.split_once('=').ok_or((i, s)))
             .for_each(|res| {
-                let (name, action) = match res {
+                let (name, actions) = match res {
                     Ok(t) => t,
                     Err((i, s)) => {
                         panic!(
