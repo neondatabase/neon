@@ -50,7 +50,7 @@ pub enum BlockLease<'a> {
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),
 }
 
-impl<'a> From<PageReadGuard<'static>> for BlockLease<'a> {
+impl From<PageReadGuard<'static>> for BlockLease<'static> {
     fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
         BlockLease::PageReadGuard(value)
     }
