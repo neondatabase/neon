@@ -3928,7 +3928,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn layer_dumping() -> anyhow::Result<()> {
+    async fn delta_layer_dumping() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
