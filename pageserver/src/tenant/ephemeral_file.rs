@@ -184,6 +184,10 @@ impl BlobWriter for EphemeralFile {
 
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
+        // drop all pages from page cache
+        let cache = page_cache::get();
+        cache.drop_buffers_for_immutable(self.page_cache_file_id);
+
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
         if let Err(e) = res {
