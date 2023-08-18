@@ -48,6 +48,11 @@ def test_tenant_delete_smoke(
 
     env = neon_env_builder.init_start()
 
+    # lucky race with stopping from flushing a layer we fail to schedule any uploads
+    env.pageserver.allowed_errors.append(
+        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    )
+
     ps_http = env.pageserver.http_client()
 
     # first try to delete non existing tenant
