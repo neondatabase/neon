@@ -210,7 +210,7 @@ impl LayerManager {
     /// Called when compaction is completed.
     pub(crate) fn finish_compact_l0(
         &mut self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<dyn PersistentLayer>>,
         compact_to: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
@@ -224,7 +224,7 @@ impl LayerManager {
             // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
             // time, even though we dropped `Timeline::layers` inbetween.
             Self::delete_historic_layer(
-                layer_removal_cs.clone(),
+                &layer_removal_cs,
                 l,
                 &mut updates,
                 metrics,
@@ -238,14 +238,14 @@ impl LayerManager {
     /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
     pub(crate) fn finish_gc_timeline(
         &mut self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         gc_layers: Vec<Arc<dyn PersistentLayer>>,
         metrics: &TimelineMetrics,
     ) -> Result<ApplyGcResultGuard> {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
             Self::delete_historic_layer(
-                layer_removal_cs.clone(),
+                layer_removal_cs,
                 doomed_layer,
                 &mut updates,
                 metrics,
@@ -279,7 +279,7 @@ impl LayerManager {
     /// Remote storage is not affected by this operation.
     fn delete_historic_layer(
         // we cannot remove layers otherwise, since gc and compaction will race
-        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        _layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_>,
         metrics: &TimelineMetrics,
