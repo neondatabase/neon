@@ -6,7 +6,7 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
-use fail::FailScenario;
+
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize up failpoints support
-    let scenario = FailScenario::setup();
+    let scenario = pageserver::failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
