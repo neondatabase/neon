@@ -270,7 +270,8 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_broker", "main")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_broker", "main")
 
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
@@ -279,10 +280,6 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 
     endpoint = env.endpoints.create_start("test_broker")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
-
-    # learn neon timeline from compute
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
@@ -325,7 +322,8 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    env.neon_cli.create_branch("test_safekeepers_wal_removal")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_removal")
     endpoint = env.endpoints.create_start("test_safekeepers_wal_removal")
 
     # Note: it is important to insert at least two segments, as currently
@@ -337,9 +335,6 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             "INSERT INTO t SELECT generate_series(1,200000), 'payload'",
         ]
     )
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     # force checkpoint to advance remote_consistent_lsn
     pageserver_conn_options = {}
@@ -451,11 +446,9 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
 
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_safekeepers_wal_backup")
-    endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
-
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
+    timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_backup")
+    endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -504,12 +497,10 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
 
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_s3_wal_replay")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_s3_wal_replay")
 
     endpoint = env.endpoints.create_start("test_s3_wal_replay")
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     expected_sum = 0
 
@@ -794,13 +785,12 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_timeline_status")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_timeline_status")
     endpoint = env.endpoints.create_start("test_timeline_status")
 
     wa = env.safekeepers[0]
 
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     if not auth_enabled:
         wa_http_cli = wa.http_client()
@@ -884,14 +874,11 @@ def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_start_replication_term")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_start_replication_term")
     endpoint = env.endpoints.create_start("test_start_replication_term")
 
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
-
-    # learn neon timeline from compute
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     sk = env.safekeepers[0]
     sk_http_cli = sk.http_client()
@@ -919,14 +906,11 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_sk_auth")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_sk_auth")
     env.endpoints.create_start("test_sk_auth")
 
     sk = env.safekeepers[0]
-
-    # learn neon timeline from compute
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     tenant_token = env.auth_keys.generate_tenant_token(tenant_id)
     full_token = env.auth_keys.generate_safekeeper_token()
@@ -1182,17 +1166,14 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_replace_safekeeper")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_replace_safekeeper")
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     endpoint = env.endpoints.create("test_replace_safekeeper")
     endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
-
-    # learn neon timeline from compute
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -1445,16 +1426,14 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_pull_timeline")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_pull_timeline")
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     endpoint = env.endpoints.create("test_pull_timeline")
     endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
