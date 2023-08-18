@@ -138,21 +138,13 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
 
-    env = neon_env_builder.init_start()
+    # initial tenant will not be present on this pageserver
+    env = neon_env_builder.init_configs()
+    env.start()
     pageserver_http = env.pageserver.http_client()
 
     # allow because we are invoking this manually; we always warn on executing disk based eviction
     env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
-
-    # remove the initial tenant
-    assert env.initial_timeline
-    pageserver_http.tenant_detach(env.initial_tenant)
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    tenant_remote_storage = env.remote_storage.root / "tenants" / str(env.initial_tenant)
-    assert tenant_remote_storage.is_dir()
-    shutil.rmtree(tenant_remote_storage)
-    env.initial_tenant = TenantId("0" * 32)
-    env.initial_timeline = None
 
     # Choose small layer_size so that we can use low pgbench_scales and still get a large count of layers.
     # Large count of layers and small layer size is good for testing because it makes evictions predictable.
