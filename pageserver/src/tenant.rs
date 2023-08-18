@@ -1887,6 +1887,7 @@ impl Tenant {
     /// This function is not cancel-safe!
     ///
     /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
+    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
     async fn set_stopping(
         &self,
         progress: completion::Barrier,

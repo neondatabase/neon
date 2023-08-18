@@ -275,8 +275,9 @@ pub(crate) async fn remote_delete_mark_exists(
 /// It is resumable from any step in case a crash/restart occurs.
 /// There are three entrypoints to the process:
 /// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume`] is called during restarts when local or remote deletion marks are still there.
-/// Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
+/// 2. [`DeleteTenantFlow::resume_from_load`] is called during restarts when local or remote deletion marks are still there.
+/// 3. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
+///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
     #[default]
