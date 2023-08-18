@@ -390,7 +390,7 @@ def test_download_remote_layers_api(
     env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
     env.pageserver.allowed_errors.extend(
         [
-            f".*download_all_remote_layers.*{tenant_id}.*{timeline_id}.*layer download failed.*remote-storage-download-pre-rename failpoint",
+            ".*download failed: downloading failed, possibly for shutdown.*",
             f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
         ]
     )
