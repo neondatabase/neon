@@ -358,8 +358,8 @@ def test_timeline_resurrection_on_attach(
     ps_http = env.pageserver.http_client()
     pg = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    main_timeline_id = env.initial_timeline
 
     with pg.cursor() as cur:
         cur.execute("CREATE TABLE f (i integer);")

@@ -95,12 +95,12 @@ def test_remote_storage_backup_and_restore(
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Thats because of UnreliableWrapper's injected failures
     env.pageserver.allowed_errors.append(
-        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
+        f".*failed to fetch tenant deletion mark at tenants/{tenant_id}/deleted attempt 1.*"
     )
 
     checkpoint_numbers = range(1, 3)

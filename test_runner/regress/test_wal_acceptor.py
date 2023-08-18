@@ -281,8 +281,8 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
     # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
@@ -338,8 +338,8 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         ]
     )
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # force checkpoint to advance remote_consistent_lsn
     pageserver_conn_options = {}
@@ -454,9 +454,8 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     env.neon_cli.create_branch("test_safekeepers_wal_backup")
     endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
 
-    # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -509,9 +508,8 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     endpoint = env.endpoints.create_start("test_s3_wal_replay")
 
-    # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     expected_sum = 0
 
@@ -801,9 +799,8 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     wa = env.safekeepers[0]
 
-    # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     if not auth_enabled:
         wa_http_cli = wa.http_client()
@@ -893,8 +890,8 @@ def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
     # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     sk = env.safekeepers[0]
     sk_http_cli = sk.http_client()
@@ -923,13 +920,13 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_sk_auth")
-    endpoint = env.endpoints.create_start("test_sk_auth")
+    env.endpoints.create_start("test_sk_auth")
 
     sk = env.safekeepers[0]
 
     # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     tenant_token = env.auth_keys.generate_tenant_token(tenant_id)
     full_token = env.auth_keys.generate_safekeeper_token()
@@ -1194,8 +1191,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     endpoint.start()
 
     # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -1456,9 +1453,8 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
 
-    # learn neon timeline from compute
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)

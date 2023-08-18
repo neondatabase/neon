@@ -11,7 +11,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import TimelineId
 from fixtures.utils import query_scalar
 
 # Test configuration
@@ -117,8 +117,8 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
-    tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
-    timeline_id = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     cur.execute("CREATE TABLE foo (id int, counter int, t text)")
     cur.execute(

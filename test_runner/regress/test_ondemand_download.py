@@ -78,8 +78,8 @@ def test_ondemand_download_large_rel(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # We want to make sure that the data is large enough that the keyspace is partitioned.
     num_rows = 1000000
@@ -183,8 +183,8 @@ def test_ondemand_download_timetravel(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     lsns = []
 
