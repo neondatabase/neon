@@ -801,7 +801,7 @@ jobs:
 
       - name: Build vm image
         run: |
-          ./vm-builder 
+          ./vm-builder \
             -enable-file-cache \
             -enable-monitor \
             -enable-informant \
