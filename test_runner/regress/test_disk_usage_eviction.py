@@ -1,4 +1,3 @@
-import shutil
 import time
 from dataclasses import dataclass
 from typing import Dict, Tuple
@@ -14,7 +13,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
