@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TimelineId
-from fixtures.utils import query_scalar
 
 # Test configuration
 #

@@ -791,7 +791,6 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     wa = env.safekeepers[0]
 
-
     if not auth_enabled:
         wa_http_cli = wa.http_client()
         wa_http_cli.check_status()
