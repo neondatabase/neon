@@ -18,7 +18,7 @@
 //! Two types of pages are supported:
 //!
 //! * **Materialized pages**, filled & used by page reconstruction
-//! * **Immutable File pages**, filled & used by `crate::tenant::block_io` and `crate::tenant::ephemeral_file`.
+//! * **Immutable File pages**, filled & used by [`crate::tenant::block_io`] and [`crate::tenant::ephemeral_file`].
 //!
 //! Note that [`crate::tenant::ephemeral_file::EphemeralFile`] is generally mutable, but, it's append-only.
 //! It uses the page cache only for the blocks that are already fully written and immutable.
