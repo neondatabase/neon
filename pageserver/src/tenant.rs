@@ -3935,13 +3935,16 @@ mod tests {
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-        let layers = tline.layers.read().await;
-        let level0_deltas = layers.layer_map().get_level0_deltas()?;
+        let layer_map = tline.layers.read().await;
+        let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
 
         assert!(level0_deltas.len() > 0);
 
         for delta in level0_deltas {
-            let delta = layers.get_from_desc(&delta);
+            let delta = layer_map.get_from_desc(&delta);
+            // Ensure we are dumping a delta layer here
+            let delta = delta.downcast_delta_layer().unwrap();
+
             delta.dump(false, &ctx).await.unwrap();
             delta.dump(true, &ctx).await.unwrap();
         }
