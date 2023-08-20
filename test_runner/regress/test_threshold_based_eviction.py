@@ -10,7 +10,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import LayerMapInfo
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TimelineId
 from pytest_httpserver import HTTPServer
 
 # NB: basic config change tests are in test_tenant_conf.py
@@ -45,7 +44,6 @@ def test_threshold_based_eviction(
     )
 
     tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
-    assert isinstance(timeline_id, TimelineId)
 
     ps_http = env.pageserver.http_client()
     assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {

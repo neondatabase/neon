@@ -18,8 +18,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TenantId, TimelineId
-from fixtures.utils import query_scalar
+from fixtures.types import TenantId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -115,14 +114,12 @@ def test_metric_collection(
     # Order of fixtures shutdown is not specified, and if http server gets down
     # before pageserver, pageserver log might contain such errors in the end.
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
-    env.neon_cli.create_branch("test_metric_collection")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_metric_collection")
     endpoint = env.endpoints.create_start("test_metric_collection")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
-
-    tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
-    timeline_id = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
     cur.execute("CREATE TABLE foo (id int, counter int, t text)")
     cur.execute(
