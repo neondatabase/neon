@@ -275,8 +275,9 @@ pub(crate) async fn remote_delete_mark_exists(
 /// It is resumable from any step in case a crash/restart occurs.
 /// There are three entrypoints to the process:
 /// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume`] is called during restarts when local or remote deletion marks are still there.
-/// Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
+/// 2. [`DeleteTenantFlow::resume_from_load`] is called during restarts when local or remote deletion marks are still there.
+/// 3. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
+///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
     #[default]
@@ -403,7 +404,7 @@ impl DeleteTenantFlow {
         }
     }
 
-    pub(crate) async fn resume(
+    pub(crate) async fn resume_from_load(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         init_order: Option<&InitializationOrder>,
@@ -413,7 +414,7 @@ impl DeleteTenantFlow {
         let (_, progress) = completion::channel();
 
         tenant
-            .set_stopping(progress, true)
+            .set_stopping(progress, true, false)
             .await
             .expect("cant be stopping or broken");
 
@@ -430,6 +431,31 @@ impl DeleteTenantFlow {
         if timelines_path.exists() {
             tenant.load(init_order, ctx).await.context("load")?;
         }
+
+        Self::background(
+            guard,
+            tenant.conf,
+            tenant.remote_storage.clone(),
+            tenants,
+            tenant,
+        )
+        .await
+    }
+
+    pub(crate) async fn resume_from_attach(
+        guard: DeletionGuard,
+        tenant: &Arc<Tenant>,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        ctx: &RequestContext,
+    ) -> Result<(), DeleteTenantError> {
+        let (_, progress) = completion::channel();
+
+        tenant
+            .set_stopping(progress, false, true)
+            .await
+            .expect("cant be stopping or broken");
+
+        tenant.attach(ctx).await.context("attach")?;
 
         Self::background(
             guard,

@@ -29,6 +29,7 @@ use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -499,6 +500,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -513,7 +515,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            Some(remote_storage),
+            Some(remote_storage.clone()),
         ));
 
         // Do all the hard work in the background
@@ -528,17 +530,61 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                let make_broken = |t: &Tenant, err: anyhow::Error| {
+                    error!("attach failed, setting tenant state to Broken: {err:?}");
+                    t.state.send_modify(|state| {
+                        assert_eq!(
+                            *state,
+                            TenantState::Attaching,
+                            "the attach task owns the tenant state until activation is complete"
+                        );
+                        *state = TenantState::broken_from_reason(err.to_string());
+                    });
+                };
+
+                let pending_deletion = {
+                    match DeleteTenantFlow::should_resume_deletion(
+                        conf,
+                        Some(&remote_storage),
+                        &tenant_clone,
+                    )
+                    .await
+                    {
+                        Ok(should_resume_deletion) => should_resume_deletion,
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                    }
+                };
+
+                info!("pending_deletion {}", pending_deletion.is_some());
+
+                if let Some(deletion) = pending_deletion {
+                    match DeleteTenantFlow::resume_from_attach(
+                        deletion,
+                        &tenant_clone,
+                        tenants,
+                        &ctx,
+                    )
+                    .await
+                    {
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                        Ok(()) => return Ok(()),
+                    }
+                }
+
                 match tenant_clone.attach(&ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        error!("attach failed, setting tenant state to Broken: {:?}", e);
-                        tenant_clone.state.send_modify(|state| {
-                            assert_eq!(*state, TenantState::Attaching, "the attach task owns the tenant state until activation is complete");
-                            *state = TenantState::broken_from_reason(e.to_string());
-                        });
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
                 Ok(())
@@ -833,6 +879,7 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 let make_broken = |t: &Tenant, err: anyhow::Error| {
                     error!("load failed, setting tenant state to Broken: {err:?}");
                     t.state.send_modify(|state| {
@@ -880,7 +927,7 @@ impl Tenant {
                         .as_mut()
                         .and_then(|x| x.initial_logical_size_attempt.take());
 
-                    match DeleteTenantFlow::resume(
+                    match DeleteTenantFlow::resume_from_load(
                         deletion,
                         &tenant_clone,
                         init_order.as_ref(),
@@ -902,7 +949,7 @@ impl Tenant {
 
                 match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
-                        debug!("load finished",);
+                        debug!("load finished");
 
                         tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
@@ -1795,7 +1842,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress, false).await {
+        match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -1837,15 +1884,18 @@ impl Tenant {
     /// This function is not cancel-safe!
     ///
     /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
+    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
     async fn set_stopping(
         &self,
         progress: completion::Barrier,
         allow_transition_from_loading: bool,
+        allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
+            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
@@ -1862,12 +1912,19 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) | TenantState::Attaching => {
-                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            TenantState::Activating(_) => {
+                unreachable!("1we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Attaching => {
+                if !allow_transition_from_attaching {
+                    unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
+                };
+                *current_state = TenantState::Stopping { progress };
+                true
             }
             TenantState::Loading => {
                 if !allow_transition_from_loading {
-                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                    unreachable!("3we ensured above that we're done with activation, and, there is no re-activation")
                 };
                 *current_state = TenantState::Stopping { progress };
                 true
@@ -1943,7 +2000,8 @@ impl Tenant {
         self.set_broken_no_wait(reason)
     }
 
-    pub(crate) fn set_broken_no_wait(&self, reason: String) {
+    pub(crate) fn set_broken_no_wait(&self, reason: impl Display) {
+        let reason = reason.to_string();
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
