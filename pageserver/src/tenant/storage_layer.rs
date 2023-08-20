@@ -1223,6 +1223,10 @@ enum LayerKind {
     Image(image_layer::ImageLayerInner),
 }
 
+mod heavier_once_cell {
+    pub(super) use utils::sync::heavier_once_cell::{Guard, OnceCell};
+}
+
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`](super::layer_map::LayerMap).
 ///
