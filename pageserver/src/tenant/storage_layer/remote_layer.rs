@@ -151,7 +151,6 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn,
-                false,
                 layer_metadata.file_size(),
             ),
             layer_metadata: layer_metadata.clone(),
