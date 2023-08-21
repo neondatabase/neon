@@ -433,14 +433,29 @@ impl Drop for LayerE {
         // SEMITODO: yes, this is sync, could spawn as well..
         let _g = span.entered();
 
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            tracing::error!(layer = %self, "failed to remove garbage collected layer: {e}");
-        } else if let Some(timeline) = self.timeline.upgrade() {
-            timeline
-                .metrics
-                .resident_physical_size_gauge
-                .sub(self.layer_desc().file_size);
+        let mut removed = false;
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {
+                removed = true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // FIXME: unsure how to handle this. there are no deleted by mistake here, but it
+                // feels like the downloadedness state tracking, and so knowing here if the file
+                // should be present or not, requires load_layer_map fixing.
+            }
+            Err(e) => {
+                // FIXME: it is possible, that we've just evicted the layer or it was always remote
+                tracing::error!(layer = %self, "failed to remove garbage collected layer: {e}");
+            }
+        }
 
+        if let Some(timeline) = self.timeline.upgrade() {
+            if removed {
+                timeline
+                    .metrics
+                    .resident_physical_size_gauge
+                    .sub(self.layer_desc().file_size);
+            }
             if let Some(remote_client) = timeline.remote_client.as_ref() {
                 let res =
                     remote_client.schedule_layer_file_deletion(&[self.layer_desc().filename()]);
