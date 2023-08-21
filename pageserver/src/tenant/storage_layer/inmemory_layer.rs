@@ -111,11 +111,6 @@ impl InMemoryLayer {
         self.start_lsn..self.end_lsn_or_max()
     }
 
-    pub(crate) fn is_incremental(&self) -> bool {
-        // in-memory layer is always considered incremental.
-        true
-    }
-
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
@@ -218,10 +213,6 @@ impl InMemoryLayer {
 
 #[async_trait::async_trait]
 impl Layer for InMemoryLayer {
-    fn is_incremental(&self) -> bool {
-        self.is_incremental()
-    }
-
     async fn get_value_reconstruct_data(
         &self,
         key: Key,
