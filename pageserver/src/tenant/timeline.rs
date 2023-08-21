@@ -1200,12 +1200,6 @@ impl Timeline {
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Layer],
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        // ensure that the layers have finished uploading
-        remote_client
-            .wait_completion()
-            .await
-            .context("wait for layer upload ops to complete")?;
-
         {
             // to avoid racing with detach and delete_timeline
             let state = self.current_state();
@@ -3615,17 +3609,6 @@ impl Timeline {
             return Ok(());
         }
 
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See remote_timeline_client module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
-        }
-
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
@@ -3848,17 +3831,6 @@ impl Timeline {
         info!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
-
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
-        }
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
