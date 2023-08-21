@@ -950,6 +950,9 @@ to S3.
 
 #### Case A: re-attachment to other nodes
 
+In this section we use the <attach_gen>-<node_id>-<node_gen> shorthand for object
+suffixes, see [generation numbers](#generation-numbers)
+
 1. Let's say node 0 fails in a cluster of three nodes 0, 1, 2.
 2. Some external mechanism notices that the node is unavailable and initiates
    movement of all tenants attached to that node to a different node. In
