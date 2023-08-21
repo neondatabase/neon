@@ -281,6 +281,9 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         ), "ensure that remote_physical_size metric corresponds to layer map dump"
 
     log.info("before runnning GC, ensure that remote_physical size is zero")
+    # leaving index_part.json upload from successful compaction out will show
+    # up here as a mismatch between remove_physical_size and summed up layermap
+    # size
     ensure_resident_and_remote_size_metrics()
 
     log.info("run GC")
