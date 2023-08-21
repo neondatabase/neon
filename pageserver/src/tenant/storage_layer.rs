@@ -604,6 +604,15 @@ impl LayerE {
         }
     }
 
+    /// Access the current state without waiting for the file to be downloaded.
+    ///
+    /// Used by eviction only. Requires that we've initialized to state which is respective to the
+    /// actual residency state.
+    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+        let locked = self.inner.get();
+        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
+    }
+
     /// Delete the layer file when the `self` gets dropped, also schedule a remote index upload
     /// then perhaps.
     pub(crate) fn garbage_collect(&self) {
@@ -656,11 +665,7 @@ impl LayerE {
         })
     }
 
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
-        let locked = self.inner.get();
 
-        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
-    }
 
     fn get_or_apply_evictedness(
         guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
