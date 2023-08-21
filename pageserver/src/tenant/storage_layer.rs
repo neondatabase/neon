@@ -80,7 +80,7 @@ pub struct ValueReconstructState {
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from Layer::get_page_reconstruct_data
+/// Return value from [`LayerE::get_value_reconstruct_data`]
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -311,7 +311,7 @@ impl LayerAccessStats {
 ///
 /// However when we want something evicted, we cannot evict it right away as there might be current
 /// reads happening on it. It has been for example searched from [`LayerMap`] but not yet
-/// [`Layer::get_value_reconstruct_data`].
+/// [`LayerE::get_value_reconstruct_data`].
 ///
 /// [`LayerMap`]: crate::tenant::layer_map::LayerMap
 enum ResidentOrWantedEvicted {
@@ -348,6 +348,21 @@ impl ResidentOrWantedEvicted {
     }
 }
 
+/// A Layer contains all data in a "rectangle" consisting of a range of keys and
+/// range of LSNs.
+///
+/// There are two kinds of layers, in-memory and on-disk layers. In-memory
+/// layers are used to ingest incoming WAL, and provide fast access to the
+/// recent page versions. On-disk layers are stored as files on disk, and are
+/// immutable. This trait presents the common functionality of in-memory and
+/// on-disk layers.
+///
+/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
+/// A delta layer contains all modifications within a range of LSNs and keys.
+/// An image layer is a snapshot of all the data in a key-range, at a single
+/// LSN.
+///
+/// This type models the on-disk layers, which can be evicted and on-demand downloaded.
 // TODO:
 // - internal arc, because I've now worked away majority of external wrapping
 // - load time api which checks that files are present, fixmes in load time, remote timeline
@@ -614,6 +629,17 @@ impl LayerE {
         self.wanted_garbage_collected.store(true, Ordering::Release);
     }
 
+    /// Return data needed to reconstruct given page at LSN.
+    ///
+    /// It is up to the caller to collect more data from previous layer and
+    /// perform WAL redo, if necessary.
+    ///
+    /// See PageReconstructResult for possible return values. The collected data
+    /// is appended to reconstruct_data; the caller should pass an empty struct
+    /// on first call, or a struct with a cached older image of the page if one
+    /// is available. If this returns ValueReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data' to
+    /// collect more data.
     pub(crate) async fn get_value_reconstruct_data(
         self: &Arc<Self>,
         key: Key,
@@ -621,9 +647,20 @@ impl LayerE {
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
+        use anyhow::ensure;
+
         let layer = self.get_or_maybe_download(true, Some(ctx)).await?;
         self.access_stats
             .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+
+        if self.layer_desc().is_delta {
+            ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
+            ensure!(self.layer_desc().key_range.contains(&key));
+        } else {
+            ensure!(self.layer_desc().key_range.contains(&key));
+            ensure!(lsn_range.start >= self.layer_desc().image_layer_lsn());
+            ensure!(lsn_range.end >= self.layer_desc().image_layer_lsn());
+        }
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data)
@@ -1263,7 +1300,6 @@ impl DownloadedLayer {
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 
-        // FIXME: some asserts are left behind in DeltaLayer, ImageLayer
         match self.get().await? {
             Delta(d) => {
                 d.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
@@ -1317,79 +1353,10 @@ enum LayerKind {
     Image(image_layer::ImageLayerInner),
 }
 
-/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`](super::layer_map::LayerMap).
-///
-/// All layers should implement a minimal `std::fmt::Debug` without tenant or
-/// timeline names, because those are known in the context of which the layers
-/// are used in (timeline).
-#[async_trait::async_trait]
-pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
-    ///
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// See PageReconstructResult for possible return values. The collected data
-    /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns ValueReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data' to
-    /// collect more data.
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult>;
-}
-
 /// Get a layer descriptor from a layer.
 pub trait AsLayerDesc {
     /// Get the layer descriptor.
     fn layer_desc(&self) -> &PersistentLayerDesc;
-}
-
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN.
-pub trait PersistentLayer: Layer + AsLayerDesc {
-    /// File name used for this layer, both in the pageserver's local filesystem
-    /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName {
-        self.layer_desc().filename()
-    }
-
-    // Path to the layer file in the local filesystem.
-    // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
-
-    /// Permanently remove this layer from disk.
-    fn delete_resident_layer_file(&self) -> Result<()>;
-
-    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
-        None
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        false
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
-
-    fn access_stats(&self) -> &LayerAccessStats;
 }
 
 pub mod tests {
@@ -1427,19 +1394,6 @@ pub mod tests {
             }
         }
     }
-}
-
-/// Helper enum to hold a PageServerConf, or a path
-///
-/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
-/// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'pagectl' binary, we need to construct a Layer
-/// struct for a file on disk, without having a page server running, so that we have no
-/// config. In that case, we use the Path variant to hold the full path to the file on
-/// disk.
-enum PathOrConf {
-    Path(PathBuf),
-    Conf(&'static PageServerConf),
 }
 
 /// Range wrapping newtype, which uses display to render Debug.

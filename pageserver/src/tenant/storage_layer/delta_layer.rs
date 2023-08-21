@@ -34,18 +34,16 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{
-    LayerE, PersistentLayer, ValueReconstructResult, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{LayerE, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
+use pageserver_api::models::LayerAccessKind;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::io::{Seek, SeekFrom};
 use std::ops::Range;
@@ -61,10 +59,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{
-    AsLayerDesc, DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, PathOrConf,
-    PersistentLayerDesc, ResidentLayer,
-};
+use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
 
 ///
 /// Header stored in the beginning of the file
@@ -192,7 +187,7 @@ impl DeltaKey {
 /// Otherwise the struct is just a placeholder for a file that exists on disk,
 /// and it needs to be loaded before using it in queries.
 pub struct DeltaLayer {
-    path_or_conf: PathOrConf,
+    path: PathBuf,
 
     pub desc: PersistentLayerDesc,
 
@@ -238,19 +233,6 @@ impl std::fmt::Debug for DeltaLayerInner {
     }
 }
 
-#[async_trait::async_trait]
-impl Layer for DeltaLayer {
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
-            .await
-    }
-}
 /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
 impl std::fmt::Display for DeltaLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -261,28 +243,6 @@ impl std::fmt::Display for DeltaLayer {
 impl AsLayerDesc for DeltaLayer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         &self.desc
-    }
-}
-
-impl PersistentLayer for DeltaLayer {
-    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
-        Some(self)
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        self.local_path()
-    }
-
-    fn delete_resident_layer_file(&self) -> Result<()> {
-        self.delete_resident_layer_file()
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        self.info(reset)
-    }
-
-    fn access_stats(&self) -> &LayerAccessStats {
-        self.access_stats()
     }
 }
 
@@ -357,69 +317,6 @@ impl DeltaLayer {
         Ok(())
     }
 
-    pub(crate) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.desc.lsn_range.start);
-
-        ensure!(self.desc.key_range.contains(&key));
-
-        let inner = self
-            .load(LayerAccessKind::GetValueReconstructData, ctx)
-            .await?;
-        inner
-            .get_value_reconstruct_data(key, lsn_range, reconstruct_state)
-            .await
-    }
-
-    pub(crate) fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
-    }
-
-    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.layer_desc().filename().file_name();
-        let lsn_range = self.layer_desc().lsn_range.clone();
-
-        let access_stats = self.access_stats.as_api_model(reset);
-
-        HistoricLayerInfo::Delta {
-            layer_file_name,
-            layer_file_size: self.desc.file_size,
-            lsn_start: lsn_range.start,
-            lsn_end: lsn_range.end,
-            remote: false,
-            access_stats,
-        }
-    }
-
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.access_stats
-    }
-
-    fn path_for(
-        path_or_conf: &PathOrConf,
-        tenant_id: &TenantId,
-        timeline_id: &TimelineId,
-        fname: &DeltaFileName,
-    ) -> PathBuf {
-        match path_or_conf {
-            PathOrConf::Path(path) => path.clone(),
-            PathOrConf::Conf(conf) => conf
-                .timeline_path(tenant_id, timeline_id)
-                .join(fname.to_string()),
-        }
-    }
-
     fn temp_path_for(
         conf: &PageServerConf,
         tenant_id: &TenantId,
@@ -463,50 +360,20 @@ impl DeltaLayer {
     async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let summary = match &self.path_or_conf {
-            PathOrConf::Conf(_) => Some(Summary::from(self)),
-            PathOrConf::Path(_) => None,
-        };
+        let loaded = DeltaLayerInner::load(&path, None)?;
 
-        let loaded = DeltaLayerInner::load(&path, summary)?;
+        // not production code
 
-        if let PathOrConf::Path(ref path) = self.path_or_conf {
-            // not production code
+        let actual_filename = self.path.file_name().unwrap().to_str().unwrap().to_owned();
+        let expected_filename = self.layer_desc().filename().file_name();
 
-            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-            let expected_filename = self.filename().file_name();
-
-            if actual_filename != expected_filename {
-                println!("warning: filename does not match what is expected from in-file summary");
-                println!("actual: {:?}", actual_filename);
-                println!("expected: {:?}", expected_filename);
-            }
+        if actual_filename != expected_filename {
+            println!("warning: filename does not match what is expected from in-file summary");
+            println!("actual: {:?}", actual_filename);
+            println!("expected: {:?}", expected_filename);
         }
 
         Ok(Arc::new(loaded))
-    }
-
-    /// Create a DeltaLayer struct representing an existing file on disk.
-    pub fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
-        filename: &DeltaFileName,
-        file_size: u64,
-        access_stats: LayerAccessStats,
-    ) -> DeltaLayer {
-        DeltaLayer {
-            path_or_conf: PathOrConf::Conf(conf),
-            desc: PersistentLayerDesc::new_delta(
-                tenant_id,
-                timeline_id,
-                filename.key_range.clone(),
-                filename.lsn_range.clone(),
-                file_size,
-            ),
-            access_stats,
-            inner: OnceCell::new(),
-        }
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
@@ -523,7 +390,7 @@ impl DeltaLayer {
             .context("get file metadata to determine size")?;
 
         Ok(DeltaLayer {
-            path_or_conf: PathOrConf::Path(path.to_path_buf()),
+            path: path.to_path_buf(),
             desc: PersistentLayerDesc::new_delta(
                 summary.tenant_id,
                 summary.timeline_id,
@@ -536,17 +403,9 @@ impl DeltaLayer {
         })
     }
 
-    fn layer_name(&self) -> DeltaFileName {
-        self.desc.delta_file_name()
-    }
-    /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            &self.desc.tenant_id,
-            &self.desc.timeline_id,
-            &self.layer_name(),
-        )
+    /// Path to the layer file
+    fn path(&self) -> PathBuf {
+        self.path.clone()
     }
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
@@ -720,10 +579,10 @@ impl DeltaLayerWriterInner {
             metadata.len(),
         );
 
-        let layer = LayerE::for_written(self.conf, timeline, desc)?;
-
         // fsync the file
         file.sync_all()?;
+
+        let layer = LayerE::for_written(self.conf, timeline, desc)?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.
