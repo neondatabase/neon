@@ -251,32 +251,33 @@ leaking objects is an optimization, accomplished by making this queue persistent
 ### Deletion Part 2: WAL trim changes (delay `remote_consistent_lsn` updates)
 
 Remote objects are not the only kind of deletion the pageserver does: it also indirectly deletes
-WAL data, by feeding back remote_consistent_lsn to safekeepers, as a hint to the safekeepers that
+WAL data, by feeding back remote_consistent_lsn to safekeepers, as a signal to the safekeepers that
 they may drop data below this LSN.
 
-We may solve for safety of remote_consistent_lsn updates in the same way as for deletions: before indicating to safekeepers
-that they may trim up to a particular LSN, pageservers should communicate with the control plane
-to confirm that their node generation is current. This guarantees that any future generation will
-be starting from the last metadata that this generation wrote out, i.e. the S3 state which contains
-all the data from the WAL up to the proposed trim point.
+We may solve for safety of remote_consistent_lsn updates in the same way as for S3 deletions. Before indicating to safekeepers
+that they may trim up to some LSN `L0`, pageservers must do the following in order:
 
-The pageservers indicate what to trim by the `remote_consistent_lsn` field in messages to
-the safekeeper. The pageservers will change to only advertise the true remote_consistent_lsn
-after they have periodically checked the validity of their generation: this will slightly
-delay WAL trimming by whatever period we decide to make that control plane check-in.
+1. persist index_part that covers data up to LSN `L0`
+2. call to control plane to validate their attachment + node generation number
+3. update the `remote_consistent_lsn` that they send to the safekeepers to `L0`
 
-The `remote_consistent_lsn` advertised to a safekeeper is the value from _before_ the
-validation request to the control plane started, not the value at the time the
-pageserver receives a response. This will require an extra field internally to
-the pageserver, to store some "pending remote_consistent_lsn" that may be shared
-with the safekeeper after validation completes.
+**Note:** at step 3 we are not advertising the _latest_ remote_consistent_lsn, we are
+advertising the value immediately before we started the validation RPC. This provides
+a strong ordering guarantee.
+
+Internally, the pagekeeper will have two remote_consistent_lsn values: the one that
+reflects its latest write to remote storage, and the one that reflects the most
+recent validation of generation number. It is only the latter value that may
+be advertised to the outside world (i.e. to the safekeeper).
 
 The control plane remains unaware of `remote_consistent_lsn`: it only has to validate
 the freshness of generation numbers, thereby granting the pageserver permission to
 share the information with the safekeeper.
 
-In subsequent sections and RFCs, when discussing correctness, read "deletion" as meaning
-both the deletion of remote objects, and publishing updates to remote_consistent_lsn.
+For convenience, in subsequent sections and RFCs we will use "deletion" to mean both deletion
+of objects in S3, and updates to the `remote_consistent_lsn`, as updates to the remote consistent
+LSN are de-facto deletions done via the safekeeper, and both kinds of deletion are subject to
+the same generation validation requirement.
 
 ### Index changes
 
