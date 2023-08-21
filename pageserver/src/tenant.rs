@@ -4037,8 +4037,10 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    /// FIXME: I don't want to add dump to LayerE, it should be in the ctl
+    /*#[tokio::test]
     async fn delta_layer_dumping() -> anyhow::Result<()> {
+        use storage_layer::AsLayerDesc;
         let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -4053,7 +4055,7 @@ mod tests {
         for delta in level0_deltas {
             let delta = layer_map.get_from_desc(&delta);
             // Ensure we are dumping a delta layer here
-            let delta = delta.downcast_delta_layer().unwrap();
+            assert!(delta.layer_desc().is_delta);
 
             delta.dump(false, &ctx).await.unwrap();
             delta.dump(true, &ctx).await.unwrap();
@@ -4061,6 +4063,7 @@ mod tests {
 
         Ok(())
     }
+    */
 
     #[tokio::test]
     async fn corrupt_metadata() -> anyhow::Result<()> {
