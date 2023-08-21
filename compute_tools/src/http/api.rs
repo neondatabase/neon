@@ -34,7 +34,7 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
 }
 
 // Service function to handle all available routes.
-async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body> {
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -204,7 +204,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
 
 async fn handle_configure_request(
     req: Request<Body>,
-    compute: &Arc<ComputeNode>,
+    compute: Arc<ComputeNode>,
 ) -> Result<String, (String, StatusCode)> {
     if !compute.live_config_allowed {
         return Err((
@@ -214,8 +214,7 @@ async fn handle_configure_request(
     }
 
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
-    let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
-    if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
+    if let Ok(request) = serde_json::from_slice::<ConfigurationRequest>(&body_bytes) {
         let spec = request.spec;
 
         let parsed_spec = match ParsedSpec::try_from(spec) {
@@ -249,27 +248,29 @@ async fn handle_configure_request(
         // This is needed to do not block the main pool of workers and
         // be able to serve other requests while some particular request
         // is waiting for compute to finish configuration.
-        let c = compute.clone();
-        task::spawn_blocking(move || {
-            let mut state = c.state.lock().unwrap();
-            while state.status != ComputeStatus::Running {
-                state = c.state_changed.wait(state).unwrap();
-                info!(
-                    "waiting for compute to become Running, current status: {:?}",
-                    state.status
-                );
+        {
+            let compute = compute.clone();
+            task::spawn_blocking(move || {
+                let mut state = compute.state.lock().unwrap();
+                while state.status != ComputeStatus::Running {
+                    state = compute.state_changed.wait(state).unwrap();
+                    info!(
+                        "waiting for compute to become Running, current status: {:?}",
+                        state.status
+                    );
 
-                if state.status == ComputeStatus::Failed {
-                    let err = state.error.as_ref().map_or("unknown error", |x| x);
-                    let msg = format!("compute configuration failed: {:?}", err);
-                    return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+                    if state.status == ComputeStatus::Failed {
+                        let err = state.error.as_ref().map_or("unknown error", |x| x);
+                        let msg = format!("compute configuration failed: {:?}", err);
+                        return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+                    }
                 }
-            }
 
-            Ok(())
-        })
-        .await
-        .unwrap()?;
+                Ok(())
+            })
+            .await
+            .unwrap()?;
+        }
 
         // Return current compute state if everything went well.
         let state = compute.state.lock().unwrap().clone();
@@ -307,7 +308,7 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
                         // information in this API.
                         tracing_utils::http::tracing_handler(
                             req,
-                            |req| routes(req, &state),
+                            |req| routes(req, state.clone()),
                             OtelName::UriPath,
                         )
                         .await,
@@ -328,9 +329,7 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
 }
 
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
-pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
-    let state = Arc::clone(state);
-
+pub fn launch_http_server(port: u16, state: Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     Ok(thread::Builder::new()
         .name("http-endpoint".into())
         .spawn(move || serve(port, state))?)
