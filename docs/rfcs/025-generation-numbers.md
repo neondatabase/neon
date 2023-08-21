@@ -159,7 +159,7 @@ The node generation is useful other ways, beyond it's core correctness purpose:
 - node generation numbers enable building fencing into any network protocol (for example
   communication with safekeepers) to refuse to communicate with stale/partitioned nodes.
 
-The two generation numbers have a different behavior for stale generations:
+Node that the two generation numbers have a different behavior for stale generations:
 
 - A pageserver with a stale generation number should immediately terminate: it is never intended
   to have two pageservers with the same node ID.
@@ -170,30 +170,10 @@ The two generation numbers have a different behavior for stale generations:
 
 ### Object Key Changes
 
-All object keys (layer objects and index objects) will have a suffix as follows:
+#### Generation suffix
 
-```
-   <attachment generation>-<node id>-<node generation>
-```
-
-The ordering of elements in the suffix is not important for correctness. As a speculative
-optimization, the attachment generation is first in case we want to use this when searching
-using a prefixed ListObjects2 for the most recent index from the current or previous attachment generation.
-
-To avoid unreasonably long keys, we may make some reasonable assumptions about max lengths
-of these integers:
-
-- 32 bit attachment generation (this easily accommodates reasonable worst case scenarios like
-  having to migrate a tenant every minute for 5 years)
-- 16 bit node ID (this doesn't have to accommodate all pageservers ever, just all the pageservers
-  that act together in a logical cluster)
-- 32 bit node generation (as with attachment generation, this can handle even very frequent restarts)
-
-So an example suffix for generation 1 of node 0 might look like:
-
-```
-   00000001-0000-00000001
-```
+All object keys (layer objects and index objects) will contain a numeric suffix that
+advances as the attachment generation and node generation advance.
 
 This suffix is the primary mechanism for protecting against split-brain situations, and
 enabling safe multi-attachment of tenants:
@@ -202,6 +182,47 @@ enabling safe multi-attachment of tenants:
   some rogue pageserver still running) will not try to write to the same objects.
 - Multiple attachments of the same tenant will not try to write to the same objects, as
   each attachment would have a distinct attachment generation.
+  To avoid coupling our storage format tightly with the way we manage generation numbers,
+  they will be packed into a single u64 that must obey just the following properties:
+
+- On a node restart, the suffix must increase
+- On a change to the attachment, the suffix must increase
+- Sorting the suffixes numerically must give the most logically recent data.
+
+```
+000000 0000 000000
+^^^^^^--------------------- 24 bit attachment generation
+
+       ^^^^---------------- 16 bit node ID
+
+            ^^^^^^--------- 24 bit node generation
+```
+
+Hereafter, when referring to "the suffix", we mean this u64 composite that contains the
+attachment generation and the node generation. Suffixes are written in a human-frendly
+form with dashes between the elements.
+
+For example, we would write the suffix for attachment generation 7 to node ID 0 with node generation 1
+like so, while the actual object suffix would be packed into a u64:
+
+```
+   00000007-0000-00000001
+
+```
+
+The semantic meaning of these bits may change as the system design evolves: for example, if we
+switched to a model of ephemeral node IDs that changed on each startup, then the
+way we compose the suffix would change, but the actual object & index format would
+remain the same (it just sees an opaque u64).
+
+The fixed number of bits for each field is used to provide a fixed key length. The justification
+for the lengths being sufficient are:
+
+- 24 bit generations are enough for the generation to increment 9000 times per day over
+  a 5 year system lifetime (in practice generation increments are expected to be far rarer,
+  perhaps of the order of 1 per day if we are dynamically balancing load)
+- 16 bit node ID is enough for 35 new pageservers to be deployed every day over a 5 year
+  system lifetime. In practice the frequency is likely to be more like 1 per week, and
 
 ### Deletion Part 1: Remote object deletions
 
@@ -284,8 +305,7 @@ the same generation validation requirement.
 Since object keys now include a generation suffix, the index of these keys must also be updated.
 
 IndexPart currently stores keys and LSNs sufficient to reconstruct key names: this would be
-extended to store the generation numbers with which a particular object was written, to enable
-reconstructing the suffix as well.
+extended to store the suffix as well.
 
 This will increase the size of the file, but only modestly: layers are already encoded as
 their string-ized form, so the overhead is about 20 bytes per layer. This will be less if/when
@@ -303,7 +323,9 @@ the index storage format is migrated to a binary format from JSON.
 #### Metadata reconciliation
 
 Whether for a new attachment or just a pageserver restart, Tenant _should_
-reconcile with remote metadata.
+reconcile with remote metadata. Note that "reconcile" in this context is
+used generically, and does not refer specifically to the logic currently
+in the `reconcile_with_remote` function.
 
 If the remote index reaches a lower LSN than the pageserver's local state,
 then the pageserver is free to ignore the remote index and use its local
@@ -829,7 +851,7 @@ to represent generation-less layers.
 We will do a two phase rollout, probably over multiple releases because we will naturally
 have some of the read-side code ready before the overall functionality is ready:
 
-1. Deploy pageservers which understand the new index format and generation numbers
+1. Deploy pageservers which understand the new index format and generation suffixes
    in keys, but do not write objects with generation numbers in the keys.
 2. Deploy pageservers that write objects with generation numbers in the keys.
 
@@ -850,27 +872,21 @@ has taken action in response to the node being down.
 
 - After restart, the node does no writes until it can obtain a fresh generation
   number from the control plane.
-- Once issued a new generation number, the node synchronizes with control plane to learn of any
-  changes to its attachments, and receives a fast O(1) response informing it that it may continue
-  to operate with all its existing attachments (assuming the optimization from
-  "Optimizations" section for pageserver startup)
-- Node proceeds to operate as normal, trusting that all its local content
-  for attached tenants is up to date.
+- Once it has a generation number, it may activate all existing attachments. The
+  generation of its attachments is stored on disk. This may be stale, but that is
+  safe.
+- If any of its attachments were in fact stale (i.e. had be reassigned to another
+  node while this node was offline), then:
+  - Deletions to those attachments will be blocked by generation validation on the
+    delete path
+  - The control plane is expected to eventually detach this tenant from the
+    pageserver.
 
-The only difference between this and how the system behaves today is that
-the node generation number increases, and the pageserver's startup depends
-on availability of the control plane. The improvement is an increase in _safety_: we
-are no longer assuming that we may continue to write to all our attached
-tenants' data, we are confirming it before writing.
+### Failure of a pageserver
 
-### Unexpected "death" (possible network partition) of a pageserver
-
-Consider a network partition where somewhere there is a functioning node
-that believes it is the rightful holder of a particular node ID, and it
-can write to S3 even though it can't communicate with our control plane.
-
-This is the general case of a node dying: we must always assume that the
-unresponsive node might be network partitioned and still writing to S3.
+In this context, read "failure" as the most ambiguous possible case, where
+a pageserver is unavailable to clients and control plane, but may still be executing and talking
+to S3.
 
 #### Case A: re-attachment to other nodes
 
@@ -897,11 +913,15 @@ this is not necessary for correctness:
 
 - A hard-stop of the VM it is running on
 - It tries to communicate with another peer that sends it an error response
-  indicating its generation is out of date
+  indicating its node generation is out of date
 - It tries to do some deletions, and discovers when synchronizing with the
-  control plane that its generation number is stale.
+  control plane that its node generation number is stale.
 
-#### Case B: direct node replacement with blank node (cold standby)
+#### Case B: direct node replacement with same node_id
+
+This is the scenario we would experience if running a kubernetes Statefulset
+of pageservers: kubernetes would start a new node without guaranteeing that the
+old "failed" node is really dead.
 
 1. Let's say node 0 fails, and there may be some other peers but they aren't relevant.
 2. Some external mechanism notices that the node is unavailable, and creates
@@ -959,3 +979,20 @@ would be a separate change to the control plane to store standby location(s) for
 the standbys do not write to S3, they do not need to be assigned generation IDs. When a tenant is
 re-attached to a standby location, that would increment the tenant attachment generation and this
 would work the same as any other attachment change, but with a warm cache.
+
+## Ephemeral node IDs
+
+This RFC intentionally avoids changing anything fundamental about how pageservers are identified
+and registered with the control plane, to avoid coupling the implementation of pageserver split
+brain protection with more fundamental changes in the management of the pageservers.
+
+However, we also accommodate the possibility of a future change to fully ephemeral pageserver IDs,
+where an attachment would implicitly have a lifetime bounded to one pageserver process lifetime,
+as the pageserver ID would change on restart. In this model, separate node and attachment
+generations are unnecessary, but the storage format doesn't change: the [generation suffix](#generation-suffix)
+may simply be the attachment generation, without any per-node component, as the attachment
+generation would change any time an attached node restarted.
+
+That is just one possible future direction for node management: the imporant thing is just that
+we avoid coding in assumptions about cluster management into our storage format, hence the opaque
+u64 used in the object suffix.
