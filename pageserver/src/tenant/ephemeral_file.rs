@@ -3,7 +3,6 @@
 
 use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
@@ -61,19 +60,8 @@ impl EphemeralFile {
     pub(crate) fn size(&self) -> u64 {
         self.size
     }
-}
 
-/// Does the given filename look like an ephemeral file?
-pub fn is_ephemeral_file(filename: &str) -> bool {
-    if let Some(rest) = filename.strip_prefix("ephemeral-") {
-        rest.parse::<u32>().is_ok()
-    } else {
-        false
-    }
-}
-
-impl BlobWriter for EphemeralFile {
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
+    pub(crate) fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
             /// The block to which the next [`push_bytes`] will write.
@@ -179,6 +167,15 @@ impl BlobWriter for EphemeralFile {
         self.size += srcbuf.len() as u64;
 
         Ok(pos)
+    }
+}
+
+/// Does the given filename look like an ephemeral file?
+pub fn is_ephemeral_file(filename: &str) -> bool {
+    if let Some(rest) = filename.strip_prefix("ephemeral-") {
+        rest.parse::<u32>().is_ok()
+    } else {
+        false
     }
 }
 
