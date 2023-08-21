@@ -3149,7 +3149,6 @@ impl Timeline {
                     self.tenant_id,
                     &img_range,
                     lsn,
-                    false, // image layer always covers the full range
                 )?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {

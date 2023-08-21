@@ -509,7 +509,6 @@ struct ImageLayerWriterInner {
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
-    is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
@@ -525,7 +524,6 @@ impl ImageLayerWriterInner {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -560,7 +558,6 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
-            is_incremental,
         };
 
         Ok(writer)
@@ -695,7 +692,6 @@ impl ImageLayerWriter {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(ImageLayerWriterInner::new(
@@ -704,7 +700,6 @@ impl ImageLayerWriter {
                 tenant_id,
                 key_range,
                 lsn,
-                is_incremental,
             )?),
         })
     }
