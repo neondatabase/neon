@@ -94,11 +94,6 @@ impl Layer for RemoteLayer {
 
         Ok(())
     }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
 }
 
 /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.

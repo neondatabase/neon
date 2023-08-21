@@ -254,10 +254,6 @@ impl Layer for DeltaLayer {
         self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
             .await
     }
-
-    fn is_incremental(&self) -> bool {
-        self.is_incremental()
-    }
 }
 /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
 impl std::fmt::Display for DeltaLayer {
@@ -388,10 +384,6 @@ impl DeltaLayer {
 
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.layer_desc().lsn_range.clone()
-    }
-
-    pub(crate) fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
     }
 
     pub(crate) fn local_path(&self) -> Option<PathBuf> {

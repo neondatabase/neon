@@ -344,12 +344,6 @@ impl LayerAccessStats {
 /// are used in (timeline).
 #[async_trait::async_trait]
 pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
-    /// Does this layer only contain some data for the key-range (incremental),
-    /// or does it contain a version of every page? This is important to know
-    /// for garbage collecting old layers: an incremental layer depends on
-    /// the previous non-incremental layer.
-    fn is_incremental(&self) -> bool;
-
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
