@@ -3785,10 +3785,10 @@ impl Timeline {
             // we still might easily hit the limit otherwise.
             let warn_limit = target_file_size * 2 + page_cache::PAGE_SZ as u64 * 2;
             for layer in new_layers.iter() {
-                if layer.desc.file_size > warn_limit {
+                if layer.layer_desc().file_size > warn_limit {
                     warn!(
                         %layer,
-                        "created delta file of size {} larger than double of target of {target_file_size}", layer.desc.file_size
+                        "created delta file of size {} larger than double of target of {target_file_size}", layer.layer_desc().file_size
                     );
                 }
             }
@@ -3806,7 +3806,7 @@ impl Timeline {
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
         stats.new_deltas_count = Some(new_layers.len());
-        stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
+        stats.new_deltas_size = Some(new_layers.iter().map(|l| l.layer_desc().file_size).sum());
 
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
             .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
