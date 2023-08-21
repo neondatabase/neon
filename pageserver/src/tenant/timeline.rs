@@ -251,14 +251,6 @@ pub struct Timeline {
     /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
     layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<(), FlushLayerError>)>,
 
-    /// Layer removal lock.
-    /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
-    /// This lock is acquired in [`Timeline::gc`] and [`Timeline::compact`].
-    /// This is an `Arc<Mutex>` lock because we need an owned
-    /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
-    /// Note that [`DeleteTimelineFlow`] uses `delete_progress` field.
-    pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
-
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
 
@@ -766,7 +758,7 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
+
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
@@ -807,8 +799,7 @@ impl Timeline {
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(layer_removal_cs.clone(), target_file_size, ctx)
-                    .await?;
+                self.compact_level0(target_file_size, ctx).await?;
                 timer.stop_and_record();
 
                 if let Some(remote_client) = &self.remote_client {
@@ -1210,14 +1201,10 @@ impl Timeline {
         layers_to_evict: &[Layer],
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
-        // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
         remote_client
             .wait_completion()
             .await
             .context("wait for layer upload ops to complete")?;
-
-        // now lock out layer removal (compaction, gc, timeline deletion)
-        let _layer_removal_guard = self.layer_removal_cs.lock().await;
 
         {
             // to avoid racing with detach and delete_timeline
@@ -1429,7 +1416,6 @@ impl Timeline {
                 layer_flush_done_tx,
 
                 write_lock: tokio::sync::Mutex::new(()),
-                layer_removal_cs: Default::default(),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
@@ -3161,13 +3147,8 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 
 impl Timeline {
     /// Level0 files first phase of compaction, explained in the [`Self::compact`] comment.
-    ///
-    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
-    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
-    /// start of level0 files compaction, the on-demand download should be revisited as well.
     async fn compact_level0_phase1(
         self: &Arc<Self>,
-        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
@@ -3254,8 +3235,6 @@ impl Timeline {
         let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = Vec::with_capacity(level0_deltas.len());
 
-        // FIXME: downloading while holding layer_removal_cs is not great, but we will remove that
-        // soon
         deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
@@ -3605,7 +3584,6 @@ impl Timeline {
     ///
     async fn compact_level0(
         self: &Arc<Self>,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
@@ -3627,16 +3605,9 @@ impl Timeline {
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            let layer_removal_cs = layer_removal_cs.clone();
-            self.compact_level0_phase1(
-                layer_removal_cs,
-                phase1_layers_locked,
-                stats,
-                target_file_size,
-                &ctx,
-            )
-            .instrument(phase1_span)
-            .await?
+            self.compact_level0_phase1(phase1_layers_locked, stats, target_file_size, &ctx)
+                .instrument(phase1_span)
+                .await?
         };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
@@ -3686,12 +3657,7 @@ impl Timeline {
         };
 
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
-        guard.finish_compact_l0(
-            &layer_removal_cs,
-            &remove_layers,
-            &insert_layers,
-            &self.metrics,
-        );
+        guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.schedule_compaction_update(&remove_layers, &new_layers)?;
@@ -3815,7 +3781,6 @@ impl Timeline {
 
         fail_point!("before-timeline-gc");
 
-        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         if self.is_stopping() {
             anyhow::bail!("timeline is Stopping");
@@ -3833,13 +3798,7 @@ impl Timeline {
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
         let res = self
-            .gc_timeline(
-                layer_removal_cs.clone(),
-                horizon_cutoff,
-                pitr_cutoff,
-                retain_lsns,
-                new_gc_cutoff,
-            )
+            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -3853,7 +3812,6 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
@@ -4031,7 +3989,7 @@ impl Timeline {
                 remote_client.schedule_gc_update(&gc_layers)?;
             }
 
-            guard.finish_gc_timeline(&layer_removal_cs, gc_layers);
+            guard.finish_gc_timeline(gc_layers);
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");

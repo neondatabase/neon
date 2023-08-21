@@ -127,9 +127,9 @@ async fn delete_local_layer_files(
     tenant_id: TenantId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    info!("waiting for layer_removal_cs.lock()");
-    let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-    info!("got layer_removal_cs.lock(), deleting layer files");
+    info!("waiting for locks");
+    let guards = tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock());
+    info!("got locks, deleting layer files");
 
     // NB: storage_sync upload tasks that reference these layers have been cancelled
     //     by the caller.
@@ -219,8 +219,8 @@ async fn delete_local_layer_files(
         .with_context(|| format!("Failed to remove: {}", entry.path().display()))?;
     }
 
-    info!("finished deleting layer files, releasing layer_removal_cs.lock()");
-    drop(layer_removal_guard);
+    info!("finished deleting layer files, releasing locks");
+    drop(guards);
 
     fail::fail_point!("timeline-delete-after-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
