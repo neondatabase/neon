@@ -273,7 +273,7 @@ impl InMemoryLayer {
             let buf = &mut inner.ser_buffer;
             buf.clear();
             val.ser_into(&mut (*buf))?;
-            inner.file.write_blob(&buf).await?
+            inner.file.write_blob(buf).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
