@@ -27,6 +27,7 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
 use crate::receive_wal::WalReceivers;
+use crate::recovery::recovery_main;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState, ServerInfo, Term,
@@ -327,13 +328,13 @@ pub struct Timeline {
 impl Timeline {
     /// Load existing timeline from disk.
     pub fn load_timeline(
-        conf: SafeKeeperConf,
+        conf: &SafeKeeperConf,
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
     ) -> Result<Timeline> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
-        let shared_state = SharedState::restore(&conf, &ttid)?;
+        let shared_state = SharedState::restore(conf, &ttid)?;
         let rcl = shared_state.sk.state.remote_consistent_lsn;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state.commit_lsn);
@@ -355,7 +356,7 @@ impl Timeline {
 
     /// Create a new timeline, which is not yet persisted to disk.
     pub fn create_empty(
-        conf: SafeKeeperConf,
+        conf: &SafeKeeperConf,
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
         server_info: ServerInfo,
@@ -371,7 +372,7 @@ impl Timeline {
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
-            mutex: Mutex::new(SharedState::create_new(&conf, &ttid, state)?),
+            mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
             walsenders: WalSenders::new(Lsn(0)),
             walreceivers: WalReceivers::new(),
             cancellation_rx,
@@ -380,12 +381,16 @@ impl Timeline {
         })
     }
 
-    /// Initialize fresh timeline on disk and start background tasks. If bootstrap
+    /// Initialize fresh timeline on disk and start background tasks. If init
     /// fails, timeline is cancelled and cannot be used anymore.
     ///
-    /// Bootstrap is transactional, so if it fails, created files will be deleted,
+    /// Init is transactional, so if it fails, created files will be deleted,
     /// and state on disk should remain unchanged.
-    pub async fn bootstrap(&self, shared_state: &mut MutexGuard<'_, SharedState>) -> Result<()> {
+    pub async fn init_new(
+        self: &Arc<Timeline>,
+        shared_state: &mut MutexGuard<'_, SharedState>,
+        conf: &SafeKeeperConf,
+    ) -> Result<()> {
         match fs::metadata(&self.timeline_dir).await {
             Ok(_) => {
                 // Timeline directory exists on disk, we should leave state unchanged
@@ -401,7 +406,7 @@ impl Timeline {
         // Create timeline directory.
         fs::create_dir_all(&self.timeline_dir).await?;
 
-        // Write timeline to disk and TODO: start background tasks.
+        // Write timeline to disk and start background tasks.
         if let Err(e) = shared_state.sk.persist().await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
@@ -415,10 +420,14 @@ impl Timeline {
 
             return Err(e);
         }
-
-        // TODO: add more initialization steps here
-        self.update_status(shared_state);
+        self.bootstrap(conf);
         Ok(())
+    }
+
+    /// Bootstrap new or existing timeline starting background stasks.
+    pub fn bootstrap(self: &Arc<Timeline>, conf: &SafeKeeperConf) {
+        // Start recovery task which always runs on the timeline.
+        tokio::spawn(recovery_main(self.clone(), conf.clone()));
     }
 
     /// Delete timeline from disk completely, by removing timeline directory. Background
@@ -452,6 +461,16 @@ impl Timeline {
     /// Returns if timeline is cancelled.
     pub fn is_cancelled(&self) -> bool {
         *self.cancellation_rx.borrow()
+    }
+
+    /// Returns watch channel which gets value when timeline is cancelled. It is
+    /// guaranteed to have not cancelled value observed (errors otherwise).
+    pub fn get_cancellation_rx(&self) -> Result<watch::Receiver<bool>> {
+        let rx = self.cancellation_rx.clone();
+        if *rx.borrow() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
+        Ok(rx)
     }
 
     /// Take a writing mutual exclusive lock on timeline shared_state.

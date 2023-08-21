@@ -227,7 +227,9 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
     tokio::fs::rename(tli_dir_path, &timeline_path).await?;
 
-    let tli = GlobalTimelines::load_timeline(ttid).context("Failed to load timeline after copy")?;
+    let tli = GlobalTimelines::load_timeline(ttid)
+        .await
+        .context("Failed to load timeline after copy")?;
 
     info!(
         "Loaded timeline {}, flush_lsn={}",
