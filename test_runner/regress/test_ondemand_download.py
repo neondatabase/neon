@@ -390,7 +390,7 @@ def test_download_remote_layers_api(
     env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
     env.pageserver.allowed_errors.extend(
         [
-            ".*download failed: downloading failed, possibly for shutdown.*",
+            ".*download failed: downloading evicted layer file failed.*",
             f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
         ]
     )
