@@ -746,6 +746,13 @@ impl Timeline {
                 self.compact_level0(layer_removal_cs.clone(), target_file_size, ctx)
                     .await?;
                 timer.stop_and_record();
+
+                if let Some(remote_client) = &self.remote_client {
+                    // should any new image layer been created, not uploading index_part will
+                    // result in a mismatch between remote_physical_size and layermap calculated
+                    // size, which will fail some tests, but should not be an issue otherwise.
+                    remote_client.schedule_index_upload_for_file_changes()?;
+                }
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
