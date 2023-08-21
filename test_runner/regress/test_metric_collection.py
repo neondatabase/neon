@@ -18,7 +18,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TenantId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response

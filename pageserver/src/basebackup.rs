@@ -339,7 +339,7 @@ where
         if spcnode == GLOBALTABLESPACE_OID {
             let pg_version_str = match self.timeline.pg_version {
                 14 | 15 => self.timeline.pg_version.to_string(),
-                ver => format!("{ver}\x0A")
+                ver => format!("{ver}\x0A"),
             };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar.append(&header, pg_version_str.as_bytes()).await?;
@@ -386,7 +386,7 @@ where
 
                 let pg_version_str = match self.timeline.pg_version {
                     14 | 15 => self.timeline.pg_version.to_string(),
-                    ver => format!("{ver}\x0A")
+                    ver => format!("{ver}\x0A"),
                 };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar.append(&header, pg_version_str.as_bytes()).await?;
