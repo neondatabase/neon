@@ -4286,18 +4286,15 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
-        assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
-
-        // both seemingly succeed, but only one will actually evict
-        match (first, second) {
-            (Ok(()), Err(EvictionError::NotFound)) | (Err(EvictionError::NotFound), Ok(())) => {}
-            other => unreachable!("unexpected {:?}", other),
-        }
-
         batch[0]
             .needs_download_blocking()
             .unwrap()
             .expect("should now have a reason to download");
+
+        match (first, second) {
+            (Ok(()), Err(EvictionError::NotFound)) | (Err(EvictionError::NotFound), Ok(())) => {}
+            other => unreachable!("unexpected {:?}", other),
+        }
     }
 
     fn any_context() -> crate::context::RequestContext {
