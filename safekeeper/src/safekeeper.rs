@@ -36,20 +36,20 @@ pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 pub type Term = u64;
 const INVALID_TERM: Term = 0;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TermSwitchEntry {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TermLsn {
     pub term: Term,
     pub lsn: Lsn,
 }
 #[derive(Clone, Serialize, Deserialize)]
-pub struct TermHistory(pub Vec<TermSwitchEntry>);
+pub struct TermHistory(pub Vec<TermLsn>);
 
 impl TermHistory {
     pub fn empty() -> TermHistory {
         TermHistory(Vec::new())
     }
 
-    // Parse TermHistory as n_entries followed by TermSwitchEntry pairs
+    // Parse TermHistory as n_entries followed by TermLsn pairs
     pub fn from_bytes(bytes: &mut Bytes) -> Result<TermHistory> {
         if bytes.remaining() < 4 {
             bail!("TermHistory misses len");
@@ -60,7 +60,7 @@ impl TermHistory {
             if bytes.remaining() < 16 {
                 bail!("TermHistory is incomplete");
             }
-            res.push(TermSwitchEntry {
+            res.push(TermLsn {
                 term: bytes.get_u64_le(),
                 lsn: bytes.get_u64_le().into(),
             })
@@ -1138,7 +1138,7 @@ mod tests {
         let pem = ProposerElected {
             term: 1,
             start_streaming_at: Lsn(1),
-            term_history: TermHistory(vec![TermSwitchEntry {
+            term_history: TermHistory(vec![TermLsn {
                 term: 1,
                 lsn: Lsn(3),
             }]),
