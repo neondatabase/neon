@@ -109,10 +109,17 @@ impl<T: AsyncRead> WithClientIp<T> {
         loop {
             match self.state {
                 ProxyParse::NotStarted => {
-                    if !ready!(self.as_mut().fill_buf(cx, 16)?) {
-                        *self.as_mut().project().state = ProxyParse::None;
-                        continue;
-                    };
+                    if self.buf.len() < 12 {
+                        // exit early for bad header
+                        if self.buf != HEADER[..self.buf.len()] {
+                            *self.as_mut().project().state = ProxyParse::None;
+                            continue;
+                        }
+                        if !ready!(self.as_mut().fill_buf(cx, 16)?) {
+                            *self.as_mut().project().state = ProxyParse::None;
+                            continue;
+                        };
+                    }
 
                     if self.buf[..12] != HEADER {
                         *self.as_mut().project().state = ProxyParse::None;
