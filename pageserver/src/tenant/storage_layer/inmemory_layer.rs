@@ -223,10 +223,6 @@ impl Layer for InMemoryLayer {
         self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
             .await
     }
-
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        self.dump(verbose, ctx).await
-    }
 }
 
 impl std::fmt::Display for InMemoryLayer {

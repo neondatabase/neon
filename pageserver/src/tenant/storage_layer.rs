@@ -363,9 +363,6 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
-
-    /// Dump summary of the contents of the layer to stdout
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Get a layer descriptor from a layer.
