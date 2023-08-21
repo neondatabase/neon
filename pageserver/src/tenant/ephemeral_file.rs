@@ -61,7 +61,7 @@ impl EphemeralFile {
         self.size
     }
 
-    pub(crate) fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
+    pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
             /// The block to which the next [`push_bytes`] will write.

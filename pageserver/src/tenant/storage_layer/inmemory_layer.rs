@@ -13,7 +13,6 @@ use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::*;
@@ -30,12 +29,6 @@ use std::ops::Range;
 use tokio::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
-
-thread_local! {
-    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
-    /// This buffer is reused for each serialization to avoid additional malloc calls.
-    static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-}
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -75,6 +68,10 @@ pub struct InMemoryLayerInner {
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
+
+    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
+    /// This buffer is reused for each serialization to avoid additional malloc calls.
+    ser_buffer: Vec<u8>,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -258,6 +255,7 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
+                ser_buffer: Vec::new(),
             }),
         })
     }
@@ -268,17 +266,14 @@ impl InMemoryLayer {
     /// Adds the page version to the in-memory tree
     pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write().await;
+        let inner: &mut _ = &mut *self.inner.write().await;
         self.assert_writable();
 
         let off = {
-            SER_BUFFER.with(|x| -> Result<_> {
-                let mut buf = x.borrow_mut();
-                buf.clear();
-                val.ser_into(&mut (*buf))?;
-                let off = inner.file.write_blob(&buf)?;
-                Ok(off)
-            })?
+            let buf = &mut inner.ser_buffer;
+            buf.clear();
+            val.ser_into(&mut (*buf))?;
+            inner.file.write_blob(&buf).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
