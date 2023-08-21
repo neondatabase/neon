@@ -96,11 +96,6 @@ impl Layer for RemoteLayer {
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.layer_desc().lsn_range.clone()
     }

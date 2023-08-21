@@ -255,10 +255,6 @@ impl Layer for DeltaLayer {
             .await
     }
 
-    fn get_key_range(&self) -> Range<Key> {
-        self.get_key_range()
-    }
-
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.get_lsn_range()
     }
@@ -392,10 +388,6 @@ impl DeltaLayer {
         inner
             .get_value_reconstruct_data(key, lsn_range, reconstruct_state)
             .await
-    }
-
-    pub(crate) fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
     }
 
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {

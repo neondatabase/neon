@@ -187,11 +187,6 @@ impl Layer for ImageLayer {
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.get_key_range()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.get_lsn_range()
     }
@@ -286,10 +281,6 @@ impl ImageLayer {
             .await
             // FIXME: makes no sense to dump paths
             .with_context(|| format!("read {}", self.path().display()))
-    }
-
-    pub(crate) fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.

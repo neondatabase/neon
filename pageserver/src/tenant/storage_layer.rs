@@ -344,9 +344,6 @@ impl LayerAccessStats {
 /// are used in (timeline).
 #[async_trait::async_trait]
 pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
-    /// Range of keys that this layer covers
-    fn get_key_range(&self) -> Range<Key>;
-
     /// Inclusive start bound of the LSN range that this layer holds
     /// Exclusive end bound of the LSN range that this layer holds.
     ///

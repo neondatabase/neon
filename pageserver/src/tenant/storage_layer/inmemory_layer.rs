@@ -107,10 +107,6 @@ impl InMemoryLayer {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
 
-    pub(crate) fn get_key_range(&self) -> Range<Key> {
-        Key::MIN..Key::MAX
-    }
-
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
     }
@@ -222,10 +218,6 @@ impl InMemoryLayer {
 
 #[async_trait::async_trait]
 impl Layer for InMemoryLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        self.get_key_range()
-    }
-
     fn get_lsn_range(&self) -> Range<Lsn> {
         self.get_lsn_range()
     }
