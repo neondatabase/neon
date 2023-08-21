@@ -217,7 +217,7 @@ impl RemoteLayer {
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer(
+    pub(crate) fn create_downloaded_layer(
         &self,
         layer_map_lock_held_witness: &LayerManager,
         conf: &'static PageServerConf,
