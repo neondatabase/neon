@@ -25,7 +25,7 @@ the unresponsive pageserver is still writing to S3.
 
 - 020-pageserver-s3-coordination.md
 - 023-the-state-of-pageserver-tenant-relocation.md
-- https://www.notion.so/neondatabase/Proposal-Pageserver-MVCC-S3-Storage-8a424c0c7ec5459e89d3e3f00e87657c
+- 026-pageserver-s3-mvcc.md
 
 This RFC has broad similarities to the proposal to implement a MVCC scheme in
 S3 object names, but this RFC avoids a general purpose transaction scheme in
