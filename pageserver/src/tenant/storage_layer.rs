@@ -681,7 +681,6 @@ impl LayerE {
             // technically the mutex could be dropped here.
             let Some(timeline) = self.timeline.upgrade() else { anyhow::bail!("timeline has gone already") };
 
-            let task_name = format!("download layer {}", self);
 
             let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
@@ -743,9 +742,12 @@ impl LayerE {
                     }
                 }
 
+                let task_name = format!("download layer {}", self);
+
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
                 // block tenant::mgr::remove_tenant_from_memory.
+
                 let this = self.clone();
                 crate::task_mgr::spawn(
                     &tokio::runtime::Handle::current(),
