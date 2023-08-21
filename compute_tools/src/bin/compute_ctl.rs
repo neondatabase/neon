@@ -295,7 +295,8 @@ fn main() -> Result<()> {
                     panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
                 }
                 (Some(_), Some(_)) => Some(
-                    tokio::runtime::Builder::new_current_thread()
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
                         .enable_all()
                         .build()
                         .expect("failed to create tokio runtime for monitor"),
