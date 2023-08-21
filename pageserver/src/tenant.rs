@@ -56,6 +56,7 @@ use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
+use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
@@ -149,6 +150,14 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
 
 pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
+
+/// References to shared objects that are passed into each tenant, such
+/// as the shared remote storage client and process initialization state.
+#[derive(Clone)]
+pub struct TenantSharedResources {
+    pub broker_client: storage_broker::BrokerClientChannel,
+    pub remote_storage: Option<GenericRemoteStorage>,
+}
 
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
@@ -389,7 +398,7 @@ impl Tenant {
     async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
-        remote_client: Option<RemoteTimelineClient>,
+        resources: TimelineResources,
         remote_startup_data: Option<RemoteStartupData>,
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
@@ -410,7 +419,7 @@ impl Tenant {
             timeline_id,
             up_to_date_metadata,
             ancestor.clone(),
-            remote_client,
+            resources,
             init_order,
             CreateTimelineCause::Load,
         )?;
@@ -701,14 +710,22 @@ impl Tenant {
                 .expect("just put it in above");
 
             // TODO again handle early failure
-            self.load_remote_timeline(timeline_id, index_part, remote_metadata, remote_client, ctx)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load remote timeline {} for tenant {}",
-                        timeline_id, self.tenant_id
-                    )
-                })?;
+            self.load_remote_timeline(
+                timeline_id,
+                index_part,
+                remote_metadata,
+                TimelineResources {
+                    remote_client: Some(remote_client),
+                },
+                ctx,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load remote timeline {} for tenant {}",
+                    timeline_id, self.tenant_id
+                )
+            })?;
         }
 
         // Walk through deleted timelines, resume deletion
@@ -763,7 +780,7 @@ impl Tenant {
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
-        remote_client: RemoteTimelineClient,
+        resources: TimelineResources,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
@@ -793,7 +810,7 @@ impl Tenant {
 
         self.timeline_init_and_sync(
             timeline_id,
-            Some(remote_client),
+            resources,
             Some(RemoteStartupData {
                 index_part,
                 remote_metadata,
@@ -840,8 +857,7 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        broker_client: storage_broker::BrokerClientChannel,
-        remote_storage: Option<GenericRemoteStorage>,
+        resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
@@ -855,6 +871,9 @@ impl Tenant {
                 return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
             }
         };
+
+        let broker_client = resources.broker_client;
+        let remote_storage = resources.remote_storage;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Tenant::new(
@@ -1241,16 +1260,9 @@ impl Tenant {
     ) -> Result<(), LoadLocalTimelineError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
-            RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                self.tenant_id,
-                timeline_id,
-            )
-        });
+        let mut resources = self.build_timeline_resources(timeline_id);
 
-        let (remote_startup_data, remote_client) = match remote_client {
+        let (remote_startup_data, remote_client) = match resources.remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
                     let index_part = match index_part {
@@ -1338,9 +1350,10 @@ impl Tenant {
                     return Ok(());
                 }
 
-                (None, remote_client)
+                (None, resources.remote_client)
             }
         };
+        resources.remote_client = remote_client;
 
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
             let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
@@ -1353,7 +1366,7 @@ impl Tenant {
 
         self.timeline_init_and_sync(
             timeline_id,
-            remote_client,
+            resources,
             remote_startup_data,
             Some(local_metadata),
             ancestor,
@@ -2225,7 +2238,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        remote_client: Option<RemoteTimelineClient>,
+        resources: TimelineResources,
         init_order: Option<&InitializationOrder>,
         cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -2254,7 +2267,7 @@ impl Tenant {
             new_timeline_id,
             self.tenant_id,
             Arc::clone(&self.walredo_mgr),
-            remote_client,
+            resources,
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned().flatten(),
@@ -2902,6 +2915,23 @@ impl Tenant {
         Ok(timeline)
     }
 
+    /// Call this before constructing a timeline, to build its required structures
+    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
+        let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
+            let remote_client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            Some(remote_client)
+        } else {
+            None
+        };
+
+        TimelineResources { remote_client }
+    }
+
     /// Creates intermediate timeline structure and its files.
     ///
     /// An empty layer map is initialized, and new data and WAL can be imported starting
@@ -2918,25 +2948,17 @@ impl Tenant {
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_id = self.tenant_id;
 
-        let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                tenant_id,
-                new_timeline_id,
-            );
+        let resources = self.build_timeline_resources(new_timeline_id);
+        if let Some(remote_client) = &resources.remote_client {
             remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
-            Some(remote_client)
-        } else {
-            None
-        };
+        }
 
         let timeline_struct = self
             .create_timeline_struct(
                 new_timeline_id,
                 new_metadata,
                 ancestor,
-                remote_client,
+                resources,
                 None,
                 CreateTimelineCause::Load,
             )
