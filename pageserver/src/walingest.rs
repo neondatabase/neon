@@ -312,7 +312,7 @@ impl<'a> WalIngest<'a> {
                 // particular point in the WAL. For more fine-grained control,
                 // we could peek into the message and only pause if it contains
                 // a particular string, for example, but this is enough for now.
-                utils::failpoint_sleep_millis_async!("wal-ingest-logical-message-sleep");
+                crate::failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
             }
         }
 

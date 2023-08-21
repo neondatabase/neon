@@ -315,4 +315,4 @@ MANY_SMALL_LAYERS_TENANT_CONFIG = {
 
 
 def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
-    return 40 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 10
+    return 40 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 15

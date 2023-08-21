@@ -95,12 +95,12 @@ def test_remote_storage_backup_and_restore(
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Thats because of UnreliableWrapper's injected failures
     env.pageserver.allowed_errors.append(
-        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
+        f".*failed to fetch tenant deletion mark at tenants/{tenant_id}/deleted attempt 1.*"
     )
 
     checkpoint_numbers = range(1, 3)
@@ -403,8 +403,7 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 
@@ -542,8 +541,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         }
     )
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
@@ -808,8 +806,7 @@ def test_compaction_delete_before_upload(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 

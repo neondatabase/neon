@@ -979,14 +979,7 @@ async fn failpoints_handler(
 
         // We recognize one extra "action" that's not natively recognized
         // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = if fp.actions == "exit" {
-            fail::cfg_callback(fp.name, || {
-                info!("Exit requested by failpoint");
-                std::process::exit(1);
-            })
-        } else {
-            fail::cfg(fp.name, &fp.actions)
-        };
+        let cfg_result = crate::failpoint_support::apply_failpoint(&fp.name, &fp.actions);
 
         if let Err(err_msg) = cfg_result {
             return Err(ApiError::BadRequest(anyhow!(

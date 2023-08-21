@@ -292,9 +292,8 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         )
 
 
-# TODO resume deletion (https://github.com/neondatabase/neon/issues/5006)
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_deleted_tenant_ignored_on_attach(
+def test_tenant_delete_is_resumed_on_attach(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
@@ -336,6 +335,8 @@ def test_deleted_tenant_ignored_on_attach(
         (
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
+            # From deletion polling
+            f".*NotFound: tenant {env.initial_tenant}.*",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
             ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
@@ -381,20 +382,17 @@ def test_deleted_tenant_ignored_on_attach(
     env.pageserver.start()
 
     # now we call attach
-    with pytest.raises(
-        PageserverApiException, match="Tenant is marked as deleted on remote storage"
-    ):
-        ps_http.tenant_attach(tenant_id=tenant_id)
+    ps_http.tenant_attach(tenant_id=tenant_id)
 
-    # delete should be resumed (not yet)
-    # wait_tenant_status_404(ps_http, tenant_id, iterations)
+    # delete should be resumed
+    wait_tenant_status_404(ps_http, tenant_id, iterations)
 
     # we shouldn've created tenant dir on disk
     tenant_path = env.tenant_dir(tenant_id=tenant_id)
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():
-        assert_prefix_not_empty(
+        assert_prefix_empty(
             neon_env_builder,
             prefix="/".join(
                 (

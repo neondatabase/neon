@@ -359,8 +359,8 @@ def test_timeline_resurrection_on_attach(
     ps_http = env.pageserver.http_client()
     pg = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    main_timeline_id = env.initial_timeline
 
     with pg.cursor() as cur:
         cur.execute("CREATE TABLE f (i integer);")
@@ -511,8 +511,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
             )
         ),
     )
-
-    assert env.initial_timeline is not None
 
     for timeline_id in (intermediate_timeline_id, env.initial_timeline):
         timeline_delete_wait_completed(
@@ -716,13 +714,9 @@ def test_timeline_delete_works_for_remote_smoke(
     ps_http = env.pageserver.http_client()
     pg = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    assert tenant_id == env.initial_tenant
-    assert main_timeline_id == env.initial_timeline
-
-    assert env.initial_timeline is not None
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
@@ -743,9 +737,8 @@ def test_timeline_delete_works_for_remote_smoke(
             log.info("waiting for checkpoint upload")
             wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
             log.info("upload of checkpoint is done")
-            timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
-        timeline_ids.append(timeline_id)
+        timeline_ids.append(branch_timeline_id)
 
     for timeline_id in timeline_ids:
         assert_prefix_not_empty(
