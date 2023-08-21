@@ -285,7 +285,7 @@ an ordering as follows:
 advertising the value immediately before we started the validation RPC. This provides
 a strong ordering guarantee.
 
-Internally, the pagekeeper will have two remote_consistent_lsn values: the one that
+Internally, the pageserver will have two remote_consistent_lsn values: the one that
 reflects its latest write to remote storage, and the one that reflects the most
 recent validation of generation number. It is only the latter value that may
 be advertised to the outside world (i.e. to the safekeeper).
@@ -299,81 +299,77 @@ of objects in S3, and updates to the `remote_consistent_lsn`, as updates to the 
 LSN are de-facto deletions done via the safekeeper, and both kinds of deletion are subject to
 the same generation validation requirement.
 
-### Pageserver startup changes
+### Pageserver attach/startup changes
+
+#### Pageserver node startup
 
 - The pageserver must obtain a generation number by some means (see Control Plane Changes below) before
   doing any remote writes.
 - The pageserver _may_ also do some synchronization of its attachments to see which are still
   valid, see "Synchronizing attachments on pageserver startup" in the optimizations section.
 
-### `pageserver::Tenant` startup changes
+#### Attachment
 
-#### Metadata reconciliation
+Calls to `/v1/tenant/{tenant_id}/attach` are augmented with generation details:
 
-Whether for a new attachment or just a pageserver restart, Tenant _should_
-reconcile with remote metadata. Note that "reconcile" in this context is
+- Required: provide an attachment generation number
+- Nice to have: provide the attachment generation, node id, and node generation of
+  where the tenant was previously attached, to help this node calculate where
+  to find the latest index_part file.
+
+The pageserver must persist this attachment generation number before starting
+the `Tenant` tasks. We will create a new per-tenant metadata file that records
+the attachment generation number, and will also be used in future work for
+implementing fast migration, where the tenant has more states than simple
+attached & detached.
+
+#### Reconciliation
+
+On attachment, the `Tenant` may have some local disk content from previous
+activity involving this tenant (e.g. it used to be attached here), and this
+needs reconciling with remote storage. Note that "reconcile" in this context is
 used generically, and does not refer specifically to the logic currently
 in the `reconcile_with_remote` function.
 
-If the remote index reaches a lower LSN than the pageserver's local state,
-then the pageserver is free to ignore the remote index and use its local
-state as-is.
+Because pageservers have access to the WAL, they don't strictly have to
+use the latest remote storage contents at all: if the WAL history still contains
+the data required to bring the pageserver's local state up to date with
+the tip of the WAL, the pageserver could recover from the WAL and then
+overwrite whatever is in remote storage.
 
-If the remote index reaches a higher LSN than the pageserver's local state,
-then this indicates that the local state may not be safely used, unless the
-safekeepers still have the WAL that spans the range between the local state
-and the remote state. In this case, the pageserver may choose between replaying
-the WAL to bring its local state up to date, or reconciling its local state with
-the contents of S3 without replaying the WAL again:
+However, it is preferable to recover from remote storage rather than
+to replay WAL, for the following reasons:
 
-- Option 1: Always reconcile with S3 when a tenant starts up
-- Option 2: Prefer to recover by ingesting WAL, only do recovery from S3 if
-  some needed LSN region is not available from the safekeeper (because some
-  other node already deleted it by advertising its `remote_consistent_lsn`).
+- Simplicity: recovering from remote storage gives identical behavior
+  whether attaching a tenant for the first time or re-attaching later.
+- Efficiency: ingesting the WAL has significant cost beyond the I/O
+  of reading it (compaction, image layer generation). We should avoid
+  doing this work twice if there is already remote content available.
+- Reduced load on safekeepers, which are a less scalable resource than S3.
 
-Option 1 is preferred over option 2, because:
+#### Finding the remote indices for timelines
 
-- Option 1 is simpler to implement and test, since there is one code path always taken, rather than a conditional behavior.
-- If there are already image layers
-  in S3, it is cheaper to download them than to re-calculate them based on the WAL.
-- Option 1 places less load on the safekeepers (a few nodes) and more on S3 (a
-  very high scale service).
-- Option 2 will leak objects referenced by the old pageserver's metadata, if the
-  new pageserver is independently replaying based on their local state and generating
-  alternative remote objects to represent the same data. This creates more work
-  for scrub to clean up later.
-- Option 2 will wastefully re-upload data that has already been uploaded to remote
-  storage by an earlier node that already consumed the WAL.
-- In option 2, then the `remote_consistent_lsn` could go _backwards_ from the
-  perspective of the rest of the system, when tenant attachment is moved and some
-  new pageserver starts from an earlier LSN than the previous pageserver had already
-  advertised as being remote consistent. The rest of the system could handle this
-  in principle, but it's rather an odd behavior, and ideally
-  other components shouldn't have to handle this case.
+Because index files are now suffixed with generation numbers, the pageserver
+cannot always GET the remote index in one request, because it can't always
+know a-priori what the latest remote index is.
 
-There are scenarios where reconciling with remote storage imposes a longer startup
-time for a tenant, if it happens to have some very fresh local state but is quite
-far behind the remote state: it will have to download substantial data from S3
-to serve the same LSNs that it could have served from local delta layers. The solution
-to this will be a "warm secondary location" mode that pre-downloads data from S3,
-which is described in a subsequent RFC.
-
-#### Finding the remote index
-
-Because index files are now suffixed with generation numbers, some changes are needed
-to load them:
-
-- In a clean migration of a tenant, the control plane may remember the tenant's most recent
-  generation numbers, and provide them to the new node in the attach request. This is sufficient
-  for the new node to directly GET the latest index.
-- As an alternative optimization, we may use the storage broker for this (see [Publishing generation numbers ot storage brokers](#publishing-generation-numbers-to-storage-broker)). If we get the generation information
-  this way, we must check that the old attachment generation is exactly 1 less than the current attachment, or if the attachment is the same but the node generation is exactly 1 less and the node ID is the same. Otherwise we must fall back to listing indices.
-- As a fallback, newly attached tenants may issue a ListObjectsv2 request using index_part as a prefix to enumerate the indices and pick the most recent one by attachment generation (or node generation within attachment generation). The listing would typically only return 1-2 indices, assuming that we have promptly cleaned up old ones (see next section).
-
-The tenant should never load an index with an attachment generation _newer_ than its own: tenants
+In the general case and as a fallback, the pageserver may list all the index*part.json
+files for a timeline, sort them by generation suffix, and pick the highest that is <=
+the suffix for its current generation numbers. The tenant should never load an index with
+an attachment generation \_newer* than its own: tenants
 are allowed to be attached with stale attachment generations during a multiply-attached
 phase in a migration, and in this instance if the old location's pageserver restarts,
 it should not try and load the newer generation's index.
+
+To avoid object listing in most cases, a couple of optimizations can be used:
+
+- On a restart of a previously attached tenant, try subtracting one from our
+  node generation number: if we find an index_part.json with that suffix, it
+  should be the last one we wrote out before restarting.
+- Otherwise, consult the previous attachment information that was provided by
+  the control plane in [attachment](#attachment), and try loading with that
+  suffix.
+- If neither of the above return a 200, then fall back to doing an object listing.
 
 #### Cleaning up previous generations' remote indices
 
