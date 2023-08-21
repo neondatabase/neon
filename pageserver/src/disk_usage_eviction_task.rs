@@ -349,10 +349,10 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
         let batch = batched.entry(TimelineKey(candidate.timeline)).or_default();
 
+        // semaphore will later be used to limit eviction concurrency, and we can express at
+        // most u32 number of permits. unlikely we would have u32::MAX layers to be evicted,
+        // but fail gracefully by not making batches larger.
         if batch.len() < u32::MAX as usize {
-            // semaphore will later be used to limit eviction concurrency, and we can express at
-            // most u32 number of permits. unlikely we would have u32::MAX layers to be evicted,
-            // but fail gracefully.
             batch.push(candidate.layer);
             max_batch_size = max_batch_size.max(batch.len());
         }
@@ -397,7 +397,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 let mut evictions_failed = LayerCount::default();
 
                 let Ok(_permit) = limit.acquire_many_owned(batch_size).await else {
-                    // assume semaphore closing means cancelled
+                    // semaphore closing means cancelled
                     return (evicted_bytes, evictions_failed);
                 };
 
