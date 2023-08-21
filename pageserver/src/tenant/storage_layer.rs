@@ -45,6 +45,7 @@ pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 use self::delta_layer::DeltaEntry;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::Timeline;
+use utils::sync::heavier_once_cell;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -542,34 +543,13 @@ impl LayerE {
         })
     }
 
-    /// Evict the the layer file as soon as possible, but then allow redownloads to happen.
-    pub(crate) async fn evict(
+    pub(crate) async fn evict_and_wait(
         &self,
         _: &RemoteTimelineClient,
-    ) -> Result<bool, super::timeline::EvictionError> {
-        assert!(
-            self.have_remote_client,
-            "refusing to evict without a remote timeline client"
-        );
-        self.wanted_evicted.store(true, Ordering::Release);
-
-        let Some(guard) = self.inner.get() else {
-            // we don't need to wait around if there is a download ongoing, because that might reset the wanted_evicted
-            // however it's also possible that we are present and just accessed by someone else.
-            return Err(super::timeline::EvictionError::NotFound);
-        };
-
-        // now, this might immediatedly cause the drop fn to run, but that'll only act on
-        // background
-        Ok(
-            Self::get_or_apply_evictedness(Some(guard), &self.wanted_evicted)
-                .map(|_strong| false)
-                .unwrap_or(true),
-        )
-    }
-
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), super::timeline::EvictionError> {
+    ) -> Result<(), super::timeline::EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
+
+        assert!(self.have_remote_client);
 
         self.wanted_evicted.store(true, Ordering::Release);
 
@@ -577,7 +557,7 @@ impl LayerE {
 
         // why call get instead of looking at the watch? because get will downgrade any
         // Arc<_> it finds, because we set the wanted_evicted
-        if dbg!(self.get()).is_none() {
+        if self.get().is_none() {
             // it was not evictable in the first place
             // our store to the wanted_evicted does not matter; it will be reset by next download
             return Err(super::timeline::EvictionError::NotFound);
@@ -665,8 +645,6 @@ impl LayerE {
         })
     }
 
-
-
     fn get_or_apply_evictedness(
         guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
         wanted_evicted: &AtomicBool,
@@ -753,7 +731,9 @@ impl LayerE {
                                 // ))
                                 //
                                 // this check is only probablistic, seems like flakyness footgun
-                                anyhow::bail!("refusing to download layer {self} due to RequestContext")
+                                anyhow::bail!(
+                                    "refusing to download layer {self} due to RequestContext"
+                                )
                             }
                         }
                     }
@@ -1265,10 +1245,6 @@ impl AsRef<delta_layer::DeltaLayerInner> for ResidentDeltaLayer {
 enum LayerKind {
     Delta(delta_layer::DeltaLayerInner),
     Image(image_layer::ImageLayerInner),
-}
-
-mod heavier_once_cell {
-    pub(super) use utils::sync::heavier_once_cell::{Guard, OnceCell};
 }
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
