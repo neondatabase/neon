@@ -12,7 +12,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::cgroup::Sequenced;
@@ -36,15 +36,12 @@ pub struct Dispatcher {
     /// We send messages to the informant through `sink`
     sink: SplitSink<WebSocket, Message>,
 
-    /// Used to notify the cgroup when we are upscaled. The manager acknowledges
-    /// on the `oneshot::Sender` once it is done handling the upscale.
-    pub(crate) notify_upscale_events: Sender<Sequenced<Resources>>,
+    /// Used to notify the cgroup when we are upscaled.
+    pub(crate) notify_upscale_events: mpsc::Sender<Sequenced<Resources>>,
 
-    /// When the cgroup requests upscale it will send on this channel. We send
-    /// an `UpscaleRequst` to the informant and then signal on the provided
-    /// `oneshot::Sender` that we have acknowledged and processed the upscale
-    /// request.
-    pub(crate) request_upscale_events: Receiver<()>,
+    /// When the cgroup requests upscale it will send on this channel. In response
+    /// we send an `UpscaleRequst` to the agent.
+    pub(crate) request_upscale_events: mpsc::Receiver<()>,
 
     /// The protocol version we have agreed to use with the informant. This is negotiated
     /// during the creation of the dispatcher, and should be the highest shared protocol
@@ -66,8 +63,8 @@ impl Dispatcher {
     ///    is no compatible version.
     pub async fn new(
         stream: WebSocket,
-        notify_upscale_events: Sender<Sequenced<Resources>>,
-        request_upscale_events: Receiver<()>,
+        notify_upscale_events: mpsc::Sender<Sequenced<Resources>>,
+        request_upscale_events: mpsc::Receiver<()>,
     ) -> anyhow::Result<Self> {
         let (mut sink, mut source) = stream.split();
 

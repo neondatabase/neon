@@ -24,13 +24,23 @@ pub mod cgroup;
 pub mod filecache;
 pub mod runner;
 
-/// Arguments to configure the monitor.
+/// The vm-monitor is an autoscaling component started by compute_ctl.
+///
+/// It carries out autoscaling decisions (upscaling/downscaling) and responds to
+/// memory pressure by making requests to the autoscaler-agent.
 #[derive(Debug, Parser)]
 pub struct Args {
+    /// The name of the cgroup we should monitor for memory.high events. This
+    /// is the cgroup that postgres should be running in.
     #[arg(short, long)]
     pub cgroup: Option<String>,
+
+    /// The connection string for the Postgres file cache we should manage.
     #[arg(short, long)]
     pub pgconnstr: Option<String>,
+
+    /// The address we should listen on for connection requests. For the
+    /// agent, this is 0.0.0.0:10301. For the informant, this is 127.0.0.1:10369.
     #[arg(short, long)]
     pub addr: String,
 }
@@ -111,9 +121,8 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
 
     let app = Router::new()
         // This route gets upgraded to a websocket connection. We only support
-        // connection at a time. We enforce this using global app state.
-        // True indicates we are connected to someone and False indicates we can
-        // receive connections.
+        // one connection at a time, which we enforce by killing old connections
+        // when we receive a new one.
         .route("/monitor", get(ws_handler))
         .with_state(ServerState {
             sender,
@@ -170,7 +179,6 @@ async fn start_monitor(
     let timeout = Duration::from_secs(4);
     let monitor = tokio::time::timeout(
         timeout,
-        // Unwrap is safe because we initialize at the beginning of main
         Runner::new(Default::default(), args, ws, kill, token),
     )
     .await;

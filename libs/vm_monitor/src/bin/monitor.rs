@@ -1,3 +1,10 @@
+// We expose a standalone binary _and_ start the monitor in `compute_ctl` so that
+// we can test the monitor as part of the entire autoscaling system in
+// neondatabase/autoscaling.
+//
+// The monitor was previously started by vm-builder, and for testing purposes,
+// we can mimic that setup with this binary.
+
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

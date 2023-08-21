@@ -8,6 +8,11 @@ out upscaling and downscaling decisions.
 
 ## More on scaling
 
-We scale Postgres' by starting it in a cgroup called `neon-postgres`. We then
-control its memory usage by setting the cgroup's `memory.{max,high}`. We scale
-CPU using NeonVM, our in-house QEMU tool for use with Kubernetes.
+We scale CPU and memory using NeonVM, our in-house QEMU tool for use with Kubernetes.
+To control thresholds for receiving memory usage notifications, we start Postgres
+in the `neon-postgres` cgroup and set its `memory.{max,high}`.
+
+* See also: [`neondatabase/autoscaling`](https://github.com/neondatabase/autoscaling/)
+* See also: [`neondatabase/vm-monitor`](https://github.com/neondatabase/vm-monitor/),
+where initial development of the monitor happened. The repository is no longer
+maintained but the commit history may be useful for debugging.

@@ -14,7 +14,7 @@ use cgroups_rs::{
     Subsystem::{Freezer, Mem},
 };
 use inotify::{EventStream, Inotify, WatchMask};
-use tokio::sync::mpsc::{error::TryRecvError, Receiver, Sender};
+use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::time::{Duration, Instant};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{info, warn};
@@ -181,7 +181,7 @@ pub struct CgroupWatcher {
     last_upscale_seqnum: AtomicU64,
 
     /// A channel on which we send messages to request upscale from the dispatcher.
-    upscale_requester: Sender<()>,
+    upscale_requester: mpsc::Sender<()>,
 
     /// The actual cgroup we are watching and managing.
     cgroup: cgroups_rs::Cgroup,
@@ -236,7 +236,7 @@ impl CgroupWatcher {
     pub fn new(
         name: String,
         // A channel on which to send upscale requests
-        upscale_requester: Sender<()>,
+        upscale_requester: mpsc::Sender<()>,
     ) -> anyhow::Result<(Self, impl Stream<Item = Sequenced<u64>>)> {
         // TODO: clarify exactly why we need v2
         // Make sure cgroups v2 (aka unified) are supported
@@ -309,7 +309,7 @@ impl CgroupWatcher {
         // -> since calling recv() on a tokio::sync::mpsc::Receiver takes &mut self,
         //    we just pass them in here instead of holding them in fields, as that
         //    would require this method to take &mut self.
-        mut upscales: Receiver<Sequenced<Resources>>,
+        mut upscales: mpsc::Receiver<Sequenced<Resources>>,
         events: E,
     ) -> anyhow::Result<()>
     where
@@ -461,7 +461,7 @@ impl CgroupWatcher {
     #[tracing::instrument(skip(self))]
     pub async fn handle_memory_high_event(
         &self,
-        upscales: &mut Receiver<Sequenced<Resources>>,
+        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<bool> {
         // Immediately freeze the cgroup before doing anything else.
         info!("received memory.high event -> freezing cgroup");
@@ -513,7 +513,7 @@ impl CgroupWatcher {
     #[tracing::instrument(skip(self))]
     fn upscaled(
         &self,
-        upscales: &mut Receiver<Sequenced<Resources>>,
+        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<Option<u64>> {
         let Sequenced { seqnum, data } = match upscales.try_recv() {
             Ok(upscale) => upscale,
@@ -537,7 +537,7 @@ impl CgroupWatcher {
     #[tracing::instrument(skip(self, upscales))]
     async fn await_upscale(
         &self,
-        upscales: &mut Receiver<Sequenced<Resources>>,
+        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<()> {
         let Sequenced { seqnum, .. } = upscales
             .recv()
