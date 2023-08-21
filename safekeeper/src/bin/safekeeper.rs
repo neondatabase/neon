@@ -341,21 +341,35 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
 
-    // Load all timelines from disk to memory.
-    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
-
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
         FuturesUnordered::new();
+
+    // Start wal backup launcher before loading timelines as we'll notify it
+    // through the channel about timelines which need offloading, not draining
+    // the channel would cause deadlock.
+    let current_thread_rt = conf
+        .current_thread_runtime
+        .then(|| Handle::try_current().expect("no runtime in main"));
+    let conf_ = conf.clone();
+    let wal_backup_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
+        .spawn(wal_backup::wal_backup_launcher_task_main(
+            conf_,
+            wal_backup_launcher_rx,
+        ))
+        .map(|res| ("WAL backup launcher".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_backup_handle));
+
+    // Load all timelines from disk to memory.
+    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx).await?;
 
     let conf_ = conf.clone();
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
         info!("running in current thread runtime");
     }
-    let current_thread_rt = conf
-        .current_thread_runtime
-        .then(|| Handle::try_current().expect("no runtime in main"));
 
     let wal_service_handle = current_thread_rt
         .as_ref()
@@ -407,17 +421,6 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .spawn(remove_wal::task_main(conf_))
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
-
-    let conf_ = conf.clone();
-    let wal_backup_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
-        .spawn(wal_backup::wal_backup_launcher_task_main(
-            conf_,
-            wal_backup_launcher_rx,
-        ))
-        .map(|res| ("WAL backup launcher".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_backup_handle));
 
     set_build_info_metric(GIT_VERSION);
 
