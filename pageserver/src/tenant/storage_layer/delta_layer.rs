@@ -377,10 +377,6 @@ impl DeltaLayer {
             .await
     }
 
-    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
     pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
@@ -392,8 +388,8 @@ impl DeltaLayer {
     }
 
     pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_range = self.layer_desc().lsn_range.clone();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
