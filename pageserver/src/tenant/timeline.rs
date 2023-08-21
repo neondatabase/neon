@@ -319,6 +319,12 @@ pub struct Timeline {
     /// Cancellation token scoped to this timeline: anything doing long-running work relating
     /// to the timeline should drop out when this token fires.
     pub(crate) cancel: CancellationToken,
+
+    /// Make sure we only have one running compaction at a time.
+    compaction_lock: tokio::sync::Mutex<()>,
+
+    /// Make sure we only have one running gc at a time.
+    gc_lock: tokio::sync::Mutex<()>,
 }
 
 pub struct WalReceiverInfo {
@@ -704,6 +710,8 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        let _g = self.compaction_lock.lock().await;
+
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
         let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
@@ -1460,6 +1468,9 @@ impl Timeline {
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
                 cancel,
                 gate: Gate::new(format!("Timeline<{tenant_id}/{timeline_id}>")),
+
+                compaction_lock: tokio::sync::Mutex::default(),
+                gc_lock: tokio::sync::Mutex::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -3799,6 +3810,7 @@ impl Timeline {
     /// obsolete.
     ///
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+        let _g = self.gc_lock.lock().await;
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
