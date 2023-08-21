@@ -78,7 +78,7 @@ impl EphemeralFile {
                 })
             }
             #[inline(always)]
-            fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+            async fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
@@ -149,15 +149,15 @@ impl EphemeralFile {
         if srcbuf.len() < 0x80 {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         }
 
         // Write the payload
-        writer.push_bytes(srcbuf)?;
+        writer.push_bytes(srcbuf).await?;
 
         if srcbuf.len() < 0x80 {
             self.size += 1;
