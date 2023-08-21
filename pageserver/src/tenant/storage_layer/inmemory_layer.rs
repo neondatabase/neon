@@ -218,10 +218,6 @@ impl InMemoryLayer {
 
 #[async_trait::async_trait]
 impl Layer for InMemoryLayer {
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.get_lsn_range()
-    }
-
     fn is_incremental(&self) -> bool {
         self.is_incremental()
     }

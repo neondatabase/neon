@@ -96,11 +96,6 @@ impl Layer for RemoteLayer {
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
     fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
@@ -137,8 +132,8 @@ impl PersistentLayer for RemoteLayer {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_range = self.layer_desc().lsn_range.clone();
 
         if self.desc.is_delta {
             HistoricLayerInfo::Delta {
