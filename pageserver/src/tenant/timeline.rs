@@ -4223,7 +4223,9 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{harness::TenantHarness, storage_layer::LayerE, Timeline};
+    use crate::tenant::{
+        harness::TenantHarness, storage_layer::LayerE, timeline::EvictionError, Timeline,
+    };
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
@@ -4286,18 +4288,16 @@ mod tests {
 
         assert_eq!(batch[0].needs_download_blocking().unwrap(), None);
 
-        let layer: Arc<LayerE> = batch[0].clone();
-        let mut evicted = std::pin::pin!(layer.wait_evicted());
-        assert_eq!(futures::future::poll_immediate(&mut evicted).await, None);
-
         // both seemingly succeed, but only one will actually evict
         match (first, second) {
-            (Ok(()), Ok(())) => {}
+            (Ok(()), Err(EvictionError::NotFound)) | (Err(EvictionError::NotFound), Ok(())) => {}
             other => unreachable!("unexpected {:?}", other),
         }
 
-        // after eviction has been requested, we will eventually evict
-        evicted.await;
+        batch[0]
+            .needs_download_blocking()
+            .unwrap()
+            .expect("should now have a reason to download");
     }
 
     fn any_context() -> crate::context::RequestContext {
