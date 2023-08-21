@@ -672,10 +672,6 @@ impl LayerE {
             // disable any scheduled but not yet running eviction deletions for this
             self.version.fetch_add(1, Ordering::Relaxed);
 
-            // what to do if we have a concurrent eviction request when we are downloading? eviction
-            // api's use ResidentLayer, so evict could be moved there, or we just reset the state here.
-            self.wanted_evicted.store(false, Ordering::Release);
-
             // no need to make the evict_and_wait wait for the actual download to complete
             drop(self.status.send(Status::Downloaded));
 
@@ -695,6 +691,14 @@ impl LayerE {
                 .context("check if layer file is present")?;
 
             if let Some(reason) = needs_download {
+                // what to do if we have a concurrent eviction request when we are downloading? eviction
+                // api's use ResidentLayer, so evict could be moved there, or we just reset the state here.
+                //
+                // only reset this after we've decided we really need to download. otherwise it'd
+                // be impossible to mark cancelled downloads for eviction, like one could imagine
+                // we would like to do for prefetching which was not needed.
+                self.wanted_evicted.store(false, Ordering::Release);
+
                 if !can_ever_evict {
                     anyhow::bail!("refusing to attempt downloading {self} because no remote timeline client, reason: {reason}")
                 };
