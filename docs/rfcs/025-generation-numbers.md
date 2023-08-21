@@ -87,25 +87,24 @@ pageserver, control plane, safekeeper (optional)
     attachment generation numbers, and attachments may be changed while a pageserver's
     generation number stays the same.
 
-- **Object keys are suffixed** with the generation numbers
+- **Object keys are suffixed** with a tuple of attachment & node generation numbers
 - **Safety in split brain for multiple nodes running with
   the same node ID** is provided by the pageserver node generation in the object key: the concurrent nodes
   will not write to the same key.
 - **Safety for multiply-attached tenants** is provided by the
   tenant attach generation in the object key: the competing pageservers will not
   try to write to the same keys.
-- **Safety for deletions** is provided by pageservers enqueing deletions until calling out to the control plane to validate that the node & attachment generation numbers have not changed since the deletions were enqueued.
+- **Safety for deletions** is provided by pageservers calling out to the control plane to validate that the node & attachment generation numbers have not changed since we last updated a timeline's index.
 - **The control plane is used to issue generation numbers** to avoid the need for
   a built-in consensus system in the pageserver, although this could in principle
   be changed without changing the storage format.
-- **The safekeeper may refuse RPCs from zombie pageservers** via the node generation number.
 
 ### Generation numbers
 
 Two logical entities will get new "generation numbers", which are monotonically increasing
 integers with a global guarantee that they will not be re-used:
 
-- Pageservers: a generation ID is acquired at startup and lasts until the process ends or another
+- Pageservers: a node generation ID is acquired at startup and lasts until the process ends or another
   process with the same node ID starts.
 - Tenant attachments: for a given tenant, each time its attachment is changed, a per-tenant generation
   number increases.
@@ -120,16 +119,16 @@ This provides some important invariants:
   generation numbers.
 
 The node generation number defines a global "in" definition for pageserver nodes: a node whose
-generation matches the generation the control plane most recently issued is a member of the cluster
+node generation matches the node generation the control plane most recently issued is a member of the cluster
 in good standing. Any node with any older generation ID is not.
 
 Distinction between generation numbers and Node ID:
 
-- The purpose of a generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
-- Generation ID is guaranteed to be globally unique across space and time. Node ID is not unique
+- The purpose of a node generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
+- Node generation ID is guaranteed to be globally unique across space and time. Node ID is not unique
   in the event of starting a replacement node after an original node is network partitioned, or
   in the event of a human error starting a replacement node that re-uses a node ID.
-- Node ID is written to disk in a pageserver's configuration, whereas generation number is
+- Node ID is written to disk in a pageserver's configuration, whereas node generation number is
   received at runtime just after startup (this does incur an availability dependency, see [availability](#availability)).
 - The two concepts could be collapsed into one if we used ephemeral node IDs that were only ever used one time,
   but this makes it harder to efficiently handle the case of the same physical node restarting, where we may want
@@ -238,7 +237,7 @@ remain the same (it just sees an opaque u64).
 The fixed number of bits for each field is used to provide a fixed key length. The justification
 for the lengths being sufficient are:
 
-- 24 bit generations are enough for the generation to increment 9000 times per day over
+- 24 bit generations are enough for to increment 9000 times per day over
   a 5 year system lifetime (in practice generation increments are expected to be far rarer,
   perhaps of the order of 1 per day if we are dynamically balancing load)
 - 16 bit node ID is enough for 35 new pageservers to be deployed every day over a 5 year
@@ -270,8 +269,8 @@ that deletions strictly obey the following ordering:
 
 1. Write out index_part.json: this guarantees that any subsequent reader of the metadata will
    not try and read the object we unlinked.
-2. Call out to control plane to validate that the generation number we hold for the attachment
-   is still the latest, and that our node generration number is the latest for this node_id.
+2. Call out to control plane to validate that the attachment generation number we hold for the tenant
+   is still the latest, and that our node generation number is the latest for this node_id.
 3. If step 2 passes, it is safe to delete the object. We have guaranteed that any future
    attachment of the tenant to a different node will happen _after_ Step 1, and therefore
    that future attached node will start from the metadata that does not reference the key
@@ -294,7 +293,7 @@ Remote objects are not the only kind of deletion the pageserver does: it also in
 WAL data, by feeding back remote_consistent_lsn to safekeepers, as a signal to the safekeepers that
 they may drop data below this LSN.
 
-For the same reasons that deletion of objects must be guarded by a generation number
+For the same reasons that deletion of objects must be guarded by a node generation & attachment generation number
 validation step, updates to `remote_consistent_lsn` are subject to the same rules, using
 an ordering as follows:
 
@@ -324,7 +323,7 @@ the same generation validation requirement.
 
 #### Pageserver node startup
 
-- The pageserver must obtain a generation number by some means (see Control Plane Changes below) before
+- The pageserver must obtain a node generation number by some means (see Control Plane Changes below) before
   doing any remote writes.
 - The pageserver _may_ also do some synchronization of its attachments to see which are still
   valid, see "Synchronizing attachments on pageserver startup" in the optimizations section.
@@ -417,7 +416,7 @@ simplicity just do it periodically as part of the background scrub (see [scrubbi
 
 - The `Project` table must store an attachment generation number for use when
   attaching the tenant to a new pageserver.
-- The `/v1/tenant/:tenant_id/attach` pageserver API will require a generation number,
+- The `/v1/tenant/:tenant_id/attach` pageserver API will require an attachment generation number,
   which the control plane can supply by simply incrementing the `Project`'s attachment
   generation number each time the tenant is attached to a different server: the same database
   transaction that changes the assigned pageserver should also change the attachment generation.
@@ -520,7 +519,7 @@ If some very slow node tries to do a timeline creation _after_
 a more recent generation node has already created the timeline
 and written some data into it, that must not cause harm. This
 is provided in timeline creations by the way all the objects
-within the timeline's remote path include a generation ID:
+within the timeline's remote path include a generation suffix:
 a slow node in an old generation that attempts to "create" a timeline
 that already exists will just emit an index_part.json with
 an old generation suffix.
@@ -819,7 +818,7 @@ certain optimizations like:
 ### Safekeeper optimization for stale pageservers
 
 As an optimization, we may extend the safekeeper to be asynchronously updated about pageserver node
-generation numbers. We may do this by including the generation in messages from pageserver to safekeeper,
+generation numbers. We may do this by including the node generation in messages from pageserver to safekeeper,
 and having the safekeeper write the highest generation number it has seen for each node to the storage broker.
 
 Once the safekeeper has visibility of the most recent generation, it may reject requests from pageservers
@@ -891,7 +890,7 @@ The control plane changes are deployed: control plane will now track and increme
 #### Phase 3
 
 The pageserver is deployed with its control-plane-dependent changes enabled: it will now require
-the control plane to issue a generation number, and require to communicate with the control plane
+the control plane to issue a node generation number, and require to communicate with the control plane
 prior to processing deletions.
 
 ### On-disk backward compatibility
@@ -899,9 +898,9 @@ prior to processing deletions.
 Backward compatibility with existing data is straightforward:
 
 - When reading the index, we may assume that any layer whose metadata doesn't include
-  generations will have a generation-less key path.
+  generations will have a path without generation suffix.
 - When locating the index file on attachment, we may use the "fallback" listing path
-  and if there is only a generation-less index, that is the one we load.
+  and if there is only an index without generation suffix, that is the one we load.
 
 It is not necessary to re-write existing layers: even new index files will be able
 to represent generation-less layers.
@@ -932,7 +931,7 @@ has taken action in response to the node being down.
 
 - After restart, the node does no writes until it can obtain a fresh generation
   number from the control plane.
-- Once it has a generation number, it may activate all existing attachments. The
+- Once it has a node generation number, it may activate all existing attachments. The
   generation of its attachments is stored on disk. This may be stale, but that is
   safe.
 - If any of its attachments were in fact stale (i.e. had be reassigned to another
