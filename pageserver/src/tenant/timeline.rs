@@ -1054,7 +1054,6 @@ impl Timeline {
             );
         }
 
-        // start the batch update
         let mut results = Vec::with_capacity(layers_to_evict.len());
         for _ in 0..layers_to_evict.len() {
             results.push(None);
