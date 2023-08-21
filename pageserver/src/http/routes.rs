@@ -1160,11 +1160,11 @@ async fn disk_usage_eviction_run(
 
     let state = get_state(&r);
 
-    let Some(storage) = state.remote_storage.clone() else {
+    if state.remote_storage.as_ref().is_none() {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
         )));
-    };
+    }
 
     let state = state.disk_usage_eviction_state.clone();
 
@@ -1182,7 +1182,6 @@ async fn disk_usage_eviction_run(
         async move {
             let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
                 &state,
-                &storage,
                 usage,
                 &child_cancel,
             )
