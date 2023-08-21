@@ -187,11 +187,6 @@ impl Layer for ImageLayer {
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.get_lsn_range()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
     fn is_incremental(&self) -> bool {
         self.is_incremental()
     }
