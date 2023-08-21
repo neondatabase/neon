@@ -168,6 +168,27 @@ Node that the two generation numbers have a different behavior for stale generat
   facilitating live migration (this will be articulated in the next RFC that describes HA and
   migrations).
 
+#### Visibility
+
+Because index_part.json is now written with a generation suffix, which data
+is visible depends on which generation the reader is operating in:
+
+- If two pageservers have the same tenant attached, they may have different
+  data visible as they're independently replaying the WAL, and maintaining
+  independent LayerMaps that are written to independent index_part.json files.
+  Data does not have to be remotely committed to be visible.
+- If one was passively reading from S3 from outside of a pageserver, the
+  visibility of data would depend on which index_part.json-<suffix> file
+  one had chosen to read from.
+- For a pageserver writing with a stale generation suffix, historic LSNs
+  remain readable until another pageserver (with a higher generation suffix)
+  decides to execute GC deletions. At this point, we may think of the stale
+  attachment's generation as having logically ended: during its existence
+  the generation had a consistent view of the world.
+- For a newly attached pageserver, its highest visible LSN may appears to
+  go backwards with respect to an earlier attachment, if that earlier
+  attachment had not uploaded all data to S3 before the new attachment.
+
 ### Object Key Changes
 
 #### Generation suffix
