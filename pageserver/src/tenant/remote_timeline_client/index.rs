@@ -85,7 +85,11 @@ impl IndexPart {
     /// used to understand later versions.
     ///
     /// Version is currently informative only.
-    const LATEST_VERSION: usize = 2;
+    /// Version history
+    /// - 2: added `deleted_at`
+    /// - 3: no longer deserialize `timeline_layers` (serialized format is the same, but timeline_layers
+    ///      is always generated from the keys of `layer_metadata`)
+    const LATEST_VERSION: usize = 3;
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
