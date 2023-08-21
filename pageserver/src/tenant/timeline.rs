@@ -3989,7 +3989,7 @@ impl Timeline {
 
                 js.spawn(
                     async move {
-                        let res = next.get_or_download(None).await;
+                        let res = next.get_or_download().await;
                         (next, res)
                     }
                     .instrument(span),

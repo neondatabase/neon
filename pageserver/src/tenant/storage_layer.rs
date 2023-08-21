@@ -544,7 +544,7 @@ impl LayerE {
     }
 
     pub(crate) async fn evict_and_wait(
-        &self,
+        self: &Arc<Self>,
         _: &RemoteTimelineClient,
     ) -> Result<(), super::timeline::EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
@@ -606,7 +606,7 @@ impl LayerE {
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        let layer = self.get_or_download(Some(ctx)).await?;
+        let layer = self.get_or_maybe_download(true, Some(ctx)).await?;
         self.access_stats
             .record_access(LayerAccessKind::GetValueReconstructData, ctx);
 
@@ -619,7 +619,7 @@ impl LayerE {
         self: &Arc<Self>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<DeltaEntry<ResidentDeltaLayer>>> {
-        let layer = self.get_or_download(Some(ctx)).await?;
+        let layer = self.get_or_maybe_download(true, Some(ctx)).await?;
         self.access_stats
             .record_access(LayerAccessKind::KeyIter, ctx);
 
@@ -632,17 +632,17 @@ impl LayerE {
         self: &Arc<Self>,
         allow_download: bool,
     ) -> anyhow::Result<ResidentLayer> {
-        let downloaded = if !allow_download {
-            self.get()
-                .ok_or_else(|| anyhow::anyhow!("layer {self} is not downloaded"))
-        } else {
-            self.get_or_download(None).await
-        }?;
+        let downloaded = self.get_or_maybe_download(allow_download, None).await?;
 
         Ok(ResidentLayer {
             _downloaded: downloaded,
             owner: self.clone(),
         })
+    }
+
+    pub(crate) async fn get_or_download(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.get_or_maybe_download(true, None).await?;
+        Ok(())
     }
 
     fn get_or_apply_evictedness(
@@ -664,11 +664,11 @@ impl LayerE {
     }
 
     /// Cancellation safe.
-    pub(crate) async fn get_or_download(
+    async fn get_or_maybe_download(
         self: &Arc<Self>,
+        allow_download: bool,
         ctx: Option<&RequestContext>,
-    ) -> anyhow::Result<Arc<DownloadedLayer>> {
-        let allow_download = true;
+    ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         let download = move || async move {
             // disable any scheduled but not yet running eviction deletions for this
             self.version.fetch_add(1, Ordering::Relaxed);
