@@ -519,6 +519,7 @@ mod tests {
                 tenant_id: vec![0x00; 16],
                 timeline_id,
             }),
+            term: 0,
             last_log_term: 0,
             flush_lsn: 1,
             commit_lsn: 2,
@@ -526,6 +527,7 @@ mod tests {
             remote_consistent_lsn: 4,
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
+            http_connstr: "neon-1-sk-1.local:7677".to_owned(),
             local_start_lsn: 0,
             availability_zone: None,
         }

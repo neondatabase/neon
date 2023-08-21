@@ -248,8 +248,9 @@ impl SharedState {
                 tenant_id: ttid.tenant_id.as_ref().to_owned(),
                 timeline_id: ttid.timeline_id.as_ref().to_owned(),
             }),
+            term: self.sk.state.acceptor_state.term,
             last_log_term: self.sk.get_epoch(),
-            flush_lsn: self.sk.wal_store.flush_lsn().0,
+            flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.inmem.commit_lsn.0,
             remote_consistent_lsn: remote_consistent_lsn.0,
@@ -258,6 +259,7 @@ impl SharedState {
                 .advertise_pg_addr
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
+            http_connstr: conf.listen_http_addr.to_owned(),
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),

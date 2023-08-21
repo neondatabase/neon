@@ -562,7 +562,7 @@ where
     }
 
     /// wal_store wrapper avoiding commit_lsn <= flush_lsn violation when we don't have WAL yet.
-    fn flush_lsn(&self) -> Lsn {
+    pub fn flush_lsn(&self) -> Lsn {
         max(self.wal_store.flush_lsn(), self.state.timeline_start_lsn)
     }
 
