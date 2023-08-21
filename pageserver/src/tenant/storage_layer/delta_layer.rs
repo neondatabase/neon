@@ -241,6 +241,69 @@ impl std::fmt::Debug for DeltaLayerInner {
 impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+        self.dump(verbose, ctx).await
+    }
+
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
+            .await
+    }
+
+    fn get_key_range(&self) -> Range<Key> {
+        self.get_key_range()
+    }
+
+    fn get_lsn_range(&self) -> Range<Lsn> {
+        self.get_lsn_range()
+    }
+
+    fn is_incremental(&self) -> bool {
+        self.is_incremental()
+    }
+}
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for DeltaLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
+impl PersistentLayer for DeltaLayer {
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        Some(self)
+    }
+
+    fn local_path(&self) -> Option<PathBuf> {
+        self.local_path()
+    }
+
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        self.delete_resident_layer_file()
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.info(reset)
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats()
+    }
+}
+
+impl DeltaLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.desc.tenant_id,
@@ -312,7 +375,7 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -331,50 +394,29 @@ impl Layer for DeltaLayer {
             .await
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
+    pub(crate) fn get_key_range(&self) -> Range<Key> {
         self.layer_desc().key_range.clone()
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
+    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.layer_desc().lsn_range.clone()
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
+    pub(crate) fn is_incremental(&self) -> bool {
         self.layer_desc().is_incremental
     }
-}
-/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-impl std::fmt::Display for DeltaLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
 
-impl AsLayerDesc for DeltaLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl PersistentLayer for DeltaLayer {
-    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
-        Some(self)
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn delete_resident_layer_file(&self) -> Result<()> {
+    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
@@ -390,12 +432,10 @@ impl PersistentLayer for DeltaLayer {
         }
     }
 
-    fn access_stats(&self) -> &LayerAccessStats {
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         &self.access_stats
     }
-}
 
-impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         tenant_id: &TenantId,
