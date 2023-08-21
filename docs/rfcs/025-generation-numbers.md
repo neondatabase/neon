@@ -174,7 +174,6 @@ Node that the two generation numbers have a different behavior for stale generat
 
 All object keys (layer objects and index objects) will contain a numeric suffix that
 advances as the attachment generation and node generation advance.
-
 This suffix is the primary mechanism for protecting against split-brain situations, and
 enabling safe multi-attachment of tenants:
 
@@ -224,59 +223,59 @@ for the lengths being sufficient are:
 - 16 bit node ID is enough for 35 new pageservers to be deployed every day over a 5 year
   system lifetime. In practice the frequency is likely to be more like 1 per week, and
 
-### Deletion Part 1: Remote object deletions
+#### Index changes
+
+Since object keys now include a generation suffix, the index of these keys must also be updated.
+
+IndexPart currently stores keys and LSNs sufficient to reconstruct key names: this would be
+extended to store the suffix as well.
+
+This will increase the size of the file, but only modestly: layers are already encoded as
+their string-ized form, so the overhead is about 20 bytes per layer. This will be less if/when
+the index storage format is migrated to a binary format from JSON.
+
+### Deletion
+
+#### Generation number validation
 
 While writes are de-conflicted by writers always using their own generation number in the key,
 deletions are slightly more challenging: if a pageserver A is isolated, and the true active node is
 pageserver B, then it is dangerous for A to do any object deletions, even of objects that it wrote
 itself, because pageserver's B metadata might reference those objects.
 
-To solve this without doing excessive synchronization, deletions are accumulated in deletion lists
-(also known as deadlists, or garbage lists), to be executed later. The actual execution of one of
-these lists has two preconditions:
+We may solve this by inserting a "generation validation" step between the write of a remote index
+that un-links a particular object from the index, and the actual deletion of the object, such
+that deletions strictly obey the following ordering:
 
-- That the executing node has written out the metadata index file since it decided to do
-  the deletion (i.e. no to-be-deleted files are referenced by the index)
-- That after writing that index file, the deleting node has confirmed that it is still the latest
-  generation (i.e. it is the legitimate holder of its node ID), _and_ that its attachments for the tenants
-  whose data is being deleted are current.
+1. Write out index_part.json: this guarantees that any subsequent reader of the metadata will
+   not try and read the object we unlinked.
+2. Call out to control plane to validate that the generation number we hold for the attachment
+   is still the latest, and that our node generration number is the latest for this node_id.
+3. If step 2 passes, it is safe to delete the object. We have guaranteed that any future
+   attachment of the tenant to a different node will happen _after_ Step 1, and therefore
+   that future attached node will start from the metadata that does not reference the key
+   we are deleting.
 
-The order of operations for correctness is:
+Note that at step 2 we are only confirming that deletions of objects _no longer referenced
+by the metadata written in step 1_ are safe. If we were attempting other deletions concurrently,
+these would need their own generation validation step.
 
-1. Decide to delete one or more objects
-2. Write updated metadata (this means that if we are still the rightful leader, any subsequent leader will
-   read metadata that does not reference the about-to-be-deleted object).
-3. Confirm we hold a non-stale generation for the node and the attachment(s) doing deletion.
-4. Actually delete the objects
+If step 2 fails, we may leak the object. This is safe, but has a cost: see [scrubbing](#cleaning-up-orphan-objects-scrubbing). We may avoid this entirely outside of node
+failures, if we do proper flushing of deletions on clean shutdown and clean migration.
 
-Note that at stage 3 we are only confirming that deletions of objects no longer referenced
-by the metadata written in step 2 are safe. While Step 3 is in flight, new deletions may
-be enqueued, but these are not safe to execute until a subsequent iteration of the
-generation check.
+To avoid doing a huge number of control plane requests to perform generation validation,
+validation of many tenants will be done in a single request, and deletions will be queued up
+prior to validation: see [Persistent deletion queue](#persistent-deletion-queue) for more.
 
-Because step 3 puts load on the control plane, deletion lists should be executed lazily,
-accumulating many deletions before executing them behind a batched generation check message
-to the control plane, which would contain a list of tenant generation numbers to validate.
-
-The result of the request to the control plane may indicate that only some of the attachment
-generations are fresh: if this is the case, then the pageserver must selectively drop the
-deletions from a stale generation, but still execute the deletions for attachments
-that had a fresh generation.
-
-The only correctness requirement for deletions is that they are _not_ executed prior
-to the barrier in step 3. It is safe to delay a deletion, or indeed to never execute
-it at all, if a node restarts while an in-memory queue of deletions is pending. Minimizing
-leaking objects is an optimization, accomplished by making this queue persistent: see
-[Persistent Deletion Queue](#persistent-deletion-queue) in the optimizations section.
-
-### Deletion Part 2: WAL trim changes (delay `remote_consistent_lsn` updates)
+#### `remote_consistent_lsn` updates
 
 Remote objects are not the only kind of deletion the pageserver does: it also indirectly deletes
 WAL data, by feeding back remote_consistent_lsn to safekeepers, as a signal to the safekeepers that
 they may drop data below this LSN.
 
-We may solve for safety of remote_consistent_lsn updates in the same way as for S3 deletions. Before indicating to safekeepers
-that they may trim up to some LSN `L0`, pageservers must do the following in order:
+For the same reasons that deletion of objects must be guarded by a generation number
+validation step, updates to `remote_consistent_lsn` are subject to the same rules, using
+an ordering as follows:
 
 1. persist index_part that covers data up to LSN `L0`
 2. call to control plane to validate their attachment + node generation number
@@ -299,17 +298,6 @@ For convenience, in subsequent sections and RFCs we will use "deletion" to mean 
 of objects in S3, and updates to the `remote_consistent_lsn`, as updates to the remote consistent
 LSN are de-facto deletions done via the safekeeper, and both kinds of deletion are subject to
 the same generation validation requirement.
-
-### Index changes
-
-Since object keys now include a generation suffix, the index of these keys must also be updated.
-
-IndexPart currently stores keys and LSNs sufficient to reconstruct key names: this would be
-extended to store the suffix as well.
-
-This will increase the size of the file, but only modestly: layers are already encoded as
-their string-ized form, so the overhead is about 20 bytes per layer. This will be less if/when
-the index storage format is migrated to a binary format from JSON.
 
 ### Pageserver startup changes
 
@@ -606,13 +594,17 @@ The flow of deletion becomes:
 3. Validate the deletion list by calling to the control plane
 4. Execute the valid parts of the deletion list (i.e. call DeleteObjects)
 
+Note that steps 2 and 3 can be swapped: it depends on whether we would like
+to optimize for delaying validation for a long time in bounded memory (persist
+first, delete later), or optimize for I/O (validate first, then persist).
+
 There is existing work (https://github.com/neondatabase/neon/pull/4960) to
 create a deletion queue: this would be extended by adding the "step 3" validation
 step.
 
-Since this whole section is an optimization, there is a lot of flexibility
-in exactly how the deletion queue should work, especially in the timing
-of the validation step:
+Since its reason for existence is optimization rather than correctness,
+there is a lot of flexibility in exactly how the deletion queue should work,
+as long as it obeys the rule to validate generations before executing deletions:
 
 - Option A (simplest):validate the
   deletion list before persisting it. This has the downside of delaying
@@ -641,6 +633,10 @@ deletions over long timescale has side benefits:
 
 #### Deletion queue persistence format
 
+_Note: the following format describes a persistent format for "Option C" in
+the previous section. It would be simpler in "Option A", as one would not
+need to store generation information for pre-validated deletes_
+
 Persistence is to S3 rather than local disk so that if a pageserver
 is stopped uncleanly and then the same node_id is started on a fresh
 physical machine, the deletion queue can still continue without leaking
@@ -663,12 +659,31 @@ case there are no deletion lists at present.
 Deletion queue objects will be stored outside the `tenants/` path, and
 with the node generation ID in the name. The paths would look something like:
 
-```
+```bash
   # Deletion List
   deletion/<node id>/<sequence>-<generation>.list
 
-  # Header object, st
+  # Header object, stores the highest sequence & clean sequence
   deletion/<node id>/header-<generation>
+```
+
+Each entry in a deletion list is structured to contain the tenant & timeline,
+and the node generation & attachment generation.
+
+```rust
+/// One of these per deletion list object
+struct DeletionList {
+  deletions: Vec<DeletionEntry>
+  node_gen: NodeGeneration
+}
+
+/// N of these per deletion list
+struct DeletionEntry {
+  tenant_id: TenantId,
+  timeline_id: TimelineId,
+  keys: Vec<String>,
+  attach_gen: AttachmentGeneration
+}
 ```
 
 #### Deletion queue replay on startup
@@ -677,7 +692,7 @@ When starting up with a new generation number, a pageserver should avoid
 leaking objects by ingesting the deletion queue from its previous lifetime, but
 ignore any un-validated content:
 
-1. List all objects in `deletion/<node id>`. Load the header.
+1. List all objects in `deletion/<node id>`. Fetch the header.
 2. Drop any that are not below the validated horizon in the header
 3. Write a new header in the current generation number
 4. Process the validated lists from the previous generation in the same
@@ -686,6 +701,34 @@ ignore any un-validated content:
 The number of objects leaked in this process depends on how frequently we
 do validation during normal operations, and whether the previous pageserver
 instance was terminated cleanly and validated its lists in the process.
+
+#### Background generation validation
+
+Deletion execution is gated on the "validated sequence" advancing. To advance it,
+some background task would do the following procedure for each deletion list
+in order:
+
+1. Scan the DeletionList and aggregate a map of tenant to attachment generation
+2. Send a request to the control plane to validate these generations and the
+   DeletionList's node generation.
+3. Conditional on result:
+   - a. If all are valid, then advance validated sequence number
+   - b. If some are invalid, then rewrite the deletion list to exclude all non-valid
+     deletions, persist to S3, then advance the validated sequence number.
+
+#### Operations that may skip the queue
+
+Deletions of an entire timeline are exempt from generation number validation. Once the
+control plane sends the deletion request, there is no requirement to retain the readability
+of any data within the timeline, and all objects within the timeline path may be deleted
+at any time from the control plane's deletion request onwards.
+
+Since deletions of smaller timelines won't have enough objects to compose a full sized
+DeleteObjects request, it is still useful to send these through the last part of the
+deletion pipeline to coalesce with other executing deletions: to enable this, the
+deletion queue should expose two input channels: one for deletions that must be
+processed in a generation-aware way, and a fast path for timeline deletions, where
+that fast path may skip validation and the persistent queue.
 
 ### Synchronizing attachments on pageserver startup
 
