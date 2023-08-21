@@ -248,7 +248,6 @@ impl BlockReader for EphemeralFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::blob_io::BlobWriter;
     use crate::tenant::block_io::BlockCursor;
     use rand::{thread_rng, RngCore};
     use std::fs;
@@ -277,12 +276,12 @@ mod tests {
 
         let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
 
-        let pos_foo = file.write_blob(b"foo")?;
+        let pos_foo = file.write_blob(b"foo").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
         );
-        let pos_bar = file.write_blob(b"bar")?;
+        let pos_bar = file.write_blob(b"bar").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
@@ -295,13 +294,13 @@ mod tests {
         let mut blobs = Vec::new();
         for i in 0..10000 {
             let data = Vec::from(format!("blob{}", i).as_bytes());
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
         // also test with a large blobs
         for i in 0..100 {
             let data = format!("blob{}", i).as_bytes().repeat(100);
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
 
@@ -315,7 +314,7 @@ mod tests {
         let mut large_data = Vec::new();
         large_data.resize(20000, 0);
         thread_rng().fill_bytes(&mut large_data);
-        let pos_large = file.write_blob(&large_data)?;
+        let pos_large = file.write_blob(&large_data).await?;
         let result = file.block_cursor().read_blob(pos_large).await?;
         assert_eq!(result, large_data);
 
