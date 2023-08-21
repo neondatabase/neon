@@ -78,7 +78,6 @@ impl PersistentLayerDesc {
         timeline_id: TimelineId,
         key_range: Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
         file_size: u64,
     ) -> Self {
         Self {
@@ -87,7 +86,8 @@ impl PersistentLayerDesc {
             key_range,
             lsn_range: Self::image_layer_lsn_range(lsn),
             is_delta: false,
-            is_incremental,
+            // currently all image layers are non-incremental
+            is_incremental: false,
             file_size,
         }
     }

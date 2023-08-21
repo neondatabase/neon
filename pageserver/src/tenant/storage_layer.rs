@@ -447,7 +447,6 @@ pub mod tests {
                 TimelineId::from_array([0; 16]),
                 value.key_range,
                 value.lsn,
-                false,
                 233,
             )
         }

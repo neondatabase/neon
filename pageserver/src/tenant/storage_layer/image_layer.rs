@@ -382,7 +382,6 @@ impl ImageLayer {
                 timeline_id,
                 filename.key_range.clone(),
                 filename.lsn,
-                false,
                 file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
@@ -409,7 +408,6 @@ impl ImageLayer {
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
-                false,
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
@@ -623,7 +621,6 @@ impl ImageLayerWriterInner {
             self.timeline_id,
             self.key_range.clone(),
             self.lsn,
-            self.is_incremental, // for now, image layer ALWAYS covers the full range
             metadata.len(),
         );
 
