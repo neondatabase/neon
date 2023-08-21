@@ -668,6 +668,7 @@ impl LayerE {
         self: &Arc<Self>,
         ctx: Option<&RequestContext>,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
+        let allow_download = true;
         let download = move || async move {
             // disable any scheduled but not yet running eviction deletions for this
             self.version.fetch_add(1, Ordering::Relaxed);
@@ -679,15 +680,17 @@ impl LayerE {
             // locked.take();
 
             // technically the mutex could be dropped here.
-            let Some(timeline) = self.timeline.upgrade() else { anyhow::bail!("timeline has gone already") };
-
+            let timeline = self
+                .timeline
+                .upgrade()
+                .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
             let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
             let needs_download = self
                 .needs_download()
                 .await
-                .context("check if layer file is present")?;
+                .map_err(DownloadError::PreStatFailed)?;
 
             if let Some(reason) = needs_download {
                 // what to do if we have a concurrent eviction request when we are downloading? eviction
@@ -699,8 +702,8 @@ impl LayerE {
                 self.wanted_evicted.store(false, Ordering::Release);
 
                 if !can_ever_evict {
-                    anyhow::bail!("refusing to attempt downloading {self} because no remote timeline client, reason: {reason}")
-                };
+                    return Err(DownloadError::NoRemoteStorage);
+                }
 
                 if self.wanted_garbage_collected.load(Ordering::Acquire) {
                     // it will fail because we should had already scheduled a delete and an
@@ -734,12 +737,16 @@ impl LayerE {
                                 // ))
                                 //
                                 // this check is only probablistic, seems like flakyness footgun
-                                anyhow::bail!(
-                                    "refusing to download layer {self} due to RequestContext"
-                                )
+                                return Err(DownloadError::ContextAndConfigReallyDeniesDownloads);
                             }
                         }
                     }
+                }
+
+                if !allow_download {
+                    // this does look weird, but for LayerE the "downloading" means also changing
+                    // internal once related state ...
+                    return Err(DownloadError::DownloadRequired);
                 }
 
                 let task_name = format!("download layer {}", self);
@@ -760,9 +767,9 @@ impl LayerE {
                         let client = timeline
                             .remote_client
                             .as_ref()
-                            .expect("checked above with can_ever_evict");
-                        let result = client
-                        .download_layer_file(
+                            .expect("checked above with have_remote_client");
+
+                        let result = client.download_layer_file(
                             &this.desc.filename(),
                             &crate::tenant::remote_timeline_client::index::LayerFileMetadata::new(
                                 this.desc.file_size,
@@ -770,14 +777,29 @@ impl LayerE {
                         )
                         .await;
 
-                        match result {
+                        let result = match result {
                             Ok(size) => {
                                 timeline.metrics.resident_physical_size_gauge.add(size);
-                                let _ = tx.send(());
+                                Ok(())
                             }
                             Err(e) => {
-                                // TODO: the temp file might still be around, metrics might be off
-                                tracing::error!("layer file download failed: {e:?}",);
+                                Err(e)
+                            }
+                        };
+
+                        if let Err(res) = tx.send(result) {
+                            match res {
+                                Ok(()) => {
+                                    // our caller is cancellation safe so this is fine; if someone
+                                    // else requests the layer, they'll find it already downloaded.
+                                    //
+                                    // however, could be that we should consider marking the layer
+                                    // for eviction?
+                                },
+                                Err(e) => {
+                                    // our caller is cancellation safe, but
+                                    tracing::error!("layer file download failed, and additionally failed to communicate this to caller: {e:?}");
+                                }
                             }
                         }
 
@@ -785,17 +807,27 @@ impl LayerE {
                     }
                     .in_current_span(),
                 );
-                if rx.await.is_err() {
-                    return Err(anyhow::anyhow!("downloading failed, possibly for shutdown"));
+                match rx.await {
+                    Ok(Ok(())) => {
+                        if let Some(reason) = self
+                            .needs_download()
+                            .await
+                            .map_err(DownloadError::PostStatFailed)?
+                        {
+                            // this is really a bug in needs_download or remote timeline client
+                            panic!("post-condition failed: needs_download returned {reason:?}");
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("layer file download failed: {e:#}");
+                        return Err(DownloadError::DownloadFailed);
+                        // FIXME: we need backoff here so never spiral to download loop, maybe,
+                        // because remote timeline client already retries
+                    }
+                    Err(_gone) => {
+                        return Err(DownloadError::DownloadCancelled);
+                    }
                 }
-                // FIXME: we need backoff here so never spiral to download loop
-                anyhow::ensure!(
-                    self.needs_download()
-                        .await
-                        .context("test if downloading is still needed")?
-                        .is_none(),
-                    "post-condition for downloading: no longer needs downloading"
-                );
             } else {
                 // the file is present locally and we could even be running without remote
                 // storage
@@ -815,13 +847,8 @@ impl LayerE {
             });
 
             Ok(if self.wanted_evicted.load(Ordering::Acquire) {
-                // because we reset wanted_evictness near beginning, this means when we were downloading someone
+                // because we reset wanted_evictness earlier, this most likely means when we were downloading someone
                 // wanted to evict this layer.
-                //
-                // perhaps the evict should only possible via ResidentLayer because this makes my head
-                // spin. the caller of this function will still get the proper `Arc<DownloadedLayer>`.
-                //
-                // the risk is that eviction becomes too flaky.
                 ResidentOrWantedEvicted::WantedEvicted(Arc::downgrade(&res))
             } else {
                 ResidentOrWantedEvicted::Resident(res.clone())
@@ -1038,6 +1065,28 @@ impl LayerE {
             crate::task_mgr::BACKGROUND_RUNTIME.spawn(eviction);
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DownloadError {
+    #[error("timeline has already shutdown")]
+    TimelineShutdown,
+    #[error("no remote storage configured")]
+    NoRemoteStorage,
+    #[error("context denies downloading")]
+    ContextAndConfigReallyDeniesDownloads,
+    #[error("downloading is really required but not allowed by this method")]
+    DownloadRequired,
+    /// Why no error here? Because it will be reported by page_service. We should had also done
+    /// retries already.
+    #[error("downloading evicted layer file failed")]
+    DownloadFailed,
+    #[error("downloading failed, possibly for shutdown")]
+    DownloadCancelled,
+    #[error("pre-condition: stat before download failed")]
+    PreStatFailed(#[source] std::io::Error),
+    #[error("post-condition: stat after download failed")]
+    PostStatFailed(#[source] std::io::Error),
 }
 
 #[derive(Debug, PartialEq)]
