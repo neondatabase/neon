@@ -268,11 +268,6 @@ impl ImageLayer {
             .with_context(|| format!("read {}", self.path().display()))
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
     pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
@@ -284,13 +279,13 @@ impl ImageLayer {
     }
 
     pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_start = self.layer_desc().image_layer_lsn();
 
         HistoricLayerInfo::Image {
             layer_file_name,
             layer_file_size: self.desc.file_size,
-            lsn_start: lsn_range.start,
+            lsn_start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
         }
