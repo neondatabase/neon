@@ -921,6 +921,7 @@ mod tests {
             timeline: SafekeeperTimelineInfo {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
+                term: 0,
                 last_log_term: 0,
                 flush_lsn: 0,
                 commit_lsn,
@@ -929,6 +930,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
+                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
             },
             latest_update,
