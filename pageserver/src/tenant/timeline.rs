@@ -15,7 +15,6 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
     LayerResidenceEventReason, LayerResidenceStatus, TimelineState,
 };
-use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, TryAcquireError};
@@ -1012,7 +1011,7 @@ impl Timeline {
             .as_ref()
             .context("timeline must have RemoteTimelineClient")?;
 
-        self.evict_layer_batch(remote_client, layers_to_evict, &cancel)
+        self.evict_layer_batch(remote_client, layers_to_evict, cancel)
             .await
     }
 
@@ -1063,10 +1062,11 @@ impl Timeline {
 
         let mut js = tokio::task::JoinSet::new();
 
-        for (i, l) in layers_to_evict.into_iter().enumerate() {
+        for (i, l) in layers_to_evict.iter().enumerate() {
             js.spawn({
                 let l = l.to_owned();
-                async move { (i, l.evict_and_wait().await) }
+                let remote_client = remote_client.clone();
+                async move { (i, l.evict_and_wait(&remote_client).await) }
             });
         }
 
