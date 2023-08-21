@@ -1,7 +1,6 @@
 //! Code to deal with safekeeper control file upgrades
 use crate::safekeeper::{
-    AcceptorState, PersistedPeers, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory,
-    TermSwitchEntry,
+    AcceptorState, PersistedPeers, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory, TermLsn,
 };
 use anyhow::{bail, Result};
 use pq_proto::SystemId;
@@ -145,7 +144,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         let oldstate = SafeKeeperStateV1::des(&buf[..buf.len()])?;
         let ac = AcceptorState {
             term: oldstate.acceptor_state.term,
-            term_history: TermHistory(vec![TermSwitchEntry {
+            term_history: TermHistory(vec![TermLsn {
                 term: oldstate.acceptor_state.epoch,
                 lsn: Lsn(0),
             }]),
