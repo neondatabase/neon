@@ -147,6 +147,13 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
+
+# pg_embedding was temporarily released as hnsw from this repo, when we only
+# supported PostgreSQL 14 and 15
+neon-pg-ext-v14: neon-pg-ext-hnsw-v14
+neon-pg-ext-v15: neon-pg-ext-hnsw-v15
+
+neon-pg-ext-hnsw-%: postgres-headers-%
 	+@echo "Compiling hnsw $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/hnsw-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
