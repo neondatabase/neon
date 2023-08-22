@@ -1609,8 +1609,6 @@ impl Timeline {
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
-        // total size of layer files in the current timeline directory
-        let mut total_physical_size = 0;
 
         let mut loaded_layers = Vec::<Arc<dyn PersistentLayer>>::new();
 
@@ -1645,7 +1643,6 @@ impl Timeline {
                         stats,
                     );
 
-                    total_physical_size += file_size;
                     loaded_layers.push(Arc::new(layer));
                 }
                 Ok(LayerFileName::Delta(filename)) => {
@@ -1676,7 +1673,6 @@ impl Timeline {
                         stats,
                     );
 
-                    total_physical_size += file_size;
                     loaded_layers.push(Arc::new(layer));
                 }
                 Err(_) => {
@@ -1707,6 +1703,10 @@ impl Timeline {
         }
 
         let num_layers = loaded_layers.len();
+        let total_physical_size = loaded_layers
+            .iter()
+            .map(|x| x.layer_desc().file_size)
+            .sum::<u64>();
         guard.initialize_local_layers(loaded_layers, Lsn(disk_consistent_lsn.0) + 1);
 
         info!(
