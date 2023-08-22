@@ -772,6 +772,7 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
+            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
             backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
         )
         .await?;

@@ -83,7 +83,7 @@ async fn create_remote_delete_mark(
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        // TODO: thread a cancellation token into this code path
+        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
         backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
     )
     .await
@@ -174,7 +174,7 @@ async fn remove_tenant_remote_delete_mark(
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            // TODO: thread a cancellation token into this code path
+            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
             backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
         )
         .await
@@ -257,7 +257,7 @@ pub(crate) async fn remote_delete_mark_exists(
         SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
         SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
         "fetch_tenant_deletion_mark",
-        // TODO: thread a cancellation token into this code path
+        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
         backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
     )
     .await;

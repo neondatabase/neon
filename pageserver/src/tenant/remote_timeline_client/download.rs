@@ -281,7 +281,7 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        // TODO: pass a cancellation token into this function
+        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
         backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
             unreachable!()
         }),
