@@ -344,23 +344,6 @@ impl LayerAccessStats {
 /// are used in (timeline).
 #[async_trait::async_trait]
 pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
-    /// Range of keys that this layer covers
-    fn get_key_range(&self) -> Range<Key>;
-
-    /// Inclusive start bound of the LSN range that this layer holds
-    /// Exclusive end bound of the LSN range that this layer holds.
-    ///
-    /// - For an open in-memory layer, this is MAX_LSN.
-    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
-    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
-    fn get_lsn_range(&self) -> Range<Lsn>;
-
-    /// Does this layer only contain some data for the key-range (incremental),
-    /// or does it contain a version of every page? This is important to know
-    /// for garbage collecting old layers: an incremental layer depends on
-    /// the previous non-incremental layer.
-    fn is_incremental(&self) -> bool;
-
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
@@ -380,9 +363,6 @@ pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
-
-    /// Dump summary of the contents of the layer to stdout
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Get a layer descriptor from a layer.

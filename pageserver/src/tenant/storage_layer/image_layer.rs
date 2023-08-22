@@ -169,8 +169,52 @@ impl std::fmt::Debug for ImageLayerInner {
 
 #[async_trait::async_trait]
 impl Layer for ImageLayer {
-    /// debugging function to print out the contents of the layer
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    /// Look up given page in the file
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
+            .await
+    }
+}
+
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for ImageLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
+impl PersistentLayer for ImageLayer {
+    fn local_path(&self) -> Option<PathBuf> {
+        self.local_path()
+    }
+
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        self.delete_resident_layer_file()
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.info(reset)
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        self.access_stats()
+    }
+}
+
+impl ImageLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
@@ -203,8 +247,7 @@ impl Layer for ImageLayer {
         Ok(())
     }
 
-    /// Look up given page in the file
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -225,65 +268,33 @@ impl Layer for ImageLayer {
             .with_context(|| format!("read {}", self.path().display()))
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
-}
-
-/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-impl std::fmt::Display for ImageLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
-
-impl AsLayerDesc for ImageLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl PersistentLayer for ImageLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn delete_resident_layer_file(&self) -> Result<()> {
+    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_start = self.layer_desc().image_layer_lsn();
 
         HistoricLayerInfo::Image {
             layer_file_name,
             layer_file_size: self.desc.file_size,
-            lsn_start: lsn_range.start,
+            lsn_start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
         }
     }
 
-    fn access_stats(&self) -> &LayerAccessStats {
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         &self.access_stats
     }
-}
 
-impl ImageLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         timeline_id: TimelineId,

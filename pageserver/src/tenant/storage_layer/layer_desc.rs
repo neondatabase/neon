@@ -19,16 +19,22 @@ use serde::{Deserialize, Serialize};
 pub struct PersistentLayerDesc {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+    /// Range of keys that this layer covers
     pub key_range: Range<Key>,
-    /// For image layer, this is `[lsn, lsn+1)`.
+    /// Inclusive start, exclusive end of the LSN range that this layer holds.
+    ///
+    /// - For an open in-memory layer, the end bound is MAX_LSN
+    /// - For a frozen in-memory layer or a delta layer, the end bound is a valid lsn after the
+    /// range start
+    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     pub lsn_range: Range<Lsn>,
     /// Whether this is a delta layer.
     pub is_delta: bool,
-    /// Whether this layer only contains page images for part of the keys in the range. In the current implementation, this should
-    /// always be equal to `is_delta`. If we land the partial image layer PR someday, image layer could also be
-    /// incremental.
+    /// Does this layer only contain some data for the key-range (incremental),
+    /// or does it contain a version of every page? This is important to know
+    /// for garbage collecting old layers: an incremental layer depends on
+    /// the previous non-incremental layer.
     pub is_incremental: bool,
-    /// File size
     pub file_size: u64,
 }
 
