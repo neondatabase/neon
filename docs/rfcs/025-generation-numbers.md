@@ -269,10 +269,13 @@ that deletions strictly obey the following ordering:
 1. Write out index_part.json: this guarantees that any subsequent reader of the metadata will
    not try and read the object we unlinked.
 2. Call out to control plane to validate that the suffix which we just used is still the latest.
-3. If step 2 passes, it is safe to delete the object. We have guaranteed that any future
-   attachment of the tenant to a different node will happen _after_ Step 1, and therefore
-   that future attached node will start from the metadata that does not reference the key
-   we are deleting.
+3. If step 2 passes, it is safe to delete the object. Why? The check-in with control plane
+   together with our visibility rules guarantees that any later attachment / node generation
+   will use either the exact `index_part.json` that we uploaded in step 1, or a successor
+   of it; not an earlier one. In both cases, the `index_part.json` doesn't reference the
+   key we are deleting anymore, so, the key is invisible to any later attachment / node generation.
+   Hence it's safe to delete it.
+
 
 Note that at step 2 we are only confirming that deletions of objects _no longer referenced
 by the specific `index_part.json` written in step 1_ are safe. If we were attempting other deletions concurrently,
