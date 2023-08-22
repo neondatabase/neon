@@ -1140,16 +1140,13 @@ impl RemoteTimelineClient {
                     }
 
                     // sleep until it's time to retry, or we're cancelled
-                    let cancel = shutdown_token();
-                    tokio::select! {
-                        _ = task_mgr::shutdown_watcher() => { },
-                        _ = exponential_backoff(
-                            retries,
-                            DEFAULT_BASE_BACKOFF_SECONDS,
-                            DEFAULT_MAX_BACKOFF_SECONDS,
-                            &cancel
-                        ) => { },
-                    };
+                    exponential_backoff(
+                        retries,
+                        DEFAULT_BASE_BACKOFF_SECONDS,
+                        DEFAULT_MAX_BACKOFF_SECONDS,
+                        &shutdown_token(),
+                    )
+                    .await;
                 }
             }
         }
