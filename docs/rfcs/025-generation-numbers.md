@@ -12,14 +12,21 @@ in the pageservers.
 ## Motivation
 
 Currently, the pageserver's remote storage format does not provide a mechanism for addressing
-split brain conditions that may happen when replacing a node during failover or when migrating
-a tenant from one pageserver to another. From a remote storage perspective, a split brain condition
-occurs whenever two nodes both think they have the same tenant attached, and both can write to S3. This
-can happen in the case of a network partition, pathologically long delays (e.g. suspended VM), or software
-bugs.
+split brain conditions that may happen when replacing a node or when migrating
+a tenant from one pageserver to another.
 
-This blocks robust implementation of failover from unresponsive pageservers, due to the risk that
-the unresponsive pageserver is still writing to S3.
+From a remote storage perspective, a split brain condition occurs whenever two nodes both think
+they have the same tenant attached, and both can write to S3. This can happen in the case of a
+network partition, pathologically long delays (e.g. suspended VM), or software bugs.
+
+In the current deployment model, control plane guarantees that a tenant is attached to one
+pageserver at a time, thereby ruling out split-brain conditions.
+However, there is always the risk of a control plane bug.
+
+Futher, lack of safety during split-brain conditions blocks two important features where occasional
+split-brain conditions are part of the design assumptions:
+* seamless tenant migration ([RFC PR](https://github.com/neondatabase/neon/pull/5029))
+* automatic pageserver instance failure handling (aka "failover") (RFC TBD)
 
 ### Prior art
 
@@ -38,10 +45,11 @@ always has the same lifetime as a pageserver process and/or tenant attachment.
   S3's limitation that there are no atomics and clients can't be fenced)
 - Don't depend on any STONITH or node fencing in the compute layer (i.e. we will not
   assume that we can reliably kill and EC2 instance and have it die)
-- Enable per-tenant granularity migration/failover, so that the workload after a failure
-  is spread across a number of peers, rather than monolithically moving all load from
-  a particular server to some other server (we do not rule out the latter case, but should
-  not constrain ourselves to it).
+- Scoped per-tenant, not per-pageserver; for *seamless tenant migration*, we need
+  per-tenant granularity, and for *failover*, we likely want to spread the workload
+  of the failed pageserver instance to a number of peers, rather than monolithically
+  moving the entire workload to another machine.
+  We do not rule out the latter case, but should not constrain ourselves to it.
 
 ## Design Tenets
 
@@ -139,7 +147,7 @@ in good standing. Any node with any older generation number is not.
 #### Distinction between attachment and node generation id
 
 The most important generation number is the tenant attachment number: this alone would be sufficient
-to implement safe migration and failover, if we assume that our control plane will never concurrently
+to implement safe tenant migration and instance failover, if we assume that our control plane will never concurrently
 run two nodes with the same node ID.
 
 Running two nodes with the same ID might sound far-fetched, but it would happen very easily if we
