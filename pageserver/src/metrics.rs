@@ -6,7 +6,7 @@ use metrics::{
     HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
-use strum::{IntoEnumIterator, VariantNames};
+use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
 
@@ -595,7 +595,15 @@ impl<'a> Drop for GlobalAndPerTimelineHistogramTimer<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, IntoStaticStr, strum_macros::EnumCount, strum_macros::EnumIter)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    IntoStaticStr,
+    strum_macros::EnumCount,
+    strum_macros::EnumIter,
+    strum_macros::FromRepr,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum SmgrQueryType {
     GetRelExists,
@@ -606,7 +614,7 @@ pub enum SmgrQueryType {
 
 #[derive(Debug)]
 pub struct SmgrQueryTimePerTimeline {
-    metrics: Vec<GlobalAndPerTimelineHistogram>, // indexed by SmgrQueryTimeOperation
+    metrics: [GlobalAndPerTimelineHistogram; SmgrQueryType::COUNT],
 }
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
@@ -633,20 +641,19 @@ impl SmgrQueryTimePerTimeline {
     pub(crate) fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
-        let metrics = SmgrQueryType::iter()
-            .map(|op| {
-                let global = SMGR_QUERY_TIME_AGG
-                    .get_metric_with_label_values(&[op.into()])
-                    .unwrap();
-                let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
-                    .get_metric_with_label_values(&[op.into(), &tenant_id, &timeline_id])
-                    .unwrap();
-                GlobalAndPerTimelineHistogram {
-                    global,
-                    per_tenant_timeline,
-                }
-            })
-            .collect();
+        let metrics = std::array::from_fn(|i| {
+            let op = SmgrQueryType::from_repr(i).unwrap();
+            let global = SMGR_QUERY_TIME_AGG
+                .get_metric_with_label_values(&[op.into()])
+                .unwrap();
+            let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
+                .get_metric_with_label_values(&[op.into(), &tenant_id, &timeline_id])
+                .unwrap();
+            GlobalAndPerTimelineHistogram {
+                global,
+                per_tenant_timeline,
+            }
+        });
         Self { metrics }
     }
     pub(crate) fn start_timer(&self, op: SmgrQueryType) -> impl Drop + '_ {
