@@ -184,6 +184,35 @@ initially has visibility of all the objects that its predecessor generation refe
 These objects are guaranteed to remain visible until the current generation is
 superseded, via pageservers in older generations avoiding deletions (see [deletion](#deletion)).
 
+The "most recent previous generation suffix" is _not_ necessarily the most recent
+in terms of walltime, it is the one that is readable at the time a new generation
+starts. Consider the following sequence of a tenant being re-attached to different
+pageserver nodes:
+
+- Create + attach on PS1 in attach generation 1
+- PS1 Do some work, write out index_part.json-0001
+- Attach to PS2 in attach generation 2
+- Read index_part.json-0001
+- PS2 starts doing some work...
+- Attach to PS3 in attach generation 3
+- Read index_part.json-0001
+- **...PS2 finishes its work: now it writes index_part.json-0002**
+- PS3 writes out index_part.json-0003
+
+In the above sequence, the ancestry of indices is:
+
+```
+0001 -> 0002
+     |
+     -> 0003
+```
+
+This is not an issue for safety: if the 0002 references some object that is
+not in 0001, then 0003 simply does not see it, and will re-do whatever
+work was required (e.g. ingesting WAL or doing compaction). Objects referenced
+by only the 0002 index will never be read by future attachment generations, and
+will eventually be cleaned up by a scrub (see [scrubbing](#cleaning-up-orphan-objects-scrubbing)).
+
 ##### Visibility of LSNs to clients
 
 Because index_part.json is now written with a generation suffix, which data
