@@ -434,6 +434,19 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
+        if self.remote_storage.is_some() {
+            // Reconcile local state with remote storage, verifying metadata for layers existing
+            // both remotely and locally and scheduling uploads for anything that's missing in
+            // remote storage.
+            timeline
+                .reconcile_with_remote(
+                    up_to_date_metadata,
+                    remote_startup_data.as_ref().map(|r| &r.index_part),
+                )
+                .await
+                .context("failed to reconcile with remote")?
+        }
+
         {
             // avoiding holding it across awaits
             let mut timelines_accessor = self.timelines.lock().unwrap();
@@ -451,19 +464,6 @@ impl Tenant {
                 }
             }
         };
-
-        if self.remote_storage.is_some() {
-            // Reconcile local state with remote storage, downloading anything that's
-            // missing locally, and scheduling uploads for anything that's missing
-            // in remote storage.
-            timeline
-                .reconcile_with_remote(
-                    up_to_date_metadata,
-                    remote_startup_data.as_ref().map(|r| &r.index_part),
-                )
-                .await
-                .context("failed to reconcile with remote")?
-        }
 
         // Sanity check: a timeline should have some content.
         anyhow::ensure!(
