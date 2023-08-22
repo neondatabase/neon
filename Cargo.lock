@@ -5373,6 +5373,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "smallvec",
  "socket2 0.4.9",
  "syn 1.0.109",
  "syn 2.0.16",
