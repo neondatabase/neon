@@ -1184,8 +1184,9 @@ impl Drop for TimelineMetrics {
             .remove(tenant_id, timeline_id);
 
         // The following metrics are born outside of the TimelineMetrics lifecycle but still
-        // removed at the end of it. This is because we want the smgr metrics to outlive
-        // an individual smgr connection, but not the timeline.
+        // removed at the end of it. The idea is to have the metrics outlive the
+        // entity during which they're observed, e.g., the smgr metrics shall
+        // outlive an individual smgr connection, but not the timeline.
 
         for op in StorageTimeOperation::VARIANTS {
             let _ =
