@@ -422,13 +422,18 @@ impl Tenant {
             init_order,
             CreateTimelineCause::Load,
         )?;
-        let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        assert_eq!(
+            disk_consistent_lsn,
+            up_to_date_metadata.disk_consistent_lsn(),
+            "these are used interchangeably; need to move layer map loading before Timeline creation to avoid drifting"
+        );
         anyhow::ensure!(
-            new_disk_consistent_lsn.is_valid(),
+            disk_consistent_lsn.is_valid(),
             "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
         );
         timeline
-            .load_layer_map(new_disk_consistent_lsn)
+            .load_layer_map(disk_consistent_lsn)
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
