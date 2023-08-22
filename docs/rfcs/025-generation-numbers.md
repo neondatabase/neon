@@ -240,7 +240,7 @@ for the lengths being sufficient are:
   a 5 year system lifetime (in practice generation increments are expected to be far rarer,
   perhaps of the order of 1 per day if we are dynamically balancing load)
 - 16 bit node ID is enough for 35 new pageservers to be deployed every day over a 5 year
-  system lifetime. In practice the frequency is likely to be more like 1 per week, and
+  system lifetime. In practice the frequency is likely to be more like 1 per week.
 
 #### Index changes
 
@@ -275,7 +275,6 @@ that deletions strictly obey the following ordering:
    of it; not an earlier one. In both cases, the `index_part.json` doesn't reference the
    key we are deleting anymore, so, the key is invisible to any later attachment / node generation.
    Hence it's safe to delete it.
-
 
 Note that at step 2 we are only confirming that deletions of objects _no longer referenced
 by the specific `index_part.json` written in step 1_ are safe. If we were attempting other deletions concurrently,
