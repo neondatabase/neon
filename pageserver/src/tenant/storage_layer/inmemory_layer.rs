@@ -68,10 +68,6 @@ pub struct InMemoryLayerInner {
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
-
-    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
-    /// This buffer is reused for each serialization to avoid additional malloc calls.
-    ser_buffer: Vec<u8>,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -255,7 +251,6 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
-                ser_buffer: Vec::new(),
             }),
         })
     }
@@ -270,10 +265,11 @@ impl InMemoryLayer {
         self.assert_writable();
 
         let off = {
-            let buf = &mut inner.ser_buffer;
+            // Avoid doing allocations for "small" values.
+            let mut buf = smallvec::SmallVec::<[u8; 128]>::new();
             buf.clear();
-            val.ser_into(&mut (*buf))?;
-            inner.file.write_blob(buf).await?
+            val.ser_into(&mut buf)?;
+            inner.file.write_blob(&buf).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
