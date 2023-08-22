@@ -120,7 +120,7 @@ This provides some important invariants:
 
 The node generation number defines a global "in" definition for pageserver nodes: a node whose
 node generation matches the node generation the control plane most recently issued is a member of the cluster
-in good standing. Any node with any older generation ID is not.
+in good standing. Any node with any older generation number is not.
 
 Distinction between generation numbers and Node ID:
 
