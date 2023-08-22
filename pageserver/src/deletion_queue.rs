@@ -760,12 +760,6 @@ impl FrontendQueueWorker {
 
             match msg {
                 FrontendQueueMessage::Delete(op) => {
-                    let _span = tracing::info_span!(
-                        "deletion_frontend_enqueue",
-                        tenant_id = %op.tenant_id,
-                        timeline_id = %op.timeline_id,
-                    );
-
                     debug!(
                         "Deletion enqueue {0} layers, {1} other objects",
                         op.layers.len(),
@@ -1151,7 +1145,6 @@ pub mod mock {
             let executed_bg = executed.clone();
 
             tokio::spawn(async move {
-                let _span = tracing::info_span!("mock_deletion_queue");
                 let remote_storage = match &remote_storage {
                     Some(rs) => rs,
                     None => {
@@ -1168,12 +1161,6 @@ pub mod mock {
                             FrontendQueueMessage::Delete(op) => {
                                 let timeline_path =
                                     conf.timeline_path(&op.tenant_id, &op.timeline_id);
-
-                                let _span = tracing::info_span!(
-                                    "execute_deletion",
-                                    tenant_id = %op.tenant_id,
-                                    timeline_id = %op.timeline_id,
-                                );
 
                                 let mut objects = op.objects;
                                 for layer in op.layers {
