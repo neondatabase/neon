@@ -1602,7 +1602,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<&IndexPart>,
+        index_part: Option<Arc<IndexPart>>,
     ) -> anyhow::Result<()> {
         use init::Decision::*;
         use init::Discovered;
@@ -1615,9 +1615,9 @@ impl Timeline {
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+        let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
 
-        let discovered_layers = tokio::task::spawn_blocking({
-            let timeline_path = timeline_path.clone();
+        let (loaded_layers, needs_upload, total_physical_size) = tokio::task::spawn_blocking({
             move || {
                 let discovered = init::scan_timeline_dir(&timeline_path)?;
                 let mut discovered_layers = Vec::with_capacity(discovered.len());
@@ -1646,28 +1646,15 @@ impl Timeline {
                     path.pop();
                 }
 
-                Ok(discovered_layers)
-            }
-        })
-        .await
-        .map_err(anyhow::Error::new)
-        .and_then(|x| x)
-        .with_context(|| {
-            format!(
-                "process tenant {} timeline {} directory",
-                self.tenant_id, self.timeline_id
-            )
-        })?;
+                let decided = init::recoincile(
+                    discovered_layers,
+                    index_part.as_deref(),
+                    disk_consistent_lsn,
+                );
 
-        // IndexPart is borrowed, which is probably a good idea, because these can get quite large
-        let decided = init::recoincile(discovered_layers, index_part, disk_consistent_lsn);
-
-        let (loaded_layers, needs_upload) = tokio::task::spawn_blocking({
-            let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
-            move || {
-                let mut path = timeline_path;
                 let mut loaded_layers = Vec::new();
                 let mut needs_upload = Vec::new();
+                let mut total_physical_size = 0;
 
                 for (name, maybe_decision) in decided {
                     let decision = match maybe_decision {
@@ -1702,22 +1689,28 @@ impl Timeline {
 
                     // this is not that much code, but we but rustfmt does not enjoy it
                     let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
-                        (Delta(d), UseLocal(m) | NeedsUpload(m)) => Arc::new(DeltaLayer::new(
-                            conf,
-                            timeline_id,
-                            tenant_id,
-                            &d,
-                            m.file_size(),
-                            stats,
-                        )),
-                        (Image(i), UseLocal(m) | NeedsUpload(m)) => Arc::new(ImageLayer::new(
-                            conf,
-                            timeline_id,
-                            tenant_id,
-                            &i,
-                            m.file_size(),
-                            stats,
-                        )),
+                        (Delta(d), UseLocal(m) | NeedsUpload(m)) => {
+                            total_physical_size += m.file_size();
+                            Arc::new(DeltaLayer::new(
+                                conf,
+                                timeline_id,
+                                tenant_id,
+                                &d,
+                                m.file_size(),
+                                stats,
+                            ))
+                        }
+                        (Image(i), UseLocal(m) | NeedsUpload(m)) => {
+                            total_physical_size += m.file_size();
+                            Arc::new(ImageLayer::new(
+                                conf,
+                                timeline_id,
+                                tenant_id,
+                                &i,
+                                m.file_size(),
+                                stats,
+                            ))
+                        }
                         (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
                             RemoteLayer::new_delta(tenant_id, timeline_id, &d, &remote, stats),
                         ),
@@ -1732,7 +1725,7 @@ impl Timeline {
 
                     loaded_layers.push(layer);
                 }
-                Ok((loaded_layers, needs_upload))
+                Ok((loaded_layers, needs_upload, total_physical_size))
             }
         })
         .await
@@ -1740,18 +1733,13 @@ impl Timeline {
         .and_then(|x| x)
         .with_context(|| {
             format!(
-                "create tenant {} timeline {} layers",
+                "process tenant {} timeline {} directory",
                 self.tenant_id, self.timeline_id
             )
         })?;
 
         let num_layers = loaded_layers.len();
-        let total_physical_size = loaded_layers
-            .iter()
-            .map(|x| x.layer_desc().file_size)
-            .sum::<u64>();
 
-        // we initialize the layer map up to ..(disk_consistent_lsn+1)
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if !needs_upload.is_empty() {

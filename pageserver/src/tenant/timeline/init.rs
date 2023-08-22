@@ -121,6 +121,9 @@ pub(super) fn recoincile(
             }
         });
 
+    // must not use the index_part presence here as a proxy for remote timeline client
+    // it might be that we have local file(s), but the index upload was stopped with failpoint
+
     discovered
         .into_iter()
         .map(|(name, (local, remote))| {

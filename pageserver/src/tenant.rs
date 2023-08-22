@@ -330,7 +330,7 @@ impl Debug for SetStoppingError {
 }
 
 struct RemoteStartupData {
-    index_part: IndexPart,
+    index_part: Arc<IndexPart>,
     remote_metadata: TimelineMetadata,
 }
 
@@ -441,7 +441,7 @@ impl Tenant {
                 .remote_client
                 .as_ref()
                 .unwrap()
-                .init_upload_queue(index_part)?;
+                .init_upload_queue(&index_part)?;
         } else if self.remote_storage.is_some() {
             // No data on the remote storage, no local layers, local metadata file.
             //
@@ -461,7 +461,7 @@ impl Tenant {
         }
 
         timeline
-            .load_layer_map(disk_consistent_lsn, index_part)
+            .load_layer_map(disk_consistent_lsn, index_part.cloned())
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -831,7 +831,7 @@ impl Tenant {
             timeline_id,
             resources,
             Some(RemoteStartupData {
-                index_part,
+                index_part: Arc::new(index_part),
                 remote_metadata,
             }),
             local_metadata,
@@ -1325,7 +1325,7 @@ impl Tenant {
                         .map_err(LoadLocalTimelineError::Load)?;
                     (
                         Some(RemoteStartupData {
-                            index_part,
+                            index_part: Arc::new(index_part),
                             remote_metadata,
                         }),
                         Some(remote_client),
