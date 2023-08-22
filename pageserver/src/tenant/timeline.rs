@@ -1515,7 +1515,7 @@ impl Timeline {
         let layer_flush_start_rx = self.layer_flush_start_tx.subscribe();
         let self_clone = Arc::clone(self);
 
-        info!("spawning flush loop");
+        debug!("spawning flush loop");
         *flush_loop_state = FlushLoopState::Running {
             #[cfg(test)]
             expect_initdb_optimization: false,
