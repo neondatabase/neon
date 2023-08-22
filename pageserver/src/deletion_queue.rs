@@ -375,7 +375,7 @@ impl BackendQueueWorker {
         {
             warn!("Failed to upload deletion queue header: {e:#}");
             DELETION_QUEUE_ERRORS
-                .with_label_values(&["put_headerr"])
+                .with_label_values(&["put_header"])
                 .inc();
             return;
         }
