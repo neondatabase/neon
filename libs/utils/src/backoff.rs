@@ -18,10 +18,14 @@ pub async fn exponential_backoff(
         tracing::info!(
             "Backoff: waiting {backoff_duration_seconds} seconds before processing with the task",
         );
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_duration_seconds)) => {},
-            _ = cancel.cancelled() => {}
-        }
+
+        drop(
+            tokio::time::timeout(
+                std::time::Duration::from_secs_f64(backoff_duration_seconds),
+                cancel.cancelled(),
+            )
+            .await,
+        )
     }
 }
 
