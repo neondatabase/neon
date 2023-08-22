@@ -296,7 +296,8 @@ def test_remote_storage_upload_queue_retries(
             return int(executed)
 
     def assert_queued_count(file_kind: str, op_kind: str, fn):
-        v = get_queued_count(file_kind="layer", op_kind="upload")
+        v = get_queued_count(file_kind=file_kind, op_kind=op_kind)
+        log.info(f"queue count: {file_kind} {op_kind} {v}")
         assert fn(v)
 
     # Push some uploads into the remote_timeline_client queues, before failpoints
@@ -364,7 +365,7 @@ def test_remote_storage_upload_queue_retries(
 
         # Deletions should have been enqueued now that index uploads proceeded
         log.info("Waiting to see deletions enqueued")
-        wait_until(5, 1, lambda: assert_deletion_queue(client, lambda v: v > 0))
+        wait_until(10, 1, lambda: assert_deletion_queue(client, lambda v: v > 0))
 
         # Run flush in the backgrorund because it will block on the failpoint
         class background_flush(threading.Thread):
