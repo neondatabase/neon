@@ -281,7 +281,7 @@ impl PersistentLayer for DeltaLayer {
     }
 
     fn access_stats(&self) -> &LayerAccessStats {
-        &self.access_stats()
+        self.access_stats()
     }
 }
 
