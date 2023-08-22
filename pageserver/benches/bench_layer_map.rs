@@ -215,7 +215,6 @@ fn bench_sequential(c: &mut Criterion) {
             TimelineId::generate(),
             zero.add(10 * i32)..zero.add(10 * i32 + 1),
             Lsn(i),
-            false,
             0,
         );
         updates.insert_historic(layer);
