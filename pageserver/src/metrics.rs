@@ -587,21 +587,15 @@ impl HistogramTrait for GlobalAndPerTimelineHistogram {
     }
 }
 
-struct HistogramTimer<H: AsRef<GlobalAndPerTimelineHistogram>> {
-    h: H,
+struct HistogramTimer<'a, H: HistogramTrait> {
+    h: &'a H,
     start: std::time::Instant,
 }
 
-impl<H: AsRef<GlobalAndPerTimelineHistogram>> Drop for HistogramTimer<H> {
+impl<'a, H: HistogramTrait> Drop for HistogramTimer<'a, H> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
-        self.h.as_ref().observe(elapsed.as_secs_f64());
-    }
-}
-
-impl AsRef<GlobalAndPerTimelineHistogram> for GlobalAndPerTimelineHistogram {
-    fn as_ref(&self) -> &Self {
-        self
+        self.h.observe(elapsed.as_secs_f64());
     }
 }
 
