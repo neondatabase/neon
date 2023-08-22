@@ -104,8 +104,8 @@ pageserver, control plane, safekeeper (optional)
 Two logical entities will get new "generation numbers", which are monotonically increasing
 integers with a global guarantee that they will not be re-used:
 
-- Pageservers: a node generation ID is acquired at startup and lasts until the process ends or another
-  process with the same node ID starts.
+- Pageserver processes: for a given pageserver node ID, each time a pageserver process starts,
+  the per-node-ID generation number increases.
 - Tenant attachments: for a given tenant, each time its attachment is changed, a per-tenant generation
   number increases.
 
