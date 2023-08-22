@@ -576,23 +576,19 @@ struct GlobalAndPerTimelineHistogram {
     per_tenant_timeline: Histogram,
 }
 
-trait HistogramTrait {
-    fn observe(&self, value: f64);
-}
-
-impl HistogramTrait for GlobalAndPerTimelineHistogram {
+impl GlobalAndPerTimelineHistogram {
     fn observe(&self, value: f64) {
         self.global.observe(value);
         self.per_tenant_timeline.observe(value);
     }
 }
 
-struct HistogramTimer<'a, H: HistogramTrait> {
-    h: &'a H,
+struct GlobalAndPerTimelineHistogramTimer<'a> {
+    h: &'a GlobalAndPerTimelineHistogram,
     start: std::time::Instant,
 }
 
-impl<'a, H: HistogramTrait> Drop for HistogramTimer<'a, H> {
+impl<'a> Drop for GlobalAndPerTimelineHistogramTimer<'a> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         self.h.observe(elapsed.as_secs_f64());
@@ -655,7 +651,7 @@ impl SmgrQueryTimePerTimeline {
     }
     pub(crate) fn start_timer(&self, op: SmgrQueryType) -> impl Drop + '_ {
         let metric = &self.metrics[op as usize];
-        HistogramTimer {
+        GlobalAndPerTimelineHistogramTimer {
             h: metric,
             start: std::time::Instant::now(),
         }
