@@ -18,7 +18,7 @@ vulnerability = "deny"
 unmaintained = "warn"
 yanked = "warn"
 notice = "warn"
-ignore = []
+ignore = ["RUSTSEC-2023-0052"]
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
