@@ -124,7 +124,7 @@ in good standing. Any node with any older generation number is not.
 
 #### Distinction between generation numbers and Node ID
 
-- The purpose of a node generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
+- The purpose of a node generation number is to provide a stronger guarantee of uniqueness than a Node ID.
 - Node generation ID is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
   if a human provisions a replacement instance for a dead node and accidentally re-uses the node ID.
 - Node ID is written to disk in a pageserver's configuration, whereas node generation number is
