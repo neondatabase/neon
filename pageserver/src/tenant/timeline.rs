@@ -1616,9 +1616,11 @@ impl Timeline {
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
         let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
+        let span = tracing::Span::current();
 
         let (loaded_layers, needs_upload, total_physical_size) = tokio::task::spawn_blocking({
             move || {
+                let _g = span.entered();
                 let discovered = init::scan_timeline_dir(&timeline_path)?;
                 let mut discovered_layers = Vec::with_capacity(discovered.len());
 
