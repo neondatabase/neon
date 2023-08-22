@@ -136,7 +136,7 @@ in good standing. Any node with any older generation number is not.
   guaranteeing that the cluster manager (e.g. k8s) doesn't run two concurrent instances with the same
   node ID is much harder.
 
-#### Why use per-tenant _and_ per-node generation numbers?
+#### Distinction between attachment and node generation id
 
 The most important generation number is the tenant attachment number: this alone would be sufficient
 to implement safe migration and failover, if we assume that our control plane will never concurrently
