@@ -60,7 +60,6 @@ pub(crate) struct UploadQueueInitialized {
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
     pub(crate) num_inprogress_metadata_uploads: usize,
-    pub(crate) num_inprogress_deletions: usize,
 
     /// Tasks that are currently in-progress. In-progress means that a tokio Task
     /// has been launched for it. An in-progress task can be busy uploading, but it can
@@ -118,7 +117,6 @@ impl UploadQueue {
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
         };
@@ -161,7 +159,6 @@ impl UploadQueue {
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
         };

@@ -1229,7 +1229,6 @@ impl RemoteTimelineClient {
                         last_uploaded_consistent_lsn: initialized.last_uploaded_consistent_lsn,
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
-                        num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
                         queued_operations: VecDeque::default(),
                     };
@@ -1250,9 +1249,7 @@ impl RemoteTimelineClient {
 
                 // consistency check
                 assert_eq!(
-                    qi.num_inprogress_layer_uploads
-                        + qi.num_inprogress_metadata_uploads
-                        + qi.num_inprogress_deletions,
+                    qi.num_inprogress_layer_uploads + qi.num_inprogress_metadata_uploads,
                     qi.inprogress_tasks.len()
                 );
 
@@ -1578,7 +1575,6 @@ mod tests {
             assert_eq!(upload_queue.queued_operations.len(), 0);
             assert_eq!(upload_queue.inprogress_tasks.len(), 0);
             assert_eq!(upload_queue.num_inprogress_layer_uploads, 0);
-            assert_eq!(upload_queue.num_inprogress_deletions, 0);
             assert_eq!(
                 upload_queue.latest_files_changes_since_metadata_upload_scheduled,
                 0
