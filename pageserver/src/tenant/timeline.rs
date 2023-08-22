@@ -1612,58 +1612,72 @@ impl Timeline {
 
         let mut loaded_layers = Vec::<Arc<dyn PersistentLayer>>::new();
 
-        for direntry in fs::read_dir(timeline_path)? {
+        enum Discovered {
+            Layer(LayerFileName, u64),
+            FutureLayer(LayerFileName),
+            Ephemeral,
+            Temporary,
+            TemporaryDownload,
+            Metadata,
+            IgnoredBackup,
+            Unknown,
+            // NonUtf8(std::ffi::OsString),
+        }
+
+        for direntry in fs::read_dir(&timeline_path)? {
             let direntry = direntry?;
             let direntry_path = direntry.path();
-            let fname = direntry.file_name();
-            let fname = fname.to_string_lossy();
+            let file_name = direntry.file_name();
 
-            use std::str::FromStr;
-            match LayerFileName::from_str(&fname) {
-                Ok(LayerFileName::Image(filename)) if filename.lsn > disk_consistent_lsn => {
-                    info!(
-                        "found future image layer {} on timeline {} disk_consistent_lsn is {}",
-                        filename, self.timeline_id, disk_consistent_lsn
-                    );
+            let discovered = {
+                let fname = file_name.to_string_lossy();
 
-                    rename_to_backup(&direntry_path)?;
+                use std::str::FromStr;
+                match LayerFileName::from_str(&fname) {
+                    Ok(LayerFileName::Image(file_name)) if file_name.lsn > disk_consistent_lsn => {
+                        Discovered::FutureLayer(file_name.into())
+                    }
+                    Ok(LayerFileName::Delta(file_name))
+                        if file_name.lsn_range.end > disk_consistent_lsn + 1 =>
+                    {
+                        // The end-LSN is exclusive, while disk_consistent_lsn is
+                        // inclusive. For example, if disk_consistent_lsn is 100, it is
+                        // OK for a delta layer to have end LSN 101, but if the end LSN
+                        // is 102, then it might not have been fully flushed to disk
+                        // before crash.
+                        Discovered::FutureLayer(file_name.into())
+                    }
+                    Ok(LayerFileName::Image(file_name)) => {
+                        assert!(file_name.lsn <= disk_consistent_lsn);
+                        let file_size = direntry_path.metadata()?.len();
+                        Discovered::Layer(file_name.into(), file_size)
+                    }
+                    Ok(LayerFileName::Delta(file_name)) => {
+                        assert!(file_name.lsn_range.end <= disk_consistent_lsn + 1);
+                        let file_size = direntry_path.metadata()?.len();
+                        Discovered::Layer(file_name.into(), file_size)
+                    }
+                    Err(_) => {
+                        if fname == METADATA_FILE_NAME {
+                            Discovered::Metadata
+                        } else if fname.ends_with(".old") {
+                            // ignore these
+                            Discovered::IgnoredBackup
+                        } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
+                            Discovered::TemporaryDownload
+                        } else if is_ephemeral_file(&fname) {
+                            Discovered::Ephemeral
+                        } else if is_temporary(&direntry_path) {
+                            Discovered::Temporary
+                        } else {
+                            Discovered::Unknown
+                        }
+                    }
                 }
-                Ok(LayerFileName::Image(filename)) => {
-                    assert!(filename.lsn <= disk_consistent_lsn);
+            };
 
-                    let file_size = direntry_path.metadata()?.len();
-                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
-
-                    let layer = ImageLayer::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_id,
-                        &filename,
-                        file_size,
-                        stats,
-                    );
-
-                    loaded_layers.push(Arc::new(layer));
-                }
-                Ok(LayerFileName::Delta(filename))
-                    if filename.lsn_range.end > disk_consistent_lsn + 1 =>
-                {
-                    // The end-LSN is exclusive, while disk_consistent_lsn is
-                    // inclusive. For example, if disk_consistent_lsn is 100, it is
-                    // OK for a delta layer to have end LSN 101, but if the end LSN
-                    // is 102, then it might not have been fully flushed to disk
-                    // before crash.
-                    info!(
-                        "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
-                        filename, self.timeline_id, disk_consistent_lsn
-                    );
-
-                    rename_to_backup(&direntry_path)?;
-                }
-                Ok(LayerFileName::Delta(filename)) => {
-                    assert!(filename.lsn_range.end <= disk_consistent_lsn + 1);
-
-                    let file_size = direntry_path.metadata()?.len();
+            match discovered {
+                Discovered::Layer(LayerFileName::Delta(filename), file_size) => {
                     let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
 
                     let layer = DeltaLayer::new(
@@ -1677,29 +1691,55 @@ impl Timeline {
 
                     loaded_layers.push(Arc::new(layer));
                 }
-                Err(_) => {
-                    if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
-                        // ignore these
-                    } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
-                        info!(
-                            "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
-                            fname
-                        );
-                    } else if is_ephemeral_file(&fname) {
-                        // Delete any old ephemeral files
-                        trace!("deleting old ephemeral file in timeline dir: {}", fname);
-                        fs::remove_file(&direntry_path)?;
-                    } else if is_temporary(&direntry_path) {
-                        info!("removing temp timeline file at {}", direntry_path.display());
-                        fs::remove_file(&direntry_path).with_context(|| {
-                            format!(
-                                "failed to remove temp download file at {}",
-                                direntry_path.display()
-                            )
-                        })?;
-                    } else {
-                        warn!("unrecognized filename in timeline dir: {}", fname);
-                    }
+                Discovered::Layer(LayerFileName::Image(filename), file_size) => {
+                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
+
+                    let layer = ImageLayer::new(
+                        self.conf,
+                        self.timeline_id,
+                        self.tenant_id,
+                        &filename,
+                        file_size,
+                        stats,
+                    );
+
+                    loaded_layers.push(Arc::new(layer));
+                }
+                Discovered::FutureLayer(file_name) => {
+                    let kind = match file_name {
+                        LayerFileName::Delta(_) => "delta",
+                        LayerFileName::Image(_) => "image",
+                    };
+
+                    info!(
+                        "found future {kind} layer {file_name} on timeline {} disk_consistent_lsn is {}",
+                        self.timeline_id, disk_consistent_lsn
+                    );
+
+                    rename_to_backup(&direntry_path)?;
+                }
+                Discovered::Ephemeral => {
+                    trace!("deleting old ephemeral file in timeline dir: {file_name:?}");
+                    fs::remove_file(&direntry_path)?;
+                }
+                Discovered::Temporary => {
+                    info!("removing temp timeline file at {}", direntry_path.display());
+                    fs::remove_file(&direntry_path).with_context(|| {
+                        format!(
+                            "failed to remove temp download file at {}",
+                            direntry_path.display()
+                        )
+                    })?;
+                }
+                Discovered::TemporaryDownload => {
+                    info!(
+                        "skipping temp download file, reconcile_with_remote will resume / clean up: {:?}",
+                        file_name
+                    );
+                }
+                Discovered::Metadata | Discovered::IgnoredBackup => {}
+                Discovered::Unknown => {
+                    warn!("unrecognized filename in timeline dir: {file_name:?}");
                 }
             }
         }
