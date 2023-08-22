@@ -109,7 +109,6 @@ impl PersistentLayerDesc {
     ) -> Self {
         match filename {
             LayerFileName::Image(i) => {
-                // FIXME: can we incremental image layers or is this for future use?
                 Self::new_img(tenant_id, timeline_id, i.key_range, i.lsn, file_size)
             }
             LayerFileName::Delta(d) => {
