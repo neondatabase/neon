@@ -276,7 +276,7 @@ that deletions strictly obey the following ordering:
    we are deleting.
 
 Note that at step 2 we are only confirming that deletions of objects _no longer referenced
-by the metadata written in step 1_ are safe. If we were attempting other deletions concurrently,
+by the specific `index_part.json` written in step 1_ are safe. If we were attempting other deletions concurrently,
 these would need their own generation validation step.
 
 If step 2 fails, we may leak the object. This is safe, but has a cost: see [scrubbing](#cleaning-up-orphan-objects-scrubbing). We may avoid this entirely outside of node
