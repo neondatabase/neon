@@ -933,6 +933,46 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  build-private-extensions:
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      options: --init
+    needs: [ promote-images, tag ]
+    steps:
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+          REMOTE_REPO="${{ github.repository_owner }}/build-custom-extensions"
+
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"build-and-upload-extensions\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
+
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/build_and_upload_extensions.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"build-and-upload-extensions\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"remote_branch_name\": \"${{ github.ref_name }}\"
+              }
+            }"
+
   upload-postgres-extensions-to-s3:
     if: |
       (github.ref_name == 'main' || github.ref_name == 'release') &&
