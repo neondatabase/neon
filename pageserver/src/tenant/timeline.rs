@@ -1709,7 +1709,9 @@ impl Timeline {
             .iter()
             .map(|x| x.layer_desc().file_size)
             .sum::<u64>();
-        guard.initialize_local_layers(loaded_layers, Lsn(disk_consistent_lsn.0) + 1);
+
+        // we initialize the layer map up to ..(disk_consistent_lsn+1)
+        guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
