@@ -427,6 +427,7 @@ class NeonEnvBuilder:
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
+        initial_timeline: Optional[TimelineId] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -452,6 +453,7 @@ class NeonEnvBuilder:
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
+        self.initial_timeline = initial_timeline or TimelineId.generate()
 
     def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -473,9 +475,10 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(
-            tenant_id=env.initial_tenant, conf=initial_tenant_conf
+            tenant_id=env.initial_tenant, conf=initial_tenant_conf, timeline_id=env.initial_timeline
         )
-        env.initial_timeline = initial_timeline
+        assert env.initial_tenant == initial_tenant
+        assert env.initial_timeline == initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
@@ -784,7 +787,7 @@ class NeonEnv:
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
-        self.initial_timeline: Optional[TimelineId] = None
+        self.initial_timeline = config.initial_timeline
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(

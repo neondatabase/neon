@@ -74,7 +74,7 @@ walprop_connect_start(char *conninfo, char *password)
 	if (password)
 	{
 		keywords[n] = "password";
-		values[n] = neon_auth_token;
+		values[n] = password;
 		n++;
 	}
 	keywords[n] = "dbname";

@@ -62,10 +62,9 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<NaiveDateTime>,
 
-    /// Layer names, which are stored on the remote storage.
-    ///
-    /// Additional metadata can might exist in `layer_metadata`.
-    pub timeline_layers: HashSet<LayerFileName>,
+    /// Legacy field: equal to the keys of `layer_metadata`, only written out for forward compat
+    #[serde(default, skip_deserializing)]
+    timeline_layers: HashSet<LayerFileName>,
 
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
@@ -74,9 +73,10 @@ pub struct IndexPart {
     pub layer_metadata: HashMap<LayerFileName, IndexLayerMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
-    // It's duplicated here for convenience.
+    // It's duplicated for convenience when reading the serialized structure, but is
+    // private because internally we would read from metadata instead.
     #[serde_as(as = "DisplayFromStr")]
-    pub disk_consistent_lsn: Lsn,
+    disk_consistent_lsn: Lsn,
     metadata_bytes: Vec<u8>,
 }
 
@@ -85,7 +85,11 @@ impl IndexPart {
     /// used to understand later versions.
     ///
     /// Version is currently informative only.
-    const LATEST_VERSION: usize = 2;
+    /// Version history
+    /// - 2: added `deleted_at`
+    /// - 3: no longer deserialize `timeline_layers` (serialized format is the same, but timeline_layers
+    ///      is always generated from the keys of `layer_metadata`)
+    const LATEST_VERSION: usize = 3;
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
@@ -166,7 +170,7 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
+            timeline_layers: HashSet::new(),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
@@ -203,7 +207,7 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
-            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
+            timeline_layers: HashSet::new(),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
@@ -241,7 +245,7 @@ mod tests {
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 2,
-            timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
+            timeline_layers: HashSet::new(),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,

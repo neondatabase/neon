@@ -29,6 +29,7 @@ use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -137,9 +138,6 @@ pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline
 pub use timeline::{
     LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
 };
-
-// re-export this function so that page_cache.rs can use it.
-pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
 // re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
@@ -516,6 +514,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         ctx: &RequestContext,
@@ -531,7 +530,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            Some(remote_storage),
+            Some(remote_storage.clone()),
             Some(deletion_queue_client),
         ));
 
@@ -547,17 +546,61 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                let make_broken = |t: &Tenant, err: anyhow::Error| {
+                    error!("attach failed, setting tenant state to Broken: {err:?}");
+                    t.state.send_modify(|state| {
+                        assert_eq!(
+                            *state,
+                            TenantState::Attaching,
+                            "the attach task owns the tenant state until activation is complete"
+                        );
+                        *state = TenantState::broken_from_reason(err.to_string());
+                    });
+                };
+
+                let pending_deletion = {
+                    match DeleteTenantFlow::should_resume_deletion(
+                        conf,
+                        Some(&remote_storage),
+                        &tenant_clone,
+                    )
+                    .await
+                    {
+                        Ok(should_resume_deletion) => should_resume_deletion,
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                    }
+                };
+
+                info!("pending_deletion {}", pending_deletion.is_some());
+
+                if let Some(deletion) = pending_deletion {
+                    match DeleteTenantFlow::resume_from_attach(
+                        deletion,
+                        &tenant_clone,
+                        tenants,
+                        &ctx,
+                    )
+                    .await
+                    {
+                        Err(err) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            return Ok(());
+                        }
+                        Ok(()) => return Ok(()),
+                    }
+                }
+
                 match tenant_clone.attach(&ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        error!("attach failed, setting tenant state to Broken: {:?}", e);
-                        tenant_clone.state.send_modify(|state| {
-                            assert_eq!(*state, TenantState::Attaching, "the attach task owns the tenant state until activation is complete");
-                            *state = TenantState::broken_from_reason(e.to_string());
-                        });
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
                 Ok(())
@@ -635,6 +678,9 @@ impl Tenant {
                 .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
+
+        let mut timelines_to_resume_deletions = vec![];
+
         // Wait for all the download tasks to complete & collect results.
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
@@ -651,9 +697,12 @@ impl Tenant {
                     );
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
-                MaybeDeletedIndexPart::Deleted(_) => {
-                    info!("timeline {} is deleted, skipping", timeline_id);
-                    continue;
+                MaybeDeletedIndexPart::Deleted(index_part) => {
+                    info!(
+                        "timeline {} is deleted, picking to resume deletion",
+                        timeline_id
+                    );
+                    timelines_to_resume_deletions.push((timeline_id, index_part, client));
                 }
             }
         }
@@ -687,12 +736,32 @@ impl Tenant {
             })?;
         }
 
+        // Walk through deleted timelines, resume deletion
+        for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
+            remote_timeline_client
+                .init_upload_queue_stopped_to_continue_deletion(&index_part)
+                .context("init queue stopped")
+                .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+
+            DeleteTimelineFlow::resume_deletion(
+                Arc::clone(self),
+                timeline_id,
+                &index_part.parse_metadata().context("parse_metadata")?,
+                Some(remote_timeline_client),
+                self.deletion_queue_client.clone(),
+                None,
+            )
+            .await
+            .context("resume_deletion")
+            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+        }
+
         std::fs::remove_file(&marker_file)
             .with_context(|| format!("unlink attach marker file {}", marker_file.display()))?;
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
-        utils::failpoint_sleep_millis_async!("attach-before-activate");
+        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
 
         info!("Done");
 
@@ -841,6 +910,7 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 let make_broken = |t: &Tenant, err: anyhow::Error| {
                     error!("load failed, setting tenant state to Broken: {err:?}");
                     t.state.send_modify(|state| {
@@ -888,7 +958,7 @@ impl Tenant {
                         .as_mut()
                         .and_then(|x| x.initial_logical_size_attempt.take());
 
-                    match DeleteTenantFlow::resume(
+                    match DeleteTenantFlow::resume_from_load(
                         deletion,
                         &tenant_clone,
                         init_order.as_ref(),
@@ -910,7 +980,7 @@ impl Tenant {
 
                 match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
-                        debug!("load finished",);
+                        debug!("load finished");
 
                         tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
@@ -1106,7 +1176,7 @@ impl Tenant {
 
         debug!("loading tenant task");
 
-        utils::failpoint_sleep_millis_async!("before-loading-tenant");
+        crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Load in-memory state to reflect the local files on disk
         //
@@ -1799,7 +1869,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress, false).await {
+        match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
@@ -1841,15 +1911,18 @@ impl Tenant {
     /// This function is not cancel-safe!
     ///
     /// `allow_transition_from_loading` is needed for the special case of loading task deleting the tenant.
+    /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
     async fn set_stopping(
         &self,
         progress: completion::Barrier,
         allow_transition_from_loading: bool,
+        allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
+            TenantState::Attaching if allow_transition_from_attaching => true,
             TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
@@ -1866,12 +1939,19 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating(_) | TenantState::Attaching => {
-                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            TenantState::Activating(_) => {
+                unreachable!("1we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Attaching => {
+                if !allow_transition_from_attaching {
+                    unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
+                };
+                *current_state = TenantState::Stopping { progress };
+                true
             }
             TenantState::Loading => {
                 if !allow_transition_from_loading {
-                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                    unreachable!("3we ensured above that we're done with activation, and, there is no re-activation")
                 };
                 *current_state = TenantState::Stopping { progress };
                 true
@@ -1947,7 +2027,8 @@ impl Tenant {
         self.set_broken_no_wait(reason)
     }
 
-    pub(crate) fn set_broken_no_wait(&self, reason: String) {
+    pub(crate) fn set_broken_no_wait(&self, reason: impl Display) {
+        let reason = reason.to_string();
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
@@ -2452,7 +2533,9 @@ impl Tenant {
             .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
             .await?;
 
-        utils::failpoint_sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
+        crate::failpoint_support::sleep_millis_async!(
+            "gc_iteration_internal_after_getting_gc_timelines"
+        );
 
         // If there is nothing to GC, we don't want any messages in the INFO log.
         if !gc_timelines.is_empty() {
@@ -3973,6 +4056,31 @@ mod tests {
         let _ancestor_tline = tenant
             .get_timeline(TIMELINE_ID, true)
             .expect("cannot get ancestor timeline loaded");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delta_layer_dumping() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+
+        let layer_map = tline.layers.read().await;
+        let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
+
+        assert!(!level0_deltas.is_empty());
+
+        for delta in level0_deltas {
+            let delta = layer_map.get_from_desc(&delta);
+            // Ensure we are dumping a delta layer here
+            let delta = delta.downcast_delta_layer().unwrap();
+
+            delta.dump(false, &ctx).await.unwrap();
+            delta.dump(true, &ctx).await.unwrap();
+        }
 
         Ok(())
     }

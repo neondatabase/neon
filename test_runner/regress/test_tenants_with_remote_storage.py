@@ -142,8 +142,8 @@ def test_tenants_attached_after_download(
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Thats because of UnreliableWrapper's injected failures
     env.pageserver.allowed_errors.append(
@@ -252,8 +252,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     with endpoint.cursor() as cur:
         cur.execute("CREATE TABLE t1 AS VALUES (123, 'foobar');")

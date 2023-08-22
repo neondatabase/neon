@@ -1393,8 +1393,22 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 	char	   *err;
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
+	char conninfo[MAXCONNINFO];
 
-	wrconn = walrcv_connect(safekeeper[donor].conninfo, false, "wal_proposer_recovery", &err);
+	if (!neon_auth_token)
+	{
+		memcpy(conninfo, safekeeper[donor].conninfo, MAXCONNINFO);
+	}
+	else
+	{
+		int written = 0;
+
+		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, safekeeper[donor].conninfo);
+		if (written > MAXCONNINFO || written < 0)
+			elog(FATAL, "could not append password to the safekeeper connection string");
+	}
+
+	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
 	if (!wrconn)
 	{
 		ereport(WARNING,

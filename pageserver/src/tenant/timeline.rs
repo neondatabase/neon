@@ -1754,7 +1754,7 @@ impl Timeline {
 
         let mut corrupted_local_layers = Vec::new();
         let mut added_remote_layers = Vec::new();
-        for remote_layer_name in &index_part.timeline_layers {
+        for remote_layer_name in index_part.layer_metadata.keys() {
             let local_layer = local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
@@ -1914,7 +1914,7 @@ impl Timeline {
             Some(index_part) => {
                 info!(
                     "initializing upload queue from remote index with {} layer files",
-                    index_part.timeline_layers.len()
+                    index_part.layer_metadata.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
                 self.create_remote_layers(index_part, local_layers, disk_consistent_lsn)
@@ -3802,7 +3802,10 @@ impl Timeline {
         // Sync layers
         if !new_layers.is_empty() {
             // Print a warning if the created layer is larger than double the target size
-            let warn_limit = target_file_size * 2;
+            // Add two pages for potential overhead. This should in theory be already
+            // accounted for in the target calculation, but for very small targets,
+            // we still might easily hit the limit otherwise.
+            let warn_limit = target_file_size * 2 + page_cache::PAGE_SZ as u64 * 2;
             for layer in new_layers.iter() {
                 if layer.desc.file_size > warn_limit {
                     warn!(
