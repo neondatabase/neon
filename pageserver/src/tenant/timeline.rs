@@ -28,7 +28,6 @@ use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -39,14 +38,13 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
-use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerFileName, RemoteLayer,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
-    ephemeral_file::is_ephemeral_file,
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
@@ -78,11 +76,10 @@ use utils::{
 use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
+use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::walredo::WalRedoManager;
-use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
-use crate::{is_temporary, task_mgr};
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -1602,7 +1599,15 @@ impl Timeline {
     ///
     /// Scan the timeline directory to populate the layer map.
     ///
-    pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub(super) async fn load_layer_map(
+        &self,
+        disk_consistent_lsn: Lsn,
+        index_part: Option<&IndexPart>,
+    ) -> anyhow::Result<()> {
+        use init::Decision::*;
+        use init::Discovered;
+        use LayerFileName::*;
+
         let mut guard = self.layers.write().await;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
@@ -1611,32 +1616,134 @@ impl Timeline {
         // structs representing all files on disk
         let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
 
-        let loaded_layers = init::load_layer_map(&timeline_path, disk_consistent_lsn)
-            .await?
-            .into_iter()
-            .map(|(name, file_size)| {
-                let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
+        let discovered_layers = tokio::task::spawn_blocking({
+            let timeline_path = timeline_path.clone();
+            move || {
+                let discovered = init::scan_timeline_dir(&timeline_path)?;
+                let mut discovered_layers = Vec::with_capacity(discovered.len());
 
-                match name {
-                    LayerFileName::Delta(d) => Arc::new(DeltaLayer::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_id,
-                        &d,
-                        file_size,
-                        stats,
-                    )) as Arc<dyn PersistentLayer>,
-                    LayerFileName::Image(i) => Arc::new(ImageLayer::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_id,
-                        &i,
-                        file_size,
-                        stats,
-                    )),
+                let mut path = timeline_path;
+
+                for discovered in discovered {
+                    let (name, kind) = match discovered {
+                        Discovered::Layer(file_name, file_size) => {
+                            discovered_layers.push((file_name, file_size));
+                            continue;
+                        }
+                        Discovered::Metadata | Discovered::IgnoredBackup => {
+                            continue;
+                        }
+                        Discovered::Unknown(file_name) => {
+                            tracing::warn!("unrecognized filename in timeline dir: {file_name:?}");
+                            continue;
+                        }
+                        Discovered::Ephemeral(name) => (name, "old ephemeral file"),
+                        Discovered::Temporary(name) => (name, "temporary timeline file"),
+                        Discovered::TemporaryDownload(name) => (name, "temporary download"),
+                    };
+                    path.push(name);
+                    init::cleanup(&path, kind)?;
+                    path.pop();
                 }
-            })
-            .collect::<Vec<Arc<dyn PersistentLayer>>>();
+
+                Ok(discovered_layers)
+            }
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .and_then(|x| x)
+        .with_context(|| {
+            format!(
+                "process tenant {} timeline {} directory",
+                self.tenant_id, self.timeline_id
+            )
+        })?;
+
+        // IndexPart is borrowed, which is probably a good idea, because these can get quite large
+        let decided = init::recoincile(discovered_layers, index_part, disk_consistent_lsn);
+
+        let (loaded_layers, needs_upload) = tokio::task::spawn_blocking({
+            let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
+            move || {
+                let mut path = timeline_path;
+                let mut loaded_layers = Vec::new();
+                let mut needs_upload = Vec::new();
+
+                for (name, maybe_decision) in decided {
+                    let decision = match maybe_decision {
+                        Some(UseRemote { local, remote }) => {
+                            path.push(name.file_name());
+                            init::cleanup_local_file_for_remote(&path, &local, &remote)?;
+                            path.pop();
+
+                            UseRemote { local, remote }
+                        }
+                        Some(decision) => decision,
+                        None => {
+                            path.push(name.file_name());
+                            init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
+                            path.pop();
+                            // no futher processing possible
+                            continue;
+                        }
+                    };
+
+                    match &name {
+                        Delta(d) => assert!(d.lsn_range.end <= disk_consistent_lsn + 1),
+                        Image(i) => assert!(i.lsn <= disk_consistent_lsn),
+                    }
+
+                    let status = match &decision {
+                        UseLocal(_) | NeedsUpload(_) => LayerResidenceStatus::Resident,
+                        Evicted(_) | UseRemote { .. } => LayerResidenceStatus::Evicted,
+                    };
+
+                    let stats = LayerAccessStats::for_loading_layer(status);
+
+                    // this is not that much code, but we but rustfmt does not enjoy it
+                    let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
+                        (Delta(d), UseLocal(m) | NeedsUpload(m)) => Arc::new(DeltaLayer::new(
+                            conf,
+                            timeline_id,
+                            tenant_id,
+                            &d,
+                            m.file_size(),
+                            stats,
+                        )),
+                        (Image(i), UseLocal(m) | NeedsUpload(m)) => Arc::new(ImageLayer::new(
+                            conf,
+                            timeline_id,
+                            tenant_id,
+                            &i,
+                            m.file_size(),
+                            stats,
+                        )),
+                        (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
+                            RemoteLayer::new_delta(tenant_id, timeline_id, &d, &remote, stats),
+                        ),
+                        (Image(i), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
+                            RemoteLayer::new_img(tenant_id, timeline_id, &i, &remote, stats),
+                        ),
+                    };
+
+                    if let NeedsUpload(m) = decision {
+                        needs_upload.push((layer.clone(), m));
+                    }
+
+                    loaded_layers.push(layer);
+                }
+                Ok((loaded_layers, needs_upload))
+            }
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .and_then(|x| x)
+        .with_context(|| {
+            format!(
+                "create tenant {} timeline {} layers",
+                self.tenant_id, self.timeline_id
+            )
+        })?;
 
         let num_layers = loaded_layers.len();
         let total_physical_size = loaded_layers
@@ -1647,6 +1754,18 @@ impl Timeline {
         // we initialize the layer map up to ..(disk_consistent_lsn+1)
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
+        if !needs_upload.is_empty() {
+            let rtc = self
+                .remote_client
+                .as_ref()
+                .expect("we had index_part => we have remote timeline client");
+
+            for (layer, m) in needs_upload {
+                rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
+            }
+            rtc.schedule_index_upload_for_file_changes()?;
+        }
+
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
@@ -1656,234 +1775,6 @@ impl Timeline {
             .set(total_physical_size);
 
         timer.stop_and_record();
-
-        Ok(())
-    }
-
-    async fn create_remote_layers(
-        &self,
-        index_part: &IndexPart,
-        local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
-        up_to_date_disk_consistent_lsn: Lsn,
-    ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
-        // Are we missing some files that are present in remote storage?
-        // Create RemoteLayer instances for them.
-        let mut local_only_layers = local_layers;
-
-        // We're holding a layer map lock for a while but this
-        // method is only called during init so it's fine.
-        let mut guard = self.layers.write().await;
-
-        let mut corrupted_local_layers = Vec::new();
-        let mut added_remote_layers = Vec::new();
-        for remote_layer_name in index_part.layer_metadata.keys() {
-            let local_layer = local_only_layers.remove(remote_layer_name);
-
-            let remote_layer_metadata = index_part
-                .layer_metadata
-                .get(remote_layer_name)
-                .map(LayerFileMetadata::from)
-                .with_context(|| {
-                    format!(
-                        "No remote layer metadata found for layer {}",
-                        remote_layer_name.file_name()
-                    )
-                })?;
-
-            // Is the local layer's size different from the size stored in the
-            // remote index file?
-            // If so, rename_to_backup those files & replace their local layer with
-            // a RemoteLayer in the layer map so that we re-download them on-demand.
-            if let Some(local_layer) = local_layer {
-                let local_layer_path = local_layer
-                    .local_path()
-                    .expect("caller must ensure that local_layers only contains local layers");
-                ensure!(
-                    local_layer_path.exists(),
-                    "every layer from local_layers must exist on disk: {}",
-                    local_layer_path.display()
-                );
-
-                let remote_size = remote_layer_metadata.file_size();
-                let metadata = local_layer_path.metadata().with_context(|| {
-                    format!(
-                        "get file size of local layer {}",
-                        local_layer_path.display()
-                    )
-                })?;
-                let local_size = metadata.len();
-                if local_size != remote_size {
-                    warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-                    if let Err(err) = rename_to_backup(&local_layer_path) {
-                        assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
-                        anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
-                    } else {
-                        self.metrics.resident_physical_size_gauge.sub(local_size);
-                        corrupted_local_layers.push(local_layer);
-                        // fall-through to adding the remote layer
-                    }
-                } else {
-                    debug!(
-                        "layer is present locally and file size matches remote, using it: {}",
-                        local_layer_path.display()
-                    );
-                    continue;
-                }
-            }
-
-            info!(
-                "remote layer does not exist locally, creating remote layer: {}",
-                remote_layer_name.file_name()
-            );
-
-            match remote_layer_name {
-                LayerFileName::Image(imgfilename) => {
-                    if imgfilename.lsn > up_to_date_disk_consistent_lsn {
-                        info!(
-                        "found future image layer {} on timeline {} remote_consistent_lsn is {}",
-                        imgfilename, self.timeline_id, up_to_date_disk_consistent_lsn
-                    );
-                        continue;
-                    }
-                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
-
-                    let remote_layer = RemoteLayer::new_img(
-                        self.tenant_id,
-                        self.timeline_id,
-                        imgfilename,
-                        &remote_layer_metadata,
-                        stats,
-                    );
-                    let remote_layer = Arc::new(remote_layer);
-                    added_remote_layers.push(remote_layer);
-                }
-                LayerFileName::Delta(deltafilename) => {
-                    // Create a RemoteLayer for the delta file.
-                    // The end-LSN is exclusive, while disk_consistent_lsn is
-                    // inclusive. For example, if disk_consistent_lsn is 100, it is
-                    // OK for a delta layer to have end LSN 101, but if the end LSN
-                    // is 102, then it might not have been fully flushed to disk
-                    // before crash.
-                    if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
-                        info!(
-                            "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
-                            deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
-                        );
-                        continue;
-                    }
-                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
-
-                    let remote_layer = RemoteLayer::new_delta(
-                        self.tenant_id,
-                        self.timeline_id,
-                        deltafilename,
-                        &remote_layer_metadata,
-                        stats,
-                    );
-                    let remote_layer = Arc::new(remote_layer);
-                    added_remote_layers.push(remote_layer);
-                }
-            }
-        }
-        guard.initialize_remote_layers(corrupted_local_layers, added_remote_layers);
-        Ok(local_only_layers)
-    }
-
-    /// This function will synchronize local state with what we have in remote storage.
-    ///
-    /// Steps taken:
-    /// 1. Initialize upload queue based on `index_part`.
-    /// 2. Create `RemoteLayer` instances for layers that exist only on the remote.
-    ///    The list of layers on the remote comes from `index_part`.
-    ///    The list of local layers is given by the layer map's `iter_historic_layers()`.
-    ///    So, the layer map must have been loaded already.
-    /// 3. Schedule upload of local-only layer files (which will then also update the remote
-    ///    IndexPart to include the new layer files).
-    ///
-    /// Refer to the [`remote_timeline_client`] module comment for more context.
-    ///
-    /// # TODO
-    /// May be a bit cleaner to do things based on populated remote client,
-    /// and then do things based on its upload_queue.latest_files.
-    #[instrument(skip(self, index_part, up_to_date_metadata))]
-    pub async fn reconcile_with_remote(
-        &self,
-        up_to_date_metadata: &TimelineMetadata,
-        index_part: Option<&IndexPart>,
-    ) -> anyhow::Result<()> {
-        info!("starting");
-        let remote_client = self
-            .remote_client
-            .as_ref()
-            .ok_or_else(|| anyhow!("cannot download without remote storage"))?;
-
-        let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
-
-        let local_layers = {
-            let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            layers
-                .iter_historic_layers()
-                .map(|l| (l.filename(), guard.get_from_desc(&l)))
-                .collect::<HashMap<_, _>>()
-        };
-
-        // If no writes happen, new branches do not have any layers, only the metadata file.
-        let has_local_layers = !local_layers.is_empty();
-        let local_only_layers = match index_part {
-            Some(index_part) => {
-                info!(
-                    "initializing upload queue from remote index with {} layer files",
-                    index_part.layer_metadata.len()
-                );
-                remote_client.init_upload_queue(index_part)?;
-                self.create_remote_layers(index_part, local_layers, disk_consistent_lsn)
-                    .await?
-            }
-            None => {
-                info!("initializing upload queue as empty");
-                remote_client.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
-                local_layers
-            }
-        };
-
-        if has_local_layers {
-            // Are there local files that don't exist remotely? Schedule uploads for them.
-            // Local timeline metadata will get uploaded to remove along witht he layers.
-            for (layer_name, layer) in &local_only_layers {
-                // XXX solve this in the type system
-                let layer_path = layer
-                    .local_path()
-                    .expect("local_only_layers only contains local layers");
-                let layer_size = layer_path
-                    .metadata()
-                    .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
-                    .len();
-                info!("scheduling {layer_path:?} for upload");
-                remote_client
-                    .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
-            }
-            remote_client.schedule_index_upload_for_file_changes()?;
-        } else if index_part.is_none() {
-            // No data on the remote storage, no local layers, local metadata file.
-            //
-            // TODO https://github.com/neondatabase/neon/issues/3865
-            // Currently, console does not wait for the timeline data upload to the remote storage
-            // and considers the timeline created, expecting other pageserver nodes to work with it.
-            // Branch metadata upload could get interrupted (e.g pageserver got killed),
-            // hence any locally existing branch metadata with no remote counterpart should be uploaded,
-            // otherwise any other pageserver won't see the branch on `attach`.
-            //
-            // After the issue gets implemented, pageserver should rather remove the branch,
-            // since absence on S3 means we did not acknowledge the branch creation and console will have to retry,
-            // no need to keep the old files.
-            remote_client.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
-        } else {
-            // Local timeline has a metadata file, remote one too, both have no layers to sync.
-        }
-
-        info!("Done");
-
         Ok(())
     }
 

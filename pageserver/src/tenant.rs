@@ -432,25 +432,40 @@ impl Tenant {
             disk_consistent_lsn.is_valid(),
             "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
         );
+
+        let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
+
+        // FIXME: it seems that we shouldn't have "mutable init" for RemoteTimelineClient either
+        if let Some(index_part) = index_part {
+            timeline
+                .remote_client
+                .as_ref()
+                .unwrap()
+                .init_upload_queue(index_part)?;
+        } else if self.remote_storage.is_some() {
+            // No data on the remote storage, no local layers, local metadata file.
+            //
+            // TODO https://github.com/neondatabase/neon/issues/3865
+            // Currently, console does not wait for the timeline data upload to the remote storage
+            // and considers the timeline created, expecting other pageserver nodes to work with it.
+            // Branch metadata upload could get interrupted (e.g pageserver got killed),
+            // hence any locally existing branch metadata with no remote counterpart should be uploaded,
+            // otherwise any other pageserver won't see the branch on `attach`.
+            //
+            // After the issue gets implemented, pageserver should rather remove the branch,
+            // since absence on S3 means we did not acknowledge the branch creation and console will have to retry,
+            // no need to keep the old files.
+            let rtc = timeline.remote_client.as_ref().unwrap();
+            rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
+            rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
+        }
+
         timeline
-            .load_layer_map(disk_consistent_lsn)
+            .load_layer_map(disk_consistent_lsn, index_part)
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
-
-        if self.remote_storage.is_some() {
-            // Reconcile local state with remote storage, verifying metadata for layers existing
-            // both remotely and locally and scheduling uploads for anything that's missing in
-            // remote storage.
-            timeline
-                .reconcile_with_remote(
-                    up_to_date_metadata,
-                    remote_startup_data.as_ref().map(|r| &r.index_part),
-                )
-                .await
-                .context("failed to reconcile with remote")?
-        }
 
         {
             // avoiding holding it across awaits

@@ -2,62 +2,47 @@ use crate::{
     is_temporary,
     tenant::{
         ephemeral_file::is_ephemeral_file,
-        remote_timeline_client,
-        storage_layer::{LayerFileName, PersistentLayer},
-        timeline::rename_to_backup,
+        remote_timeline_client::{
+            self,
+            index::{IndexPart, LayerFileMetadata},
+        },
+        storage_layer::LayerFileName,
     },
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{collections::HashMap, ffi::OsString, path::Path, str::FromStr};
 use utils::lsn::Lsn;
 
-pub(super) async fn load_layer_map(
-    path: &Path,
-    disk_consistent_lsn: Lsn,
-) -> anyhow::Result<Vec<(LayerFileName, u64)>> {
-    enum Discovered {
-        Layer(LayerFileName, u64),
-        FutureLayer(LayerFileName),
-        Ephemeral,
-        Temporary,
-        TemporaryDownload,
-        Metadata,
-        IgnoredBackup,
-        Unknown,
-        // NonUtf8(std::ffi::OsString),
-    }
+pub(super) enum Discovered {
+    Layer(LayerFileName, u64),
+    Ephemeral(OsString),
+    Temporary(OsString),
+    TemporaryDownload(OsString),
+    Metadata,
+    IgnoredBackup,
+    Unknown(OsString),
+    // NonUtf8(std::ffi::OsString),
+}
 
+/// Scans the timeline directory for interesting files.
+pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
     for direntry in std::fs::read_dir(&path)? {
         let direntry = direntry?;
         let direntry_path = direntry.path();
         let file_name = direntry.file_name();
+
         let discovered = {
             let fname = file_name.to_string_lossy();
 
             match LayerFileName::from_str(&fname) {
-                Ok(LayerFileName::Image(file_name)) if file_name.lsn > disk_consistent_lsn => {
-                    Discovered::FutureLayer(file_name.into())
-                }
-                Ok(LayerFileName::Delta(file_name))
-                    if file_name.lsn_range.end > disk_consistent_lsn + 1 =>
-                {
-                    // The end-LSN is exclusive, while disk_consistent_lsn is
-                    // inclusive. For example, if disk_consistent_lsn is 100, it is
-                    // OK for a delta layer to have end LSN 101, but if the end LSN
-                    // is 102, then it might not have been fully flushed to disk
-                    // before crash.
-                    Discovered::FutureLayer(file_name.into())
-                }
                 Ok(LayerFileName::Image(file_name)) => {
-                    assert!(file_name.lsn <= disk_consistent_lsn);
                     let file_size = direntry_path.metadata()?.len();
                     Discovered::Layer(file_name.into(), file_size)
                 }
                 Ok(LayerFileName::Delta(file_name)) => {
-                    assert!(file_name.lsn_range.end <= disk_consistent_lsn + 1);
                     let file_size = direntry_path.metadata()?.len();
                     Discovered::Layer(file_name.into(), file_size)
                 }
@@ -68,60 +53,143 @@ pub(super) async fn load_layer_map(
                         // ignore these
                         Discovered::IgnoredBackup
                     } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
-                        Discovered::TemporaryDownload
+                        Discovered::TemporaryDownload(file_name)
                     } else if is_ephemeral_file(&fname) {
-                        Discovered::Ephemeral
+                        Discovered::Ephemeral(file_name)
                     } else if is_temporary(&direntry_path) {
-                        Discovered::Temporary
+                        Discovered::Temporary(file_name)
                     } else {
-                        Discovered::Unknown
+                        Discovered::Unknown(file_name)
                     }
                 }
             }
         };
 
-        match discovered {
-            Discovered::Layer(file_name, file_size) => {
-                ret.push((file_name, file_size));
-            }
-            Discovered::FutureLayer(file_name) => {
-                let kind = match file_name {
-                    LayerFileName::Delta(_) => "delta",
-                    LayerFileName::Image(_) => "image",
-                };
-
-                tracing::info!(
-                    "found future {kind} layer {file_name} disk_consistent_lsn is {}",
-                    disk_consistent_lsn
-                );
-
-                rename_to_backup(&direntry_path)?;
-            }
-            Discovered::Ephemeral => {
-                tracing::trace!("deleting old ephemeral file in timeline dir: {file_name:?}");
-                std::fs::remove_file(&direntry_path)?;
-            }
-            Discovered::Temporary => {
-                tracing::info!("removing temp timeline file at {}", direntry_path.display());
-                std::fs::remove_file(&direntry_path).with_context(|| {
-                    format!(
-                        "failed to remove temp download file at {}",
-                        direntry_path.display()
-                    )
-                })?;
-            }
-            Discovered::TemporaryDownload => {
-                tracing::info!(
-                        "skipping temp download file, reconcile_with_remote will resume / clean up: {:?}",
-                        file_name
-                    );
-            }
-            Discovered::Metadata | Discovered::IgnoredBackup => {}
-            Discovered::Unknown => {
-                tracing::warn!("unrecognized filename in timeline dir: {file_name:?}");
-            }
-        }
+        ret.push(discovered);
     }
 
     Ok(ret)
+}
+
+#[derive(Clone)]
+pub(super) enum Decision {
+    /// The layer is not present locally.
+    Evicted(LayerFileMetadata),
+    /// The layer is present locally, but local metadata does not match remote; we must
+    /// delete it and treat it as evicted.
+    UseRemote {
+        local: LayerFileMetadata,
+        remote: LayerFileMetadata,
+    },
+    /// The layer is present locally, and metadata matches.
+    UseLocal(LayerFileMetadata),
+    /// The layer is only known locally, it needs to be uploaded.
+    NeedsUpload(LayerFileMetadata),
+}
+
+/// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
+///
+/// Decision of `None` means the layer needs to be filtered.
+pub(super) fn recoincile(
+    discovered: Vec<(LayerFileName, u64)>,
+    index_part: Option<&IndexPart>,
+    disk_consistent_lsn: Lsn,
+) -> Vec<(LayerFileName, Option<Decision>)> {
+    use Decision::*;
+    use LayerFileName::*;
+
+    // name => (local, remote)
+    type Collected = HashMap<LayerFileName, (Option<LayerFileMetadata>, Option<LayerFileMetadata>)>;
+
+    let mut discovered = discovered
+        .into_iter()
+        .map(|(name, file_size)| (name, (Some(LayerFileMetadata::new(file_size)), None)))
+        .collect::<Collected>();
+
+    // merge any index_part information, if we would have such
+    index_part
+        .as_ref()
+        .map(|ip| ip.layer_metadata.iter())
+        .into_iter()
+        .flatten()
+        .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
+        .for_each(|(name, metadata)| {
+            if let Some(existing) = discovered.get_mut(name) {
+                existing.1 = Some(metadata);
+            } else {
+                discovered.insert(name.to_owned(), (None, Some(metadata)));
+            }
+        });
+
+    discovered
+        .into_iter()
+        .map(|(name, (local, remote))| {
+            let future = match &name {
+                Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
+                Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
+                _ => false,
+            };
+
+            let decision = if future {
+                // trying not to add a unmatchable Decision variant; this could be a custom wrapper
+                // just as well, but None works.
+                None
+            } else {
+                Some(match (local, remote) {
+                    (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
+                    (Some(x), Some(_)) => UseLocal(x),
+                    (None, Some(x)) => Evicted(x),
+                    (Some(x), None) => NeedsUpload(x),
+                    (None, None) => {
+                        unreachable!("there must not be any non-local non-remote files")
+                    }
+                })
+            };
+
+            (name, decision)
+        })
+        .collect::<Vec<_>>()
+}
+
+pub(super) fn cleanup(path: &Path, kind: &str) -> anyhow::Result<()> {
+    let file_name = path.file_name().expect("must be file path");
+    tracing::debug!(kind, ?file_name, "cleaning up");
+    std::fs::remove_file(&path)
+        .with_context(|| format!("failed to remove temp download file at {}", path.display()))
+}
+
+pub(super) fn cleanup_local_file_for_remote(
+    path: &Path,
+    local: &LayerFileMetadata,
+    remote: &LayerFileMetadata,
+) -> anyhow::Result<()> {
+    let local_size = local.file_size();
+    let remote_size = remote.file_size();
+
+    tracing::warn!("removing local file {path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+    if let Err(err) = crate::tenant::timeline::rename_to_backup(&path) {
+        assert!(
+            path.exists(),
+            "we would leave the local_layer without a file if this does not hold: {}",
+            path.display()
+        );
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn cleanup_future_layer(
+    path: &Path,
+    name: LayerFileName,
+    disk_consistent_lsn: Lsn,
+) -> anyhow::Result<()> {
+    use LayerFileName::*;
+    let kind = match name {
+        Delta(_) => "delta",
+        Image(_) => "image",
+    };
+    tracing::info!("found future {kind} layer {name} disk_consistent_lsn is {disk_consistent_lsn}");
+    crate::tenant::timeline::rename_to_backup(&path)?;
+    Ok(())
 }

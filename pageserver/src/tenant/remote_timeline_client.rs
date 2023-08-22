@@ -353,6 +353,10 @@ impl RemoteTimelineClient {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
         self.update_remote_physical_size_gauge(Some(index_part));
+        info!(
+            "initialized upload queue from remote index with {} layer files",
+            index_part.layer_metadata.len()
+        );
         Ok(())
     }
 
@@ -365,6 +369,7 @@ impl RemoteTimelineClient {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata)?;
         self.update_remote_physical_size_gauge(None);
+        info!("initialized upload queue as empty");
         Ok(())
     }
 
