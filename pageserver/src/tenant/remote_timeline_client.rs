@@ -56,9 +56,11 @@
 //! # Consistency
 //!
 //! To have a consistent remote structure, it's important that uploads and
-//! deletions are performed in the right order. For example, the index file
-//! contains a list of layer files, so it must not be uploaded until all the
-//! layer files that are in its list have been successfully uploaded.
+//! deletions are performed in the right order. For example:
+//! - the index file contains a list of layer files, so it must not be uploaded
+//!    until all the layer files that are in its list have been successfully uploaded.
+//! - objects must be removed from the index before being deleted, and that updated
+//!   index must be written to remote storage before deleting the objects from remote storage.
 //!
 //! The contract between client and its user is that the user is responsible of
 //! scheduling operations in an order that keeps the remote consistent as
@@ -70,10 +72,12 @@
 //! correct order, and the client will parallelize the operations in a way that
 //! is safe.
 //!
-//! The caller should be careful with deletion, though. They should not delete
-//! local files that have been scheduled for upload but not yet finished uploading.
-//! Otherwise the upload will fail. To wait for an upload to finish, use
-//! the 'wait_completion' function (more on that later.)
+//! The caller should be careful with deletion, though:
+//! - they should not delete local files that have been scheduled for upload but
+//!   not yet finished uploading.  Otherwise the upload will fail. To wait for an
+//!   upload to finish, use the 'wait_completion' function (more on that later.)
+//! - they should not to remote deletions via DeletionQueue without waiting for
+//!   the latest metadata to upload via RemoteTimelineClient.
 //!
 //! All of this relies on the following invariants:
 //!
