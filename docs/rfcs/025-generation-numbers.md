@@ -148,7 +148,7 @@ an old pod is dead before starting a new one.
 
 The node generation is useful other ways, beyond it's core correctness purpose:
 
-- Including both generations (and the node ID) in object keys also provides some flexibility in
+- Including both generations (and the node ID) in object keys (see [object keys](#object-key-changes)) also provides some flexibility in
   how HA should work in future: we could move to a model where failover can happen within one
   attachment generation number (i.e. without control plane coordination) without changing the
   storage format, because node IDs/generations would de-conflict writes from peers.
