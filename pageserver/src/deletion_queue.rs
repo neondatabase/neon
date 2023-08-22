@@ -469,7 +469,7 @@ impl BackendQueueWorker {
                     }
 
                     if !self.accumulator.is_empty() {
-                        // We have a remainder, deletion list is not fully processed yet
+                        // We have a remainder, `list` not fully executed yet
                         self.pending_lists.push(list);
                     } else {
                         // We fully processed this list, it is ready for purge
