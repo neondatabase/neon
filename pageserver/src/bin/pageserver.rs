@@ -352,8 +352,9 @@ fn start_pageserver(
     let remote_storage = create_remote_storage_client(conf)?;
 
     // Set up deletion queue
+    let deletion_queue_cancel = tokio_util::sync::CancellationToken::new();
     let (deletion_queue, deletion_frontend, deletion_backend) =
-        DeletionQueue::new(remote_storage.clone(), conf);
+        DeletionQueue::new(remote_storage.clone(), conf, deletion_queue_cancel.clone());
     if let Some(mut deletion_frontend) = deletion_frontend {
         BACKGROUND_RUNTIME.spawn(async move {
             deletion_frontend
@@ -654,6 +655,9 @@ fn start_pageserver(
                     }
                 }
             });
+
+            // Clean shutdown of deletion queue workers
+            deletion_queue_cancel.cancel();
 
             unreachable!()
         }

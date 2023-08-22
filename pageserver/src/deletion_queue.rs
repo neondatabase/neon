@@ -8,6 +8,7 @@ use serde_with::serde_as;
 use thiserror::Error;
 use tokio;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error, info, warn};
 use utils::backoff;
 use utils::id::{TenantId, TimelineId};
@@ -517,6 +518,9 @@ pub struct FrontendQueueWorker {
     // this is lazy usually, but after a failed flush it is set to a smaller time
     // period to drive retries
     timeout: Duration,
+
+    // Worker loop is torn down when this fires.
+    cancel: CancellationToken,
 }
 
 impl FrontendQueueWorker {
@@ -592,6 +596,7 @@ impl FrontendQueueWorker {
             3,
             u32::MAX,
             "Reading deletion queue header",
+            backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
         )
         .await
         {
@@ -622,15 +627,15 @@ impl FrontendQueueWorker {
             };
         };
 
-        // TODO: this needs a CancellationToken or equivalent: usual worker teardown happens via the channel
         let prefix = RemotePath::new(&self.conf.remote_deletion_node_prefix())
             .expect("Failed to compose path");
         let lists = backoff::retry(
             || async { self.remote_storage.list_prefixes(Some(&prefix)).await },
-            |_| false, // TODO impl is_permanent
+            |_| false,
             3,
             u32::MAX, // There's no point giving up, since once we do that the deletion queue is stuck
             "Recovering deletion lists",
+            backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
         )
         .await?;
 
@@ -693,6 +698,7 @@ impl FrontendQueueWorker {
                 3,
                 u32::MAX,
                 "Reading a deletion list",
+                backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
             )
             .await?;
 
@@ -826,6 +832,7 @@ impl DeletionQueue {
     pub fn new(
         remote_storage: Option<GenericRemoteStorage>,
         conf: &'static PageServerConf,
+        cancel: CancellationToken,
     ) -> (
         Self,
         Option<FrontendQueueWorker>,
@@ -850,6 +857,7 @@ impl DeletionQueue {
                 tx: backend_tx,
                 timeout: FLUSH_DEFAULT_DEADLINE,
                 pending_flushes: Vec::new(),
+                cancel,
             }),
             Some(BackendQueueWorker {
                 remote_storage,
@@ -896,8 +904,11 @@ mod test {
     impl TestSetup {
         /// Simulate a pageserver restart by destroying and recreating the deletion queue
         fn restart(&mut self) {
-            let (deletion_queue, fe_worker, be_worker) =
-                DeletionQueue::new(Some(self.storage.clone()), self.harness.conf);
+            let (deletion_queue, fe_worker, be_worker) = DeletionQueue::new(
+                Some(self.storage.clone()),
+                self.harness.conf,
+                CancellationToken::new(),
+            );
 
             self.deletion_queue = deletion_queue;
 
@@ -948,8 +959,11 @@ mod test {
         ));
         let entered_runtime = runtime.enter();
 
-        let (deletion_queue, fe_worker, be_worker) =
-            DeletionQueue::new(Some(storage.clone()), harness.conf);
+        let (deletion_queue, fe_worker, be_worker) = DeletionQueue::new(
+            Some(storage.clone()),
+            harness.conf,
+            CancellationToken::new(),
+        );
 
         let mut fe_worker = fe_worker.unwrap();
         let mut be_worker = be_worker.unwrap();

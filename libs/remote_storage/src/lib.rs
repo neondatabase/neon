@@ -190,6 +190,8 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// The client was shut down
+    Shutdown,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -201,6 +203,7 @@ impl std::fmt::Display for DownloadError {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Shutdown => write!(f, "Client shutting down"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
