@@ -468,9 +468,12 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 	Event event = sim_epoll_peek(timeout);
 	if (event.tag == Closed) {
 		sim_epoll_rcv(0);
-		// TODO: shutdown connection?
-		// walprop_log(LOG, "connection closed");
-		// ShutdownConnection(sk);
+		for (int i = 0; i < n_safekeepers; i++) {
+			if (safekeeper[i].conn && ((int64_t) walprop_socket(safekeeper[i].conn)) == event.tcp) {
+				walprop_log(LOG, "connection to %s:%s is closed", safekeeper[i].host, safekeeper[i].port);
+				ResetConnection(&safekeeper[i]);
+			}
+		}
 		return 0;
 	} else if (event.tag == Message && event.any_message == Bytes) {
 		// !!! code must read the message
@@ -1561,6 +1564,60 @@ DetermineEpochStartLsn(void)
 	}
 }
 
+#ifdef SIMLIB
+static bool
+WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
+{
+	int node_id;
+	int64_t tcp_id;
+	char startcmd[1024];
+	int len;
+	XLogRecPtr pos = startpos;
+
+	const char *connstr_prefix = "host=node port=";
+	Assert(strncmp(safekeeper[donor].conninfo, connstr_prefix, strlen(connstr_prefix)) == 0);
+
+	node_id = atoi(safekeeper[donor].conninfo + strlen(connstr_prefix));
+	tcp_id = sim_open_tcp_nopoll(node_id);
+
+	len = snprintf(
+		startcmd,
+		sizeof(startcmd),
+		"START_REPLICATION %s %s %ld %ld",
+		neon_tenant_walproposer,
+		neon_timeline_walproposer,
+		(int64_t) startpos,
+		(int64_t) endpos
+	);
+	Assert(len > 0 && len < sizeof(startcmd));
+
+	sim_msg_set_bytes(startcmd, len);
+	sim_tcp_send(tcp_id);
+
+	while (pos < endpos)
+	{
+		uintptr_t msg_len;
+		char *msg;
+		Event event = sim_tcp_recv(tcp_id);
+		if (event.tag == Closed)
+			break;
+		Assert(event.tag == Message);
+		walprop_log(LOG, "recovery received event %d", (int) event.any_message);
+		Assert(event.any_message == Bytes);
+		msg = (char*) sim_msg_get_bytes(&msg_len);
+
+		XLogWalPropWrite(msg, msg_len, pos);
+		pos += msg_len;
+	}
+
+	walprop_log(LOG, "recovery finished at %X/%X, from %X/%X to %X/%X",
+			LSN_FORMAT_ARGS(pos),
+			LSN_FORMAT_ARGS(startpos),
+			LSN_FORMAT_ARGS(endpos));
+
+	return pos == endpos;
+}
+#else
 /*
  * Receive WAL from most advanced safekeeper
  */
@@ -1646,6 +1703,7 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 
 	return true;
 }
+#endif
 
 /*
  * Determine for sk the starting streaming point and send it message

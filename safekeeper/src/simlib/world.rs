@@ -106,9 +106,34 @@ impl World {
         let id = self
             .connection_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         let conn = VirtualConnection::new(
             id,
             self.clone(),
+            src.network_chan(),
+            dst.network_chan(),
+            src.clone(),
+            dst,
+            self.network_options.clone(),
+        );
+
+        // MessageDirection(0) is src->dst
+        TCP::new(conn, 0)
+    }
+
+    pub fn open_tcp_nopoll(self: &Arc<World>, src: &Arc<Node>, dst: NodeId) -> TCP {
+        // TODO: replace unwrap() with /dev/null socket.
+        let dst = self.get_node(dst).unwrap();
+
+        let id = self
+            .connection_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let conn = VirtualConnection::new(
+            id,
+            self.clone(),
+            Chan::new(), // creating a new channel to read from
+            dst.network_chan(),
             src.clone(),
             dst,
             self.network_options.clone(),

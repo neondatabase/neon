@@ -296,6 +296,10 @@ impl WalProposer {
             }
         }
     }
+
+    fn stop(&self) {
+        self.node.crash_stop();
+    }
 }
 
 #[test]
@@ -365,4 +369,34 @@ fn crash_safekeeper() {
 
     test.poll_for_duration(1000);
     wp.update();
+}
+
+#[test]
+fn test_simple_restart() {
+    logging::init(logging::LogFormat::Plain).unwrap();
+
+    let mut config = TestConfig::new();
+    // config.network.timeout = Some(250);
+    let test = config.start(1337);
+
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    println!("Sucessfully synced empty safekeepers at 0/0");
+
+    let mut wp = test.launch_walproposer(lsn);
+
+    test.poll_for_duration(30);
+    wp.update();
+
+    wp.write_tx();
+    wp.write_tx();
+    wp.write_tx();
+    test.poll_for_duration(100);
+    wp.update();
+
+    wp.stop();
+    drop(wp);
+
+    let lsn = test.sync_safekeepers().unwrap();
+    println!("Sucessfully synced safekeepers at {}", lsn);
 }

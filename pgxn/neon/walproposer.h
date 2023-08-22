@@ -14,6 +14,7 @@
 
 #ifdef SIMLIB
 #define walprop_log(tag, fmt, ...) do { \
+	MyProcPid = sim_now(); \
 	ereport((tag > WARNING ? WARNING : tag),                                  \
 			(errmsg(fmt, ##__VA_ARGS__), \
 			errhidestmt(true), errhidecontext(true), internalerrposition(0))); \

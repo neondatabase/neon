@@ -36,6 +36,12 @@ impl NodeOs {
         self.world.open_tcp(&self.internal, dst)
     }
 
+    /// Returns a readable and writable pipe. All incoming messages should
+    /// be read from [`TCP`] object.
+    pub fn open_tcp_nopoll(&self, dst: NodeId) -> TCP {
+        self.world.open_tcp_nopoll(&self.internal, dst)
+    }
+
     /// Returns a channel to receive timers and events from the network.
     pub fn epoll(&self) -> Chan<NodeEvent> {
         self.internal.network_chan()

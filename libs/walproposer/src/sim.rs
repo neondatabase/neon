@@ -66,9 +66,43 @@ pub extern "C" fn sim_open_tcp(dst: u32) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn sim_open_tcp_nopoll(dst: u32) -> i64 {
+    tcp_save(os().open_tcp_nopoll(dst.into()))
+}
+
+#[no_mangle]
 /// Send MESSAGE_BUF content to the given tcp.
 pub extern "C" fn sim_tcp_send(tcp: i64) {
     tcp_load(tcp).send(MESSAGE_BUF.with(|cell| cell.borrow().clone()));
+}
+
+#[no_mangle]
+/// Receive a message from the given tcp. Can be used only with tcp opened with
+/// `sim_open_tcp_nopoll`.
+pub extern "C" fn sim_tcp_recv(tcp: i64) -> Event {
+    let event = tcp_load(tcp).recv();
+    match event {
+        NodeEvent::Accept(_) => unreachable!(),
+        NodeEvent::Closed(_) => Event {
+            tag: EventTag::Closed,
+            tcp: 0,
+            any_message: AnyMessageTag::None,
+        },
+        NodeEvent::Internal(_) => unreachable!(),
+        NodeEvent::Message((message, _)) => {
+            // store message in thread local storage, C code should use
+            // sim_msg_* functions to access it.
+            MESSAGE_BUF.with(|cell| {
+                *cell.borrow_mut() = message.clone();
+            });
+            Event {
+                tag: EventTag::Message,
+                tcp: 0,
+                any_message: anymessage_tag(&message),
+            }
+        }
+        NodeEvent::WakeTimeout(_) => unreachable!(),
+    }
 }
 
 #[no_mangle]

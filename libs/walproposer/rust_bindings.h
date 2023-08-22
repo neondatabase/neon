@@ -50,10 +50,18 @@ uint32_t sim_id(void);
 
 int64_t sim_open_tcp(uint32_t dst);
 
+int64_t sim_open_tcp_nopoll(uint32_t dst);
+
 /**
  * Send MESSAGE_BUF content to the given tcp.
  */
 void sim_tcp_send(int64_t tcp);
+
+/**
+ * Receive a message from the given tcp. Can be used only with tcp opened with
+ * `sim_open_tcp_nopoll`.
+ */
+struct Event sim_tcp_recv(int64_t tcp);
 
 struct Event sim_epoll_rcv(int64_t timeout);
 

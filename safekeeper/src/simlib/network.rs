@@ -85,6 +85,8 @@ impl VirtualConnection {
     pub fn new(
         id: u64,
         world: Arc<World>,
+        src_sink: Chan<NodeEvent>,
+        dst_sink: Chan<NodeEvent>,
         src: Arc<Node>,
         dst: Arc<Node>,
         options: Arc<NetworkOptions>,
@@ -95,7 +97,7 @@ impl VirtualConnection {
         let conn = Arc::new(Self {
             connection_id: id,
             world,
-            dst_sockets: [src.network_chan(), dst.network_chan()],
+            dst_sockets: [src_sink, dst_sink],
             nodes: [src, dst],
             state: Mutex::new(ConnectionState {
                 buffers: [NetworkBuffer::new(None), NetworkBuffer::new(Some(now))],
@@ -267,6 +269,12 @@ impl VirtualConnection {
         self.world.schedule(delay, self.as_event());
     }
 
+    fn internal_recv(self: &Arc<Self>, node_idx: usize) -> NodeEvent {
+        // Only src node can receive messages.
+        assert!(node_idx == 0);
+        return self.dst_sockets[node_idx].recv();
+    }
+
     /// Close the connection. Only one side of the connection will be closed,
     /// and no further messages will be delivered. The other side will not be notified.
     pub fn close(self: &Arc<Self>, node_idx: usize) {
@@ -367,6 +375,13 @@ impl TCP {
     /// before the arrival of all messages sent earlier.
     pub fn send(&self, msg: AnyMessage) {
         self.conn.send(self.dir, msg);
+    }
+
+    /// Receive a message. Blocks until a message is available. Can be used only
+    /// with sockets opened with [`NodeOs::open_tcp_nopoll`].
+    pub fn recv(&self) -> NodeEvent {
+        // TODO: handle closed connection
+        self.conn.internal_recv(self.dir as usize)
     }
 
     pub fn id(&self) -> i64 {

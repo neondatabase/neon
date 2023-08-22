@@ -91,7 +91,7 @@ walprop_flush(WalProposerConn *conn)
 void
 walprop_finish(WalProposerConn *conn)
 {
-	walprop_log(INFO, "not implemented");
+	walprop_log(INFO, "walprop_finish not implemented");
 }
 
 /*

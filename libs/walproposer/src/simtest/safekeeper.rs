@@ -4,27 +4,29 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{bail, Result};
-use bytes::BytesMut;
+use anyhow::{anyhow, bail, Result};
+use bytes::{Bytes, BytesMut};
 use hyper::Uri;
 use log::info;
 use safekeeper::{
     safekeeper::{
-        AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
-        UNKNOWN_SERVER_VERSION,
+        ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo, UNKNOWN_SERVER_VERSION,
     },
     simlib::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent},
     timeline::TimelineError,
     SafeKeeperConf,
 };
 use utils::{
-    id::{NodeId, TenantTimelineId},
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
 };
 
-use crate::simtest::storage::{DummyWalStore, InMemoryState};
+use crate::simtest::storage::DiskStateStorage;
 
-use super::disk::Disk;
+use super::{
+    disk::{Disk, TimelineDisk},
+    storage::DiskWALStorage,
+};
 
 struct ConnState {
     tcp: TCP,
@@ -35,7 +37,8 @@ struct ConnState {
 }
 
 struct SharedState {
-    sk: SafeKeeper<InMemoryState, DummyWalStore>,
+    sk: SafeKeeper<DiskStateStorage, DiskWALStorage>,
+    disk: Arc<TimelineDisk>,
 }
 
 struct GlobalMap {
@@ -68,14 +71,17 @@ impl GlobalMap {
                 );
             }
 
-            // TODO: implement "persistent" storage for tests
-            let control_store = InMemoryState::new(state.clone());
-
-            // TODO: implement "persistent" storage for tests
-            let wal_store = DummyWalStore::new();
+            let control_store = DiskStateStorage::new(disk.clone());
+            let wal_store = DiskWALStorage::new(disk.clone(), &control_store)?;
 
             let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
-            timelines.insert(ttid.clone(), SharedState { sk });
+            timelines.insert(
+                ttid.clone(),
+                SharedState {
+                    sk,
+                    disk: disk.clone(),
+                },
+            );
         }
 
         Ok(Self {
@@ -114,15 +120,19 @@ impl GlobalMap {
             );
         }
 
-        // TODO: implement "persistent" storage for tests
-        let control_store = InMemoryState::new(state.clone());
-
-        // TODO: implement "persistent" storage for tests
-        let wal_store = DummyWalStore::new();
+        let disk_timeline = self.disk.put_state(&ttid, state);
+        let control_store = DiskStateStorage::new(disk_timeline.clone());
+        let wal_store = DiskWALStorage::new(disk_timeline.clone(), &control_store)?;
 
         let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
 
-        self.timelines.insert(ttid.clone(), SharedState { sk });
+        self.timelines.insert(
+            ttid.clone(),
+            SharedState {
+                sk,
+                disk: disk_timeline,
+            },
+        );
         Ok(())
     }
 
@@ -184,7 +194,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                     if let Some(conn) = conn {
                         let res = conn.process_any(msg, &mut global);
                         if res.is_err() {
-                            println!("conn {:?} error: {:?}", tcp, res);
+                            println!("conn {:?} error: {:#}", tcp, res.unwrap_err());
                             conns.remove(&tcp.id());
                         }
                     } else {
@@ -213,12 +223,44 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
 impl ConnState {
     fn process_any(&mut self, any: AnyMessage, global: &mut GlobalMap) -> Result<()> {
         if let AnyMessage::Bytes(copy_data) = any {
+            let repl_prefix = b"START_REPLICATION ";
+            if !self.greeting && copy_data.starts_with(repl_prefix) {
+                self.process_start_replication(copy_data.slice(repl_prefix.len()..), global)?;
+                bail!("finished processing START_REPLICATION")
+            }
+
             let msg = ProposerAcceptorMessage::parse(copy_data)?;
             // println!("got msg: {:?}", msg);
             return self.process(msg, global);
         } else {
             bail!("unexpected message, expected AnyMessage::Bytes");
         }
+    }
+
+    fn process_start_replication(
+        &mut self,
+        copy_data: Bytes,
+        global: &mut GlobalMap,
+    ) -> Result<()> {
+        // format is "<tenant_id> <timeline_id> <start_lsn> <end_lsn>"
+        let str = String::from_utf8(copy_data.to_vec())?;
+
+        let mut parts = str.split(' ');
+        let tenant_id = parts.next().unwrap().parse::<TenantId>()?;
+        let timeline_id = parts.next().unwrap().parse::<TimelineId>()?;
+        let start_lsn = parts.next().unwrap().parse::<u64>()?;
+        let end_lsn = parts.next().unwrap().parse::<u64>()?;
+
+        let ttid = TenantTimelineId::new(tenant_id, timeline_id);
+        let shared_state = global.get(&ttid);
+
+        // read bytes from start_lsn to end_lsn
+        let mut buf = vec![0; (end_lsn - start_lsn) as usize];
+        shared_state.disk.wal.lock().read(start_lsn, &mut buf);
+
+        // send bytes to the client
+        self.tcp.send(AnyMessage::Bytes(Bytes::from(buf)));
+        Ok(())
     }
 
     fn init_timeline(
