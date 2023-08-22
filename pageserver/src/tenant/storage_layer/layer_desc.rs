@@ -21,11 +21,11 @@ pub struct PersistentLayerDesc {
     pub timeline_id: TimelineId,
     /// Range of keys that this layer covers
     pub key_range: Range<Key>,
-    /// Inclusive start bound of the LSN range that this layer holds
-    /// Exclusive end bound of the LSN range that this layer holds.
+    /// Inclusive start, exclusive end of the LSN range that this layer holds.
     ///
-    /// - For an open in-memory layer, this is MAX_LSN.
-    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
+    /// - For an open in-memory layer, the end bound is MAX_LSN
+    /// - For a frozen in-memory layer or a delta layer, the end bound is a valid lsn after the
+    /// range start
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     pub lsn_range: Range<Lsn>,
     /// Whether this is a delta layer.
