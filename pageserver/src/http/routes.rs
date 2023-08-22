@@ -23,7 +23,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::deletion_queue::DeletionQueue;
+use crate::deletion_queue::{DeletionQueue, DeletionQueueError};
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -1148,14 +1148,25 @@ async fn deletion_queue_flush(
     let queue_client = state.deletion_queue.new_client();
 
     tokio::select! {
-        _ = async {
+        flush_result = async {
             if execute {
-                queue_client.flush_execute().await;
+                queue_client.flush_execute().await
             } else {
-                queue_client.flush().await;
+                queue_client.flush().await
             }
         } => {
-            json_response(StatusCode::OK, ())
+            match flush_result {
+                Ok(())=> {
+                    json_response(StatusCode::OK, ())
+                },
+                Err(e) => {
+                    match e {
+                        DeletionQueueError::ShuttingDown => {
+            Err(ApiError::ShuttingDown)
+                        }
+                    }
+                }
+            }
         },
         _ = cancel.cancelled() => {
             Err(ApiError::ShuttingDown)

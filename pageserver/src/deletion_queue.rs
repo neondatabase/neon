@@ -5,6 +5,7 @@ use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
+use thiserror::Error;
 use tokio;
 use tokio::time::Duration;
 use tracing::{self, debug, error, info, warn};
@@ -158,15 +159,22 @@ impl DeletionList {
     }
 }
 
+#[derive(Error, Debug)]
+pub enum DeletionQueueError {
+    #[error("Deletion queue unavailable during shutdown")]
+    ShuttingDown,
+}
+
 impl DeletionQueueClient {
-    async fn do_push(&self, msg: FrontendQueueMessage) {
+    async fn do_push(&self, msg: FrontendQueueMessage) -> Result<(), DeletionQueueError> {
         match self.tx.send(msg).await {
-            Ok(_) => {}
+            Ok(_) => Ok(()),
             Err(e) => {
                 // This shouldn't happen, we should shut down all tenants before
                 // we shut down the global delete queue.  If we encounter a bug like this,
                 // we may leak objects as deletions won't be processed.
                 error!("Deletion queue closed while pushing, shutting down? ({e})");
+                Err(DeletionQueueError::ShuttingDown)
             }
         }
     }
@@ -180,7 +188,7 @@ impl DeletionQueueClient {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         layers: Vec<LayerFileName>,
-    ) {
+    ) -> Result<(), DeletionQueueError> {
         DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
         self.do_push(FrontendQueueMessage::Delete(DeletionOp {
             tenant_id,
@@ -188,7 +196,7 @@ impl DeletionQueueClient {
             layers,
             objects: Vec::new(),
         }))
-        .await;
+        .await
     }
 
     /// Just like push_layers, but using some already-known remote paths, instead of abstract layer names
@@ -197,7 +205,7 @@ impl DeletionQueueClient {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         objects: Vec<RemotePath>,
-    ) {
+    ) -> Result<(), DeletionQueueError> {
         DELETION_QUEUE_SUBMITTED.inc_by(objects.len() as u64);
         self.do_push(FrontendQueueMessage::Delete(DeletionOp {
             tenant_id,
@@ -205,38 +213,46 @@ impl DeletionQueueClient {
             layers: Vec::new(),
             objects,
         }))
-        .await;
+        .await
     }
 
-    async fn do_flush(&self, msg: FrontendQueueMessage, rx: tokio::sync::oneshot::Receiver<()>) {
-        self.do_push(msg).await;
+    async fn do_flush(
+        &self,
+        msg: FrontendQueueMessage,
+        rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), DeletionQueueError> {
+        self.do_push(msg).await?;
         if rx.await.is_err() {
             // This shouldn't happen if tenants are shut down before deletion queue.  If we
             // encounter a bug like this, then a flusher will incorrectly believe it has flushed
             // when it hasn't, possibly leading to leaking objects.
             error!("Deletion queue dropped flush op while client was still waiting");
+            Err(DeletionQueueError::ShuttingDown)
+        } else {
+            Ok(())
         }
     }
 
     /// Wait until all previous deletions are persistent (either executed, or written to a DeletionList)
-    pub async fn flush(&self) {
+    pub async fn flush(&self) -> Result<(), DeletionQueueError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         self.do_flush(FrontendQueueMessage::Flush(FlushOp { tx }), rx)
             .await
     }
 
     // Wait until all previous deletions are executed
-    pub async fn flush_execute(&self) {
+    pub async fn flush_execute(&self) -> Result<(), DeletionQueueError> {
         debug!("flush_execute: flushing to deletion lists...");
         // Flush any buffered work to deletion lists
-        self.flush().await;
+        self.flush().await?;
 
         // Flush execution of deletion lists
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         debug!("flush_execute: flushing execution...");
         self.do_flush(FrontendQueueMessage::FlushExecute(FlushOp { tx }), rx)
-            .await;
+            .await?;
         debug!("flush_execute: finished flushing execution...");
+        Ok(())
     }
 }
 
@@ -1029,13 +1045,13 @@ mod test {
             tenant_id,
             TIMELINE_ID,
             [layer_file_name_1.clone()].to_vec(),
-        ));
+        ))?;
         assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
         assert_remote_files(&[], &remote_deletion_prefix);
 
         // File should still be there after we write a deletion list (we haven't pushed enough to execute anything)
         info!("Flushing");
-        ctx.runtime.block_on(client.flush());
+        ctx.runtime.block_on(client.flush())?;
         assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
         assert_remote_files(
             &["0000000000000001-00000000-01.list"],
@@ -1044,13 +1060,13 @@ mod test {
 
         // File should go away when we execute
         info!("Flush-executing");
-        ctx.runtime.block_on(client.flush_execute());
+        ctx.runtime.block_on(client.flush_execute())?;
         assert_remote_files(&[], &remote_timeline_path);
         assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
 
         // Flushing on an empty queue should succeed immediately, and not write any lists
         info!("Flush-executing on empty");
-        ctx.runtime.block_on(client.flush_execute());
+        ctx.runtime.block_on(client.flush_execute())?;
         assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
 
         Ok(())
@@ -1086,8 +1102,8 @@ mod test {
             tenant_id,
             TIMELINE_ID,
             [layer_file_name_1.clone()].to_vec(),
-        ));
-        ctx.runtime.block_on(client.flush());
+        ))?;
+        ctx.runtime.block_on(client.flush())?;
         assert_remote_files(
             &["0000000000000001-00000000-01.list"],
             &remote_deletion_prefix,
@@ -1100,7 +1116,7 @@ mod test {
 
         // If we have recovered the deletion list properly, then executing after restart should purge it
         info!("Flush-executing");
-        ctx.runtime.block_on(client.flush_execute());
+        ctx.runtime.block_on(client.flush_execute())?;
         assert_remote_files(&[], &remote_timeline_path);
         assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
         Ok(())

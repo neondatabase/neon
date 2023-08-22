@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::deletion_queue::DeletionQueue;
+use pageserver::deletion_queue::{DeletionQueue, DeletionQueueError};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -633,8 +633,21 @@ fn start_pageserver(
             let dq = deletion_queue.clone();
             BACKGROUND_RUNTIME.block_on(async move {
                 match tokio::time::timeout(Duration::from_secs(5), dq.new_client().flush()).await {
-                    Ok(()) => {
-                        info!("Deletion queue flushed successfully on shutdown");
+                    Ok(flush_r) => {
+                        match flush_r {
+                            Ok(()) => {
+                                info!("Deletion queue flushed successfully on shutdown")
+                            }
+                            Err(e) => {
+                                match e {
+                                    DeletionQueueError::ShuttingDown => {
+                                        // This is not harmful for correctness, but is unexpected: the deletion
+                                        // queue's workers should stay alive as long as there are any client handles instantiated.
+                                        warn!("Deletion queue stopped prematurely");
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("Timed out flushing deletion queue on shutdown ({e})")

@@ -664,7 +664,7 @@ impl RemoteTimelineClient {
         // Enqueue deletions
         deletion_queue_client
             .push_layers(self.tenant_id, self.timeline_id, names.to_vec())
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -817,7 +817,7 @@ impl RemoteTimelineClient {
 
         deletion_queue
             .push_layers(self.tenant_id, self.timeline_id, layers)
-            .await;
+            .await?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
@@ -826,7 +826,7 @@ impl RemoteTimelineClient {
 
         // Execute all pending deletions, so that when we prroceed to do a list_prefixes below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
-        deletion_queue.flush_execute().await;
+        deletion_queue.flush_execute().await?;
 
         let remaining = backoff::retry(
             || async {
@@ -858,7 +858,7 @@ impl RemoteTimelineClient {
         if !remaining.is_empty() {
             deletion_queue
                 .push_objects(self.tenant_id, self.timeline_id, remaining)
-                .await;
+                .await?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
@@ -872,11 +872,11 @@ impl RemoteTimelineClient {
         debug!("enqueuing index part deletion");
         deletion_queue
             .push_objects(self.tenant_id, self.timeline_id, [index_file_path].to_vec())
-            .await;
+            .await?;
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
-        deletion_queue.flush_execute().await;
+        deletion_queue.flush_execute().await?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
             Err(anyhow::anyhow!(
