@@ -157,7 +157,7 @@ The node generation is useful other ways, beyond it's core correctness purpose:
 - node generation numbers enable building fencing into any network protocol (for example
   communication with safekeepers) to refuse to communicate with stale/partitioned nodes.
 
-Node that the two generation numbers have a different behavior for stale generations:
+Note that the two generation numbers have a different behavior for stale generations:
 
 - A pageserver with a stale generation number should immediately terminate: it is never intended
   to have two pageservers with the same node ID.
