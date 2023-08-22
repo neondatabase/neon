@@ -183,8 +183,9 @@ enabling safe multi-attachment of tenants:
   some rogue pageserver still running) will not try to write to the same objects.
 - Multiple attachments of the same tenant will not try to write to the same objects, as
   each attachment would have a distinct attachment generation.
-  To avoid coupling our storage format tightly with the way we manage generation numbers,
-  they will be packed into a single u64 that must obey just the following properties:
+
+To avoid coupling our storage format tightly with the way we manage generation numbers,
+they will be packed into a single u64 that must obey just the following properties:
 
 - On a node restart, the suffix must increase
 - On a change to the attachment, the suffix must increase
