@@ -266,7 +266,9 @@ impl InMemoryLayer {
 
         let off = {
             // Avoid doing allocations for "small" values.
-            let mut buf = smallvec::SmallVec::<[u8; 128]>::new();
+            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
             buf.clear();
             val.ser_into(&mut buf)?;
             inner.file.write_blob(&buf).await?
