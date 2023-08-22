@@ -1,4 +1,5 @@
 mod backend;
+mod executor;
 mod frontend;
 
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
@@ -13,9 +14,11 @@ use tracing::{self, debug, error};
 use utils::id::{TenantId, TimelineId};
 
 pub(crate) use self::backend::BackendQueueWorker;
+use self::executor::ExecutorWorker;
 use self::frontend::DeletionOp;
 pub(crate) use self::frontend::FrontendQueueWorker;
 use backend::BackendQueueMessage;
+use executor::ExecutorMessage;
 use frontend::FrontendQueueMessage;
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
@@ -55,7 +58,7 @@ const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 /// a DeletionHeader
 #[derive(Clone)]
 pub struct DeletionQueue {
-    tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
+    client: DeletionQueueClient,
 }
 
 #[derive(Debug)]
@@ -75,6 +78,7 @@ impl FlushOp {
 #[derive(Clone)]
 pub struct DeletionQueueClient {
     tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
+    executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
 }
 
 #[serde_as]
@@ -168,23 +172,6 @@ impl DeletionQueueClient {
         .await
     }
 
-    /// Just like push_layers, but using some already-known remote paths, instead of abstract layer names
-    pub(crate) async fn push_objects(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        objects: Vec<RemotePath>,
-    ) -> Result<(), DeletionQueueError> {
-        DELETION_QUEUE_SUBMITTED.inc_by(objects.len() as u64);
-        self.do_push(FrontendQueueMessage::Delete(DeletionOp {
-            tenant_id,
-            timeline_id,
-            layers: Vec::new(),
-            objects,
-        }))
-        .await
-    }
-
     async fn do_flush(
         &self,
         msg: FrontendQueueMessage,
@@ -223,13 +210,39 @@ impl DeletionQueueClient {
         debug!("flush_execute: finished flushing execution...");
         Ok(())
     }
+
+    /// This interface bypasses the persistent deletion queue, and any validation
+    /// that this pageserver is still elegible to execute the deletions.  It is for
+    /// use in timeline deletions, where the control plane is telling us we may
+    /// delete everything in the timeline.
+    ///
+    /// DO NOT USE THIS FROM GC OR COMPACTION CODE.  Use the regular `push_layers`.
+    pub(crate) async fn push_immediate(
+        &self,
+        objects: Vec<RemotePath>,
+    ) -> Result<(), DeletionQueueError> {
+        self.executor_tx
+            .send(ExecutorMessage::Delete(objects))
+            .await
+            .map_err(|_| DeletionQueueError::ShuttingDown)
+    }
+
+    /// Companion to push_immediate.  When this returns Ok, all prior objects sent
+    /// into push_immediate have been deleted from remote storage.
+    pub(crate) async fn flush_immediate(&self) -> Result<(), DeletionQueueError> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        self.executor_tx
+            .send(ExecutorMessage::Flush(FlushOp { tx }))
+            .await
+            .map_err(|_| DeletionQueueError::ShuttingDown)?;
+
+        rx.await.map_err(|_| DeletionQueueError::ShuttingDown)
+    }
 }
 
 impl DeletionQueue {
     pub fn new_client(&self) -> DeletionQueueClient {
-        DeletionQueueClient {
-            tx: self.tx.clone(),
-        }
+        self.client.clone()
     }
 
     /// Caller may use the returned object to construct clients with new_client.
@@ -245,26 +258,57 @@ impl DeletionQueue {
         Self,
         Option<FrontendQueueWorker>,
         Option<BackendQueueWorker>,
+        Option<ExecutorWorker>,
     ) {
+        // Deep channel: it consumes deletions from all timelines and we do not want to block them
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
 
+        // Shallow channel: it carries DeletionLists which each contain up to thousands of deletions
+        let (backend_tx, backend_rx) = tokio::sync::mpsc::channel(16);
+
+        // Shallow channel: it carries lists of paths, and we expect the main queueing to
+        // happen in the backend (persistent), not in this queue.
+        let (executor_tx, executor_rx) = tokio::sync::mpsc::channel(16);
+
         let remote_storage = match remote_storage {
-            None => return (Self { tx }, None, None),
+            None => {
+                return (
+                    Self {
+                        client: DeletionQueueClient { tx, executor_tx },
+                    },
+                    None,
+                    None,
+                    None,
+                )
+            }
             Some(r) => r,
         };
 
-        let (backend_tx, backend_rx) = tokio::sync::mpsc::channel(16384);
-
         (
-            Self { tx },
+            Self {
+                client: DeletionQueueClient {
+                    tx,
+                    executor_tx: executor_tx.clone(),
+                },
+            },
             Some(FrontendQueueWorker::new(
                 remote_storage.clone(),
                 conf,
                 rx,
                 backend_tx,
-                cancel,
+                cancel.clone(),
             )),
-            Some(BackendQueueWorker::new(remote_storage, conf, backend_rx)),
+            Some(BackendQueueWorker::new(
+                remote_storage.clone(),
+                conf,
+                backend_rx,
+                executor_tx,
+            )),
+            Some(ExecutorWorker::new(
+                remote_storage,
+                executor_rx,
+                cancel.clone(),
+            )),
         )
     }
 }
@@ -296,12 +340,13 @@ mod test {
         deletion_queue: DeletionQueue,
         fe_worker: JoinHandle<()>,
         be_worker: JoinHandle<()>,
+        ex_worker: JoinHandle<()>,
     }
 
     impl TestSetup {
         /// Simulate a pageserver restart by destroying and recreating the deletion queue
         fn restart(&mut self) {
-            let (deletion_queue, fe_worker, be_worker) = DeletionQueue::new(
+            let (deletion_queue, fe_worker, be_worker, ex_worker) = DeletionQueue::new(
                 Some(self.storage.clone()),
                 self.harness.conf,
                 CancellationToken::new(),
@@ -311,18 +356,24 @@ mod test {
 
             let mut fe_worker = fe_worker.unwrap();
             let mut be_worker = be_worker.unwrap();
+            let mut ex_worker = ex_worker.unwrap();
             let mut fe_worker = self
                 .runtime
                 .spawn(async move { fe_worker.background().await });
             let mut be_worker = self
                 .runtime
                 .spawn(async move { be_worker.background().await });
+            let mut ex_worker = self.runtime.spawn(async move {
+                drop(ex_worker.background().await);
+            });
             std::mem::swap(&mut self.fe_worker, &mut fe_worker);
             std::mem::swap(&mut self.be_worker, &mut be_worker);
+            std::mem::swap(&mut self.ex_worker, &mut ex_worker);
 
             // Join the old workers
             self.runtime.block_on(fe_worker).unwrap();
             self.runtime.block_on(be_worker).unwrap();
+            self.runtime.block_on(ex_worker).unwrap();
         }
     }
 
@@ -356,7 +407,7 @@ mod test {
         ));
         let entered_runtime = runtime.enter();
 
-        let (deletion_queue, fe_worker, be_worker) = DeletionQueue::new(
+        let (deletion_queue, fe_worker, be_worker, ex_worker) = DeletionQueue::new(
             Some(storage.clone()),
             harness.conf,
             CancellationToken::new(),
@@ -364,8 +415,12 @@ mod test {
 
         let mut fe_worker = fe_worker.unwrap();
         let mut be_worker = be_worker.unwrap();
+        let mut ex_worker = ex_worker.unwrap();
         let fe_worker_join = runtime.spawn(async move { fe_worker.background().await });
         let be_worker_join = runtime.spawn(async move { be_worker.background().await });
+        let ex_worker_join = runtime.spawn(async move {
+            drop(ex_worker.background().await);
+        });
 
         Ok(TestSetup {
             runtime,
@@ -376,6 +431,7 @@ mod test {
             deletion_queue,
             fe_worker: fe_worker_join,
             be_worker: be_worker_join,
+            ex_worker: ex_worker_join,
         })
     }
 
@@ -542,6 +598,7 @@ pub mod mock {
 
     pub struct MockDeletionQueue {
         tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
+        executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
         tx_pump: tokio::sync::mpsc::Sender<FlushOp>,
         executed: Arc<AtomicUsize>,
     }
@@ -553,6 +610,7 @@ pub mod mock {
         ) -> Self {
             let (tx, mut rx) = tokio::sync::mpsc::channel(16384);
             let (tx_pump, mut rx_pump) = tokio::sync::mpsc::channel::<FlushOp>(1);
+            let (executor_tx, mut executor_rx) = tokio::sync::mpsc::channel(16384);
 
             let executed = Arc::new(AtomicUsize::new(0));
             let executed_bg = executed.clone();
@@ -569,6 +627,31 @@ pub mod mock {
                 // Each time we are asked to pump, drain the queue of deletions
                 while let Some(flush_op) = rx_pump.recv().await {
                     info!("Executing all pending deletions");
+
+                    // Transform all executor messages to generic frontend messages
+                    while let Ok(msg) = executor_rx.try_recv() {
+                        match msg {
+                            ExecutorMessage::Delete(objects) => {
+                                for path in objects {
+                                    match remote_storage.delete(&path).await {
+                                        Ok(_) => {
+                                            debug!("Deleted {path}");
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to delete {path}, leaking object! ({e})"
+                                            );
+                                        }
+                                    }
+                                    executed_bg.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            ExecutorMessage::Flush(flush_op) => {
+                                flush_op.fire();
+                            }
+                        }
+                    }
+
                     while let Ok(msg) = rx.try_recv() {
                         match msg {
                             FrontendQueueMessage::Delete(op) => {
@@ -622,6 +705,7 @@ pub mod mock {
             Self {
                 tx,
                 tx_pump,
+                executor_tx,
                 executed,
             }
         }
@@ -643,6 +727,7 @@ pub mod mock {
         pub(crate) fn new_client(&self) -> DeletionQueueClient {
             DeletionQueueClient {
                 tx: self.tx.clone(),
+                executor_tx: self.executor_tx.clone(),
             }
         }
     }

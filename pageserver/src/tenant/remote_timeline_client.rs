@@ -821,9 +821,19 @@ impl RemoteTimelineClient {
 
         let layer_deletion_count = layers.len();
 
-        deletion_queue
-            .push_layers(self.tenant_id, self.timeline_id, layers)
-            .await?;
+        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+        let layer_paths = layers
+            .into_iter()
+            .map(|l| {
+                let local_path = timeline_path.join(l.file_name());
+                let remote_path = self
+                    .conf
+                    .remote_path(&local_path)
+                    .expect("Timeline path should always convert to remote");
+                remote_path
+            })
+            .collect();
+        deletion_queue.push_immediate(layer_paths).await?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
@@ -832,7 +842,7 @@ impl RemoteTimelineClient {
 
         // Execute all pending deletions, so that when we prroceed to do a list_prefixes below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
-        deletion_queue.flush_execute().await?;
+        deletion_queue.flush_immediate().await?;
 
         let remaining = backoff::retry(
             || async {
@@ -863,9 +873,7 @@ impl RemoteTimelineClient {
 
         let not_referenced_count = remaining.len();
         if !remaining.is_empty() {
-            deletion_queue
-                .push_objects(self.tenant_id, self.timeline_id, remaining)
-                .await?;
+            deletion_queue.push_immediate(remaining).await?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
@@ -878,12 +886,12 @@ impl RemoteTimelineClient {
 
         debug!("enqueuing index part deletion");
         deletion_queue
-            .push_objects(self.tenant_id, self.timeline_id, [index_file_path].to_vec())
+            .push_immediate([index_file_path].to_vec())
             .await?;
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
-        deletion_queue.flush_execute().await?;
+        deletion_queue.flush_immediate().await?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
             Err(anyhow::anyhow!(

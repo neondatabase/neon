@@ -52,7 +52,7 @@ def test_tenant_delete_smoke(
             # The deletion queue will complain when it encounters simulated S3 errors
             ".*deletion frontend: Failed to write deletion list.*",
             ".*deletion backend: Failed to delete deletion list.*",
-            ".*deletion backend: DeleteObjects request failed.*",
+            ".*deletion executor: DeleteObjects request failed.*",
             ".*deletion backend: Failed to upload deletion queue header.*",
         ]
     )
@@ -218,7 +218,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
                 # The deletion queue will complain when it encounters simulated S3 errors
                 ".*deletion frontend: Failed to write deletion list.*",
                 ".*deletion backend: Failed to delete deletion list.*",
-                ".*deletion backend: DeleteObjects request failed.*",
+                ".*deletion executor: DeleteObjects request failed.*",
                 ".*deletion backend: Failed to upload deletion queue header.*",
             ]
         )

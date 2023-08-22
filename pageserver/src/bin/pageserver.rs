@@ -353,7 +353,7 @@ fn start_pageserver(
 
     // Set up deletion queue
     let deletion_queue_cancel = tokio_util::sync::CancellationToken::new();
-    let (deletion_queue, deletion_frontend, deletion_backend) =
+    let (deletion_queue, deletion_frontend, deletion_backend, deletion_executor) =
         DeletionQueue::new(remote_storage.clone(), conf, deletion_queue_cancel.clone());
     if let Some(mut deletion_frontend) = deletion_frontend {
         BACKGROUND_RUNTIME.spawn(async move {
@@ -368,6 +368,14 @@ fn start_pageserver(
             deletion_backend
                 .background()
                 .instrument(info_span!(parent: None, "deletion backend"))
+                .await
+        });
+    }
+    if let Some(mut deletion_executor) = deletion_executor {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_executor
+                .background()
+                .instrument(info_span!(parent: None, "deletion executor"))
                 .await
         });
     }

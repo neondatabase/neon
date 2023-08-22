@@ -45,6 +45,9 @@ pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
+// From the S3 spec
+pub const MAX_KEYS_PER_DELETE: usize = 1000;
+
 /// Path on the remote storage, relative to some inner prefix.
 /// The prefix is an implementation detail, that allows representing local paths
 /// as the remote ones, stripping the local storage prefix away.
