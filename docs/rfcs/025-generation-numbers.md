@@ -168,6 +168,20 @@ Note that the two generation numbers have a different behavior for stale generat
 
 #### Visibility
 
+##### Visibility of objects to pageservers
+
+Pageservers can of course list objects in S3 at any time, but in practice their
+visible set is based on the contents of their LayerMap, which is initialized
+from the `index_part.json` that they load.
+
+Starting with the `index_part` from the most recent previous generation suffix
+(see [loading index_part](#finding-the-remote-indices-for-timelines)), a pageserver
+initially has visibility of all the objects that its predecessor generation referenced.
+These objects are guaranteed to remain visible until the current generation is
+superseded, via pageservers in older generations avoiding deletions (see [deletion](#deletion)).
+
+##### Visibility of LSNs to clients
+
 Because index_part.json is now written with a generation suffix, which data
 is visible depends on which generation the reader is operating in:
 
@@ -205,7 +219,7 @@ enabling safe multi-attachment of tenants:
 
 - On a node restart, the suffix must increase
 - On a change to the attachment, the suffix must increase
-- Sorting the suffixes numerically must give the most logically recent data.
+- Sorting the suffixes numerically must give the most logically recent data ([visibility](#visibility))
 
 ```
 000000 0000 000000
