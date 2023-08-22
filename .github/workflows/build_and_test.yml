@@ -805,7 +805,7 @@ jobs:
             -enable-file-cache \
             -enable-monitor \
             -cgroup-uid=postgres \
-            -monitor=neondatabase:vm-monitor \
+            -monitor=neondatabase/vm-monitor \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
