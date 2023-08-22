@@ -1714,10 +1714,10 @@ impl Timeline {
                             ))
                         }
                         (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
-                            RemoteLayer::new_delta(tenant_id, timeline_id, &d, &remote, stats),
+                            RemoteLayer::new_delta(tenant_id, timeline_id, &d, remote, stats),
                         ),
                         (Image(i), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
-                            RemoteLayer::new_img(tenant_id, timeline_id, &i, &remote, stats),
+                            RemoteLayer::new_img(tenant_id, timeline_id, &i, remote, stats),
                         ),
                     };
 

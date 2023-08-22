@@ -441,7 +441,7 @@ impl Tenant {
                 .remote_client
                 .as_ref()
                 .unwrap()
-                .init_upload_queue(&index_part)?;
+                .init_upload_queue(index_part)?;
         } else if self.remote_storage.is_some() {
             // No data on the remote storage, no local layers, local metadata file.
             //

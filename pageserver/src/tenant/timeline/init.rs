@@ -29,7 +29,7 @@ pub(super) enum Discovered {
 pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
-    for direntry in std::fs::read_dir(&path)? {
+    for direntry in std::fs::read_dir(path)? {
         let direntry = direntry?;
         let direntry_path = direntry.path();
         let file_name = direntry.file_name();
@@ -157,7 +157,7 @@ pub(super) fn recoincile(
 pub(super) fn cleanup(path: &Path, kind: &str) -> anyhow::Result<()> {
     let file_name = path.file_name().expect("must be file path");
     tracing::debug!(kind, ?file_name, "cleaning up");
-    std::fs::remove_file(&path)
+    std::fs::remove_file(path)
         .with_context(|| format!("failed to remove temp download file at {}", path.display()))
 }
 
@@ -170,7 +170,7 @@ pub(super) fn cleanup_local_file_for_remote(
     let remote_size = remote.file_size();
 
     tracing::warn!("removing local file {path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-    if let Err(err) = crate::tenant::timeline::rename_to_backup(&path) {
+    if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
         assert!(
             path.exists(),
             "we would leave the local_layer without a file if this does not hold: {}",
@@ -193,6 +193,6 @@ pub(super) fn cleanup_future_layer(
         Image(_) => "image",
     };
     tracing::info!("found future {kind} layer {name} disk_consistent_lsn is {disk_consistent_lsn}");
-    crate::tenant::timeline::rename_to_backup(&path)?;
+    crate::tenant::timeline::rename_to_backup(path)?;
     Ok(())
 }
