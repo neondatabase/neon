@@ -222,7 +222,7 @@ impl ImageLayer {
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.lsn,
-            self.desc.is_incremental,
+            self.desc.is_incremental(),
             self.desc.file_size
         );
 
