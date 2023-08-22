@@ -160,11 +160,15 @@ The node generation is useful other ways, beyond it's core correctness purpose:
 Note that the two generation numbers have a different behavior for stale generations:
 
 - A pageserver with a stale generation number should immediately terminate: it is never intended
-  to have two pageservers with the same node ID.
+  to have two pageservers with the same node ID. This is not necessary for correctness, as the
+  node generation appears in object keys, but objects written in a stale node generation are never
+  read later, so waste storage.
 - An attachment with a stale generation number is permitted to continue operating (ingesting WAL
   and serving reads), but not to do any deletions. This enables a multi-attached state for tenants,
   facilitating live migration (this will be articulated in the next RFC that describes HA and
-  migrations).
+  migrations). Operating in a stale attachment generation is safe, although for efficiency reasons
+  should not be done over long periods of time, as the data in the stale generation has to avoid
+  doing operations involving deletion, like remote compaction.
 
 #### Visibility
 
@@ -185,13 +189,13 @@ superseded, via pageservers in older generations avoiding deletions (see [deleti
 Because index_part.json is now written with a generation suffix, which data
 is visible depends on which generation the reader is operating in:
 
+- If one was passively reading from S3 from outside of a pageserver, the
+  visibility of data would depend on which index_part.json-<suffix> file
+  one had chosen to read from.
 - If two pageservers have the same tenant attached, they may have different
   data visible as they're independently replaying the WAL, and maintaining
   independent LayerMaps that are written to independent index_part.json files.
   Data does not have to be remotely committed to be visible.
-- If one was passively reading from S3 from outside of a pageserver, the
-  visibility of data would depend on which index_part.json-<suffix> file
-  one had chosen to read from.
 - For a pageserver writing with a stale generation suffix, historic LSNs
   remain readable until another pageserver (with a higher generation suffix)
   decides to execute GC deletions. At this point, we may think of the stale
