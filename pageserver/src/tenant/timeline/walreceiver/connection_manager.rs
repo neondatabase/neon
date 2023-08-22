@@ -17,7 +17,7 @@ use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
-use crate::task_mgr::TaskKind;
+use crate::task_mgr::{shutdown_token, TaskKind};
 use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
@@ -211,11 +211,14 @@ async fn subscribe_for_timeline_updates(
     id: TenantTimelineId,
 ) -> Streaming<SafekeeperTimelineInfo> {
     let mut attempt = 0;
+    let cancel = shutdown_token();
+
     loop {
         exponential_backoff(
             attempt,
             DEFAULT_BASE_BACKOFF_SECONDS,
             DEFAULT_MAX_BACKOFF_SECONDS,
+            &cancel,
         )
         .await;
         attempt += 1;
