@@ -24,6 +24,7 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import (
+    TIMELINE_INDEX_PART_FILE_NAME,
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
@@ -94,12 +95,12 @@ def test_remote_storage_backup_and_restore(
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Thats because of UnreliableWrapper's injected failures
     env.pageserver.allowed_errors.append(
-        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
+        f".*failed to fetch tenant deletion mark at tenants/{tenant_id}/deleted attempt 1.*"
     )
 
     checkpoint_numbers = range(1, 3)
@@ -269,7 +270,7 @@ def test_remote_storage_upload_queue_retries(
                 f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
+               FROM generate_series(1, 20000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
                """,
@@ -370,7 +371,7 @@ def test_remote_storage_upload_queue_retries(
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
@@ -402,8 +403,7 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 
@@ -418,7 +418,7 @@ def test_remote_timeline_client_calls_started_metric(
                 f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
+               FROM generate_series(1, 20000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
                """,
@@ -509,7 +509,7 @@ def test_remote_timeline_client_calls_started_metric(
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
     # ensure that we updated the calls_started download metric
     fetch_calls_started()
@@ -541,8 +541,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         }
     )
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     timeline_path = env.timeline_dir(tenant_id, timeline_id)
 
@@ -607,15 +606,15 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
 
-    timeline_delete_wait_completed(client, tenant_id, timeline_id)
+    # Generous timeout, because currently deletions can get blocked waiting for compaction
+    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
+    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
 
     assert not timeline_path.exists()
 
     # to please mypy
     assert isinstance(env.remote_storage, LocalFsStorage)
-    remote_timeline_path = (
-        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    remote_timeline_path = env.remote_storage.timeline_path(tenant_id, timeline_id)
 
     assert not list(remote_timeline_path.iterdir())
 
@@ -720,15 +719,14 @@ def test_empty_branch_remote_storage_upload_on_restart(
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    timeline_path = (
-        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
-    )
-
-    local_metadata = env.repo_dir / timeline_path / "metadata"
+    local_metadata = env.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
     assert local_metadata.is_file()
 
     assert isinstance(env.remote_storage, LocalFsStorage)
-    new_branch_on_remote_storage = env.remote_storage.root / timeline_path
+
+    new_branch_on_remote_storage = env.remote_storage.timeline_path(
+        env.initial_tenant, new_branch_timeline_id
+    )
     assert (
         not new_branch_on_remote_storage.exists()
     ), "failpoint should had prohibited index_part.json upload"
@@ -777,7 +775,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
         assert (
-            new_branch_on_remote_storage / "index_part.json"
+            new_branch_on_remote_storage / TIMELINE_INDEX_PART_FILE_NAME
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
         create_thread.join()
@@ -808,8 +806,7 @@ def test_compaction_delete_before_upload(
     )
 
     tenant_id = env.initial_tenant
-    assert env.initial_timeline is not None
-    timeline_id: TimelineId = env.initial_timeline
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 

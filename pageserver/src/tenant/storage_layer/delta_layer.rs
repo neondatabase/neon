@@ -51,7 +51,6 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -177,10 +176,6 @@ impl DeltaKey {
         Lsn(u64::from_be_bytes(self.0[KEY_SIZE..].try_into().unwrap()))
     }
 
-    fn extract_key_from_buf(buf: &[u8]) -> Key {
-        Key::from_slice(&buf[..KEY_SIZE])
-    }
-
     fn extract_lsn_from_buf(buf: &[u8]) -> Lsn {
         let mut lsn_buf = [0u8; 8];
         lsn_buf.copy_from_slice(&buf[KEY_SIZE..]);
@@ -277,48 +272,42 @@ impl Layer for DeltaLayer {
 
         tree_reader.dump().await?;
 
-        let cursor = file.block_cursor();
+        let keys = DeltaLayerInner::load_keys(&Ref(&**inner)).await?;
 
         // A subroutine to dump a single blob
-        let dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            // TODO this is not ideal, but on the other hand we are in dumping code...
-            let buf = Handle::current().block_on(cursor.read_blob(blob_ref.pos()))?;
-            let val = Value::des(&buf)?;
-            let desc = match val {
-                Value::Image(img) => {
-                    format!(" img {} bytes", img.len())
-                }
-                Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
-                    format!(
-                        " rec {} bytes will_init: {} {}",
-                        buf.len(),
-                        rec.will_init(),
-                        wal_desc
-                    )
-                }
-            };
-            Ok(desc)
+        let dump_blob = |val: ValueRef<_>| -> _ {
+            async move {
+                let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
+                let val = Value::des(&buf)?;
+                let desc = match val {
+                    Value::Image(img) => {
+                        format!(" img {} bytes", img.len())
+                    }
+                    Value::WalRecord(rec) => {
+                        let wal_desc = walrecord::describe_wal_record(&rec)?;
+                        format!(
+                            " rec {} bytes will_init: {} {}",
+                            buf.len(),
+                            rec.will_init(),
+                            wal_desc
+                        )
+                    }
+                };
+                Ok(desc)
+            }
         };
 
-        tree_reader
-            .visit(
-                &[0u8; DELTA_KEY_SIZE],
-                VisitDirection::Forwards,
-                |delta_key, val| {
-                    let blob_ref = BlobRef(val);
-                    let key = DeltaKey::extract_key_from_buf(delta_key);
-                    let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
-
-                    let desc = match dump_blob(blob_ref) {
-                        Ok(desc) => desc,
-                        Err(err) => format!("ERROR: {}", err),
-                    };
-                    println!("  key {} at {}: {}", key, lsn, desc);
-                    true
-                },
-            )
-            .await?;
+        for entry in keys {
+            let DeltaEntry { key, lsn, val, .. } = entry;
+            let desc = match dump_blob(val).await {
+                Ok(desc) => desc,
+                Err(err) => {
+                    let err: anyhow::Error = err;
+                    format!("ERROR: {err}")
+                }
+            };
+            println!("  key {key} at {lsn}: {desc}");
+        }
 
         Ok(())
     }
@@ -549,30 +538,20 @@ impl DeltaLayer {
             &self.layer_name(),
         )
     }
-
-    /// Obtains all keys and value references stored in the layer
+    /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub async fn load_val_refs(
+    pub(crate) async fn load_keys(
         &self,
         ctx: &RequestContext,
-    ) -> Result<Vec<(Key, Lsn, ValueRef<Arc<DeltaLayerInner>>)>> {
-        let inner = self
-            .load(LayerAccessKind::Iter, ctx)
-            .await
-            .context("load delta layer")?;
-        DeltaLayerInner::load_val_refs(inner)
-            .await
-            .context("Layer index is corrupted")
-    }
-
-    /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<(Key, Lsn, u64)>> {
+    ) -> Result<Vec<DeltaEntry<Ref<&'_ DeltaLayerInner>>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-        DeltaLayerInner::load_keys(inner)
+
+        let inner = Ref(&**inner);
+        DeltaLayerInner::load_keys(&inner)
             .await
             .context("Layer index is corrupted")
     }
@@ -710,6 +689,17 @@ impl DeltaLayerWriterInner {
         let metadata = file
             .metadata()
             .context("get file metadata to determine size")?;
+
+        // 5GB limit for objects without multipart upload (which we don't want to use)
+        // Make it a little bit below to account for differing GB units
+        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
+        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+        ensure!(
+            metadata.len() <= S3_UPLOAD_LIMIT,
+            "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+            file.path.display(),
+            metadata.len()
+        );
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -955,15 +945,17 @@ impl DeltaLayerInner {
         }
     }
 
-    pub(super) async fn load_val_refs<T: AsRef<DeltaLayerInner> + Clone>(
+    pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<(Key, Lsn, ValueRef<T>)>> {
+    ) -> Result<Vec<DeltaEntry<T>>> {
         let dl = this.as_ref();
         let file = &dl.file;
+
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_offsets = Vec::<(Key, Lsn, ValueRef<T>)>::new();
+        let mut all_keys: Vec<DeltaEntry<T>> = Vec::new();
+
         tree_reader
             .visit(
                 &[0u8; DELTA_KEY_SIZE],
@@ -974,52 +966,61 @@ impl DeltaLayerInner {
                         blob_ref: BlobRef(value),
                         reader: BlockCursor::new(Adapter(this.clone())),
                     };
-                    all_offsets.push((delta_key.key(), delta_key.lsn(), val_ref));
-                    true
-                },
-            )
-            .await?;
-
-        Ok(all_offsets)
-    }
-
-    pub(super) async fn load_keys(&self) -> Result<Vec<(Key, Lsn, u64)>> {
-        let file = &self.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            self.index_start_blk,
-            self.index_root_blk,
-            file,
-        );
-
-        let mut all_keys: Vec<(Key, Lsn, u64)> = Vec::new();
-        tree_reader
-            .visit(
-                &[0u8; DELTA_KEY_SIZE],
-                VisitDirection::Forwards,
-                |key, value| {
-                    let delta_key = DeltaKey::from_slice(key);
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
-                        if last.0 == delta_key.key() {
-                            return true;
-                        } else {
-                            // subtract offset of new key BLOB and first blob of this key
-                            // to get total size if values associated with this key
-                            let first_pos = last.2;
-                            last.2 = pos - first_pos;
-                        }
+                        // subtract offset of the current and last entries to get the size
+                        // of the value associated with this (key, lsn) tuple
+                        let first_pos = last.size;
+                        last.size = pos - first_pos;
                     }
-                    all_keys.push((delta_key.key(), delta_key.lsn(), pos));
+                    let entry = DeltaEntry {
+                        key: delta_key.key(),
+                        lsn: delta_key.lsn(),
+                        size: pos,
+                        val: val_ref,
+                    };
+                    all_keys.push(entry);
                     true
                 },
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
-            // Last key occupies all space till end of layer
-            last.2 = std::fs::metadata(&file.file.path)?.len() - last.2;
+            // Last key occupies all space till end of value storage,
+            // which corresponds to beginning of the index
+            last.size = dl.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
         }
         Ok(all_keys)
     }
+}
+
+/// Cloneable borrow wrapper to make borrows behave like smart pointers.
+///
+/// Shared references are trivially copyable. This wrapper avoids (confusion) to otherwise attempt
+/// cloning DeltaLayerInner.
+pub(crate) struct Ref<T>(T);
+
+impl<'a, T> AsRef<T> for Ref<&'a T> {
+    fn as_ref(&self) -> &T {
+        self.0
+    }
+}
+
+impl<'a, T> Clone for Ref<&'a T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, T> Copy for Ref<&'a T> {}
+
+/// A set of data associated with a delta layer key and its value
+pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
+    pub key: Key,
+    pub lsn: Lsn,
+    /// Size of the stored value
+    pub size: u64,
+    /// Reference to the on-disk value
+    pub val: ValueRef<T>,
 }
 
 /// Reference to an on-disk value

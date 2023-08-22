@@ -25,7 +25,7 @@ use crate::{
     InitializationOrder,
 };
 
-use super::Timeline;
+use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
@@ -279,6 +279,17 @@ async fn cleanup_remaining_timeline_fs_traces(
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm-dir"))?
     });
 
+    // Make sure previous deletions are ordered before mark removal.
+    // Otherwise there is no guarantee that they reach the disk before mark deletion.
+    // So its possible for mark to reach disk first and for other deletions
+    // to be reordered later and thus missed if a crash occurs.
+    // Note that we dont need to sync after mark file is removed
+    // because we can tolerate the case when mark file reappears on startup.
+    let timeline_path = conf.timelines_path(&tenant_id);
+    crashsafe::fsync_async(timeline_path)
+        .await
+        .context("fsync_pre_mark_remove")?;
+
     // Remove delete mark
     tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_id, timeline_id))
         .await
@@ -405,7 +416,7 @@ impl DeleteTimelineFlow {
                 timeline_id,
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
-                remote_client,
+                TimelineResources { remote_client },
                 init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.

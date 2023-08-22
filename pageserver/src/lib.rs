@@ -21,6 +21,8 @@ pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
 
+pub mod failpoint_support;
+
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;

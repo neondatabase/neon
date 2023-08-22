@@ -38,7 +38,7 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -147,6 +147,7 @@ fn main() -> Result<()> {
     match spec_json {
         // First, try to get cluster spec from the cli argument
         Some(json) => {
+            info!("got spec from cli argument {}", json);
             spec = Some(serde_json::from_str(json)?);
         }
         None => {
@@ -182,6 +183,7 @@ fn main() -> Result<()> {
 
     if let Some(spec) = spec {
         let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        info!("new pspec.spec: {:?}", pspec.spec);
         new_state.pspec = Some(pspec);
         spec_set = true;
     } else {
@@ -196,9 +198,7 @@ fn main() -> Result<()> {
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
         ext_remote_storage,
-        ext_remote_paths: OnceLock::new(),
         ext_download_progress: RwLock::new(HashMap::new()),
-        library_index: OnceLock::new(),
         build_tag,
     };
     let compute = Arc::new(compute_node);

@@ -394,13 +394,7 @@ def check_neon_works(
         test_output_dir / "dump-from-wal.filediff",
     )
 
-    # TODO: Run pg_amcheck unconditionally after the next release
-    try:
-        pg_bin.run(["psql", connstr, "--command", "CREATE EXTENSION IF NOT EXISTS amcheck"])
-    except subprocess.CalledProcessError:
-        log.info("Extension amcheck is not available, skipping pg_amcheck")
-    else:
-        pg_bin.run_capture(["pg_amcheck", connstr, "--install-missing", "--verbose"])
+    pg_bin.run_capture(["pg_amcheck", connstr, "--install-missing", "--verbose"])
 
     # Check that we can interract with the data
     pg_bin.run_capture(["pgbench", "--time=10", "--progress=2", connstr])

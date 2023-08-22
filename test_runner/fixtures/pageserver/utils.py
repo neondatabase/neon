@@ -1,6 +1,8 @@
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef
+
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorageKind, S3Storage
@@ -191,7 +193,11 @@ def wait_timeline_detail_404(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     iterations: int,
+    interval: Optional[float] = None,
 ):
+    if interval is None:
+        interval = 0.25
+
     def timeline_is_missing():
         data = {}
         try:
@@ -204,7 +210,7 @@ def wait_timeline_detail_404(
 
         raise RuntimeError(f"Timeline exists state {data.get('state')}")
 
-    wait_until(iterations, interval=0.250, func=timeline_is_missing)
+    wait_until(iterations, interval, func=timeline_is_missing)
 
 
 def timeline_delete_wait_completed(
@@ -212,10 +218,11 @@ def timeline_delete_wait_completed(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     iterations: int = 20,
+    interval: Optional[float] = None,
     **delete_args,
 ):
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
-    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
 
 if TYPE_CHECKING:
@@ -225,6 +232,24 @@ if TYPE_CHECKING:
 
 
 def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    response = list_prefix(neon_env_builder, prefix)
+    objects = response.get("Contents")
+    assert (
+        response["KeyCount"] == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+
+
+def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+    response = list_prefix(neon_env_builder, prefix)
+    assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
+
+
+def list_prefix(
+    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None
+) -> ListObjectsV2OutputTypeDef:
+    """
+    Note that this function takes into account prefix_in_bucket.
+    """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert neon_env_builder.remote_storage_kind in (
         RemoteStorageKind.MOCK_S3,
@@ -234,15 +259,21 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
     assert neon_env_builder.remote_storage_client is not None
 
+    prefix_in_bucket = neon_env_builder.remote_storage.prefix_in_bucket or ""
+    if not prefix:
+        prefix = prefix_in_bucket
+    else:
+        # real s3 tests have uniqie per test prefix
+        # mock_s3 tests use special pageserver prefix for pageserver stuff
+        prefix = "/".join((prefix_in_bucket, prefix))
+
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = neon_env_builder.remote_storage_client.list_objects_v2(
+        Delimiter="/",
         Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
+        Prefix=prefix,
     )
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    return response
 
 
 def wait_tenant_status_404(
@@ -284,4 +315,4 @@ MANY_SMALL_LAYERS_TENANT_CONFIG = {
 
 
 def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:
-    return 20 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 8
+    return 40 if remote_storage_kind is RemoteStorageKind.REAL_S3 else 15

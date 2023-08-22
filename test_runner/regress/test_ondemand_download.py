@@ -78,8 +78,8 @@ def test_ondemand_download_large_rel(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # We want to make sure that the data is large enough that the keyspace is partitioned.
     num_rows = 1000000
@@ -183,8 +183,8 @@ def test_ondemand_download_timetravel(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     lsns = []
 
@@ -342,8 +342,8 @@ def test_download_remote_layers_api(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     table_len = 10000
     with endpoint.cursor() as cur:
@@ -516,7 +516,6 @@ def test_compaction_downloads_on_demand_without_image_creation(
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    assert timeline_id is not None
 
     with env.endpoints.create_start("main") as endpoint:
         # no particular reason to create the layers like this, but we are sure
@@ -590,7 +589,6 @@ def test_compaction_downloads_on_demand_with_image_creation(
     env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    assert timeline_id is not None
 
     pageserver_http = env.pageserver.http_client()
 

@@ -212,6 +212,19 @@ async fn cleanup_remaining_fs_traces(
         ))?
     });
 
+    // Make sure previous deletions are ordered before mark removal.
+    // Otherwise there is no guarantee that they reach the disk before mark deletion.
+    // So its possible for mark to reach disk first and for other deletions
+    // to be reordered later and thus missed if a crash occurs.
+    // Note that we dont need to sync after mark file is removed
+    // because we can tolerate the case when mark file reappears on startup.
+    let tenant_path = &conf.tenant_path(tenant_id);
+    if tenant_path.exists() {
+        crashsafe::fsync_async(&conf.tenant_path(tenant_id))
+            .await
+            .context("fsync_pre_mark_remove")?;
+    }
+
     rm(conf.tenant_deleted_mark_file_path(tenant_id), false).await?;
 
     fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {
@@ -223,6 +236,30 @@ async fn cleanup_remaining_fs_traces(
     rm(conf.tenant_path(tenant_id), true).await?;
 
     Ok(())
+}
+
+pub(crate) async fn remote_delete_mark_exists(
+    conf: &PageServerConf,
+    tenant_id: &TenantId,
+    remote_storage: &GenericRemoteStorage,
+) -> anyhow::Result<bool> {
+    // If remote storage is there we rely on it
+    let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id).context("path")?;
+
+    let result = backoff::retry(
+        || async { remote_storage.download(&remote_mark_path).await },
+        |e| matches!(e, DownloadError::NotFound),
+        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
+        "fetch_tenant_deletion_mark",
+    )
+    .await;
+
+    match result {
+        Ok(_) => Ok(true),
+        Err(DownloadError::NotFound) => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(e)).context("remote_delete_mark_exists")?,
+    }
 }
 
 /// Orchestrates tenant shut down of all tasks, removes its in-memory structures,
@@ -238,8 +275,9 @@ async fn cleanup_remaining_fs_traces(
 /// It is resumable from any step in case a crash/restart occurs.
 /// There are three entrypoints to the process:
 /// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume`] is called during restarts when local or remote deletion marks are still there.
-/// Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
+/// 2. [`DeleteTenantFlow::resume_from_load`] is called during restarts when local or remote deletion marks are still there.
+/// 3. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
+///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
     #[default]
@@ -359,26 +397,14 @@ impl DeleteTenantFlow {
             None => return Ok(None),
         };
 
-        // If remote storage is there we rely on it
-        let remote_mark_path = remote_tenant_delete_mark_path(conf, &tenant_id)?;
-
-        let result = backoff::retry(
-            || async { remote_storage.download(&remote_mark_path).await },
-            |e| matches!(e, DownloadError::NotFound),
-            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-            SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-            "fetch_tenant_deletion_mark",
-        )
-        .await;
-
-        match result {
-            Ok(_) => Ok(acquire(tenant)),
-            Err(DownloadError::NotFound) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e)).context("should_resume_deletion")?,
+        if remote_delete_mark_exists(conf, &tenant_id, remote_storage).await? {
+            Ok(acquire(tenant))
+        } else {
+            Ok(None)
         }
     }
 
-    pub(crate) async fn resume(
+    pub(crate) async fn resume_from_load(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         init_order: Option<&InitializationOrder>,
@@ -388,7 +414,7 @@ impl DeleteTenantFlow {
         let (_, progress) = completion::channel();
 
         tenant
-            .set_stopping(progress, true)
+            .set_stopping(progress, true, false)
             .await
             .expect("cant be stopping or broken");
 
@@ -405,6 +431,31 @@ impl DeleteTenantFlow {
         if timelines_path.exists() {
             tenant.load(init_order, ctx).await.context("load")?;
         }
+
+        Self::background(
+            guard,
+            tenant.conf,
+            tenant.remote_storage.clone(),
+            tenants,
+            tenant,
+        )
+        .await
+    }
+
+    pub(crate) async fn resume_from_attach(
+        guard: DeletionGuard,
+        tenant: &Arc<Tenant>,
+        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        ctx: &RequestContext,
+    ) -> Result<(), DeleteTenantError> {
+        let (_, progress) = completion::channel();
+
+        tenant
+            .set_stopping(progress, false, true)
+            .await
+            .expect("cant be stopping or broken");
+
+        tenant.attach(ctx).await.context("attach")?;
 
         Self::background(
             guard,

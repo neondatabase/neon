@@ -4,6 +4,7 @@ use super::{messages::ServerMessage, Mechanism};
 use crate::stream::PqStream;
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 
 /// Abstracts away all peculiarities of the libpq's protocol.
 pub struct SaslStream<'a, S> {
@@ -68,7 +69,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
     ) -> super::Result<Outcome<M::Output>> {
         loop {
             let input = self.recv().await?;
-            let step = mechanism.exchange(input)?;
+            let step = mechanism.exchange(input).map_err(|error| {
+                info!(?error, "error during SASL exchange");
+                error
+            })?;
 
             use super::Step;
             return Ok(match step {

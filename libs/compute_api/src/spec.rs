@@ -3,10 +3,15 @@
 //! The spec.json file is used to pass information to 'compute_ctl'. It contains
 //! all the information needed to start up the right version of PostgreSQL,
 //! and connect it to the storage nodes.
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+
+use regex::Regex;
+use remote_storage::RemotePath;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -61,8 +66,55 @@ pub struct ComputeSpec {
     /// the pageserver and safekeepers.
     pub storage_auth_token: Option<String>,
 
-    // list of prefixes to search for custom extensions in remote extension storage
+    // information about available remote extensions
+    pub remote_extensions: Option<RemoteExtSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RemoteExtSpec {
+    pub public_extensions: Option<Vec<String>>,
     pub custom_extensions: Option<Vec<String>>,
+    pub library_index: HashMap<String, String>,
+    pub extension_data: HashMap<String, ExtensionData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtensionData {
+    pub control_data: HashMap<String, String>,
+    pub archive_path: String,
+}
+
+impl RemoteExtSpec {
+    pub fn get_ext(
+        &self,
+        ext_name: &str,
+        is_library: bool,
+    ) -> anyhow::Result<(String, RemotePath)> {
+        let mut real_ext_name = ext_name;
+        if is_library {
+            // sometimes library names might have a suffix like
+            // library.so or library.so.3. We strip this off
+            // because library_index is based on the name without the file extension
+            let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
+            let lib_raw_name = strip_lib_suffix.replace(real_ext_name, "").to_string();
+
+            real_ext_name = self
+                .library_index
+                .get(&lib_raw_name)
+                .ok_or(anyhow::anyhow!("library {} is not found", lib_raw_name))?;
+        }
+
+        match self.extension_data.get(real_ext_name) {
+            Some(ext_data) => Ok((
+                real_ext_name.to_string(),
+                RemotePath::from_string(&ext_data.archive_path)?,
+            )),
+            None => Err(anyhow::anyhow!(
+                "real_ext_name {} is not found",
+                real_ext_name
+            )),
+        }
+    }
 }
 
 #[serde_as]

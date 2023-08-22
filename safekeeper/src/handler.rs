@@ -4,6 +4,7 @@
 use anyhow::Context;
 use std::str::FromStr;
 use std::str::{self};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
@@ -20,7 +21,7 @@ use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
-use utils::auth::{Claims, Scope};
+use utils::auth::{Claims, JwtAuth, Scope};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -36,8 +37,8 @@ pub struct SafekeeperPostgresHandler {
     pub ttid: TenantTimelineId,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
-    /// Auth scope allowed on the connections. None if auth is not configured.
-    allowed_auth_scope: Option<Scope>,
+    /// Auth scope allowed on the connections and public key used to check auth tokens. None if auth is not configured.
+    auth: Option<(Scope, Arc<JwtAuth>)>,
     claims: Option<Claims>,
     io_metrics: Option<TrafficMetrics>,
 }
@@ -154,18 +155,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
-        let data = self
-            .conf
+        let (allowed_auth_scope, auth) = self
             .auth
             .as_ref()
-            .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .expect("auth_type is configured but .auth of handler is missing");
+        let data =
+            auth.decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
-        let scope = self
-            .allowed_auth_scope
-            .expect("auth is enabled but scope is not configured");
         // The handler might be configured to allow only tenant scope tokens.
-        if matches!(scope, Scope::Tenant) && !matches!(data.claims.scope, Scope::Tenant) {
+        if matches!(allowed_auth_scope, Scope::Tenant)
+            && !matches!(data.claims.scope, Scope::Tenant)
+        {
             return Err(QueryError::Other(anyhow::anyhow!(
                 "passed JWT token is for full access, but only tenant scope is allowed"
             )));
@@ -244,7 +244,7 @@ impl SafekeeperPostgresHandler {
         conf: SafeKeeperConf,
         conn_id: u32,
         io_metrics: Option<TrafficMetrics>,
-        allowed_auth_scope: Option<Scope>,
+        auth: Option<(Scope, Arc<JwtAuth>)>,
     ) -> Self {
         SafekeeperPostgresHandler {
             conf,
@@ -254,7 +254,7 @@ impl SafekeeperPostgresHandler {
             ttid: TenantTimelineId::empty(),
             conn_id,
             claims: None,
-            allowed_auth_scope,
+            auth,
             io_metrics,
         }
     }
@@ -262,7 +262,7 @@ impl SafekeeperPostgresHandler {
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
-        if self.conf.auth.is_none() {
+        if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
         }

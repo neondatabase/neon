@@ -13,7 +13,7 @@ use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use num_cpus;
 use serde_json;
 use tokio::task;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -126,6 +126,15 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
 
+            // don't even try to download extensions
+            // if no remote storage is configured
+            if compute.ext_remote_storage.is_none() {
+                info!("no extensions remote storage configured");
+                let mut resp = Response::new(Body::from("no remote storage configured"));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+
             let mut is_library = false;
             if let Some(params) = req.uri().query() {
                 info!("serving {:?} POST request with params: {}", route, params);
@@ -137,24 +146,47 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     return resp;
                 }
             }
-
             let filename = route.split('/').last().unwrap().to_string();
             info!("serving /extension_server POST request, filename: {filename:?} is_library: {is_library}");
 
-            // don't even try to download extensions
-            // if no remote storage is configured
-            if compute.ext_remote_storage.is_none() {
-                info!("no extensions remote storage configured");
-                let mut resp = Response::new(Body::from("no remote storage configured"));
-                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                return resp;
-            }
+            // get ext_name and path from spec
+            // don't lock compute_state for too long
+            let ext = {
+                let compute_state = compute.state.lock().unwrap();
+                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+                let spec = &pspec.spec;
 
-            match compute.download_extension(&filename, is_library).await {
-                Ok(_) => Response::new(Body::from("OK")),
+                // debug only
+                info!("spec: {:?}", spec);
+
+                let remote_extensions = match spec.remote_extensions.as_ref() {
+                    Some(r) => r,
+                    None => {
+                        info!("no remote extensions spec was provided");
+                        let mut resp = Response::new(Body::from("no remote storage configured"));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        return resp;
+                    }
+                };
+
+                remote_extensions.get_ext(&filename, is_library)
+            };
+
+            match ext {
+                Ok((ext_name, ext_path)) => {
+                    match compute.download_extension(ext_name, ext_path).await {
+                        Ok(_) => Response::new(Body::from("OK")),
+                        Err(e) => {
+                            error!("extension download failed: {}", e);
+                            let mut resp = Response::new(Body::from(e.to_string()));
+                            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                            resp
+                        }
+                    }
+                }
                 Err(e) => {
-                    error!("extension download failed: {}", e);
-                    let mut resp = Response::new(Body::from(e.to_string()));
+                    warn!("extension download failed to find extension: {}", e);
+                    let mut resp = Response::new(Body::from("failed to find file"));
                     *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                     resp
                 }
