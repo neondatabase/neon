@@ -222,7 +222,7 @@ impl ImageLayer {
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.lsn,
-            self.desc.is_incremental,
+            self.desc.is_incremental(),
             self.desc.file_size
         );
 
@@ -382,7 +382,6 @@ impl ImageLayer {
                 timeline_id,
                 filename.key_range.clone(),
                 filename.lsn,
-                false,
                 file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
@@ -409,7 +408,6 @@ impl ImageLayer {
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
-                false,
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
@@ -511,7 +509,6 @@ struct ImageLayerWriterInner {
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
-    is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
@@ -527,7 +524,6 @@ impl ImageLayerWriterInner {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -562,7 +558,6 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
-            is_incremental,
         };
 
         Ok(writer)
@@ -623,7 +618,6 @@ impl ImageLayerWriterInner {
             self.timeline_id,
             self.key_range.clone(),
             self.lsn,
-            self.is_incremental, // for now, image layer ALWAYS covers the full range
             metadata.len(),
         );
 
@@ -698,7 +692,6 @@ impl ImageLayerWriter {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(ImageLayerWriterInner::new(
@@ -707,7 +700,6 @@ impl ImageLayerWriter {
                 tenant_id,
                 key_range,
                 lsn,
-                is_incremental,
             )?),
         })
     }

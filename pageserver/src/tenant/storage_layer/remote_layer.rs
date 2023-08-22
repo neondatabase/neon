@@ -60,7 +60,7 @@ impl std::fmt::Debug for RemoteLayer {
         f.debug_struct("RemoteLayer")
             .field("file_name", &self.desc.filename())
             .field("layer_metadata", &self.layer_metadata)
-            .field("is_incremental", &self.desc.is_incremental)
+            .field("is_incremental", &self.desc.is_incremental())
             .finish()
     }
 }
@@ -151,7 +151,6 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn,
-                false,
                 layer_metadata.file_size(),
             ),
             layer_metadata: layer_metadata.clone(),
