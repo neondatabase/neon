@@ -268,8 +268,7 @@ that deletions strictly obey the following ordering:
 
 1. Write out index_part.json: this guarantees that any subsequent reader of the metadata will
    not try and read the object we unlinked.
-2. Call out to control plane to validate that the attachment generation number we hold for the tenant
-   is still the latest, and that our node generation number is the latest for this node_id.
+2. Call out to control plane to validate that the suffix which we just used is still the latest.
 3. If step 2 passes, it is safe to delete the object. We have guaranteed that any future
    attachment of the tenant to a different node will happen _after_ Step 1, and therefore
    that future attached node will start from the metadata that does not reference the key
