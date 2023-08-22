@@ -141,7 +141,7 @@ impl<S> Stream<S> {
     pub fn sni_hostname(&self) -> Option<&str> {
         match self {
             Stream::Raw { .. } => None,
-            Stream::Tls { tls } => tls.get_ref().1.sni_hostname(),
+            Stream::Tls { tls } => tls.get_ref().1.server_name(),
         }
     }
 }
