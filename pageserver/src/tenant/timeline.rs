@@ -1620,16 +1620,16 @@ impl Timeline {
 
             use std::str::FromStr;
             match LayerFileName::from_str(&fname) {
-                Ok(LayerFileName::Image(filename)) => {
-                    if filename.lsn > disk_consistent_lsn {
-                        info!(
-                            "found future image layer {} on timeline {} disk_consistent_lsn is {}",
-                            filename, self.timeline_id, disk_consistent_lsn
-                        );
+                Ok(LayerFileName::Image(filename)) if filename.lsn > disk_consistent_lsn => {
+                    info!(
+                        "found future image layer {} on timeline {} disk_consistent_lsn is {}",
+                        filename, self.timeline_id, disk_consistent_lsn
+                    );
 
-                        rename_to_backup(&direntry_path)?;
-                        continue;
-                    }
+                    rename_to_backup(&direntry_path)?;
+                }
+                Ok(LayerFileName::Image(filename)) => {
+                    assert!(filename.lsn <= disk_consistent_lsn);
 
                     let file_size = direntry_path.metadata()?.len();
                     let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
@@ -1645,21 +1645,23 @@ impl Timeline {
 
                     loaded_layers.push(Arc::new(layer));
                 }
-                Ok(LayerFileName::Delta(filename)) => {
+                Ok(LayerFileName::Delta(filename))
+                    if filename.lsn_range.end > disk_consistent_lsn + 1 =>
+                {
                     // The end-LSN is exclusive, while disk_consistent_lsn is
                     // inclusive. For example, if disk_consistent_lsn is 100, it is
                     // OK for a delta layer to have end LSN 101, but if the end LSN
                     // is 102, then it might not have been fully flushed to disk
                     // before crash.
-                    if filename.lsn_range.end > disk_consistent_lsn + 1 {
-                        info!(
-                            "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
-                            filename, self.timeline_id, disk_consistent_lsn
-                        );
+                    info!(
+                        "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
+                        filename, self.timeline_id, disk_consistent_lsn
+                    );
 
-                        rename_to_backup(&direntry_path)?;
-                        continue;
-                    }
+                    rename_to_backup(&direntry_path)?;
+                }
+                Ok(LayerFileName::Delta(filename)) => {
+                    assert!(filename.lsn_range.end <= disk_consistent_lsn + 1);
 
                     let file_size = direntry_path.metadata()?.len();
                     let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
