@@ -125,9 +125,8 @@ in good standing. Any node with any older generation number is not.
 Distinction between generation numbers and Node ID:
 
 - The purpose of a node generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
-- Node generation ID is guaranteed to be globally unique across space and time. Node ID is not unique
-  in the event of starting a replacement node after an original node is network partitioned, or
-  in the event of a human error starting a replacement node that re-uses a node ID.
+- Node generation ID is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
+  if a human provisions a replacement instance for a dead node and accidentally re-uses the node ID.
 - Node ID is written to disk in a pageserver's configuration, whereas node generation number is
   received at runtime just after startup (this does incur an availability dependency, see [availability](#availability)).
 - The two concepts could be collapsed into one if we used ephemeral node IDs that were only ever used one time,
