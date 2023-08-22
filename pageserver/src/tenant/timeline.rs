@@ -4291,7 +4291,13 @@ mod tests {
             .expect("should now have a reason to download");
 
         match (first, second) {
-            (Ok(()), Err(EvictionError::NotFound)) | (Err(EvictionError::NotFound), Ok(())) => {}
+            (Ok(()), Ok(())) => {
+                // because there are no more timeline locks being taken on eviction path, we can
+                // witness all three outcomes here.
+            }
+            (Ok(()), Err(EvictionError::NotFound)) | (Err(EvictionError::NotFound), Ok(())) => {
+                // if one completes before the other, this is fine just as well.
+            }
             other => unreachable!("unexpected {:?}", other),
         }
     }
