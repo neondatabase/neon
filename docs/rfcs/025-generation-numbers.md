@@ -94,7 +94,7 @@ pageserver, control plane, safekeeper (optional)
 - **Safety for multiply-attached tenants** is provided by the
   tenant attach generation in the object key: the competing pageservers will not
   try to write to the same keys.
-- **Safety for deletions** is provided by pageservers calling out to the control plane to validate that the node & attachment generation numbers have not changed since we last updated a timeline's index.
+- **Safety for deletions** is provided by pageservers validating with control plane that neither pageserver process nor the attachment has been superseded since it last updated a timeline's index.
 - **The control plane is used to issue generation numbers** to avoid the need for
   a built-in consensus system in the pageserver, although this could in principle
   be changed without changing the storage format.
