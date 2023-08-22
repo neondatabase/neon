@@ -627,9 +627,9 @@ static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static SMGR_QUERY_TIME_AGG: Lazy<HistogramVec> = Lazy::new(|| {
+static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "pageserver_smgr_query_seconds_agg",
+        "pageserver_smgr_query_seconds_global",
         "Time spent on smgr query handling, aggregated by query type.",
         &["smgr_query_type"],
         CRITICAL_OP_BUCKETS.into(),
@@ -643,7 +643,7 @@ impl SmgrQueryTimePerTimeline {
         let timeline_id = timeline_id.to_string();
         let metrics = std::array::from_fn(|i| {
             let op = SmgrQueryType::from_repr(i).unwrap();
-            let global = SMGR_QUERY_TIME_AGG
+            let global = SMGR_QUERY_TIME_GLOBAL
                 .get_metric_with_label_values(&[op.into()])
                 .unwrap();
             let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
