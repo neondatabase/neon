@@ -122,7 +122,7 @@ The node generation number defines a global "in" definition for pageserver nodes
 node generation matches the node generation the control plane most recently issued is a member of the cluster
 in good standing. Any node with any older generation number is not.
 
-Distinction between generation numbers and Node ID:
+#### Distinction between generation numbers and Node ID
 
 - The purpose of a node generation ID is to provide a stronger guarantee of uniqueness than a Node ID.
 - Node generation ID is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
