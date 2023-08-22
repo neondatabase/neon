@@ -41,8 +41,6 @@ pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use remote_layer::RemoteLayer;
 
-use super::timeline::layer_manager::LayerManager;
-
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -175,16 +173,9 @@ impl LayerAccessStats {
     ///
     /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
     /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn for_loading_layer(
-        layer_map_lock_held_witness: &LayerManager,
-        status: LayerResidenceStatus,
-    ) -> Self {
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
-        new.record_residence_event(
-            layer_map_lock_held_witness,
-            status,
-            LayerResidenceEventReason::LayerLoad,
-        );
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
         new
     }
 
@@ -197,7 +188,6 @@ impl LayerAccessStats {
     /// [`record_residence_event`]: Self::record_residence_event
     pub(crate) fn clone_for_residence_change(
         &self,
-        layer_map_lock_held_witness: &LayerManager,
         new_status: LayerResidenceStatus,
     ) -> LayerAccessStats {
         let clone = {
@@ -205,11 +195,7 @@ impl LayerAccessStats {
             inner.clone()
         };
         let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(
-            layer_map_lock_held_witness,
-            new_status,
-            LayerResidenceEventReason::ResidenceChange,
-        );
+        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
         new
     }
 
@@ -229,7 +215,6 @@ impl LayerAccessStats {
     ///
     pub(crate) fn record_residence_event(
         &self,
-        _layer_map_lock_held_witness: &LayerManager,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
     ) {

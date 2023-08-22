@@ -186,7 +186,7 @@ impl RemoteLayer {
     /// Create a Layer struct representing this layer, after it has been downloaded.
     pub(crate) fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &LayerManager,
+        _layer_map_lock_held_witness: &LayerManager,
         conf: &'static PageServerConf,
         file_size: u64,
     ) -> Arc<dyn PersistentLayer> {
@@ -198,10 +198,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         } else {
             let fname = self.desc.image_file_name();
@@ -211,10 +209,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         }
     }

@@ -1210,7 +1210,7 @@ impl Timeline {
                 &layer_metadata,
                 local_layer
                     .access_stats()
-                    .clone_for_residence_change(layer_mgr, LayerResidenceStatus::Evicted),
+                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
             ),
             LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
                 self.tenant_id,
@@ -1219,7 +1219,7 @@ impl Timeline {
                 &layer_metadata,
                 local_layer
                     .access_stats()
-                    .clone_for_residence_change(layer_mgr, LayerResidenceStatus::Evicted),
+                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
             ),
         });
 
@@ -1634,8 +1634,7 @@ impl Timeline {
                     }
 
                     let file_size = direntry_path.metadata()?.len();
-                    let stats =
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
+                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
 
                     let layer = ImageLayer::new(
                         self.conf,
@@ -1666,8 +1665,7 @@ impl Timeline {
                     }
 
                     let file_size = direntry_path.metadata()?.len();
-                    let stats =
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
+                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
 
                     let layer = DeltaLayer::new(
                         self.conf,
@@ -1809,8 +1807,7 @@ impl Timeline {
                     );
                         continue;
                     }
-                    let stats =
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
+                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
 
                     let remote_layer = RemoteLayer::new_img(
                         self.tenant_id,
@@ -1836,8 +1833,7 @@ impl Timeline {
                         );
                         continue;
                     }
-                    let stats =
-                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Evicted);
+                    let stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
 
                     let remote_layer = RemoteLayer::new_delta(
                         self.tenant_id,
@@ -2856,7 +2852,6 @@ impl Timeline {
             if let Some(ref l) = delta_layer_to_add {
                 // TODO: move access stats, metrics update, etc. into layer manager.
                 l.access_stats().record_residence_event(
-                    &guard,
                     LayerResidenceStatus::Resident,
                     LayerResidenceEventReason::LayerCreate,
                 );
@@ -3246,7 +3241,6 @@ impl Timeline {
                 .add(metadata.len());
             let l = Arc::new(l);
             l.access_stats().record_residence_event(
-                &guard,
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
@@ -3926,7 +3920,6 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             l.access_stats().record_residence_event(
-                &guard,
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
