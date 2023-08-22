@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
@@ -266,6 +267,10 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
+        // TODO: pass a cancellation token into this function
+        backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
+            unreachable!()
+        }),
     )
     .await
 }

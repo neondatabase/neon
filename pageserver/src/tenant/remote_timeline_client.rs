@@ -210,6 +210,7 @@ use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
+use tokio_util::sync::CancellationToken;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -231,6 +232,7 @@ use crate::metrics::{
     RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
+use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
@@ -748,7 +750,7 @@ impl RemoteTimelineClient {
         pausable_failpoint!("persist_deleted_index_part");
 
         backoff::retry(
-            || async {
+            || {
                 upload::upload_index_part(
                     self.conf,
                     &self.storage_impl,
@@ -756,7 +758,6 @@ impl RemoteTimelineClient {
                     &self.timeline_id,
                     &index_part_with_deleted_at,
                 )
-                .await
             },
             |_e| false,
             1,
@@ -765,6 +766,7 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
+            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
         )
         .await?;
 
@@ -838,6 +840,7 @@ impl RemoteTimelineClient {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "list_prefixes",
+            backoff::Cancel::new(shutdown_token(), || anyhow::anyhow!("Cancelled!")),
         )
         .await
         .context("list prefixes")?;
@@ -1085,12 +1088,14 @@ impl RemoteTimelineClient {
                     }
 
                     // sleep until it's time to retry, or we're cancelled
+                    let cancel = shutdown_token();
                     tokio::select! {
                         _ = task_mgr::shutdown_watcher() => { },
                         _ = exponential_backoff(
                             retries,
                             DEFAULT_BASE_BACKOFF_SECONDS,
                             DEFAULT_MAX_BACKOFF_SECONDS,
+                            &cancel
                         ) => { },
                     };
                 }
