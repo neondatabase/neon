@@ -310,6 +310,8 @@ impl BackendQueueWorker {
 
         match self.remote_storage.delete_objects(&self.accumulator).await {
             Ok(()) => {
+                // Note: we assume that the remote storage layer returns Ok(()) if some
+                // or all of the deleted objects were already gone.
                 DELETION_QUEUE_EXECUTED.inc_by(self.accumulator.len() as u64);
                 info!(
                     "Executed deletion batch {}..{}",

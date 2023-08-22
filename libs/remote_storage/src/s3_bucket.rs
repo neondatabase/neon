@@ -22,7 +22,7 @@ use aws_sdk_s3::{
     Client,
 };
 use aws_smithy_http::body::SdkBody;
-use hyper::Body;
+use hyper::{Body, StatusCode};
 use scopeguard::ScopeGuard;
 use tokio::{
     io::{self, AsyncRead},
@@ -529,7 +529,16 @@ impl RemoteStorage for S3Bucket {
                     }
                 }
                 Err(e) => {
-                    return Err(e.into());
+                    if let Some(r) = e.raw_response() {
+                        if r.http().status() == StatusCode::NOT_FOUND {
+                            // 404 is acceptable for deletions.  AWS S3 does not return this, but
+                            // some other implementations might (e.g. GCS XML API returns 404 on DeleteObject
+                            // to a missing key)
+                            continue;
+                        } else {
+                            return Err(anyhow::format_err!("DeleteObjects response error: {e}"));
+                        }
+                    }
                 }
             }
         }
