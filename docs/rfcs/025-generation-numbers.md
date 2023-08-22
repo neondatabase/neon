@@ -112,7 +112,7 @@ integers with a global guarantee that they will not be re-used:
 This provides some important invariants:
 
 - If there are multiple pageservers running with the same node ID, they are guaranteed to have
-  a different generation ID.
+  a different generation number.
 - If there are multiple pageservers running with the same node ID, we may unambiguously know which
   of them "wins" by picking the higher generation number.
 - If two pageservers have the same tenant attached, they are guaranteed to have different attachment
