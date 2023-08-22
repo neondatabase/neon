@@ -125,7 +125,7 @@ in good standing. Any node with any older generation number is not.
 #### Distinction between generation numbers and Node ID
 
 - The purpose of a node generation number is to provide a stronger guarantee of uniqueness than a Node ID.
-- Node generation ID is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
+- Node generation number is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
   if a human provisions a replacement instance for a dead node and accidentally re-uses the node ID.
 - Node ID is written to disk in a pageserver's configuration, whereas node generation number is
   received at runtime just after startup (this does incur an availability dependency, see [availability](#availability)).
@@ -687,7 +687,7 @@ above, for background validation), and to record the next sequence number in
 case there are no deletion lists at present.
 
 Deletion queue objects will be stored outside the `tenants/` path, and
-with the node generation ID in the name. The paths would look something like:
+with the node generation number in the name. The paths would look something like:
 
 ```bash
   # Deletion List
@@ -1052,7 +1052,7 @@ disk capacity on keeping standby locations populated with local disk data.
 
 There's no conflict between this RFC and that: implementing warm secondary locations on a per-tenant basis
 would be a separate change to the control plane to store standby location(s) for a tenant. Because
-the standbys do not write to S3, they do not need to be assigned generation IDs. When a tenant is
+the standbys do not write to S3, they do not need to be assigned generation numbers. When a tenant is
 re-attached to a standby location, that would increment the tenant attachment generation and this
 would work the same as any other attachment change, but with a warm cache.
 
