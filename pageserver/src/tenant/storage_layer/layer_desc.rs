@@ -35,7 +35,6 @@ pub struct PersistentLayerDesc {
     /// for garbage collecting old layers: an incremental layer depends on
     /// the previous non-incremental layer.
     pub is_incremental: bool,
-    /// File size
     pub file_size: u64,
 }
 
