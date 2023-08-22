@@ -41,8 +41,7 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
-    LayerAccessStats, LayerFileName, RemoteLayer,
+    DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerFileName, RemoteLayer,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -1621,86 +1620,91 @@ impl Timeline {
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
 
-            if let Some(filename) = ImageFileName::parse_str(&fname) {
-                // create an ImageLayer struct for each image file.
-                if filename.lsn > disk_consistent_lsn {
-                    info!(
-                        "found future image layer {} on timeline {} disk_consistent_lsn is {}",
-                        filename, self.timeline_id, disk_consistent_lsn
+            use std::str::FromStr;
+            match LayerFileName::from_str(&fname) {
+                Ok(LayerFileName::Image(filename)) => {
+                    if filename.lsn > disk_consistent_lsn {
+                        info!(
+                            "found future image layer {} on timeline {} disk_consistent_lsn is {}",
+                            filename, self.timeline_id, disk_consistent_lsn
+                        );
+
+                        rename_to_backup(&direntry_path)?;
+                        continue;
+                    }
+
+                    let file_size = direntry_path.metadata()?.len();
+                    let stats =
+                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
+
+                    let layer = ImageLayer::new(
+                        self.conf,
+                        self.timeline_id,
+                        self.tenant_id,
+                        &filename,
+                        file_size,
+                        stats,
                     );
 
-                    rename_to_backup(&direntry_path)?;
-                    continue;
+                    total_physical_size += file_size;
+                    loaded_layers.push(Arc::new(layer));
                 }
+                Ok(LayerFileName::Delta(filename)) => {
+                    // The end-LSN is exclusive, while disk_consistent_lsn is
+                    // inclusive. For example, if disk_consistent_lsn is 100, it is
+                    // OK for a delta layer to have end LSN 101, but if the end LSN
+                    // is 102, then it might not have been fully flushed to disk
+                    // before crash.
+                    if filename.lsn_range.end > disk_consistent_lsn + 1 {
+                        info!(
+                            "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
+                            filename, self.timeline_id, disk_consistent_lsn
+                        );
 
-                let file_size = direntry_path.metadata()?.len();
-                let stats =
-                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
+                        rename_to_backup(&direntry_path)?;
+                        continue;
+                    }
 
-                let layer = ImageLayer::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    &filename,
-                    file_size,
-                    stats,
-                );
+                    let file_size = direntry_path.metadata()?.len();
+                    let stats =
+                        LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
 
-                total_physical_size += file_size;
-                loaded_layers.push(Arc::new(layer));
-            } else if let Some(filename) = DeltaFileName::parse_str(&fname) {
-                // Create a DeltaLayer struct for each delta file.
-                // The end-LSN is exclusive, while disk_consistent_lsn is
-                // inclusive. For example, if disk_consistent_lsn is 100, it is
-                // OK for a delta layer to have end LSN 101, but if the end LSN
-                // is 102, then it might not have been fully flushed to disk
-                // before crash.
-                if filename.lsn_range.end > disk_consistent_lsn + 1 {
-                    info!(
-                        "found future delta layer {} on timeline {} disk_consistent_lsn is {}",
-                        filename, self.timeline_id, disk_consistent_lsn
+                    let layer = DeltaLayer::new(
+                        self.conf,
+                        self.timeline_id,
+                        self.tenant_id,
+                        &filename,
+                        file_size,
+                        stats,
                     );
 
-                    rename_to_backup(&direntry_path)?;
-                    continue;
+                    total_physical_size += file_size;
+                    loaded_layers.push(Arc::new(layer));
                 }
-
-                let file_size = direntry_path.metadata()?.len();
-                let stats =
-                    LayerAccessStats::for_loading_layer(&guard, LayerResidenceStatus::Resident);
-
-                let layer = DeltaLayer::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    &filename,
-                    file_size,
-                    stats,
-                );
-
-                total_physical_size += file_size;
-                loaded_layers.push(Arc::new(layer));
-            } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
-                // ignore these
-            } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
-                info!(
-                    "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
-                    fname
-                );
-            } else if is_ephemeral_file(&fname) {
-                // Delete any old ephemeral files
-                trace!("deleting old ephemeral file in timeline dir: {}", fname);
-                fs::remove_file(&direntry_path)?;
-            } else if is_temporary(&direntry_path) {
-                info!("removing temp timeline file at {}", direntry_path.display());
-                fs::remove_file(&direntry_path).with_context(|| {
-                    format!(
-                        "failed to remove temp download file at {}",
-                        direntry_path.display()
-                    )
-                })?;
-            } else {
-                warn!("unrecognized filename in timeline dir: {}", fname);
+                Err(_) => {
+                    if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
+                        // ignore these
+                    } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
+                        info!(
+                            "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
+                            fname
+                        );
+                    } else if is_ephemeral_file(&fname) {
+                        // Delete any old ephemeral files
+                        trace!("deleting old ephemeral file in timeline dir: {}", fname);
+                        fs::remove_file(&direntry_path)?;
+                    } else if is_temporary(&direntry_path) {
+                        info!("removing temp timeline file at {}", direntry_path.display());
+                        fs::remove_file(&direntry_path).with_context(|| {
+                            format!(
+                                "failed to remove temp download file at {}",
+                                direntry_path.display()
+                            )
+                        })?;
+                    } else {
+                        warn!("unrecognized filename in timeline dir: {}", fname);
+                    }
+                }
             }
         }
 
