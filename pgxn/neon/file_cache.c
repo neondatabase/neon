@@ -91,6 +91,7 @@ typedef struct FileCacheControl
 static HTAB* lfc_hash;
 static LWLockId lfc_lock;
 static int   lfc_max_size;
+static int   lfc_max_mem;
 static int   lfc_size_limit;
 static int   lfc_free_space_watermark;
 static int   lfc_free_memory_watermark;
@@ -181,6 +182,7 @@ lfc_shmem_request(void)
 		prev_shmem_request_hook();
 #endif
 
+	lfc_max_size = Min(lfc_max_size, lfc_max_mem);
 	RequestAddinShmemSpace(sizeof(FileCacheControl) + lfc_max_size*MB + CHUNK_SIZE + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size)+1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
@@ -316,6 +318,19 @@ lfc_init(void)
 							NULL,
 							&lfc_max_size,
 							0, /* disabled by default */
+							0,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_UNIT_MB,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("neon.max_inmem_cache_size",
+							"Maximal size used by Neon local file cache in memory",
+							NULL,
+							&lfc_max_mem,
+							128, /* 128Mb */
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
