@@ -41,33 +41,31 @@ pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> 
         let direntry_path = direntry.path();
         let file_name = direntry.file_name();
 
-        let discovered = {
-            let fname = file_name.to_string_lossy();
+        let fname = file_name.to_string_lossy();
 
-            match LayerFileName::from_str(&fname) {
-                Ok(LayerFileName::Image(file_name)) => {
-                    let file_size = direntry_path.metadata()?.len();
-                    Discovered::Layer(file_name.into(), file_size)
-                }
-                Ok(LayerFileName::Delta(file_name)) => {
-                    let file_size = direntry_path.metadata()?.len();
-                    Discovered::Layer(file_name.into(), file_size)
-                }
-                Err(_) => {
-                    if fname == METADATA_FILE_NAME {
-                        Discovered::Metadata
-                    } else if fname.ends_with(".old") {
-                        // ignore these
-                        Discovered::IgnoredBackup
-                    } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
-                        Discovered::TemporaryDownload(file_name)
-                    } else if is_ephemeral_file(&fname) {
-                        Discovered::Ephemeral(file_name)
-                    } else if is_temporary(&direntry_path) {
-                        Discovered::Temporary(file_name)
-                    } else {
-                        Discovered::Unknown(file_name)
-                    }
+        let discovered = match LayerFileName::from_str(&fname) {
+            Ok(LayerFileName::Image(file_name)) => {
+                let file_size = direntry_path.metadata()?.len();
+                Discovered::Layer(file_name.into(), file_size)
+            }
+            Ok(LayerFileName::Delta(file_name)) => {
+                let file_size = direntry_path.metadata()?.len();
+                Discovered::Layer(file_name.into(), file_size)
+            }
+            Err(_) => {
+                if fname == METADATA_FILE_NAME {
+                    Discovered::Metadata
+                } else if fname.ends_with(".old") {
+                    // ignore these
+                    Discovered::IgnoredBackup
+                } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
+                    Discovered::TemporaryDownload(file_name)
+                } else if is_ephemeral_file(&fname) {
+                    Discovered::Ephemeral(file_name)
+                } else if is_temporary(&direntry_path) {
+                    Discovered::Temporary(file_name)
+                } else {
+                    Discovered::Unknown(file_name)
                 }
             }
         };
