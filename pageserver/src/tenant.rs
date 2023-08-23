@@ -330,7 +330,7 @@ impl Debug for SetStoppingError {
 }
 
 struct RemoteStartupData {
-    index_part: Arc<IndexPart>,
+    index_part: IndexPart,
     remote_metadata: TimelineMetadata,
 }
 
@@ -464,7 +464,10 @@ impl Tenant {
         }
 
         timeline
-            .load_layer_map(disk_consistent_lsn, index_part.cloned())
+            .load_layer_map(
+                disk_consistent_lsn,
+                remote_startup_data.map(|x| x.index_part),
+            )
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -822,7 +825,7 @@ impl Tenant {
             timeline_id,
             resources,
             Some(RemoteStartupData {
-                index_part: Arc::new(index_part),
+                index_part: index_part,
                 remote_metadata,
             }),
             local_metadata,
@@ -1316,7 +1319,7 @@ impl Tenant {
                         .map_err(LoadLocalTimelineError::Load)?;
                     (
                         Some(RemoteStartupData {
-                            index_part: Arc::new(index_part),
+                            index_part: index_part,
                             remote_metadata,
                         }),
                         Some(remote_client),
