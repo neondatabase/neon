@@ -1739,13 +1739,7 @@ impl Timeline {
         })
         .await
         .map_err(anyhow::Error::new)
-        .and_then(|x| x)
-        .with_context(|| {
-            format!(
-                "process tenant {} timeline {} directory",
-                self.tenant_id, self.timeline_id
-            )
-        })?;
+        .and_then(|x| x)?;
 
         let num_layers = loaded_layers.len();
 
