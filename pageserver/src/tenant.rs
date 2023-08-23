@@ -455,11 +455,9 @@ impl Tenant {
                 .unwrap()
                 .init_upload_queue(index_part)?;
         } else if self.remote_storage.is_some() {
-            // No data on the remote storage, no local layers, local metadata file.
-            //
-            // TODO(#5075): pageserver should rather remove the branch which failed to upload to
-            // remote storage. because absence on remote storage means we did not acknowledge the
-            // branch creation and console will have to retry, no need to keep the old files.
+            // No data on the remote storage, local metadata file. We might end up
+            // here with timeline_create right before restart. the timeline creation will be
+            // retried, and that http handler will wait for these uploads to complete.
             let rtc = timeline.remote_client.as_ref().unwrap();
             rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
             rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
