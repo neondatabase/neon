@@ -123,12 +123,12 @@ integers with a global guarantee that they will not be re-used:
 
 This provides some important invariants:
 
+- If two pageservers have the same tenant attached, they are guaranteed to have different attachment
+  generation numbers.
 - If there are multiple pageservers running with the same node ID, they are guaranteed to have
   a different generation number.
 - If there are multiple pageservers running with the same node ID, we may unambiguously know which
   of them "wins" by picking the higher generation number.
-- If two pageservers have the same tenant attached, they are guaranteed to have different attachment
-  generation numbers.
 
 The node generation number defines a global "in" definition for pageserver nodes: a node whose
 node generation matches the node generation the control plane most recently issued is a member of the cluster
@@ -186,7 +186,7 @@ Note that the two generation numbers have a different behavior for stale generat
 
 #### Generation suffix
 
-All object keys (layer objects and index objects) will contain a numeric suffix that
+All object keys (layer objects and index objects) will contain a numeric [suffix](#why-a-generation-suffix-rather-than-prefix) that
 advances as the attachment generation and node generation advance.
 This suffix is the primary mechanism for protecting against split-brain situations, and
 enabling safe multi-attachment of tenants:
@@ -983,6 +983,21 @@ first step must deploy the ability to read, before the second step
 starts writing them.
 
 # Frequently Asked Questions
+
+## Why a generation _suffix_ rather than _prefix_?
+
+The choice is motivated by object listing, since one can list by prefix but not
+suffix.
+
+In [finding remote indices](#finding-the-remote-indices-for-timelines), we rely
+on being able to do a prefix listing for `<tenant>/<timeline>/index_part.json*`:
+we don't care about listing layers within a particular generation, and if
+we already know the index generation we would GET the index directly.
+
+The converse case of using a generation prefix and listing by generation is
+not needed: one could imagine listing by generation while scrubbing (so that
+a particular generation's layers could be scrubbed), but this is not part
+of normal operations, and the [scrubber](#cleaning-up-orphan-objects-scrubbing) probably won't work that way anyway.
 
 ## Can't we do without the separate node generation?
 
