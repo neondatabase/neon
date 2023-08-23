@@ -15,11 +15,8 @@ use pin_project_lite::pin_project;
 use tls_listener::AsyncAccept;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
-pin_project! {
-    pub struct ProxyProtocolAccept {
-        #[pin]
-        pub incoming: AddrIncoming,
-    }
+pub struct ProxyProtocolAccept {
+    pub incoming: AddrIncoming,
 }
 
 pin_project! {
@@ -41,6 +38,7 @@ enum ProxyParse {
 }
 
 impl<T: AsyncWrite> AsyncWrite for WithClientIp<T> {
+    #[inline]
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -49,12 +47,28 @@ impl<T: AsyncWrite> AsyncWrite for WithClientIp<T> {
         self.project().inner.poll_write(cx, buf)
     }
 
+    #[inline]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_flush(cx)
     }
 
+    #[inline]
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         self.project().inner.poll_shutdown(cx)
+    }
+
+    #[inline]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.project().inner.poll_write_vectored(cx, bufs)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }
 
@@ -87,14 +101,15 @@ impl<T: AsyncRead + Unpin> WithClientIp<T> {
 const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
-const IPV4: u8 = 1;
-const IPV6: u8 = 2;
 
 impl<T: AsyncRead> WithClientIp<T> {
+    /// implementation of https://www.haproxy.org/download/2.4/doc/proxy-protocol.txt Version 2 (Binary Format)
     fn poll_client_ip(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<Option<SocketAddr>>> {
+        // The binary header format starts with a constant 12 bytes block containing the protocol signature :
+        //    \x0D \x0A \x0D \x0A \x00 \x0D \x0A \x51 \x55 \x49 \x54 \x0A
         while self.buf.len() <= 16 {
             let mut this = self.as_mut().project();
             let bytes_read = pin!(this.inner.read_buf(this.buf)).poll(cx)?;
@@ -102,91 +117,163 @@ impl<T: AsyncRead> WithClientIp<T> {
             // exit for bad header
             let len = usize::min(self.buf.len(), HEADER.len());
             if self.buf[..len] != HEADER[..len] {
-                *self.as_mut().project().state = ProxyParse::None;
                 return Poll::Ready(Ok(None));
             }
 
             // if no more bytes available then exit
             if ready!(bytes_read) == 0 {
-                *self.as_mut().project().state = ProxyParse::None;
                 return Poll::Ready(Ok(None));
             };
         }
 
-        let family = self.buf[13] >> 4;
-        let ip_bytes = match family {
-            // 2 IPV4s and 2 ports
-            IPV4 => (4 + 2) * 2,
-            // 2 IPV6s and 2 ports
-            IPV6 => (16 + 2) * 2,
+        // The next byte (the 13th one) is the protocol version and command.
+        // The highest four bits contains the version. As of this specification, it must
+        // always be sent as \x2 and the receiver must only accept this value.
+        let vc = self.buf[12];
+        let version = vc >> 4;
+        let command = vc & 0b1111;
+        if version != 2 {
+            return Poll::Ready(Ok(None));
+        }
+        match command {
+            // the connection was established on purpose by the proxy
+            // without being relayed. The connection endpoints are the sender and the
+            // receiver. Such connections exist when the proxy sends health-checks to the
+            // server. The receiver must accept this connection as valid and must use the
+            // real connection endpoints and discard the protocol block including the
+            // family which is ignored.
+            0 => {}
+            // the connection was established on behalf of another node,
+            // and reflects the original connection endpoints. The receiver must then use
+            // the information provided in the protocol block to get original the address.
+            1 => {}
+            // other values are unassigned and must not be emitted by senders. Receivers
+            // must drop connections presenting unexpected values here.
+            _ => return Poll::Ready(Ok(None)),
+        };
+
+        // The 14th byte contains the transport protocol and address family. The highest 4
+        // bits contain the address family, the lowest 4 bits contain the protocol.
+        let ft = self.buf[13];
+        let address_length = match ft {
+            // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
+            //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
+            // - \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
+            //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
+            0x11 | 0x12 => 12,
+            // - \x21 : TCP over IPv6 : the forwarded connection uses TCP over the AF_INET6
+            //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
+            // - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
+            //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
+            0x21 | 0x22 => 36,
+            // unspecified or unix stream. ignore the addresses
             _ => 0,
         };
 
-        while self.buf.len() < 16 + ip_bytes {
+        // The 15th and 16th bytes is the address length in bytes in network endian order.
+        // It is used so that the receiver knows how many address bytes to skip even when
+        // it does not implement the presented protocol. Thus the length of the protocol
+        // header in bytes is always exactly 16 + this value. When a sender presents a
+        // LOCAL connection, it should not present any address so it sets this field to
+        // zero. Receivers MUST always consider this field to skip the appropriate number
+        // of bytes and must not assume zero is presented for LOCAL connections. When a
+        // receiver accepts an incoming connection showing an UNSPEC address family or
+        // protocol, it may or may not decide to log the address information if present.
+        let remaining_length = u16::from_be_bytes(self.buf[14..16].try_into().unwrap()) as usize;
+        if remaining_length < address_length {
+            return Poll::Ready(Ok(None));
+        }
+
+        while self.buf.len() < 16 + address_length {
             let mut this = self.as_mut().project();
             if ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?) == 0 {
-                *self.as_mut().project().state = ProxyParse::None;
                 return Poll::Ready(Ok(None));
             }
         }
 
-        let length = u16::from_be_bytes(self.buf[14..16].try_into().unwrap()) as usize;
-
         let this = self.as_mut().project();
-        let socket = match family {
-            // 2 IPV4s and 2 ports
-            IPV4 if length >= ip_bytes => {
-                *this.tlv_bytes = length - ip_bytes;
-                let buf = this.buf.split_to(16 + ip_bytes);
-                let src_addr: [u8; 4] = buf[16..20].try_into().unwrap();
-                let src_port = u16::from_be_bytes(buf[24..26].try_into().unwrap());
+
+        // we are sure this is a proxy protocol v2 entry and we have read all the bytes we need
+        // discard the header we have parsed
+        this.buf.advance(16);
+
+        // Starting from the 17th byte, addresses are presented in network byte order.
+        // The address order is always the same :
+        //   - source layer 3 address in network byte order
+        //   - destination layer 3 address in network byte order
+        //   - source layer 4 address if any, in network byte order (port)
+        //   - destination layer 4 address if any, in network byte order (port)
+        let addresses = this.buf.split_to(address_length);
+        let socket = match address_length {
+            12 => {
+                let src_addr: [u8; 4] = addresses[0..4].try_into().unwrap();
+                let src_port = u16::from_be_bytes(addresses[8..10].try_into().unwrap());
                 Some(SocketAddr::from((src_addr, src_port)))
             }
-            IPV6 if length >= ip_bytes => {
-                *this.tlv_bytes = length - ip_bytes;
-                let buf = this.buf.split_to(16 + ip_bytes);
-                let src_addr: [u8; 16] = buf[16..32].try_into().unwrap();
-                let src_port = u16::from_be_bytes(buf[48..50].try_into().unwrap());
+            36 => {
+                let src_addr: [u8; 16] = addresses[0..16].try_into().unwrap();
+                let src_port = u16::from_be_bytes(addresses[32..34].try_into().unwrap());
                 Some(SocketAddr::from((src_addr, src_port)))
             }
             _ => None,
         };
 
+        *this.tlv_bytes = remaining_length - address_length;
         let discard = usize::min(*this.tlv_bytes, this.buf.len());
         *this.tlv_bytes -= discard;
         this.buf.advance(discard);
 
         Poll::Ready(Ok(socket))
     }
+
+    #[cold]
+    fn read_ip(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let ip = ready!(self.as_mut().poll_client_ip(cx)?);
+        match ip {
+            Some(x) => *self.as_mut().project().state = ProxyParse::Finished(x),
+            None => *self.as_mut().project().state = ProxyParse::None,
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    #[cold]
+    fn skip_tlv(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut this = self.project();
+        // we know that this.buf is empty
+        debug_assert_eq!(this.buf.len(), 0);
+
+        let n = ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?);
+        let tlv_bytes_read = usize::min(n, *this.tlv_bytes);
+        *this.tlv_bytes -= tlv_bytes_read;
+        this.buf.advance(tlv_bytes_read);
+
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
+    #[inline]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        // I'm assuming these 3 comparisons will be easy to branch predict.
+        // especially with the cold attributes
+        // which should make this read wrapper almost invisible
+
         if let ProxyParse::NotStarted = self.state {
-            let ip = ready!(self.as_mut().poll_client_ip(cx)?);
-            match ip {
-                Some(x) => *self.as_mut().project().state = ProxyParse::Finished(x),
-                None => *self.as_mut().project().state = ProxyParse::None,
-            }
+            ready!(self.as_mut().read_ip(cx)?);
         }
 
-        let mut this = self.project();
-
-        while *this.tlv_bytes > 0 {
-            // we know that this.buf is empty
-            debug_assert_eq!(this.buf.len(), 0);
-
-            let n = ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?);
-            let tlv_bytes_read = usize::min(n, *this.tlv_bytes);
-            *this.tlv_bytes -= tlv_bytes_read;
-            this.buf.advance(tlv_bytes_read);
+        while self.tlv_bytes > 0 {
+            ready!(self.as_mut().skip_tlv(cx)?)
         }
 
-        if !this.buf.is_empty() {
+        let this = self.project();
+        if this.buf.is_empty() {
+            this.inner.poll_read(cx, buf)
+        } else {
             // we know that tlv_bytes is 0
             debug_assert_eq!(*this.tlv_bytes, 0);
 
@@ -194,12 +281,6 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
             let slice = this.buf.split_to(write).freeze();
             buf.put_slice(&slice);
 
-            return Poll::Ready(Ok(()));
-        }
-
-        if this.buf.is_empty() {
-            this.inner.poll_read(cx, buf)
-        } else {
             Poll::Ready(Ok(()))
         }
     }
@@ -211,10 +292,10 @@ impl AsyncAccept for ProxyProtocolAccept {
     type Error = io::Error;
 
     fn poll_accept(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
-        let conn = ready!(self.project().incoming.poll_accept(cx)?);
+        let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
         let Some(conn) = conn else {
             return Poll::Ready(None);
         };
@@ -235,7 +316,7 @@ mod tests {
     async fn test_ipv4() {
         let header = super::HEADER
             // Proxy command, Inet << 4 | Stream
-            .chain([1u8, (1 << 4) | 1].as_slice())
+            .chain([(2 << 4) | 1, (1 << 4) | 1].as_slice())
             // 12 + 3 bytes
             .chain([0, 15].as_slice())
             // src ip
@@ -294,7 +375,7 @@ mod tests {
 
         let header = super::HEADER
             // Proxy command, Inet << 4 | Stream
-            .chain([1u8, (1 << 4) | 1].as_slice())
+            .chain([(2 << 4) | 1, (1 << 4) | 1].as_slice())
             // 12 + 3 bytes
             .chain(len.as_slice())
             // src ip
