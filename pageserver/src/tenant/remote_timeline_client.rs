@@ -172,7 +172,6 @@
 //!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
 //!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
 //!
-//! Most of the above steps happen in [`Timeline::reconcile_with_remote`] or its callers.
 //! We keep track of the fact that a client is in `Attaching` state in a marker
 //! file on the local disk. This is critical because, when we restart the pageserver,
 //! we do not want to do the `List timelines` step for each tenant that has already
@@ -192,7 +191,7 @@
 //! not created and the uploads are skipped.
 //! Theoretically, it should be ok to remove and re-add remote storage configuration to
 //! the pageserver config at any time, since it doesn't make a difference to
-//! `reconcile_with_remote`.
+//! `Timeline::load_layer_map`.
 //! Of course, the remote timeline dir must not change while we have de-configured
 //! remote storage, i.e., the pageserver must remain the owner of the given prefix
 //! in remote storage.
