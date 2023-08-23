@@ -231,8 +231,8 @@ fn create_file_watcher(path: &str) -> anyhow::Result<EventStream<[u8; 1024]>> {
 }
 
 impl CgroupWatcher {
-    #[tracing::instrument]
     /// Create a new `CgroupWatcher`.
+    #[tracing::instrument(skip_all, fields(%name))]
     pub fn new(
         name: String,
         // A channel on which to send upscale requests
@@ -296,7 +296,7 @@ impl CgroupWatcher {
     }
 
     /// The entrypoint for the `CgroupWatcher`.
-    #[tracing::instrument(skip(self, events))]
+    #[tracing::instrument(skip_all)]
     pub async fn watch<E>(
         &self,
         // These are ~dependency injected~ (fancy, I know) because this function
@@ -458,8 +458,8 @@ impl CgroupWatcher {
     /// 4. After the timer elapses or we receive upscale, thaw the cgroup.
     /// 5. Return whether or not we are still waiting for upscale. If we are,
     ///    we'll increase the cgroups memory.high to avoid getting oom killed
-    #[tracing::instrument(skip(self))]
-    pub async fn handle_memory_high_event(
+    #[tracing::instrument(skip_all)]
+    async fn handle_memory_high_event(
         &self,
         upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
     ) -> anyhow::Result<bool> {
@@ -510,7 +510,7 @@ impl CgroupWatcher {
 
     /// Checks whether we were just upscaled, returning the upscale's sequence
     /// number if so.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all)]
     fn upscaled(
         &self,
         upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
@@ -534,7 +534,7 @@ impl CgroupWatcher {
     ///
     /// This is used in `handle_memory_high_event`, where we need to listen
     /// for upscales in particular so we know if we can thaw the cgroup early.
-    #[tracing::instrument(skip(self, upscales))]
+    #[tracing::instrument(skip_all)]
     async fn await_upscale(
         &self,
         upscales: &mut mpsc::Receiver<Sequenced<Resources>>,

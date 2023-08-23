@@ -148,7 +148,7 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
 ///
 /// If we are already to connected to an informant, we kill that old connection
 /// and accept the new one.
-#[tracing::instrument(name = "/monitor", skip(ws))]
+#[tracing::instrument(name = "/monitor", skip_all, fields(?args))]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(ServerState {
@@ -168,7 +168,7 @@ pub async fn ws_handler(
 
 /// Starts the monitor. If startup fails or the monitor exits, an error will
 /// be logged and our internal state will be reset to allow for new connections.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, fields(?args))]
 async fn start_monitor(
     ws: WebSocket,
     args: &Args,

@@ -129,7 +129,7 @@ impl Dispatcher {
 
     /// Notify the cgroup manager that we have received upscale and wait for
     /// the acknowledgement.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(?resources))]
     pub async fn notify_upscale(&self, resources: Sequenced<Resources>) -> anyhow::Result<()> {
         self.notify_upscale_events
             .send(resources)

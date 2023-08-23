@@ -71,7 +71,7 @@ impl Default for Config {
 
 impl Runner {
     /// Create a new monitor.
-    #[tracing::instrument(skip(ws))]
+    #[tracing::instrument(skip_all, fields(?config, ?args))]
     pub async fn new(
         config: Config,
         args: &Args,
@@ -180,7 +180,7 @@ impl Runner {
     }
 
     /// Attempt to downscale filecache + cgroup
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(?target))]
     pub async fn try_downscale(&mut self, target: Resources) -> anyhow::Result<(bool, String)> {
         // Nothing to adjust
         if self.cgroup.is_none() && self.filecache.is_none() {
@@ -276,7 +276,7 @@ impl Runner {
     }
 
     /// Handle new resources
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(?resources))]
     pub async fn handle_upscale(&mut self, resources: Resources) -> anyhow::Result<()> {
         if self.filecache.is_none() && self.cgroup.is_none() {
             info!("no action needed for upscale (no cgroup or file cache enabled)");
@@ -335,7 +335,7 @@ impl Runner {
 
     /// Take in a message and perform some action, such as downscaling or upscaling,
     /// and return a message to be send back.
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(%id, message = ?inner))]
     pub async fn process_message(
         &mut self,
         InboundMsg { inner, id }: InboundMsg,
@@ -381,7 +381,7 @@ impl Runner {
     }
 
     // TODO: don't propagate errors, probably just warn!?
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> anyhow::Result<()> {
         info!("starting dispatcher");
         loop {

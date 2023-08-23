@@ -146,7 +146,7 @@ impl FileCacheConfig {
 
 impl FileCacheState {
     /// Connect to the file cache.
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all, fields(%conn_str, ?config))]
     pub async fn new(
         conn_str: &str,
         config: FileCacheConfig,
@@ -172,7 +172,7 @@ impl FileCacheState {
     ///
     /// Aborts the spawned thread if the kill signal is received. This is not
     /// a method as it is called in [`FileCacheState::new`].
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all, fields(%conn_str))]
     async fn connect(conn_str: &str, token: CancellationToken) -> anyhow::Result<Client> {
         let (client, conn) = tokio_postgres::connect(conn_str, NoTls)
             .await
@@ -197,6 +197,7 @@ impl FileCacheState {
     ///
     /// If the initial query fails, we restart the database connection and attempt
     /// if again.
+    #[tracing::instrument(skip_all, fields(%statement))]
     pub async fn query_with_retry(
         &mut self,
         statement: &str,
@@ -228,7 +229,7 @@ impl FileCacheState {
     }
 
     /// Get the current size of the file cache.
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all)]
     pub async fn get_file_cache_size(&mut self) -> anyhow::Result<u64> {
         self.query_with_retry(
             // The file cache GUC variable is in MiB, but the conversion with
@@ -249,7 +250,7 @@ impl FileCacheState {
 
     /// Attempt to set the file cache size, returning the size it was actually
     /// set to.
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all, fields(%num_bytes))]
     pub async fn set_file_cache_size(&mut self, num_bytes: u64) -> anyhow::Result<u64> {
         let max_bytes = self
             // The file cache GUC variable is in MiB, but the conversion with pg_size_bytes
