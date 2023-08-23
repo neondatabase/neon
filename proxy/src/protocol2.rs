@@ -103,7 +103,8 @@ const HEADER: [u8; 12] = [
 ];
 
 impl<T: AsyncRead> WithClientIp<T> {
-    /// implementation of https://www.haproxy.org/download/2.4/doc/proxy-protocol.txt Version 2 (Binary Format)
+    /// implementation of <https://www.haproxy.org/download/2.4/doc/proxy-protocol.txt>
+    /// Version 2 (Binary Format)
     fn poll_client_ip(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
