@@ -433,6 +433,18 @@ impl Tenant {
             "these are used interchangeably"
         );
 
+        // Save the metadata file to local disk.
+        if !picked_local {
+            save_metadata(
+                self.conf,
+                &tenant_id,
+                &timeline_id,
+                up_to_date_metadata,
+                first_save,
+            )
+            .context("save_metadata")?;
+        }
+
         let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
 
         // FIXME: it seems that we shouldn't have "mutable init" for RemoteTimelineClient either
@@ -491,18 +503,6 @@ impl Tenant {
                     .is_some(),
             "Timeline has no ancestor and no layer files"
         );
-
-        // Save the metadata file to local disk.
-        if !picked_local {
-            save_metadata(
-                self.conf,
-                &tenant_id,
-                &timeline_id,
-                up_to_date_metadata,
-                first_save,
-            )
-            .context("save_metadata")?;
-        }
 
         Ok(())
     }
