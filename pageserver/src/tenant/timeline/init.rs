@@ -44,13 +44,9 @@ pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> 
         let fname = file_name.to_string_lossy();
 
         let discovered = match LayerFileName::from_str(&fname) {
-            Ok(LayerFileName::Image(file_name)) => {
-                let file_size = direntry_path.metadata()?.len();
-                Discovered::Layer(file_name.into(), file_size)
-            }
-            Ok(LayerFileName::Delta(file_name)) => {
-                let file_size = direntry_path.metadata()?.len();
-                Discovered::Layer(file_name.into(), file_size)
+            Ok(file_name) => {
+                let file_size = direntry.metadata()?.len();
+                Discovered::Layer(file_name, file_size)
             }
             Err(_) => {
                 if fname == METADATA_FILE_NAME {
