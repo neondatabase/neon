@@ -422,7 +422,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests, benchmarks ]
+    needs: [ regress-tests, coverage-report, benchmarks ]
     if: ${{ !cancelled() }}
 
     steps:
@@ -449,12 +449,18 @@ jobs:
               reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
             }
 
+            const coverage = {
+              coverageUrl: "${{ needs.coverage-report.outputs.coverage-html }}",
+              summaryJsonUrl: "${{ needs.coverage-report.outputs.coverage-json }}",
+            }
+
             const script = require("./scripts/comment-test-report.js")
             await script({
               github,
               context,
               fetch,
               report,
+              coverage,
             })
 
   coverage-report:
