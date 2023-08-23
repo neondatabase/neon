@@ -445,16 +445,9 @@ impl Tenant {
         } else if self.remote_storage.is_some() {
             // No data on the remote storage, no local layers, local metadata file.
             //
-            // TODO https://github.com/neondatabase/neon/issues/3865
-            // Currently, console does not wait for the timeline data upload to the remote storage
-            // and considers the timeline created, expecting other pageserver nodes to work with it.
-            // Branch metadata upload could get interrupted (e.g pageserver got killed),
-            // hence any locally existing branch metadata with no remote counterpart should be uploaded,
-            // otherwise any other pageserver won't see the branch on `attach`.
-            //
-            // After the issue gets implemented, pageserver should rather remove the branch,
-            // since absence on S3 means we did not acknowledge the branch creation and console will have to retry,
-            // no need to keep the old files.
+            // TODO(#5075): pageserver should rather remove the branch which failed to upload to
+            // remote storage. because absence on remote storage means we did not acknowledge the
+            // branch creation and console will have to retry, no need to keep the old files.
             let rtc = timeline.remote_client.as_ref().unwrap();
             rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
             rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
