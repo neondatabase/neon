@@ -40,22 +40,29 @@ const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 ///   to flush any outstanding deletions.
 /// - Globally control throughput of deletions, as these are a low priority task: do
 ///   not compete with the same S3 clients/connections used for higher priority uploads.
+/// - Future: enable validating that we may do deletions in a multi-attached scenario,
+///   via generation numbers (see https://github.com/neondatabase/neon/pull/4919)
 ///
-/// There are two parts to this, frontend and backend, joined by channels:
-/// - DeletionQueueWorker consumes the frontend queue: the "DeletionQueue" that makes up
-///   the public interface and accepts deletion requests.
-/// - BackendQueueWorker consumes the backend queue: a queue of DeletionList that have
-///   already been written to S3 and are now eligible for final deletion.
+/// There are two kinds of deletion: deferred and immediate.  A deferred deletion
+/// may be intentionally delayed to protect passive readers of S3 data, and may
+/// be subject to a generation number validation step.  An immediate deletion is
+/// ready to execute immediately, and is only queued up so that it can be coalesced
+/// with other deletions in flight.
 ///
-/// There are three queues internally:
-/// - Incoming deletes (the DeletionQueue that the outside world sees)
-/// - Persistent deletion blocks: these represent deletion lists that have already been written to S3 and
-///   are pending execution.
-/// - Deletions read back frorm the persistent deletion blocks, which are batched up into groups
-///   of 1000 for execution via a DeleteObjects call.
+/// Deferred deletions pass through three steps:
+/// - Frontend: accumulate deletion requests from Timelines, and batch them up into
+///   DeletionLists, which are persisted to S3.
+/// - Backend: accumulate deletion lists, and validate them en-masse prior to passing
+///   the keys in the list onward for actual deletion
+/// - Executor: accumulate object keys that the backend has validated for immediate
+///   deletion, and execute them in batches of 1000 keys via DeleteObjects.
 ///
-/// In S3, there is just one queue, made up of a series of DeletionList objects and
-/// a DeletionHeader
+/// Non-deferred deletions, such as during timeline deletion, bypass the first
+/// two stages and are passed straight into the Executor.
+///
+/// Internally, each stage is joined by a channel to the next.  In S3, there is only
+/// one queue (of DeletionLists), which is written by the frontend and consumed
+/// by the backend.
 #[derive(Clone)]
 pub struct DeletionQueue {
     client: DeletionQueueClient,
