@@ -6,7 +6,7 @@ use safekeeper::simlib::{
     world::World,
     world::{Node, NodeEvent},
 };
-use utils::{id::TenantTimelineId, logging, lsn::Lsn};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     bindings::{
@@ -15,7 +15,7 @@ use crate::{
         MyInsertRecord, WalProposerCleanup, WalProposerRust,
     },
     c_context,
-    simtest::safekeeper::run_server,
+    simtest::{safekeeper::run_server, log::{SimClock, init_logger}},
 };
 
 use super::disk::Disk;
@@ -57,10 +57,11 @@ impl SkNode {
 struct TestConfig {
     network: NetworkOptions,
     timeout: u64,
+    clock: Option<SimClock>,
 }
 
 impl TestConfig {
-    fn new() -> Self {
+    fn new(clock: Option<SimClock>) -> Self {
         Self {
             network: NetworkOptions {
                 timeout: Some(2000),
@@ -76,6 +77,7 @@ impl TestConfig {
                 },
             },
             timeout: 1_000 * 10,
+            clock,
         }
     }
 
@@ -86,6 +88,10 @@ impl TestConfig {
             c_context(),
         ));
         world.register_world();
+
+        if let Some(clock) = &self.clock {
+            clock.set_world(world.clone());
+        }
 
         let servers = [
             SkNode::new(world.new_node()),
@@ -304,9 +310,8 @@ impl WalProposer {
 
 #[test]
 fn sync_empty_safekeepers() {
-    logging::init(logging::LogFormat::Plain).unwrap();
-
-    let config = TestConfig::new();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
     let test = config.start(1337);
 
     let lsn = test.sync_safekeepers().unwrap();
@@ -320,9 +325,8 @@ fn sync_empty_safekeepers() {
 
 #[test]
 fn run_walproposer_generate_wal() {
-    logging::init(logging::LogFormat::Plain).unwrap();
-
-    let mut config = TestConfig::new();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 
@@ -343,9 +347,8 @@ fn run_walproposer_generate_wal() {
 
 #[test]
 fn crash_safekeeper() {
-    logging::init(logging::LogFormat::Plain).unwrap();
-
-    let mut config = TestConfig::new();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 
@@ -373,9 +376,8 @@ fn crash_safekeeper() {
 
 #[test]
 fn test_simple_restart() {
-    logging::init(logging::LogFormat::Plain).unwrap();
-
-    let mut config = TestConfig::new();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 

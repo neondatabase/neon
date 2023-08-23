@@ -7,3 +7,4 @@ pub mod wp_sk;
 pub mod disk;
 pub mod safekeeper;
 pub mod storage;
+pub mod log;

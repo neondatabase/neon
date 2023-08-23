@@ -4642,6 +4642,7 @@ name = "walproposer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atty",
  "bindgen",
  "byteorder",
  "bytes",
@@ -4661,6 +4662,8 @@ dependencies = [
  "safekeeper",
  "serde",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "utils",
  "workspace_hack",
 ]
