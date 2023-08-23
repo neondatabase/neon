@@ -191,13 +191,14 @@
 //! not created and the uploads are skipped.
 //! Theoretically, it should be ok to remove and re-add remote storage configuration to
 //! the pageserver config at any time, since it doesn't make a difference to
-//! `Timeline::load_layer_map`.
+//! [`Timeline::load_layer_map`].
 //! Of course, the remote timeline dir must not change while we have de-configured
 //! remote storage, i.e., the pageserver must remain the owner of the given prefix
 //! in remote storage.
 //! But note that we don't test any of this right now.
 //!
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
+//! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
 mod delete;
 mod download;
