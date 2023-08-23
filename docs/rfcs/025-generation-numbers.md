@@ -130,23 +130,15 @@ This provides some important invariants:
 - If there are multiple pageservers running with the same node ID, we may unambiguously know which
   of them "wins" by picking the higher generation number.
 
-The node generation number defines a global "in" definition for pageserver nodes: a node whose
-node generation matches the node generation the control plane most recently issued is a member of the cluster
-in good standing. Any node with any older generation number is not.
+The requirement for two generations numbers is not intrinsic to our storage
+format: in our [object keys](#object-key-changes) we will concatenate the generations into a single suffix. Using two generation numbers provides more flexibility
+in how the control plane may be implemented, and accommodates its current
+model of long-lived attachments that span pageserver process lifetimes.
 
-#### Distinction between generation numbers and Node ID
-
-- The purpose of a node generation number is to provide a stronger guarantee of uniqueness than a Node ID.
-- Node generation number is guaranteed to be globally unique across space and time. Node ID is not, e.g.,
-  if a human provisions a replacement instance for a dead node and accidentally re-uses the node ID.
-- Node ID is written to disk in a pageserver's configuration, whereas node generation number is
-  received at runtime just after startup (this does incur an availability dependency, see [availability](#availability)).
-- The two concepts could be collapsed into one if we used ephemeral node IDs that were only ever used one time,
-  but this makes it harder to efficiently handle the case of the same physical node restarting, where we may want
-  to retain the same attachments as it had before restart, without having to map them to a different node ID.
-- We may in future run the pageserver in a different cluster runtime environment (e.g. k8s) where
-  guaranteeing that the cluster manager (e.g. k8s) doesn't run two concurrent instances with the same
-  node ID is much harder.
+The use of a pageserver _node generation_ in addition to the current static
+`node_id` is an implementation detail: one could in future collapse the two
+concepts into an ephemeral node ID that is issued on each pageserver process
+start.
 
 #### Distinction between attachment and node generation id
 
@@ -160,18 +152,16 @@ an old pod is dead before starting a new one.
 
 The node generation is useful other ways, beyond it's core correctness purpose:
 
-- Including both generations (and the node ID) in object keys (see [object keys](#object-key-changes)) also provides some flexibility in
-  how HA should work in future: we could move to a model where failover can happen within one
-  attachment generation number (i.e. without control plane coordination) without changing the
-  storage format, because node IDs/generations would de-conflict writes from peers.
 - The node generation is also useful for managing remote objects which are not per-tenant,
-  such as the persistent per-node deletion queue which is proposed in this RFC.
+  such as the persistent per-node deletion queue which is proposed in this RFC, without
+  having to involve the control plane in attaching these: each node has an implicit
+  "attachment" of all its per-node remote storage that
 - node generation numbers enable building fencing into any network protocol (for example
   communication with safekeepers) to refuse to communicate with stale/partitioned nodes.
 
 Note that the two generation numbers have a different behavior for stale generations:
 
-- A pageserver with a stale generation number should immediately terminate: it is never intended
+- A pageserver with a stale node generation number should immediately terminate: it is never intended
   to have two pageservers with the same node ID. This is not necessary for correctness, as the
   node generation appears in object keys, but objects written in a stale node generation are never
   read later, so waste storage.
@@ -204,12 +194,10 @@ they will be packed into a single u64 that must obey just the following properti
 - Sorting the suffixes numerically must give the most logically recent data ([visibility](#visibility))
 
 ```
-000000 0000 000000
-^^^^^^--------------------- 24 bit attachment generation
+00000000 00000000
+^^^^^^^^------------------- 32 bit attachment generation
 
-       ^^^^---------------- 16 bit node ID
-
-            ^^^^^^--------- 24 bit node generation
+         ^^^^^^^^---------  32 bit node generation
 ```
 
 Hereafter, when referring to "the suffix", we mean this u64 composite that contains the
@@ -220,7 +208,7 @@ For example, we would write the suffix for attachment generation 7 to node ID 0 
 like so, while the actual object suffix would be packed into a u64:
 
 ```
-   00000007-0000-00000001
+   00000007-00000001
 
 ```
 
@@ -235,8 +223,6 @@ for the lengths being sufficient are:
 - 24 bit generations are enough for to increment 9000 times per day over
   a 5 year system lifetime (in practice generation increments are expected to be far rarer,
   perhaps of the order of 1 per day if we are dynamically balancing load)
-- 16 bit node ID is enough for 35 new pageservers to be deployed every day over a 5 year
-  system lifetime. In practice the frequency is likely to be more like 1 per week.
 
 #### Index changes
 
@@ -396,7 +382,7 @@ the same generation validation requirement.
 Calls to `/v1/tenant/{tenant_id}/attach` are augmented with generation details:
 
 - Required: provide an attachment generation number
-- Nice to have: provide the attachment generation, node id, and node generation of
+- Nice to have: provide the attachment generation, node generation of
   where the tenant was previously attached, to help this node calculate where
   to find the latest index_part file.
 
@@ -1008,7 +994,7 @@ The storage format in [object keys](#object-key-changes) only
 uses a single u64 suffix, so the idea of multiple node generations is not encoded
 into how we store data.
 
-Generating those suffixes from the tuple of (attach_gen, node_id, node_gen) enables
+Generating those suffixes from the tuple of (attach_gen, node_gen) enables
 us to avoid centrally updating per-attachment generation numbers each time a node
 restarts. In future, we may move to a model where attachments are explicitly
 per-process-lifetime (see [ephemeral node IDs](#ephemeral-node-ids)) -- at that point,
@@ -1063,7 +1049,7 @@ to S3.
 
 #### Case A: re-attachment to other nodes
 
-In this section we use the <attach_gen>-<node_id>-<node_gen> shorthand for object
+In this section we use the <attach_gen>-<node_gen> shorthand for object
 suffixes, see [generation numbers](#generation-numbers)
 
 1. Let's say node 0 fails in a cluster of three nodes 0, 1, 2.
@@ -1075,10 +1061,10 @@ suffixes, see [generation numbers](#generation-numbers)
    robin, or capacity based).
 3. A tenant which is now attached to node 1 will _also_ still be attached to node
    0, from the perspective of node 0. Let's say it was originally attached with
-   generation suffix 00000001-0000-00000001 -- its new suffix on node 1
-   might be 00000002-0001-00000001 (attachment gen 2, on node 1).
-4. S3 writes will continue from nodes 0 and 1: there will be an index_part.json-00000001-0000-00000001
-   \_and\* an index_part.json-00000002-0001-00000001. Objects written under the old suffix
+   generation suffix 00000001-00000001 -- its new suffix on node 1
+   might be 00000002-00000001 (attachment gen 2, on node 1).
+4. S3 writes will continue from nodes 0 and 1: there will be an index_part.json-00000001-00000001
+   \_and\* an index_part.json-00000002-00000001. Objects written under the old suffix
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
    written by node 0 are just garbage that can be cleaned up at leisure. Node 0 will
