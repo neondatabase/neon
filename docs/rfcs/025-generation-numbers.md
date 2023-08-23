@@ -321,7 +321,7 @@ deletions are slightly more challenging: if a pageserver A is isolated, and the 
 pageserver B, then it is dangerous for A to do any object deletions, even of objects that it wrote
 itself, because pageserver's B metadata might reference those objects.
 
-We may solve this by inserting a "generation validation" step between the write of a remote index
+We solve this by inserting a "generation validation" step between the write of a remote index
 that un-links a particular object from the index, and the actual deletion of the object, such
 that deletions strictly obey the following ordering:
 
