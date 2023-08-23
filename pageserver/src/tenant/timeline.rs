@@ -1619,6 +1619,7 @@ impl Timeline {
                 let _g = span.entered();
                 let discovered = init::scan_timeline_dir(&timeline_path)?;
                 let mut discovered_layers = Vec::with_capacity(discovered.len());
+                let mut unrecognized_files = Vec::new();
 
                 let mut path = timeline_path;
 
@@ -1632,7 +1633,8 @@ impl Timeline {
                             continue;
                         }
                         Discovered::Unknown(file_name) => {
-                            tracing::warn!("unrecognized filename in timeline dir: {file_name:?}");
+                            // we will later error if there are any
+                            unrecognized_files.push(file_name);
                             continue;
                         }
                         Discovered::Ephemeral(name) => (name, "old ephemeral file"),
@@ -1642,6 +1644,16 @@ impl Timeline {
                     path.push(name);
                     init::cleanup(&path, kind)?;
                     path.pop();
+                }
+
+                if !unrecognized_files.is_empty() {
+                    // assume that if there are any which are not there because of debugging there
+                    // are many.
+                    let n = unrecognized_files.len();
+                    let first = &unrecognized_files[..n.min(10)];
+                    anyhow::bail!(
+                        "unrecognized files in timeline dir (total {n}), first 10: {first:?}"
+                    );
                 }
 
                 let decided = init::reconcile(
