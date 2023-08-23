@@ -135,7 +135,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Tenant::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
+//!   [`Tenant::timeline_init_and_sync`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
@@ -199,7 +199,6 @@
 //! But note that we don't test any of this right now.
 //!
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
-//! [`Timeline::reconcile_with_remote`]: super::Timeline::reconcile_with_remote
 
 mod delete;
 mod download;
