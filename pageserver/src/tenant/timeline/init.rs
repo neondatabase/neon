@@ -177,7 +177,8 @@ pub(super) fn cleanup_local_file_for_remote(
     let local_size = local.file_size();
     let remote_size = remote.file_size();
 
-    tracing::warn!("removing local file {path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+    let file_name = path.file_name().expect("must be file path");
+    tracing::warn!("removing local file {file_name:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
     if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
         assert!(
             path.exists(),
