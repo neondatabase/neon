@@ -1,0 +1,219 @@
+
+# Crash-Consistent Layer Map Updates By Leveraging `index_part.json`
+
+* Created on: Aug 23, 2023
+* Author: Christian Schwarz
+
+## Summary
+
+This RFC describes a simple scheme to make layer map updates crash consistent by leveraging the `index_part.json` in remote storage.
+Without such a mechanism, crashes can induce certain edge cases in which broadly held assumptions about system invariants don't hold.
+
+## Motivation
+
+### Background
+
+We can currently easily make complex, atomic updates to the layer map by means of an RwLock.
+If we crash or restart pageserver, we reconstruct the layer map from:
+1. local timeline directory contents
+2. remote `index_part.json` contents.
+
+The function that is responsible for this is called `reconcile_with_remote()`.
+The reconciliation process's behavior is the following:
+* local-only files will become part of the layer map as local-only layers and rescheduled for upload
+* For a file name that, by its name, is present locally and in the remote `index_part.json`, but where the local file has a different size (future: checksum) than the remote file, we will delete the local file and leave the remote file as a `RemoteLayer` in the layer map.
+
+### The Problem
+
+There are are cases where we need to make an atomic update to the layer map that involves **more than one layer**.
+The best example is compaction, where we need to insert the L1 layers generated from the L0 layers, and remove the L0 layers.
+As stated above, making the update to the layer map in atomic way is trivial.
+But, there is no system call API to make an atomic update to a directory that involves more than one file rename and deletion.
+Currently, we issue the system calls one by one and hope we don't crash.
+
+What happens if we crash and restart in the middle of that system call sequence?
+We will reconstruct the layer map according to the reconciliation process, taking as input whatever transitory state the timeline directory ended up in.
+
+We cannot roll back or complete the timeline directory update during which we crashed, because we keep no record of the changes we plan to make.
+
+### Problem's Implications For Comapction
+
+The implications of the above are primarily problematic for compaction.
+Specifically, the part of it that compats L0 layers into L1 layers.
+
+* Recap: compaction takes a set of L0 layers and reshuffels the delta records in them into L1 layer files.
+  Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
+  It then deletes the L0 layers locally, and schedules an upload of the L1 layers and and updated index part.
+* If we crash before deleting L0s, but after writing out L1s, the next compaction after restart will re-digest the L0s and produce new L1s.
+  * This will produce the same L1s as before (same key & lsn range) iff the compaction algorithm remains unchanged.
+    * It means we're overwriting previously written L1s.
+    * If the contents are the same, that's generally unproblematic.
+    * If the contents are different, that's a violation of our assumptions in https://github.com/neondatabase/neon/pull/4919
+  * If the compaction algorithm is changed between restarts, then it may produce different L1s.
+    But the old L1s will still be in the layer map.
+    So, there will be old and new L1s, and a delta record from the L0s may be present twice, once in the old L1 and once in a new L1.
+* If we crash after having written out all the L1s and having deleted some but not all L0s, the next compaction run will likely produce L1s that are different than the compaction run before the crash.
+  The reason is that the inputs to the post-crash compact are a *subset* of pre-crash-L0s and some *new* post-crash L0s, i.e., new data.
+  * The data in the pre-crash-L0s that weren't deleted before the crash is now duplicated in the repository.
+  * If we're unlucky, and/or the compaction algorithm changed, post-crash compaction may produce L1s that have identical key & lsn range, but different contents.
+
+Basically, two things can happen:
+* there is duplicate data in the repository (it will eventually be turned into an image, so, that's a transient problem)
+* we can overwrite a layer file with same S3 key but a different set of delta records within it.
+
+The latter is a problem for the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919) which assumes that layer objects keys remain identical.
+In that RFC, if a stale node overwrites a layer file with a different content, and subsequently updates the index part, the earlier version of its `index_part.json` that the current not-stale node bases its world view on beocmes invalid.
+
+Technically, the split-brain RFC only requires equal content, not bit-for-bit equality.
+Also, technically, I'm not 100% certain that the *current* compaction algorithm will ever overwrite an L1 layer file with different contents.
+
+But, in any way, it's better to avoid making too much code dependent on details of the compaction code.
+**Let's instead re-establish the currently broadly-assumed invariant that layer files are written once and immutable, both locally and in S3.**
+
+## Design
+
+Instead of reonciling a layer map from local timeline directory contents and remote index part, this RFC proposed to view the remote index part as authoritative during timeline load.
+Local layer files will be recognized if they match what's listed in remote index part, and removed otherwise.
+
+During **timeline load**, the only thing that matter is the remote index part content.
+Essentially, timeline load becomes much like attach, except we don't need to prefix-list the remote timelines.
+The local timeline dir's `metadata` file does not matter.
+The layer files in the local timeline dir are seen as a nice-to-have cache of layer files that are in the remote index part.
+Any layer files in the local timeline dir that aren't in the remote index part are removed during startup.
+The `reconcile_with_remote()` no longer "merges" local timeline dir contents with the remote index part.
+Instead, it treats the remote index part as the authoritative layer map.
+If the local timeline dir contains a layer that is in the remote index part, that's nice, and we'll re-use it if file size (and in the future, check sum) match what's stated in the index part.
+If it doesn't match, we remove the file from the local timeline dir.
+
+After load, **at runtime**, nothing changes compared to what we did before this RFC.
+The procedure for single- and multi-object changes is reproduced here for reference:
+* For any new layers that the change adds:
+  * Write them to a temporary location.
+  * While holding layer map lock:
+    * Move them to the final location.
+    * Insert into layer map.
+* Make the S3 changes.
+  We won't reproduce the remote timeline client method calls here because these are subject to change.
+  Instead we reproduce the sequence of s3 changes that must result for a given single-/multi-object change:
+    * PUT layer files inserted by the change.
+    * PUT an index part that has insertions and deletions of the change.
+    * DELETE the layer files that are deleted by the change.
+      * With the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919), the deletions will be written to deletion queue instead of scheduled.
+
+## How This Solves The Problem
+
+If we crash before we've finished the S3 changes, then timeline load will reset layer map to the state that's in the S3 index part.
+The S3 change sequence above is obviously crash-consistent.
+If we crash before the index part PUT, then we leak the inserted layer files to S3.
+If we crash after the index part PUT, we leak the to-be-DELETEd layer files to S3.
+Leaking is fine, it's a pre-existing condition and not addressed in this RFC.
+
+Multi-object changes that previously created and removed files in timeline dir are now atomic because the layer map updates are atomic and crash consistent:
+* atomic layer map update at runtime, currently by using an RwLock in write mode
+* atomic `index_part.json` update in S3, as per guarantee that S3 PUT is atomic
+* local timeline dir state:
+  * irrelevant for layer map content => irrelevant for atomic updates / crash consistency
+  * if we crash after index part PUT, local layer files will be used, so, no on-demand downloads neede for them
+  * if we crash before index part PUT, local layer files will be deleted
+
+## Trade-Offs
+
+`disk_consistent_lsn` can go backwards across restarts if we crash before we've finished the index part PUT.
+Nobody should care about it, because the only thing that matters is `remote_consistent_lsn`.
+Compute certainly doesn't care about `disk_consistent_lsn`.
+
+If we crash before finishing the index part PUT, we have to re-do the work during restart:
+* wal ingest: losing not-yet-uploaded L0s; load on the **safekeepers** + work for pageserver
+* compaction: we lose the entire compaction iteration work; need to re-do it again
+* gc: no change to what we have today
+
+In comparison to the current reconciliation process, this means we will sometimes throw away needless work that was previously conserved.
+For example, if we crash after doing all the local changes but before _any_ remote S3 changes.
+Note however that the amount of work to be re-done after restart is capped to the lag of S3 changes to the local changes.
+That is something we can control and monitor for.
+
+Related, if the upload queue is clogged, _and_ we restart, we'll throw away the work that was stuck in the queue.
+
+What's probably most important though is the impact of this RFC on regular pageserver restart, e.g., during weekly deploys.
+In general, restart faces the problem of tenants that "take too long" to shut down.
+They are a problem because other tenants that shut down quickly are unavailble while we wait for the slow tenants to shut down.
+We currently allot 10 seconds for graceful shutdown until we SIGKILL the pageserver process (as per `pageserver.service` unit file).
+A longer budget would expose tenants that are done early to a longer downtime.
+A short budget would risk throwing away more work that'd have to be re-done after restart.
+In the context of this RFC, killing the process would mean losing the work that hasn't made it to S3.
+We can mitigate this problem as follows:
+0. initially, by accepting that we need to do the work again
+1. short-term, by introducing a read-only shutdown state for tenants that are fast to shut down; that state would be equivalent to the state of a tenant in hot standby / readonly mode.
+2. mid term, by not restarting pageserver in place, but using [*seamless tenant migration*](https://github.com/neondatabase/neon/pull/5029) to drain a pageserver's tenants before we restart it.
+
+## Side-Effects Of This Design
+
+* local `metadata` is basically reduced to a cache of which timelines exist for this tenant; i.e., we can avoid a `ListObjects` requests for a tenant's timelines during tenant load.
+
+## Limitations
+
+Multi-object changes that span multiple timelines aren't covered.
+We currently have:
+1. GC (but, it doesn't require atomicity across timelines, so, it doesn't really count)
+2. Timeline deletion (covered by `deleted_at` marker)
+
+## Impacted components
+
+Primarily pageservers.
+
+Safekeepers will experience more load when we need to re-ingest WAL because we've thrown away work.
+No changes to safekeepers are needed.
+
+## Alternatives considered
+
+### Alternative 1: WAL
+
+We could have a local WAL for timeline dir changes, as proposed here https://github.com/neondatabase/neon/issues/4418 and partially implemented here https://github.com/neondatabase/neon/pull/4422 .
+The WAL would be used to
+1. make multi-object changes atomic
+2. replace `reconcile_with_remote()` reconciliation: scheduling of layer upload would be part of WAL replay.
+
+The WAL is appealing in a local-first world, but, it's much more complex than the design described above:
+* New on-disk state to get right.
+* Forward- and backward-compatibility development costs in the future.
+
+### Alternative 2: Flow Everything Through `index_part.json`
+
+We could have gone to the other extreme and **only** update the layer map whenever we've PUT `index_part.json`.
+I.e., layer map would always be the last-persisted S3 state.
+That's axiomatically beautiful, not least because it fully separates the layer file production and consumption path (=> [layer file spreading proposal](https://www.notion.so/neondatabase/One-Pager-Layer-File-Spreading-Christian-eb6b64182a214e11b3fceceee688d843?pvs=4)).
+And it might make hot standbys / read-only pageservers less of a special case in the future.
+
+But, I have some uncertainties with regard to WAL ingestion, because it needs to be able to do some reads for the logical size feedback to safekeepers.
+
+And it's silly that we wouldn't be able to use the results of compaction or image layer generation before we're done with the upload.
+
+Lastly, a temporarily clogged-up upload queue (e.g. S3 is down) shouldn't immediately render ingestion unavailable.
+
+## Related issues
+
+- https://github.com/neondatabase/neon/issues/4749
+- https://github.com/neondatabase/neon/issues/4418
+  - https://github.com/neondatabase/neon/pull/4422
+- https://github.com/neondatabase/neon/issues/5077
+- https://github.com/neondatabase/neon/issues/4088
+  - (re)resolutions:
+    - https://github.com/neondatabase/neon/pull/4696
+    - https://github.com/neondatabase/neon/pull/4094
+      - https://neondb.slack.com/archives/C033QLM5P7D/p1682519017949719
+
+Note that the test case introduced in https://github.com/neondatabase/neon/pull/4696/files#diff-13114949d1deb49ae394405d4c49558adad91150ba8a34004133653a8a5aeb76 will produce L1s with the same logical content, but, as outlined in the last paragraph of the _Problem Statement_ section above, we don't want to make that  assumption in order to fix the problem.
+
+
+## Implementation Plan
+
+1. Remove support for `remote_storage=None`, because we now rely on the existence of an index part.
+
+    - The nasty part here is to fix all the tests that fiddle with the loca timeline directory.
+      Possibly they are just irrelevant with this change, but, each case will require inspection.
+
+2. Implement the design above.
+
+    - Initially, ship without the mitigations for restart and accept we will do some work twice.
+    - Measure the impact and implement one of the mitigations.
+
