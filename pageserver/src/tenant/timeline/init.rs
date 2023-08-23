@@ -22,7 +22,6 @@ pub(super) enum Discovered {
     Metadata,
     IgnoredBackup,
     Unknown(OsString),
-    // NonUtf8(std::ffi::OsString),
 }
 
 /// Scans the timeline directory for interesting files.
