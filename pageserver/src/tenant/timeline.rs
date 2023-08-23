@@ -1647,8 +1647,7 @@ impl Timeline {
                 }
 
                 if !unrecognized_files.is_empty() {
-                    // assume that if there are any which are not there because of debugging there
-                    // are many.
+                    // assume that if there are any there are many many.
                     let n = unrecognized_files.len();
                     let first = &unrecognized_files[..n.min(10)];
                     anyhow::bail!(
