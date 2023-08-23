@@ -1746,12 +1746,10 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
-            if !needs_upload.is_empty() {
-                for (layer, m) in needs_upload {
-                    rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
-                }
-                rtc.schedule_index_upload_for_file_changes()?;
+            for (layer, m) in needs_upload {
+                rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
+            rtc.schedule_index_upload_for_file_changes()?;
         }
 
         info!(
