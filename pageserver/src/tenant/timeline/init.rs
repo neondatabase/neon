@@ -140,6 +140,9 @@ pub(super) fn reconcile(
                 _ => false,
             };
 
+            // future image layers are allowed to be produced always for not yet flushed to disk
+            // lsns stored in InMemoryLayer.
+
             let decision = if is_in_future {
                 Err(FutureLayer { local })
             } else {
