@@ -826,7 +826,7 @@ impl Tenant {
             timeline_id,
             resources,
             Some(RemoteStartupData {
-                index_part: index_part,
+                index_part,
                 remote_metadata,
             }),
             local_metadata,
@@ -1320,7 +1320,7 @@ impl Tenant {
                         .map_err(LoadLocalTimelineError::Load)?;
                     (
                         Some(RemoteStartupData {
-                            index_part: index_part,
+                            index_part,
                             remote_metadata,
                         }),
                         Some(remote_client),
