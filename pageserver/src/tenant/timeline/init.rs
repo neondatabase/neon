@@ -100,6 +100,9 @@ pub(super) enum Decision {
 pub(super) struct FutureLayer;
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
+///
+/// This function should not gain additional reasons to fail than [`FutureLayer`], consider adding
+/// the checks earlier to [`scan_timeline_dir`].
 pub(super) fn recoincile(
     discovered: Vec<(LayerFileName, u64)>,
     index_part: Option<&IndexPart>,
