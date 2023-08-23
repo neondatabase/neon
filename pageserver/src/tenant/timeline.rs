@@ -1644,7 +1644,7 @@ impl Timeline {
                     path.pop();
                 }
 
-                let decided = init::recoincile(
+                let decided = init::reconcile(
                     discovered_layers,
                     index_part.as_deref(),
                     disk_consistent_lsn,

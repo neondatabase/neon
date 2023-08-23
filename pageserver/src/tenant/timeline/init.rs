@@ -103,7 +103,7 @@ pub(super) struct FutureLayer;
 ///
 /// This function should not gain additional reasons to fail than [`FutureLayer`], consider adding
 /// the checks earlier to [`scan_timeline_dir`].
-pub(super) fn recoincile(
+pub(super) fn reconcile(
     discovered: Vec<(LayerFileName, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
