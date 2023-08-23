@@ -455,9 +455,11 @@ impl Tenant {
                 .unwrap()
                 .init_upload_queue(index_part)?;
         } else if self.remote_storage.is_some() {
-            // No data on the remote storage, local metadata file. We might end up
-            // here with timeline_create right before restart. the timeline creation will be
-            // retried, and that http handler will wait for these uploads to complete.
+            // No data on the remote storage, but we have local metadata file. We can end up
+            // here with timeline_create being interrupted before finishing index part upload.
+            // By doing what we do here, the index part upload is retried.
+            // If control plane retries timeline creation in the meantime, the mgmt API handler
+            // for timeline creation will coalesce on the upload we queue here.
             let rtc = timeline.remote_client.as_ref().unwrap();
             rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
             rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
