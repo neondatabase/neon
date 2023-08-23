@@ -1601,8 +1601,7 @@ impl Timeline {
         disk_consistent_lsn: Lsn,
         index_part: Option<Arc<IndexPart>>,
     ) -> anyhow::Result<()> {
-        use init::Decision::*;
-        use init::Discovered;
+        use init::{Decision::*, Discovered, FutureLayer};
         use LayerFileName::*;
 
         let mut guard = self.layers.write().await;
@@ -1665,7 +1664,7 @@ impl Timeline {
                             UseRemote { local, remote }
                         }
                         Ok(decision) => decision,
-                        Err(_future_layer) => {
+                        Err(FutureLayer {}) => {
                             path.push(name.file_name());
                             init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
                             path.pop();
