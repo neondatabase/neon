@@ -141,13 +141,13 @@ pub(super) fn recoincile(
     discovered
         .into_iter()
         .map(|(name, (local, remote))| {
-            let future = match &name {
+            let is_in_future = match &name {
                 Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
                 Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
                 _ => false,
             };
 
-            let decision = if future {
+            let decision = if is_in_future {
                 Err(FutureLayer)
             } else {
                 Ok(match (local, remote) {
