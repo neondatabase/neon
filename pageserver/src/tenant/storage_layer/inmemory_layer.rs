@@ -238,7 +238,7 @@ impl InMemoryLayer {
     ///
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
-        Ok(inner.file.size())
+        Ok(inner.file.len())
     }
 
     ///
