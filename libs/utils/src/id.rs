@@ -244,13 +244,13 @@ id_newtype!(TenantId);
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
 /// See [`Id`] for alternative ways to serialize it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnectionId(Id);
 
 id_newtype!(ConnectionId);
 
 // A pair uniquely identifying Neon instance.
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct TenantTimelineId {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -270,6 +270,36 @@ impl TenantTimelineId {
 
     pub fn empty() -> Self {
         Self::new(TenantId::from([0u8; 16]), TimelineId::from([0u8; 16]))
+    }
+}
+
+impl Serialize for TenantTimelineId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for TenantTimelineId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        if let Some((tenant_part, timeline_part)) = str.split_once("/") {
+            Ok(Self {
+                tenant_id: TenantId(Id::from_hex(tenant_part).map_err(|e| {
+                    serde::de::Error::custom(format!("Malformed tenant in TenantTimelineId: {e}"))
+                })?),
+                timeline_id: TimelineId(Id::from_hex(timeline_part).map_err(|e| {
+                    serde::de::Error::custom(format!("Malformed timeline in TenantTimelineId {e}"))
+                })?),
+            })
+        } else {
+            Err(serde::de::Error::custom("Malformed TenantTimelineId"))
+        }
     }
 }
 
