@@ -86,14 +86,16 @@ pub(super) enum Decision {
     NeedsUpload(LayerFileMetadata),
 }
 
+/// The related layer is is in future compared to disk_consistent_lsn, it must not be loaded.
+#[derive(Debug)]
+pub(super) struct FutureLayer;
+
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
-///
-/// Decision of `None` means the layer needs to be filtered.
 pub(super) fn recoincile(
     discovered: Vec<(LayerFileName, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
-) -> Vec<(LayerFileName, Option<Decision>)> {
+) -> Vec<(LayerFileName, Result<Decision, FutureLayer>)> {
     use Decision::*;
     use LayerFileName::*;
 
@@ -133,11 +135,9 @@ pub(super) fn recoincile(
             };
 
             let decision = if future {
-                // trying not to add a unmatchable Decision variant; this could be a custom wrapper
-                // just as well, but None works.
-                None
+                Err(FutureLayer)
             } else {
-                Some(match (local, remote) {
+                Ok(match (local, remote) {
                     (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
                     (Some(x), Some(_)) => UseLocal(x),
                     (None, Some(x)) => Evicted(x),

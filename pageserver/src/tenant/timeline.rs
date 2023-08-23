@@ -1658,17 +1658,17 @@ impl Timeline {
                 let mut needs_upload = Vec::new();
                 let mut total_physical_size = 0;
 
-                for (name, maybe_decision) in decided {
-                    let decision = match maybe_decision {
-                        Some(UseRemote { local, remote }) => {
+                for (name, decision) in decided {
+                    let decision = match decision {
+                        Ok(UseRemote { local, remote }) => {
                             path.push(name.file_name());
                             init::cleanup_local_file_for_remote(&path, &local, &remote)?;
                             path.pop();
 
                             UseRemote { local, remote }
                         }
-                        Some(decision) => decision,
-                        None => {
+                        Ok(decision) => decision,
+                        Err(_future_layer) => {
                             path.push(name.file_name());
                             init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
                             path.pop();
