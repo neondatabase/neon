@@ -25,8 +25,9 @@ However, there is always the risk of a control plane bug.
 
 Futher, lack of safety during split-brain conditions blocks two important features where occasional
 split-brain conditions are part of the design assumptions:
-* seamless tenant migration ([RFC PR](https://github.com/neondatabase/neon/pull/5029))
-* automatic pageserver instance failure handling (aka "failover") (RFC TBD)
+
+- seamless tenant migration ([RFC PR](https://github.com/neondatabase/neon/pull/5029))
+- automatic pageserver instance failure handling (aka "failover") (RFC TBD)
 
 ### Prior art
 
@@ -45,8 +46,8 @@ always has the same lifetime as a pageserver process and/or tenant attachment.
   S3's limitation that there are no atomics and clients can't be fenced)
 - Don't depend on any STONITH or node fencing in the compute layer (i.e. we will not
   assume that we can reliably kill and EC2 instance and have it die)
-- Scoped per-tenant, not per-pageserver; for *seamless tenant migration*, we need
-  per-tenant granularity, and for *failover*, we likely want to spread the workload
+- Scoped per-tenant, not per-pageserver; for _seamless tenant migration_, we need
+  per-tenant granularity, and for _failover_, we likely want to spread the workload
   of the failed pageserver instance to a number of peers, rather than monolithically
   moving the entire workload to another machine.
   We do not rule out the latter case, but should not constrain ourselves to it.
@@ -61,7 +62,8 @@ These are not requirements, but are ideas that guide the following design:
 - Avoiding locking in to specific models of how failover will work (e.g. do not assume that
   all the tenants on a pageserver will fail over as a unit).
 - Avoid doing synchronization that scales with the number of tenants, unless absolutely
-  necessary.
+  necessary. For example, a pageserver should be able to start up without having to
+  have each tenant individually re-attached.
 - Be strictly correct when it comes to data integrity. Occasional failures of availability
   are tolerable, occasional data loss is not.
 
@@ -78,6 +80,8 @@ This RFC intentionally does not cover:
 - Standby modes to keep data ready for fast migration
 - Intentional multi-writer operation on tenants (multi-writer scenarios are assumed to be transient split-brain situations).
 - Sharding.
+
+The interaction between this RFC and those features is discussed in [Appendix B](#appendix-b-interoperability-with-other-features)
 
 ## Impacted Components
 
@@ -977,6 +981,42 @@ Old pageservers will be oblivious to generation numbers. That means that they ca
 read objects with generation numbers in the name. This is why we must
 first step must deploy the ability to read, before the second step
 starts writing them.
+
+# Frequently Asked Questions
+
+## Can't we do without the separate node generation?
+
+Eventually yes, but in the current control plane design it is convenient to build
+our suffix from a tuple of node generation and attachment generation.
+
+The storage format in [object keys](#object-key-changes) only
+uses a single u64 suffix, so the idea of multiple node generations is not encoded
+into how we store data.
+
+Generating those suffixes from the tuple of (attach_gen, node_id, node_gen) enables
+us to avoid centrally updating per-attachment generation numbers each time a node
+restarts. In future, we may move to a model where attachments are explicitly
+per-process-lifetime (see [ephemeral node IDs](#ephemeral-node-ids)) -- at that point,
+without changing the storage format, we may eliminate the concept of node generations.
+
+## Wouldn't it be simpler to have a separate deletion queue per tenant?
+
+We could. That's how RemoteTimelineClient currently works, but this approach does not map
+well to a long-lived persistent queue with generation validation:
+
+- Load on the control plane from validations would be much higher if we are sending
+  one request per timeline, rather than a batched request. Because generation validation
+  is a small read transaction to the control plane database, these requests will be dominated
+  by per-request overhead & benefit a lot from batching.
+- Writing deletion queues per-timeline either bloats the index_part with an inline
+  deletion queue, or incurs extra small PUTs per timeline (bear in mind we expect
+  many thousands of timelines) to maintain separate queues for each one.
+- If there are deletions pending for a timeline, but the timeline is idle and we
+  would like to detach it or put it into a "sleep" state to save resources, then
+  it is helpful to have offloaded deletions into a queue that will no go to sleep
+  with the tenant.
+- The recovery/replay of the deletion queue at startup is more expensive to do
+  across thousands of individual queues than for one queue.
 
 # Appendix A: Examples of use in high availability/failover
 
