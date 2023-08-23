@@ -166,7 +166,7 @@ pub(super) fn cleanup(path: &Path, kind: &str) -> anyhow::Result<()> {
     let file_name = path.file_name().expect("must be file path");
     tracing::debug!(kind, ?file_name, "cleaning up");
     std::fs::remove_file(path)
-        .with_context(|| format!("failed to remove temp download file at {}", path.display()))
+        .with_context(|| format!("failed to remove {kind} at {}", path.display()))
 }
 
 pub(super) fn cleanup_local_file_for_remote(
