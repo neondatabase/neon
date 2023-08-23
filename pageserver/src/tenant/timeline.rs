@@ -1586,9 +1586,7 @@ impl Timeline {
         ));
     }
 
-    ///
     /// Initialize with an empty layer map. Used when creating a new timeline.
-    ///
     pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
         let mut layers = self.layers.try_write().expect(
             "in the context where we call this function, no other task has access to the object",
@@ -1596,9 +1594,8 @@ impl Timeline {
         layers.initialize_empty(Lsn(start_lsn.0));
     }
 
-    ///
-    /// Scan the timeline directory to populate the layer map.
-    ///
+    /// Scan the timeline directory, cleanup, populate the layer map, and schedule uploads for local-only
+    /// files.
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
