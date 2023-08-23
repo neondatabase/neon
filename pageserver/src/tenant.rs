@@ -447,7 +447,6 @@ impl Tenant {
 
         let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
 
-        // FIXME: it seems that we shouldn't have "mutable init" for RemoteTimelineClient either
         if let Some(index_part) = index_part {
             timeline
                 .remote_client
