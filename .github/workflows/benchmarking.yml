@@ -253,7 +253,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [ "${PLATFORM}" = "neon"* ]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -378,7 +382,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [ "${PLATFORM}" = "neon"* ]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -478,7 +486,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [ "${PLATFORM}" = "neon"* ]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -564,7 +576,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [ "${PLATFORM}" = "neon"* ]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
