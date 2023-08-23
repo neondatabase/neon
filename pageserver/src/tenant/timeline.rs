@@ -1685,7 +1685,6 @@ impl Timeline {
 
                     let stats = LayerAccessStats::for_loading_layer(status);
 
-                    // this is not that much code, but we but rustfmt does not enjoy it
                     let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
                         (Delta(d), UseLocal(m) | NeedsUpload(m)) => {
                             total_physical_size += m.file_size();
