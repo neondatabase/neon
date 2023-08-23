@@ -183,6 +183,7 @@ lfc_shmem_request(void)
 #endif
 
 	lfc_max_size = Min(lfc_max_size, lfc_max_mem);
+	lfc_size_limit = Min(lfc_size_limit, lfc_max_mem);
 	RequestAddinShmemSpace(sizeof(FileCacheControl) + lfc_max_size*MB + CHUNK_SIZE + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size)+1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
