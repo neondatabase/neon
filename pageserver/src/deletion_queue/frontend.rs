@@ -122,9 +122,7 @@ impl FrontendQueueWorker {
     /// This does not return errors, because on failure to flush we do not lose
     /// any state: flushing will be retried implicitly on the next deadline
     async fn flush(&mut self) {
-        if self.pending.objects.is_empty() {
-            // We do not expect to be called in this state, but handle it so that later
-            // logging code can be assured that therre is always a first+last key to print
+        if self.pending.is_empty() {
             for f in self.pending_flushes.drain(..) {
                 f.fire();
             }
@@ -133,18 +131,7 @@ impl FrontendQueueWorker {
 
         match self.upload_pending_list().await {
             Ok(_) => {
-                info!(
-                    sequence = self.pending.sequence,
-                    "Stored deletion list ({0}..{1})",
-                    self.pending
-                        .objects
-                        .first()
-                        .expect("list should be non-empty"),
-                    self.pending
-                        .objects
-                        .last()
-                        .expect("list should be non-empty"),
-                );
+                info!(sequence = self.pending.sequence, "Stored deletion list");
 
                 for f in self.pending_flushes.drain(..) {
                     f.fire();
@@ -300,7 +287,7 @@ impl FrontendQueueWorker {
 
             // We will drop out of recovery if this fails: it indicates that we are shutting down
             // or the backend has panicked
-            DELETION_QUEUE_SUBMITTED.inc_by(deletion_list.objects.len() as u64);
+            DELETION_QUEUE_SUBMITTED.inc_by(deletion_list.len() as u64);
             self.tx
                 .send(BackendQueueMessage::Delete(deletion_list))
                 .await?;
@@ -358,12 +345,13 @@ impl FrontendQueueWorker {
             match msg {
                 FrontendQueueMessage::Delete(op) => {
                     debug!(
-                        "Deletion enqueue {0} layers, {1} other objects",
+                        "Delete: ingesting {0} layers, {1} other objects",
                         op.layers.len(),
                         op.objects.len()
                     );
 
                     let timeline_path = self.conf.timeline_path(&op.tenant_id, &op.timeline_id);
+                    let mut layer_paths = Vec::new();
                     for layer in op.layers {
                         // TODO go directly to remote path without composing local path
                         let local_path = timeline_path.join(layer.file_name());
@@ -373,22 +361,27 @@ impl FrontendQueueWorker {
                                 panic!("Can't make a timeline path! {e}");
                             }
                         };
-                        self.pending.objects.push(path);
+                        layer_paths.push(path);
                     }
 
-                    self.pending.objects.extend(op.objects.into_iter())
+                    self.pending
+                        .push(&op.tenant_id, &op.timeline_id, layer_paths);
+                    self.pending
+                        .push(&op.tenant_id, &op.timeline_id, op.objects);
                 }
                 FrontendQueueMessage::Flush(op) => {
                     if self.pending.objects.is_empty() {
                         // Execute immediately
-                        debug!("No pending objects, flushing immediately");
+                        debug!("Flush: No pending objects, flushing immediately");
                         op.fire()
                     } else {
                         // Execute next time we flush
+                        debug!("Flush: adding to pending flush list for next deadline flush");
                         self.pending_flushes.push(op);
                     }
                 }
                 FrontendQueueMessage::FlushExecute(op) => {
+                    debug!("FlushExecute: passing through to backend");
                     // We do not flush to a deletion list here: the client sends a Flush before the FlushExecute
                     if let Err(e) = self.tx.send(BackendQueueMessage::Flush(op)).await {
                         info!("Can't flush, shutting down ({e})");

@@ -131,30 +131,34 @@ impl BackendQueueWorker {
     }
 
     pub async fn flush(&mut self) {
-        let mut onward_lists: Vec<DeletionList> = Vec::new();
-        std::mem::swap(&mut onward_lists, &mut self.pending_lists);
-        for list in onward_lists {
-            let objects = list.objects.clone();
-            // TODO: a take_objects method
-            self.executed_lists.push(list);
+        self.pending_key_count = 0;
+
+        // Submit all keys from pending DeletionLists into the executor
+        for list in &mut self.pending_lists {
+            let objects = list.take_paths();
             if let Err(_e) = self.tx.send(ExecutorMessage::Delete(objects)).await {
                 warn!("Shutting down");
                 return;
             };
         }
 
+        // Flush the executor to ensure all the operations we just submitted have been executed
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let flush_op = FlushOp { tx };
         if let Err(_e) = self.tx.send(ExecutorMessage::Flush(flush_op)).await {
             warn!("Shutting down");
             return;
         };
-
         if rx.await.is_err() {
             warn!("Shutting down");
             return;
         }
 
+        // After flush, we are assured that all contents of the pending lists
+        // are executed
+        self.executed_lists.append(&mut self.pending_lists);
+
+        // Erase the lists we executed
         self.cleanup_lists().await;
     }
 
@@ -184,15 +188,6 @@ impl BackendQueueWorker {
 
             match msg {
                 BackendQueueMessage::Delete(list) => {
-                    if list.objects.is_empty() {
-                        // This shouldn't happen, but is harmless.  warn so that
-                        // tests will fail if we have such a bug, but proceed with
-                        // processing subsequent messages.
-                        warn!("Empty DeletionList passed to deletion backend");
-                        self.executed_lists.push(list);
-                        continue;
-                    }
-
                     self.pending_key_count += list.objects.len();
                     self.pending_lists.push(list);
 

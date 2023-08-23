@@ -2,6 +2,8 @@ mod backend;
 mod executor;
 mod frontend;
 
+use std::collections::HashMap;
+
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
@@ -11,7 +13,7 @@ use thiserror::Error;
 use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error};
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 pub(crate) use self::backend::BackendQueueWorker;
 use self::executor::ExecutorWorker;
@@ -88,6 +90,14 @@ pub struct DeletionQueueClient {
     executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct TimelineDeletionList {
+    objects: Vec<RemotePath>,
+    // TODO: Tenant attachment generation will go here
+    // (see https://github.com/neondatabase/neon/pull/4919)
+    // attach_gen: u32,
+}
+
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionList {
@@ -97,9 +107,12 @@ struct DeletionList {
     /// Used for constructing a unique key for each deletion list we write out.
     sequence: u64,
 
-    /// These objects are elegible for deletion: they are unlinked from timeline metadata, and
-    /// we are free to delete them at any time from their presence in this data structure onwards.
-    objects: Vec<RemotePath>,
+    /// To avoid repeating tenant/timeline IDs in every key, we store keys in
+    /// nested HashMaps by TenantTimelineID
+    objects: HashMap<TenantTimelineId, TimelineDeletionList>,
+    // TODO: Node generation will go here
+    // (see https://github.com/neondatabase/neon/pull/4919)
+    // node_gen: u32,
 }
 
 #[serde_as]
@@ -134,8 +147,41 @@ impl DeletionList {
         Self {
             version: Self::VERSION_LATEST,
             sequence,
-            objects: Vec::new(),
+            objects: HashMap::new(),
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.objects.values().map(|v| v.objects.len()).sum()
+    }
+
+    fn push(&mut self, tenant: &TenantId, timeline: &TimelineId, mut objects: Vec<RemotePath>) {
+        if objects.is_empty() {
+            // Avoid inserting an empty TimelineDeletionList: this preserves the property
+            // that if we have no keys, then self.objects is empty (used in Self::is_empty)
+            return;
+        }
+
+        let key = TenantTimelineId::new(tenant.clone(), timeline.clone());
+        let entry = self
+            .objects
+            .entry(key)
+            .or_insert_with(|| TimelineDeletionList {
+                objects: Vec::new(),
+            });
+        entry.objects.append(&mut objects)
+    }
+
+    fn take_paths(&mut self) -> Vec<RemotePath> {
+        self.objects
+            .drain()
+            .map(|(_k, v)| v.objects.into_iter())
+            .flatten()
+            .collect()
     }
 }
 
