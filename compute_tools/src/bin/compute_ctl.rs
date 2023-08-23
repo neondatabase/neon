@@ -338,7 +338,9 @@ fn main() -> Result<()> {
     cfg_if::cfg_if! {
         if #[cfg(target_os = "linux")] {
             if let Some(handle) = vm_monitor {
+                // Kills all threads spawned by the monitor
                 token.cancel();
+                // Kills the actual task running the monitor
                 handle.abort();
 
                 // If handle is some, rt must have been used to produce it, and
