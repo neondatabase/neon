@@ -1599,7 +1599,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<Arc<IndexPart>>,
+        index_part: Option<IndexPart>,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, FutureLayer};
         use LayerFileName::*;
@@ -1655,11 +1655,8 @@ impl Timeline {
                     );
                 }
 
-                let decided = init::reconcile(
-                    discovered_layers,
-                    index_part.as_deref(),
-                    disk_consistent_lsn,
-                );
+                let decided =
+                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_upload = Vec::new();
