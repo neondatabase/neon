@@ -119,7 +119,7 @@ pub(super) fn recoincile(
         .map(|(name, file_size)| (name, (Some(LayerFileMetadata::new(file_size)), None)))
         .collect::<Collected>();
 
-    // merge any index_part information, if we would have such
+    // merge any index_part information, when available
     index_part
         .as_ref()
         .map(|ip| ip.layer_metadata.iter())
@@ -134,8 +134,9 @@ pub(super) fn recoincile(
             }
         });
 
-    // must not use the index_part presence here as a proxy for remote timeline client
-    // it might be that we have local file(s), but the index upload was stopped with failpoint
+    // must not use the index_part presence here as a proxy for remote timeline client. it might be
+    // that we have local file(s), but the index upload was stopped with failpoint. See #5075 and
+    // search for related TODO; this will need to change.
 
     discovered
         .into_iter()
