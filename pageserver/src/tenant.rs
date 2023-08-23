@@ -423,14 +423,14 @@ impl Tenant {
             CreateTimelineCause::Load,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
-        assert_eq!(
-            disk_consistent_lsn,
-            up_to_date_metadata.disk_consistent_lsn(),
-            "these are used interchangeably; need to move layer map loading before Timeline creation to avoid drifting"
-        );
         anyhow::ensure!(
             disk_consistent_lsn.is_valid(),
             "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
+        );
+        assert_eq!(
+            disk_consistent_lsn,
+            up_to_date_metadata.disk_consistent_lsn(),
+            "these are used interchangeably"
         );
 
         let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
