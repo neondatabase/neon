@@ -14,13 +14,21 @@ use anyhow::Context;
 use std::{collections::HashMap, ffi::OsString, path::Path, str::FromStr};
 use utils::lsn::Lsn;
 
+/// Identified files in the timeline directory.
 pub(super) enum Discovered {
+    /// The only one we care about
     Layer(LayerFileName, u64),
+    /// Old ephmeral files from previous launches, should be removed
     Ephemeral(OsString),
+    /// Old temporary timeline files, unsure what these really are, should be removed
     Temporary(OsString),
+    /// Temporary on-demand download files, should be removed
     TemporaryDownload(OsString),
+    /// "metadata" file we persist locally and include in `index_part.json`
     Metadata,
+    /// Backup file from previously future layers
     IgnoredBackup,
+    /// Unrecognized, warn about these
     Unknown(OsString),
 }
 
@@ -70,6 +78,7 @@ pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> 
     Ok(ret)
 }
 
+/// Decision on what to do with a layer file after considering it's local and remote metadata.
 #[derive(Clone)]
 pub(super) enum Decision {
     /// The layer is not present locally.
