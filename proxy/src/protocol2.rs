@@ -91,85 +91,72 @@ const IPV4: u8 = 1;
 const IPV6: u8 = 2;
 
 impl<T: AsyncRead> WithClientIp<T> {
-    fn fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>, len: usize) -> Poll<io::Result<bool>> {
-        let mut this = self.project();
-        while this.buf.len() < len {
-            // read_buf is cancel safe
-            if ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?) == 0 {
-                return Poll::Ready(Ok(false));
-            }
-        }
-        Poll::Ready(Ok(true))
-    }
-
     fn poll_client_ip(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<Option<SocketAddr>>> {
-        loop {
-            match self.state {
-                ProxyParse::NotStarted => {
-                    if self.buf.len() < 12 {
-                        // exit early for bad header
-                        if self.buf != HEADER[..self.buf.len()] {
-                            *self.as_mut().project().state = ProxyParse::None;
-                            continue;
-                        }
-                        if !ready!(self.as_mut().fill_buf(cx, 16)?) {
-                            *self.as_mut().project().state = ProxyParse::None;
-                            continue;
-                        };
-                    }
+        while self.buf.len() <= 16 {
+            let mut this = self.as_mut().project();
+            let bytes_read = pin!(this.inner.read_buf(this.buf)).poll(cx)?;
 
-                    if self.buf[..12] != HEADER {
-                        *self.as_mut().project().state = ProxyParse::None;
-                        continue;
-                    }
+            // exit for bad header
+            let len = usize::min(self.buf.len(), HEADER.len());
+            if self.buf[..len] != HEADER[..len] {
+                *self.as_mut().project().state = ProxyParse::None;
+                return Poll::Ready(Ok(None));
+            }
 
-                    let family = self.buf[13] >> 4;
-                    let ip_bytes = match family {
-                        // 2 IPV4s and 2 ports
-                        IPV4 => (4 + 2) * 2,
-                        // 2 IPV6s and 2 ports
-                        IPV6 => (16 + 2) * 2,
-                        _ => 0,
-                    };
+            // if no more bytes available then exit
+            if ready!(bytes_read) == 0 {
+                *self.as_mut().project().state = ProxyParse::None;
+                return Poll::Ready(Ok(None));
+            };
+        }
 
-                    if !ready!(self.as_mut().fill_buf(cx, 16 + ip_bytes)?) {
-                        *self.as_mut().project().state = ProxyParse::None;
-                        continue;
-                    }
+        let family = self.buf[13] >> 4;
+        let ip_bytes = match family {
+            // 2 IPV4s and 2 ports
+            IPV4 => (4 + 2) * 2,
+            // 2 IPV6s and 2 ports
+            IPV6 => (16 + 2) * 2,
+            _ => 0,
+        };
 
-                    let length = u16::from_be_bytes(self.buf[14..16].try_into().unwrap()) as usize;
-
-                    let this = self.as_mut().project();
-                    *this.state = match family {
-                        // 2 IPV4s and 2 ports
-                        IPV4 if length >= ip_bytes => {
-                            *this.tlv_bytes = length - ip_bytes;
-                            let buf = this.buf.split_to(16 + ip_bytes);
-                            let src_addr: [u8; 4] = buf[16..20].try_into().unwrap();
-                            let src_port = u16::from_be_bytes(buf[24..26].try_into().unwrap());
-                            ProxyParse::Finished(SocketAddr::from((src_addr, src_port)))
-                        }
-                        IPV6 if length >= ip_bytes => {
-                            *this.tlv_bytes = length - ip_bytes;
-                            let buf = this.buf.split_to(16 + ip_bytes);
-                            let src_addr: [u8; 16] = buf[16..32].try_into().unwrap();
-                            let src_port = u16::from_be_bytes(buf[48..50].try_into().unwrap());
-                            ProxyParse::Finished(SocketAddr::from((src_addr, src_port)))
-                        }
-                        _ => ProxyParse::None,
-                    };
-
-                    let discard = usize::min(*this.tlv_bytes, this.buf.len());
-                    *this.tlv_bytes -= discard;
-                    this.buf.advance(discard);
-                }
-                ProxyParse::Finished(ip) => break Poll::Ready(Ok(Some(ip))),
-                ProxyParse::None => break Poll::Ready(Ok(None)),
+        while self.buf.len() < 16 + ip_bytes {
+            let mut this = self.as_mut().project();
+            if ready!(pin!(this.inner.read_buf(this.buf)).poll(cx)?) == 0 {
+                *self.as_mut().project().state = ProxyParse::None;
+                return Poll::Ready(Ok(None));
             }
         }
+
+        let length = u16::from_be_bytes(self.buf[14..16].try_into().unwrap()) as usize;
+
+        let this = self.as_mut().project();
+        let socket = match family {
+            // 2 IPV4s and 2 ports
+            IPV4 if length >= ip_bytes => {
+                *this.tlv_bytes = length - ip_bytes;
+                let buf = this.buf.split_to(16 + ip_bytes);
+                let src_addr: [u8; 4] = buf[16..20].try_into().unwrap();
+                let src_port = u16::from_be_bytes(buf[24..26].try_into().unwrap());
+                Some(SocketAddr::from((src_addr, src_port)))
+            }
+            IPV6 if length >= ip_bytes => {
+                *this.tlv_bytes = length - ip_bytes;
+                let buf = this.buf.split_to(16 + ip_bytes);
+                let src_addr: [u8; 16] = buf[16..32].try_into().unwrap();
+                let src_port = u16::from_be_bytes(buf[48..50].try_into().unwrap());
+                Some(SocketAddr::from((src_addr, src_port)))
+            }
+            _ => None,
+        };
+
+        let discard = usize::min(*this.tlv_bytes, this.buf.len());
+        *this.tlv_bytes -= discard;
+        this.buf.advance(discard);
+
+        Poll::Ready(Ok(socket))
     }
 }
 
@@ -179,10 +166,13 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.state {
-            ProxyParse::Finished(_) | ProxyParse::None => None,
-            _ => ready!(self.as_mut().poll_client_ip(cx)?),
-        };
+        if let ProxyParse::NotStarted = self.state {
+            let ip = ready!(self.as_mut().poll_client_ip(cx)?);
+            match ip {
+                Some(x) => *self.as_mut().project().state = ProxyParse::Finished(x),
+                None => *self.as_mut().project().state = ProxyParse::None,
+            }
+        }
 
         let mut this = self.project();
 
@@ -203,6 +193,8 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
             let write = usize::min(this.buf.len(), buf.remaining());
             let slice = this.buf.split_to(write).freeze();
             buf.put_slice(&slice);
+
+            return Poll::Ready(Ok(()));
         }
 
         if this.buf.is_empty() {
