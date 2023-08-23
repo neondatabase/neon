@@ -1675,11 +1675,17 @@ impl Timeline {
                             UseRemote { local, remote }
                         }
                         Ok(decision) => decision,
-                        Err(FutureLayer {}) => {
-                            path.push(name.file_name());
-                            init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
-                            path.pop();
-                            // no futher processing possible
+                        Err(FutureLayer { local }) => {
+                            if local.is_some() {
+                                path.push(name.file_name());
+                                init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
+                                path.pop();
+                            } else {
+                                // we cannot do anything for remote layers, but not continuing to
+                                // process it will leave it out index_part.json as well.
+                            }
+                            //
+                            // we do not currently schedule deletions for these.
                             continue;
                         }
                     };

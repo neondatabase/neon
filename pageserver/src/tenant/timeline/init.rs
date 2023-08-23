@@ -91,7 +91,10 @@ pub(super) enum Decision {
 
 /// The related layer is is in future compared to disk_consistent_lsn, it must not be loaded.
 #[derive(Debug)]
-pub(super) struct FutureLayer;
+pub(super) struct FutureLayer {
+    /// The local metadata. `None` if the layer is only known through [`IndexPart`].
+    pub(super) local: Option<LayerFileMetadata>,
+}
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
 ///
@@ -142,7 +145,7 @@ pub(super) fn reconcile(
             };
 
             let decision = if is_in_future {
-                Err(FutureLayer)
+                Err(FutureLayer { local })
             } else {
                 Ok(match (local, remote) {
                     (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
