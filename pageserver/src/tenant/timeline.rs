@@ -4652,7 +4652,8 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     for i in 0u32.. {
         new_path.set_file_name(format!("{filename}.{i}.old"));
         if !new_path.exists() {
-            std::fs::rename(path, &new_path)?;
+            std::fs::rename(path, &new_path)
+                .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
             return Ok(());
         }
     }
