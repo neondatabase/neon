@@ -388,10 +388,10 @@ generation minus 1. However, this might not be the case: the previous
 node might have started and acquired a generation number, and then crashed
 before writing out a remote index.
 
-In the general case and as a fallback, the pageserver may list all the index*part.json
-files for a timeline, sort them by generation suffix, and pick the highest that is <=
-the suffix for its current generation numbers. The tenant should never load an index
-with an attachment generation \_newer* than its own: tenants
+In the general case and as a fallback, the pageserver may list all the `index_part.json`
+files for a timeline, sort them by generation, and pick the highest that is `<=`
+its current generation for this attachment. The tenant should never load an index
+with an attachment generation _newer_ than its own: tenants
 are allowed to be attached with stale attachment generations during a multiply-attached
 phase in a migration, and in this instance if the old location's pageserver restarts,
 it should not try and load the newer generation's index.
