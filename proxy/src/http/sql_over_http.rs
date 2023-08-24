@@ -15,9 +15,13 @@ use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
+use tokio_postgres::Client;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
+use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Row;
+use tokio_postgres::Statement;
+use tokio_postgres::Transaction;
 use tracing::error;
 use tracing::instrument;
 use url::Url;
@@ -36,6 +40,19 @@ struct QueryData {
     params: Vec<serde_json::Value>,
 }
 
+impl QueryData {
+    async fn into_statement(self, client: &Client) -> anyhow::Result<StatementData> {
+        let stmt = client.prepare(&self.query).await?;
+        let params = json_to_pg_text(self.params)?;
+        Ok(StatementData { stmt, params })
+    }
+}
+
+struct StatementData {
+    stmt: Statement,
+    params: Vec<Option<String>>,
+}
+
 #[derive(serde::Deserialize)]
 struct BatchQueryData {
     queries: Vec<QueryData>,
@@ -46,6 +63,11 @@ struct BatchQueryData {
 enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
+}
+
+enum PreparedPayload {
+    Single(StatementData),
+    Batch(Vec<StatementData>),
 }
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
@@ -59,6 +81,10 @@ static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only
 static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+static HEADER_SERIALIZABLE: HeaderValue = HeaderValue::from_static("Serializable");
+static HEADER_READ_UNCOMITTED: HeaderValue = HeaderValue::from_static("ReadUncommitted");
+static HEADER_READ_COMITTED: HeaderValue = HeaderValue::from_static("ReadCommitted");
+static HEADER_REPEATABLE_READ: HeaderValue = HeaderValue::from_static("RepeatableRead");
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -307,6 +333,21 @@ async fn handle_inner(
 
     let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
+    // Prepare the statements
+    let prepared = match payload {
+        Payload::Single(query) => query
+            .into_statement(&client)
+            .await
+            .map(PreparedPayload::Single)?,
+        Payload::Batch(batch_query) => {
+            let mut statements = Vec::with_capacity(batch_query.queries.len());
+            for query in batch_query.queries {
+                statements.push(query.into_statement(&client).await?);
+            }
+            PreparedPayload::Batch(statements)
+        }
+    };
+
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
@@ -315,96 +356,130 @@ async fn handle_inner(
     // Now execute the query and return the result
     //
     let mut size = 0;
-    let result = match payload {
-        Payload::Single(query) => {
-            query_to_json(&client.inner, query, &mut size, raw_output, array_mode).await
-        }
-        Payload::Batch(batch_query) => {
-            let mut results = Vec::new();
-            let mut builder = client.inner.build_transaction();
-            if let Some(isolation_level) = txn_isolation_level {
-                builder = builder.isolation_level(isolation_level);
+    let result =
+        match prepared {
+            PreparedPayload::Single(stmt) => {
+                let (status, results) =
+                    query_to_json(&*client, stmt, &mut size, raw_output, array_mode)
+                        .await
+                        .map_err(|e| {
+                            client.discard();
+                            e
+                        })?;
+                client.check_idle(status);
+                results
             }
-            if txn_read_only {
-                builder = builder.read_only(true);
-            }
-            if txn_deferrable {
-                builder = builder.deferrable(true);
-            }
-            let transaction = builder.start().await?;
-            for query in batch_query.queries {
-                let result =
-                    query_to_json(&transaction, query, &mut size, raw_output, array_mode).await;
-                match result {
-                    Ok(r) => results.push(r),
-                    Err(e) => {
-                        transaction.rollback().await?;
-                        return Err(e);
-                    }
+            PreparedPayload::Batch(statements) => {
+                let (inner, mut discard) = client.inner();
+                let mut builder = inner.build_transaction();
+                if let Some(isolation_level) = txn_isolation_level {
+                    builder = builder.isolation_level(isolation_level);
                 }
+                if txn_read_only {
+                    builder = builder.read_only(true);
+                }
+                if txn_deferrable {
+                    builder = builder.deferrable(true);
+                }
+
+                let transaction = builder.start().await.map_err(|e| {
+                    // if we cannot start a transaction, we should return immediately
+                    // and not return to the pool. connection is clearly broken
+                    discard.discard();
+                    e
+                })?;
+
+                let results =
+                    match query_batch(&transaction, statements, &mut size, raw_output, array_mode)
+                        .await
+                    {
+                        Ok(results) => {
+                            let status = transaction.commit().await.map_err(|e| {
+                                // if we cannot commit - for now don't return connection to pool
+                                // TODO: get a query status from the error
+                                discard.discard();
+                                e
+                            })?;
+                            discard.check_idle(status);
+                            results
+                        }
+                        Err(err) => {
+                            let status = transaction.rollback().await.map_err(|e| {
+                                // if we cannot rollback - for now don't return connection to pool
+                                // TODO: get a query status from the error
+                                discard.discard();
+                                e
+                            })?;
+                            discard.check_idle(status);
+                            return Err(err);
+                        }
+                    };
+
+                if txn_read_only {
+                    response = response.header(
+                        TXN_READ_ONLY.clone(),
+                        HeaderValue::try_from(txn_read_only.to_string())?,
+                    );
+                }
+                if txn_deferrable {
+                    response = response.header(
+                        TXN_DEFERRABLE.clone(),
+                        HeaderValue::try_from(txn_deferrable.to_string())?,
+                    );
+                }
+                if let Some(txn_isolation_level) = txn_isolation_level_raw {
+                    response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
+                }
+                json!({ "results": results })
             }
-            transaction.commit().await?;
-            if txn_read_only {
-                response = response.header(
-                    TXN_READ_ONLY.clone(),
-                    HeaderValue::try_from(txn_read_only.to_string())?,
-                );
-            }
-            if txn_deferrable {
-                response = response.header(
-                    TXN_DEFERRABLE.clone(),
-                    HeaderValue::try_from(txn_deferrable.to_string())?,
-                );
-            }
-            if let Some(txn_isolation_level) = txn_isolation_level_raw {
-                response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
-            }
-            Ok(json!({ "results": results }))
-        }
-    };
+        };
 
     let metrics = client.metrics();
 
-    if allow_pool {
-        let current_span = tracing::Span::current();
-        // return connection to the pool
-        tokio::task::spawn_blocking(move || {
-            let _span = current_span.enter();
-            let _ = conn_pool.put(&conn_info, client);
-        });
-    }
+    // how could this possibly fail
+    let body = serde_json::to_string(&result).expect("json serialization should not fail");
+    let len = body.len();
+    let response = response
+        .body(Body::from(body))
+        // only fails if invalid status code or invalid header/values are given.
+        // these are not user configurable so it cannot fail dynamically
+        .expect("building response payload should not fail");
 
-    match result {
-        Ok(value) => {
-            // how could this possibly fail
-            let body = serde_json::to_string(&value).expect("json serialization should not fail");
-            let len = body.len();
-            let response = response
-                .body(Body::from(body))
-                // only fails if invalid status code or invalid header/values are given.
-                // these are not user configurable so it cannot fail dynamically
-                .expect("building response payload should not fail");
+    // count the egress bytes - we miss the TLS and header overhead but oh well...
+    // moving this later in the stack is going to be a lot of effort and ehhhh
+    metrics.record_egress(len as u64);
 
-            // count the egress bytes - we miss the TLS and header overhead but oh well...
-            // moving this later in the stack is going to be a lot of effort and ehhhh
-            metrics.record_egress(len as u64);
-            Ok(response)
-        }
-        Err(e) => Err(e),
+    Ok(response)
+}
+
+async fn query_batch(
+    transaction: &Transaction<'_>,
+    statements: Vec<StatementData>,
+    total_size: &mut usize,
+    raw_output: bool,
+    array_mode: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let mut results = Vec::with_capacity(statements.len());
+    let mut current_size = 0;
+    for stmt in statements {
+        // TODO: maybe we should check that the transaction bit is set here
+        let (_, values) =
+            query_to_json(transaction, stmt, &mut current_size, raw_output, array_mode).await?;
+        results.push(values);
     }
+    *total_size += current_size;
+    Ok(results)
 }
 
 async fn query_to_json<T: GenericClient>(
     client: &T,
-    data: QueryData,
+    data: StatementData,
     current_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
-) -> anyhow::Result<Value> {
-    let query_params = json_to_pg_text(data.params)?;
-    let row_stream = client
-        .query_raw_txt::<String, _>(data.query, query_params)
-        .await?;
+) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+    // let query_params = json_to_pg_text(data.params)?;
+    let row_stream = client.query_raw_txt(&data.stmt, data.params).await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -423,6 +498,8 @@ async fn query_to_json<T: GenericClient>(
             ));
         }
     }
+
+    let ready = row_stream.ready_status();
 
     // grab the command tag and number of rows affected
     let command_tag = row_stream.command_tag().unwrap_or_default();
@@ -464,13 +541,16 @@ async fn query_to_json<T: GenericClient>(
         .collect::<Result<Vec<_>, _>>()?;
 
     // resulting JSON format is based on the format of node-postgres result
-    Ok(json!({
-        "command": command_tag_name,
-        "rowCount": command_tag_count,
-        "rows": rows,
-        "fields": fields,
-        "rowAsArray": array_mode,
-    }))
+    Ok((
+        ready,
+        json!({
+            "command": command_tag_name,
+            "rowCount": command_tag_count,
+            "rows": rows,
+            "fields": fields,
+            "rowAsArray": array_mode,
+        }),
+    ))
 }
 
 //
