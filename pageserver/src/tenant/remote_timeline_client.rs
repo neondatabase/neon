@@ -1076,6 +1076,15 @@ impl RemoteTimelineClient {
                     .await
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
+                    let mention_having_future_layers = if cfg!(feature = "testing") {
+                        index_part
+                            .layer_metadata
+                            .keys()
+                            .any(|x| x.is_in_future(*_lsn))
+                    } else {
+                        false
+                    };
+
                     let res = upload::upload_index_part(
                         self.conf,
                         &self.storage_impl,
@@ -1093,6 +1102,10 @@ impl RemoteTimelineClient {
                     .await;
                     if res.is_ok() {
                         self.update_remote_physical_size_gauge(Some(index_part));
+                        if mention_having_future_layers {
+                            // find rationale near crate::tenant::timeline::init::cleanup_future_layer
+                            tracing::info!(disk_consistent_lsn=%_lsn, "uploaded an index_part.json with future layers -- this is ok! if shutdown now, expect future layer cleanup");
+                        }
                     }
                     res
                 }
