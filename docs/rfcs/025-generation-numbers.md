@@ -118,7 +118,7 @@ and each time the attachment status of the tenant changes, this is incremented.
 Changes in attachment status include:
 
 - Attaching the tenant to a different pageserver
-- A page server restarting, and "re-attaching" its tenants on startup
+- A pageserver restarting, and "re-attaching" its tenants on startup
 
 These increments of attachment generation provide invariants we need to avoid
 split-brain issues in storage:
