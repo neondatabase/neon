@@ -366,7 +366,7 @@ impl ResidentOrWantedEvicted {
 // TODO:
 // - internal arc, because I've now worked away majority of external wrapping
 pub(crate) struct LayerE {
-    // do we really need this?
+    // only needed to check ondemand_download_behavior_treat_error_as_warn
     conf: &'static PageServerConf,
     path: PathBuf,
 
@@ -440,10 +440,9 @@ impl Drop for LayerE {
             return;
         }
 
-        // TODO: spawn_blocking?
+        // SEMITODO: this could be spawn_blocking or not; we are only doing the filesystem delete
+        // right now, later this will be a submit to the global deletion queue.
         let span = tracing::info_span!(parent: None, "layer_drop", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
-
-        // SEMITODO: yes, this is sync, could spawn as well..
         let _g = span.entered();
 
         let mut removed = false;
@@ -452,12 +451,14 @@ impl Drop for LayerE {
                 removed = true;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // FIXME: unsure how to handle this. there are no deleted by mistake here, but it
-                // feels like the downloadedness state tracking, and so knowing here if the file
-                // should be present or not, requires load_layer_map fixing.
+                // until we no longer do detaches by removing all local files before removing the
+                // tenant from the global map, we will always get these errors even if we knew what
+                // is the latest state.
+                //
+                // we currently do not track the latest state, so we'll also end up here on evicted
+                // layers.
             }
             Err(e) => {
-                // FIXME: it is possible, that we've just evicted the layer or it was always remote
                 tracing::error!(layer = %self, "failed to remove garbage collected layer: {e}");
             }
         }
@@ -481,7 +482,8 @@ impl Drop for LayerE {
                 }
             }
         } else {
-            // no need to nag that timeline is gone
+            // no need to nag that timeline is gone: under normal situation on
+            // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
         }
     }
 }
