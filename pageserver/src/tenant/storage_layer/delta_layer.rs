@@ -34,7 +34,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{LayerE, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
@@ -561,7 +561,7 @@ impl DeltaLayerWriterInner {
         // fsync the file
         file.sync_all()?;
 
-        let layer = LayerE::for_written(self.conf, timeline, desc)?;
+        let layer = Layer::for_written(self.conf, timeline, desc)?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.

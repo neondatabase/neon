@@ -12,7 +12,7 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, InMemoryLayer, LayerE, PersistentLayerDesc, PersistentLayerKey,
+            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
             ResidentLayer,
         },
     },
@@ -21,7 +21,7 @@ use crate::{
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
-    layer_fmgr: LayerFileManager<LayerE>,
+    layer_fmgr: LayerFileManager<Layer>,
 }
 
 /// After GC, the layer map changes will not be applied immediately. Users should manually apply the changes after
@@ -42,7 +42,7 @@ impl LayerManager {
         }
     }
 
-    pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<LayerE> {
+    pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
 
@@ -59,7 +59,7 @@ impl LayerManager {
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
     pub(crate) fn initialize_local_layers(
         &mut self,
-        on_disk_layers: Vec<Arc<LayerE>>,
+        on_disk_layers: Vec<Layer>,
         next_open_layer_at: Lsn,
     ) {
         let mut updates = self.layer_map.batch_update();
@@ -211,7 +211,7 @@ impl LayerManager {
     pub(crate) fn finish_compact_l0(
         &mut self,
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
-        compact_from: Vec<Arc<LayerE>>,
+        compact_from: Vec<Layer>,
         compact_to: &[ResidentLayer],
         metrics: &crate::metrics::TimelineMetrics,
     ) -> Result<()> {
@@ -241,7 +241,7 @@ impl LayerManager {
     pub(crate) fn finish_gc_timeline(
         &mut self,
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
-        gc_layers: Vec<Arc<LayerE>>,
+        gc_layers: Vec<Layer>,
     ) -> Result<ApplyGcResultGuard> {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
@@ -257,9 +257,9 @@ impl LayerManager {
 
     /// Helper function to insert a layer into the layer map and file manager.
     fn insert_historic_layer(
-        layer: Arc<LayerE>,
+        layer: Layer,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager<LayerE>,
+        mapping: &mut LayerFileManager<Layer>,
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
@@ -270,9 +270,9 @@ impl LayerManager {
     fn delete_historic_layer(
         // we cannot remove layers otherwise, since gc and compaction will race
         _layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layer: Arc<LayerE>,
+        layer: Layer,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager<LayerE>,
+        mapping: &mut LayerFileManager<Layer>,
     ) -> anyhow::Result<()> {
         let desc = layer.layer_desc();
 

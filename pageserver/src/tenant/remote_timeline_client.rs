@@ -606,7 +606,7 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         // FIXME: we might be still including no longer existing files in the index_part because
-        // that consistency is built on strings and gentleman agreements, not Weak<LayerE> which
+        // that consistency is built on strings and gentleman agreements, not WeakLayer which
         // could be upgraded at the time of rendering of index_part.
         upload_queue
             .latest_files
@@ -1365,7 +1365,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::{LayerE, PersistentLayerDesc},
+            storage_layer::{Layer, PersistentLayerDesc},
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -1541,7 +1541,7 @@ mod tests {
             std::fs::write(timeline_path.join(filename.file_name()), content).unwrap();
         }
 
-        let layer_file_1 = LayerE::for_written(
+        let layer_file_1 = Layer::for_written(
             harness.conf,
             &timeline,
             PersistentLayerDesc::from_filename(
@@ -1556,7 +1556,7 @@ mod tests {
         // FIXME: need that api for local files
         assert!(layer_file_1.needs_download_blocking().unwrap().is_none());
 
-        let layer_file_2 = LayerE::for_written(
+        let layer_file_2 = Layer::for_written(
             harness.conf,
             &timeline,
             PersistentLayerDesc::from_filename(
@@ -1569,7 +1569,7 @@ mod tests {
         .unwrap();
         assert!(layer_file_2.needs_download_blocking().unwrap().is_none());
 
-        let layer_file_3 = LayerE::for_written(
+        let layer_file_3 = Layer::for_written(
             harness.conf,
             &timeline,
             PersistentLayerDesc::from_filename(
@@ -1721,7 +1721,7 @@ mod tests {
         )
         .unwrap();
 
-        let layer_file_1 = LayerE::for_written(
+        let layer_file_1 = Layer::for_written(
             harness.conf,
             &timeline,
             PersistentLayerDesc::from_filename(

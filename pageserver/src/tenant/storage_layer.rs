@@ -81,7 +81,7 @@ pub struct ValueReconstructState {
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from [`LayerE::get_value_reconstruct_data`]
+/// Return value from [`Layer::get_value_reconstruct_data`]
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -312,7 +312,7 @@ impl LayerAccessStats {
 ///
 /// However when we want something evicted, we cannot evict it right away as there might be current
 /// reads happening on it. It has been for example searched from [`LayerMap`] but not yet
-/// [`LayerE::get_value_reconstruct_data`].
+/// [`Layer::get_value_reconstruct_data`].
 ///
 /// [`LayerMap`]: crate::tenant::layer_map::LayerMap
 enum ResidentOrWantedEvicted {
@@ -363,9 +363,266 @@ impl ResidentOrWantedEvicted {
 /// LSN.
 ///
 /// This type models the on-disk layers, which can be evicted and on-demand downloaded.
+#[derive(Clone)]
+pub(crate) struct Layer(Arc<LayerInner>);
+
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl std::fmt::Debug for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl AsLayerDesc for Layer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        self.0.layer_desc()
+    }
+}
+
+impl Layer {
+    pub(crate) fn for_evicted(
+        conf: &'static PageServerConf,
+        timeline: &Arc<Timeline>,
+        file_name: LayerFileName,
+        metadata: LayerFileMetadata,
+    ) -> Self {
+        let path = conf
+            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
+            .join(file_name.file_name());
+
+        let desc = PersistentLayerDesc::from_filename(
+            timeline.tenant_id,
+            timeline.timeline_id,
+            file_name,
+            metadata.file_size(),
+        );
+
+        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
+
+        let outer = Arc::new(LayerInner {
+            conf,
+            path,
+            desc,
+            timeline: Arc::downgrade(timeline),
+            access_stats,
+            inner: heavier_once_cell::OnceCell::default(),
+            wanted_garbage_collected: AtomicBool::default(),
+            wanted_evicted: AtomicBool::default(),
+            version: AtomicUsize::default(),
+            have_remote_client: timeline.remote_client.is_some(),
+            status: tokio::sync::broadcast::channel(1).0,
+        });
+
+        debug_assert!(outer.needs_download_blocking().unwrap().is_some());
+
+        Layer(outer)
+    }
+
+    pub(crate) fn for_resident(
+        conf: &'static PageServerConf,
+        timeline: &Arc<Timeline>,
+        file_name: LayerFileName,
+        metadata: LayerFileMetadata,
+    ) -> ResidentLayer {
+        let path = conf
+            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
+            .join(file_name.file_name());
+
+        let desc = PersistentLayerDesc::from_filename(
+            timeline.tenant_id,
+            timeline.timeline_id,
+            file_name,
+            metadata.file_size(),
+        );
+
+        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
+
+        let mut resident = None;
+
+        let outer = Arc::new_cyclic(|owner| {
+            let inner = Arc::new(DownloadedLayer {
+                owner: owner.clone(),
+                kind: tokio::sync::OnceCell::default(),
+            });
+            resident = Some(inner.clone());
+            LayerInner {
+                conf,
+                path,
+                desc,
+                timeline: Arc::downgrade(timeline),
+                have_remote_client: timeline.remote_client.is_some(),
+                access_stats,
+                wanted_garbage_collected: AtomicBool::new(false),
+                wanted_evicted: AtomicBool::new(false),
+                inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),
+                version: AtomicUsize::new(0),
+                status: tokio::sync::broadcast::channel(1).0,
+            }
+        });
+
+        debug_assert!(outer.needs_download_blocking().unwrap().is_none());
+
+        let downloaded = resident.expect("just initialized");
+
+        ResidentLayer {
+            downloaded,
+            owner: Layer(outer),
+        }
+    }
+
+    pub(crate) fn for_written(
+        conf: &'static PageServerConf,
+        timeline: &Arc<Timeline>,
+        desc: PersistentLayerDesc,
+    ) -> anyhow::Result<ResidentLayer> {
+        let path = conf
+            .timeline_path(&desc.tenant_id, &desc.timeline_id)
+            .join(desc.filename().to_string());
+
+        let mut resident = None;
+
+        let outer = Arc::new_cyclic(|owner| {
+            let inner = Arc::new(DownloadedLayer {
+                owner: owner.clone(),
+                kind: tokio::sync::OnceCell::default(),
+            });
+            resident = Some(inner.clone());
+            LayerInner {
+                conf,
+                path,
+                desc,
+                timeline: Arc::downgrade(timeline),
+                have_remote_client: timeline.remote_client.is_some(),
+                access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+                wanted_garbage_collected: AtomicBool::new(false),
+                wanted_evicted: AtomicBool::new(false),
+                inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),
+                version: AtomicUsize::new(0),
+                status: tokio::sync::broadcast::channel(1).0,
+            }
+        });
+
+        // FIXME: ugly, but if we don't do this check here, any error will pop up at read time
+        // but we cannot check it because DeltaLayerWriter and ImageLayerWriter create the
+        // instances *before* renaming the file to final destination
+        // anyhow::ensure!(
+        //     outer.needs_download_blocking()?.is_none(),
+        //     "should not need downloading if it was just written"
+        // );
+
+        // FIXME: because we can now do garbage collection on drop, should we mark these files as
+        // garbage collected until they get really get added to LayerMap? consider that files are
+        // written out to disk, fsynced, renamed by `{Delta,Image}LayerWriter`, then waiting for
+        // remaining files to be generated (compaction, create_image_layers) before being added to
+        // LayerMap. We could panic or just error out during that time, even for unrelated reasons,
+        // but the files would be left.
+
+        Ok(ResidentLayer {
+            downloaded: resident.expect("just wrote Some"),
+            owner: Layer(outer),
+        })
+    }
+
+    pub(crate) async fn evict_and_wait(
+        &self,
+        rtc: &RemoteTimelineClient,
+    ) -> Result<(), super::timeline::EvictionError> {
+        self.0.evict_and_wait(rtc).await
+    }
+
+    /// Delete the layer file when the `self` gets dropped, also schedule a remote index upload
+    /// then perhaps.
+    pub(crate) fn garbage_collect(&self) {
+        self.0.garbage_collect();
+    }
+
+    /// Return data needed to reconstruct given page at LSN.
+    ///
+    /// It is up to the caller to collect more data from previous layer and
+    /// perform WAL redo, if necessary.
+    ///
+    /// See PageReconstructResult for possible return values. The collected data
+    /// is appended to reconstruct_data; the caller should pass an empty struct
+    /// on first call, or a struct with a cached older image of the page if one
+    /// is available. If this returns ValueReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data' to
+    /// collect more data.
+    pub(crate) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        use anyhow::ensure;
+
+        let layer = self.0.get_or_maybe_download(true, Some(ctx)).await?;
+        self.0
+            .access_stats
+            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+
+        if self.layer_desc().is_delta {
+            ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
+            ensure!(self.layer_desc().key_range.contains(&key));
+        } else {
+            ensure!(self.layer_desc().key_range.contains(&key));
+            ensure!(lsn_range.start >= self.layer_desc().image_layer_lsn());
+            ensure!(lsn_range.end >= self.layer_desc().image_layer_lsn());
+        }
+
+        layer
+            .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0)
+            .await
+    }
+
+    /// Download the layer if evicted.
+    ///
+    /// Will not error when it is already downloaded.
+    pub(crate) async fn get_or_download(&self) -> anyhow::Result<()> {
+        self.0.get_or_maybe_download(true, None).await?;
+        Ok(())
+    }
+
+    /// Creates a guard object which prohibit evicting this layer as long as the value is kept
+    /// around.
+    pub(crate) async fn guard_against_eviction(
+        &self,
+        allow_download: bool,
+    ) -> anyhow::Result<ResidentLayer> {
+        let downloaded = self.0.get_or_maybe_download(allow_download, None).await?;
+
+        Ok(ResidentLayer {
+            downloaded,
+            owner: self.clone(),
+        })
+    }
+
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.0.info(reset)
+    }
+
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
+        &self.0.access_stats
+    }
+
+    pub(crate) fn local_path(&self) -> &std::path::Path {
+        &self.0.path
+    }
+
+    #[cfg(test)]
+    pub(crate) fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
+        self.0.needs_download_blocking()
+    }
+}
+
 // TODO:
 // - internal arc, because I've now worked away majority of external wrapping
-pub(crate) struct LayerE {
+struct LayerInner {
     // only needed to check ondemand_download_behavior_treat_error_as_warn
     conf: &'static PageServerConf,
     path: PathBuf,
@@ -380,7 +637,7 @@ pub(crate) struct LayerE {
     /// Initialization and deinitialization is done while holding a permit.
     inner: heavier_once_cell::OnceCell<ResidentOrWantedEvicted>,
 
-    /// Do we want to garbage collect this when `LayerE` is dropped, where garbage collection
+    /// Do we want to garbage collect this when `LayerInner` is dropped, where garbage collection
     /// means:
     /// - schedule remote deletion
     /// - instant local deletion
@@ -407,31 +664,25 @@ pub(crate) struct LayerE {
     status: tokio::sync::broadcast::Sender<Status>,
 }
 
+impl std::fmt::Display for LayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for LayerInner {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Status {
     Evicted,
     Downloaded,
 }
 
-impl std::fmt::Display for LayerE {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
-
-impl std::fmt::Debug for LayerE {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl AsLayerDesc for LayerE {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl Drop for LayerE {
+impl Drop for LayerInner {
     fn drop(&mut self) {
         if !*self.wanted_garbage_collected.get_mut() {
             // should we try to evict if the last wish was for eviction?
@@ -488,152 +739,13 @@ impl Drop for LayerE {
     }
 }
 
-impl LayerE {
-    pub(crate) fn for_evicted(
-        conf: &'static PageServerConf,
-        timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
-        metadata: LayerFileMetadata,
-    ) -> Arc<LayerE> {
-        let path = conf
-            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
-            .join(file_name.file_name());
-
-        let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_id,
-            timeline.timeline_id,
-            file_name,
-            metadata.file_size(),
-        );
-
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
-
-        let outer = Arc::new(LayerE {
-            conf,
-            path,
-            desc,
-            timeline: Arc::downgrade(timeline),
-            access_stats,
-            inner: heavier_once_cell::OnceCell::default(),
-            wanted_garbage_collected: AtomicBool::default(),
-            wanted_evicted: AtomicBool::default(),
-            version: AtomicUsize::default(),
-            have_remote_client: timeline.remote_client.is_some(),
-            status: tokio::sync::broadcast::channel(1).0,
-        });
-
-        debug_assert!(outer.needs_download_blocking().unwrap().is_some());
-
-        outer
-    }
-
-    pub(crate) fn for_resident(
-        conf: &'static PageServerConf,
-        timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
-        metadata: LayerFileMetadata,
-    ) -> ResidentLayer {
-        let path = conf
-            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
-            .join(file_name.file_name());
-
-        let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_id,
-            timeline.timeline_id,
-            file_name,
-            metadata.file_size(),
-        );
-
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
-
-        let mut resident = None;
-
-        let outer = Arc::new_cyclic(|owner| {
-            let inner = Arc::new(DownloadedLayer {
-                owner: owner.clone(),
-                kind: tokio::sync::OnceCell::default(),
-            });
-            resident = Some(inner.clone());
-            LayerE {
-                conf,
-                path,
-                desc,
-                timeline: Arc::downgrade(timeline),
-                have_remote_client: timeline.remote_client.is_some(),
-                access_stats,
-                wanted_garbage_collected: AtomicBool::new(false),
-                wanted_evicted: AtomicBool::new(false),
-                inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),
-                version: AtomicUsize::new(0),
-                status: tokio::sync::broadcast::channel(1).0,
-            }
-        });
-
-        debug_assert!(outer.needs_download_blocking().unwrap().is_none());
-
-        let downloaded = resident.expect("just initialized");
-
-        ResidentLayer {
-            downloaded,
-            owner: outer,
-        }
-    }
-
-    pub(crate) fn for_written(
-        conf: &'static PageServerConf,
-        timeline: &Arc<Timeline>,
-        desc: PersistentLayerDesc,
-    ) -> anyhow::Result<ResidentLayer> {
-        let path = conf
-            .timeline_path(&desc.tenant_id, &desc.timeline_id)
-            .join(desc.filename().to_string());
-
-        let mut resident = None;
-
-        let outer = Arc::new_cyclic(|owner| {
-            let inner = Arc::new(DownloadedLayer {
-                owner: owner.clone(),
-                kind: tokio::sync::OnceCell::default(),
-            });
-            resident = Some(inner.clone());
-            LayerE {
-                conf,
-                path,
-                desc,
-                timeline: Arc::downgrade(timeline),
-                have_remote_client: timeline.remote_client.is_some(),
-                access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-                wanted_garbage_collected: AtomicBool::new(false),
-                wanted_evicted: AtomicBool::new(false),
-                inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),
-                version: AtomicUsize::new(0),
-                status: tokio::sync::broadcast::channel(1).0,
-            }
-        });
-
-        // FIXME: ugly, but if we don't do this check here, any error will pop up at read time
-        // but we cannot check it because DeltaLayerWriter and ImageLayerWriter create the
-        // instances *before* renaming the file to final destination
-        // anyhow::ensure!(
-        //     outer.needs_download_blocking()?.is_none(),
-        //     "should not need downloading if it was just written"
-        // );
-
-        // FIXME: because we can now do garbage collection on drop, should we mark these files as
-        // garbage collected until they get really get added to LayerMap? consider that files are
-        // written out to disk, fsynced, renamed by `{Delta,Image}LayerWriter`, then waiting for
-        // remaining files to be generated (compaction, create_image_layers) before being added to
-        // LayerMap. We could panic or just error out during that time, even for unrelated reasons,
-        // but the files would be left.
-
-        Ok(ResidentLayer {
-            downloaded: resident.expect("just wrote Some"),
-            owner: outer,
-        })
+impl LayerInner {
+    fn garbage_collect(&self) {
+        self.wanted_garbage_collected.store(true, Ordering::Release);
     }
 
     pub(crate) async fn evict_and_wait(
-        self: &Arc<Self>,
+        &self,
         _: &RemoteTimelineClient,
     ) -> Result<(), super::timeline::EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
@@ -680,69 +792,6 @@ impl LayerE {
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         let locked = self.inner.get();
         Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
-    }
-
-    /// Delete the layer file when the `self` gets dropped, also schedule a remote index upload
-    /// then perhaps.
-    pub(crate) fn garbage_collect(&self) {
-        self.wanted_garbage_collected.store(true, Ordering::Release);
-    }
-
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// See PageReconstructResult for possible return values. The collected data
-    /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns ValueReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data' to
-    /// collect more data.
-    pub(crate) async fn get_value_reconstruct_data(
-        self: &Arc<Self>,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        use anyhow::ensure;
-
-        let layer = self.get_or_maybe_download(true, Some(ctx)).await?;
-        self.access_stats
-            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
-
-        if self.layer_desc().is_delta {
-            ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
-            ensure!(self.layer_desc().key_range.contains(&key));
-        } else {
-            ensure!(self.layer_desc().key_range.contains(&key));
-            ensure!(lsn_range.start >= self.layer_desc().image_layer_lsn());
-            ensure!(lsn_range.end >= self.layer_desc().image_layer_lsn());
-        }
-
-        layer
-            .get_value_reconstruct_data(key, lsn_range, reconstruct_data, self)
-            .await
-    }
-
-    /// Creates a guard object which prohibit evicting this layer as long as the value is kept
-    /// around.
-    pub(crate) async fn guard_against_eviction(
-        self: &Arc<Self>,
-        allow_download: bool,
-    ) -> anyhow::Result<ResidentLayer> {
-        let downloaded = self.get_or_maybe_download(allow_download, None).await?;
-
-        Ok(ResidentLayer {
-            downloaded,
-            owner: self.clone(),
-        })
-    }
-
-    pub(crate) async fn get_or_download(self: &Arc<Self>) -> anyhow::Result<()> {
-        self.get_or_maybe_download(true, None).await?;
-        Ok(())
     }
 
     fn get_or_apply_evictedness(
@@ -834,7 +883,7 @@ impl LayerE {
                 }
 
                 if !allow_download {
-                    // this does look weird, but for LayerE the "downloading" means also changing
+                    // this does look weird, but for LayerInner the "downloading" means also changing
                     // internal once related state ...
                     return Err(DownloadError::DownloadRequired);
                 }
@@ -845,7 +894,7 @@ impl LayerE {
                 // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
                 // block tenant::mgr::remove_tenant_from_memory.
 
-                let this = self.clone();
+                let this: Arc<Self> = self.clone();
                 crate::task_mgr::spawn(
                     &tokio::runtime::Handle::current(),
                     TaskKind::RemoteDownloadTask,
@@ -955,21 +1004,16 @@ impl LayerE {
         )
     }
 
-    pub(crate) fn local_path(&self) -> &std::path::Path {
-        // maybe it does make sense to have this or maybe not
-        &self.path
-    }
-
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        match tokio::fs::metadata(self.local_path()).await {
+        match tokio::fs::metadata(&self.path).await {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
         }
     }
 
-    pub(crate) fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        match self.local_path().metadata() {
+    fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
+        match self.path.metadata() {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
@@ -991,13 +1035,14 @@ impl LayerE {
         }
     }
 
-    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
         let remote = self
             .needs_download_blocking()
             .map(|maybe| maybe.is_some())
-            .unwrap_or(false);
+            .unwrap_or(true);
+
         let access_stats = self.access_stats.as_api_model(reset);
 
         if self.desc.is_delta {
@@ -1024,12 +1069,8 @@ impl LayerE {
         }
     }
 
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.access_stats
-    }
-
     /// Our resident layer has been dropped, we might hold the lock elsewhere.
-    fn on_drop(self: Arc<LayerE>) {
+    fn on_drop(self: Arc<LayerInner>) {
         let gc = self.wanted_garbage_collected.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
@@ -1053,7 +1094,7 @@ impl LayerE {
             let eviction = {
                 let span = tracing::info_span!(parent: span.clone(), "blocking");
                 async move {
-                    // the layer is already gone, don't do anything. LayerE drop has already ran.
+                    // the layer is already gone, don't do anything. LayerInner drop has already ran.
                     let Some(this) = this.upgrade() else { return; };
 
                     // deleted or detached timeline, don't do anything.
@@ -1206,7 +1247,7 @@ impl std::fmt::Display for NeedsDownload {
 /// or garbage collection happens.
 #[derive(Clone)]
 pub(crate) struct ResidentLayer {
-    owner: Arc<LayerE>,
+    owner: Layer,
     downloaded: Arc<DownloadedLayer>,
 }
 
@@ -1223,7 +1264,7 @@ impl std::fmt::Debug for ResidentLayer {
 }
 
 impl ResidentLayer {
-    pub(crate) fn drop_eviction_guard(self) -> Arc<LayerE> {
+    pub(crate) fn drop_eviction_guard(self) -> Layer {
         self.into()
     }
 
@@ -1234,9 +1275,11 @@ impl ResidentLayer {
     ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         use LayerKind::*;
 
-        match self.downloaded.get(&self.owner).await? {
+        let inner = &self.owner.0;
+
+        match self.downloaded.get(inner).await? {
             Delta(d) => {
-                self.owner
+                inner
                     .access_stats
                     .record_access(LayerAccessKind::KeyIter, ctx);
 
@@ -1248,6 +1291,19 @@ impl ResidentLayer {
             Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
         }
     }
+
+    pub(crate) fn local_path(&self) -> &std::path::Path {
+        &self.owner.0.path
+    }
+
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
+        self.owner.access_stats()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
+        self.owner.needs_download_blocking()
+    }
 }
 
 impl AsLayerDesc for ResidentLayer {
@@ -1256,24 +1312,16 @@ impl AsLayerDesc for ResidentLayer {
     }
 }
 
-impl AsRef<Arc<LayerE>> for ResidentLayer {
-    fn as_ref(&self) -> &Arc<LayerE> {
+impl AsRef<Layer> for ResidentLayer {
+    fn as_ref(&self) -> &Layer {
         &self.owner
     }
 }
 
 /// Allow slimming down if we don't want the `2*usize` with eviction candidates?
-impl From<ResidentLayer> for Arc<LayerE> {
+impl From<ResidentLayer> for Layer {
     fn from(value: ResidentLayer) -> Self {
         value.owner
-    }
-}
-
-impl std::ops::Deref for ResidentLayer {
-    type Target = LayerE;
-
-    fn deref(&self) -> &Self::Target {
-        &self.owner
     }
 }
 
@@ -1283,7 +1331,7 @@ pub(crate) struct RemovedFromLayerMap;
 
 /// Holds the actual downloaded layer, and handles evicting the file on drop.
 pub(crate) struct DownloadedLayer {
-    owner: Weak<LayerE>,
+    owner: Weak<LayerInner>,
     kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
 }
 
@@ -1308,7 +1356,7 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    async fn get(&self, owner: &LayerE) -> anyhow::Result<&LayerKind> {
+    async fn get(&self, owner: &LayerInner) -> anyhow::Result<&LayerKind> {
         // the owner is required so that we don't have to upgrade the self.owner, which will only
         // be used on drop. this way, initializing a DownloadedLayer without an owner is statically
         // impossible, so we can just not worry about it.
@@ -1347,7 +1395,7 @@ impl DownloadedLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-        owner: &LayerE,
+        owner: &LayerInner,
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 

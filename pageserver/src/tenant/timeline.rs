@@ -36,7 +36,7 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStatsReset, LayerE,
+    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, Layer, LayerAccessStatsReset,
     LayerFileName, ResidentLayer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
@@ -978,7 +978,7 @@ impl Timeline {
 
         let Ok(local_layer) = local_layer.guard_against_eviction(false).await else { return Ok(Some(false)); };
 
-        let local_layer: Arc<LayerE> = local_layer.into();
+        let local_layer: Layer = local_layer.into();
 
         let remote_client = self
             .remote_client
@@ -1001,7 +1001,7 @@ impl Timeline {
     /// Evict a batch of layers.
     pub(crate) async fn evict_layers(
         &self,
-        layers_to_evict: &[Arc<LayerE>],
+        layers_to_evict: &[Layer],
         cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let remote_client = self
@@ -1030,7 +1030,7 @@ impl Timeline {
     async fn evict_layer_batch(
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[Arc<LayerE>],
+        layers_to_evict: &[Layer],
         cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
@@ -1510,17 +1510,17 @@ impl Timeline {
                     let layer = match decision {
                         NeedsUpload(m) => {
                             total_physical_size += m.file_size();
-                            let resident = LayerE::for_resident(conf, &this, name, m.clone());
+                            let resident = Layer::for_resident(conf, &this, name, m.clone());
                             let layer = resident.as_ref().clone();
                             needs_upload.push((resident, m));
                             layer
                         }
                         UseLocal(m) => {
                             total_physical_size += m.file_size();
-                            LayerE::for_resident(conf, &this, name, m).drop_eviction_guard()
+                            Layer::for_resident(conf, &this, name, m).drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
-                            LayerE::for_evicted(conf, &this, name, remote)
+                            Layer::for_evicted(conf, &this, name, remote)
                         }
                     };
 
@@ -1882,7 +1882,7 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<LayerE>> {
+    async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
@@ -1901,7 +1901,7 @@ trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
 }
 
-impl TraversalLayerExt for Arc<LayerE> {
+impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
         self.local_path().display().to_string()
     }
@@ -2140,7 +2140,7 @@ impl Timeline {
                     result,
                     cont_lsn,
                     Box::new({
-                        let layer = Arc::clone(&layer);
+                        let layer = layer.to_owned();
                         move || layer.traversal_id()
                     }),
                 ));
@@ -2759,7 +2759,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<ResidentLayer>,
-    deltas_to_compact: Vec<Arc<LayerE>>,
+    deltas_to_compact: Vec<Layer>,
 }
 
 /// Top-level failure to compact.
@@ -3738,7 +3738,7 @@ impl Timeline {
             let gc_layers = layers_to_remove
                 .iter()
                 .map(|x| guard.get_from_desc(x))
-                .collect::<Vec<Arc<LayerE>>>();
+                .collect::<Vec<Layer>>();
 
             result.layers_removed = gc_layers.len() as u64;
 
@@ -4014,7 +4014,7 @@ pub(crate) struct DiskUsageEvictionInfo {
 }
 
 pub(crate) struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: Arc<LayerE>,
+    pub layer: Layer,
     pub last_activity_ts: SystemTime,
 }
 
@@ -4189,12 +4189,10 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{
-        harness::TenantHarness, storage_layer::LayerE, timeline::EvictionError, Timeline,
+        harness::TenantHarness, storage_layer::Layer, timeline::EvictionError, Timeline,
     };
 
     #[tokio::test]
@@ -4287,7 +4285,7 @@ mod tests {
             .expect("no cancellation")
     }
 
-    async fn find_some_layer(timeline: &Timeline) -> Arc<LayerE> {
+    async fn find_some_layer(timeline: &Timeline) -> Layer {
         let layers = timeline.layers.read().await;
         let desc = layers
             .layer_map()

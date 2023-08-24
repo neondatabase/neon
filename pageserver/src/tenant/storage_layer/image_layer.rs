@@ -59,7 +59,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{AsLayerDesc, LayerE, PersistentLayerDesc, ResidentLayer};
+use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
 
 ///
 /// Header stored in the beginning of the file
@@ -495,7 +495,7 @@ impl ImageLayerWriterInner {
         // fsync the file
         file.sync_all()?;
 
-        let layer = LayerE::for_written(self.conf, timeline, desc)?;
+        let layer = Layer::for_written(self.conf, timeline, desc)?;
 
         // Rename the file to its final name
         //
