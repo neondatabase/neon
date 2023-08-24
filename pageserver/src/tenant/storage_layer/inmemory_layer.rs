@@ -7,14 +7,12 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
-use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::*;
@@ -31,12 +29,6 @@ use std::ops::Range;
 use tokio::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
-
-thread_local! {
-    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
-    /// This buffer is reused for each serialization to avoid additional malloc calls.
-    static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-}
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -273,17 +265,17 @@ impl InMemoryLayer {
     /// Adds the page version to the in-memory tree
     pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write().await;
+        let inner: &mut _ = &mut *self.inner.write().await;
         self.assert_writable();
 
         let off = {
-            SER_BUFFER.with(|x| -> Result<_> {
-                let mut buf = x.borrow_mut();
-                buf.clear();
-                val.ser_into(&mut (*buf))?;
-                let off = inner.file.write_blob(&buf)?;
-                Ok(off)
-            })?
+            // Avoid doing allocations for "small" values.
+            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+            buf.clear();
+            val.ser_into(&mut buf)?;
+            inner.file.write_blob(&buf).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();

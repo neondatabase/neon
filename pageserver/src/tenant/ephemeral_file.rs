@@ -3,7 +3,6 @@
 
 use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
@@ -61,19 +60,8 @@ impl EphemeralFile {
     pub(crate) fn len(&self) -> u64 {
         self.len
     }
-}
 
-/// Does the given filename look like an ephemeral file?
-pub fn is_ephemeral_file(filename: &str) -> bool {
-    if let Some(rest) = filename.strip_prefix("ephemeral-") {
-        rest.parse::<u32>().is_ok()
-    } else {
-        false
-    }
-}
-
-impl BlobWriter for EphemeralFile {
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
+    pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
             /// The block to which the next [`push_bytes`] will write.
@@ -90,7 +78,7 @@ impl BlobWriter for EphemeralFile {
                 })
             }
             #[inline(always)]
-            fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+            async fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
@@ -161,15 +149,15 @@ impl BlobWriter for EphemeralFile {
         if srcbuf.len() < 0x80 {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         }
 
         // Write the payload
-        writer.push_bytes(srcbuf)?;
+        writer.push_bytes(srcbuf).await?;
 
         if srcbuf.len() < 0x80 {
             self.len += 1;
@@ -179,6 +167,15 @@ impl BlobWriter for EphemeralFile {
         self.len += srcbuf.len() as u64;
 
         Ok(pos)
+    }
+}
+
+/// Does the given filename look like an ephemeral file?
+pub fn is_ephemeral_file(filename: &str) -> bool {
+    if let Some(rest) = filename.strip_prefix("ephemeral-") {
+        rest.parse::<u32>().is_ok()
+    } else {
+        false
     }
 }
 
@@ -251,7 +248,6 @@ impl BlockReader for EphemeralFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::blob_io::BlobWriter;
     use crate::tenant::block_io::BlockCursor;
     use rand::{thread_rng, RngCore};
     use std::fs;
@@ -280,12 +276,12 @@ mod tests {
 
         let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
 
-        let pos_foo = file.write_blob(b"foo")?;
+        let pos_foo = file.write_blob(b"foo").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
         );
-        let pos_bar = file.write_blob(b"bar")?;
+        let pos_bar = file.write_blob(b"bar").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
@@ -298,13 +294,13 @@ mod tests {
         let mut blobs = Vec::new();
         for i in 0..10000 {
             let data = Vec::from(format!("blob{}", i).as_bytes());
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
         // also test with a large blobs
         for i in 0..100 {
             let data = format!("blob{}", i).as_bytes().repeat(100);
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
 
@@ -318,7 +314,7 @@ mod tests {
         let mut large_data = Vec::new();
         large_data.resize(20000, 0);
         thread_rng().fill_bytes(&mut large_data);
-        let pos_large = file.write_blob(&large_data)?;
+        let pos_large = file.write_blob(&large_data).await?;
         let result = file.block_cursor().read_blob(pos_large).await?;
         assert_eq!(result, large_data);
 

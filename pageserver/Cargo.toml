@@ -51,6 +51,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 signal-hook.workspace = true
+smallvec = { workspace = true, features = ["write"] }
 svg_fmt.workspace = true
 sync_wrapper.workspace = true
 tokio-tar.workspace = true
