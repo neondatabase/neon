@@ -4245,10 +4245,7 @@ mod tests {
 
         let (first, second) = (only_one(first), only_one(second));
 
-        batch[0]
-            .needs_download_blocking()
-            .unwrap()
-            .expect("should now have a reason to download");
+        batch[0].guard_against_eviction(false).await.unwrap_err();
 
         match (first, second) {
             (Ok(()), Ok(())) => {

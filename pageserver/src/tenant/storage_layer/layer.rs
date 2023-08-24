@@ -233,11 +233,6 @@ impl Layer {
     pub(crate) fn local_path(&self) -> &Path {
         &self.0.path
     }
-
-    #[cfg(test)]
-    pub(crate) fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        self.0.needs_download_blocking()
-    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
@@ -994,11 +989,6 @@ impl ResidentLayer {
 
     pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         self.owner.access_stats()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        self.owner.needs_download_blocking()
     }
 }
 
