@@ -291,12 +291,12 @@ For the same reasons that deletion of objects must be guarded by an attachment g
 validation step, updates to `remote_consistent_lsn` are subject to the same rules, using
 an ordering as follows:
 
-1. persist index_part that covers data up to LSN `L0`
+1. upload the index_part that covers data up to LSN `L0` to S3
 2. call to control plane to validate their attachment generation
 3. update the `remote_consistent_lsn` that they send to the safekeepers to `L0`
 
 **Note:** at step 3 we are not advertising the _latest_ remote_consistent_lsn, we are
-advertising the value immediately before we started the validation RPC. This provides
+advertising the value in the index_part that we uploaded in step 1. This provides
 a strong ordering guarantee.
 
 Internally to the pageserver, each timeline will have two remote_consistent_lsn values: the one that
