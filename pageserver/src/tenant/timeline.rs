@@ -2389,19 +2389,9 @@ impl Timeline {
 
             if let Some(ref l) = delta_layer_to_add {
                 // TODO: move access stats, metrics update, etc. into layer manager.
-                l.access_stats().record_residence_event(
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::LayerCreate,
-                );
-
-                // update metrics
-                let sz = l.layer_desc().file_size;
-                self.metrics.resident_physical_size_gauge.add(sz);
-                self.metrics.num_persistent_files_created.inc_by(1);
-                self.metrics.persistent_bytes_written.inc_by(sz);
             }
 
-            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer);
+            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
             // release lock on 'layers'
         }
 

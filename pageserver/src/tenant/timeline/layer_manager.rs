@@ -171,13 +171,13 @@ impl LayerManager {
         &mut self,
         delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
+        metrics: &crate::metrics::TimelineMetrics,
     ) {
         let inmem = self
             .layer_map
             .frozen_layers
             .pop_front()
             .expect("there must be a inmem layer to flush");
-        let mut updates = self.layer_map.batch_update();
 
         // Only one task may call this function at a time (for this
         // timeline). If two tasks tried to flush the same frozen
@@ -185,13 +185,19 @@ impl LayerManager {
         assert_eq!(Arc::as_ptr(&inmem), Arc::as_ptr(frozen_layer_for_check));
 
         if let Some(l) = delta_layer {
+            let mut updates = self.layer_map.batch_update();
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+            let sz = l.layer_desc().file_size;
+            metrics.resident_physical_size_gauge.add(sz);
+            metrics.num_persistent_files_created.inc_by(1);
+            metrics.persistent_bytes_written.inc_by(sz);
+
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            updates.flush();
         }
-        updates.flush();
     }
 
     /// Called when compaction is completed.
