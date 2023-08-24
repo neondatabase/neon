@@ -120,10 +120,13 @@ impl Layer {
         ResidentLayer { downloaded, owner }
     }
 
-    pub(crate) fn for_written(
+    /// Creates a Layer value for freshly written out new layer file by renaming it from a
+    /// temporary path.
+    pub(crate) fn for_written_tempfile(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         desc: PersistentLayerDesc,
+        temp_path: &Path,
     ) -> anyhow::Result<ResidentLayer> {
         let mut resident = None;
 
@@ -143,7 +146,9 @@ impl Layer {
 
         let downloaded = resident.expect("just initialized");
 
-        // FIXME: should we handle the rename?
+        // if the rename works, the path is as expected
+        std::fs::rename(temp_path, owner.local_path())
+            .context("rename temporary file as correct path for {owner}")?;
 
         Ok(ResidentLayer { downloaded, owner })
     }

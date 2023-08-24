@@ -495,13 +495,7 @@ impl ImageLayerWriterInner {
         // fsync the file
         file.sync_all()?;
 
-        let layer = Layer::for_written(self.conf, timeline, desc)?;
-
-        // Rename the file to its final name
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
-        std::fs::rename(self.path, layer.local_path())?;
+        let layer = Layer::for_written_tempfile(self.conf, timeline, desc, &self.path)?;
 
         trace!("created image layer {}", layer.local_path().display());
 
