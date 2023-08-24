@@ -714,7 +714,7 @@ impl LayerE {
         }
 
         layer
-            .get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+            .get_value_reconstruct_data(key, lsn_range, reconstruct_data, self)
             .await
     }
 
@@ -1245,7 +1245,7 @@ impl ResidentLayer {
     ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         use LayerKind::*;
 
-        match self.downloaded.get().await? {
+        match self.downloaded.get(&self.owner).await? {
             Delta(d) => {
                 self.owner
                     .access_stats
@@ -1319,12 +1319,11 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    async fn get(&self) -> anyhow::Result<&LayerKind> {
+    async fn get(&self, owner: &LayerE) -> anyhow::Result<&LayerKind> {
+        // the owner is required so that we don't have to upgrade the self.owner, which will only
+        // be used on drop. this way, initializing a DownloadedLayer without an owner is statically
+        // impossible, so we can just not worry about it.
         let init = || async {
-            let Some(owner) = self.owner.upgrade() else {
-                    anyhow::bail!("Cannot init, the layer has already been dropped");
-                };
-
             // there is nothing async here, but it should be async
             if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
@@ -1359,10 +1358,11 @@ impl DownloadedLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
+        owner: &LayerE,
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 
-        match self.get().await? {
+        match self.get(owner).await? {
             Delta(d) => {
                 d.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
                     .await
