@@ -1222,19 +1222,6 @@ impl std::fmt::Display for NeedsDownload {
     }
 }
 
-impl NeedsDownload {
-    pub(crate) fn is_not_found(&self) -> bool {
-        matches!(self, NeedsDownload::NotFound)
-    }
-
-    pub(crate) fn actual_size(&self) -> Option<u64> {
-        match self {
-            NeedsDownload::WrongSize { actual, .. } => Some(*actual),
-            _ => None,
-        }
-    }
-}
-
 /// Holds both Arc requriring that both components stay resident while holding this alive and no evictions
 /// or garbage collection happens.
 #[derive(Clone)]
