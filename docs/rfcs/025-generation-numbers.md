@@ -123,7 +123,7 @@ Changes in attachment status include:
 These increments of attachment generation provide invariants we need to avoid
 split-brain issues in storage:
 
-- If two pageservers have the same tenant attached, they are guaranteed to have different attachment generation numbers, because the generation would increment
+- If two pageservers have the same tenant attached, they are guaranteed to have different generation numbers, because the generation would increment
   while attaching the second one.
 - If there are multiple pageservers running with the same node ID, they are guaranteed to have different generation numbers, because the generation would increment
   when the second node started and re-attached its tenants.
