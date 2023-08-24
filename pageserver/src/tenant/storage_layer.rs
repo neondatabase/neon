@@ -819,6 +819,8 @@ impl LayerE {
 
             let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
+            // check if we really need to be downloaded; could have been already downloaded by a
+            // cancelled previous attempt.
             let needs_download = self
                 .needs_download()
                 .await
@@ -923,13 +925,17 @@ impl LayerE {
                             match res {
                                 Ok(()) => {
                                     // our caller is cancellation safe so this is fine; if someone
-                                    // else requests the layer, they'll find it already downloaded.
+                                    // else requests the layer, they'll find it already downloaded
+                                    // or redownload.
                                     //
                                     // however, could be that we should consider marking the layer
                                     // for eviction?
                                 },
                                 Err(e) => {
-                                    // our caller is cancellation safe, but
+                                    // our caller is cancellation safe, but we might be racing with
+                                    // another attempt to reinitialize. before we have cancellation
+                                    // token support: these attempts should converge regardless of
+                                    // their completion order.
                                     tracing::error!("layer file download failed, and additionally failed to communicate this to caller: {e:?}");
                                 }
                             }
