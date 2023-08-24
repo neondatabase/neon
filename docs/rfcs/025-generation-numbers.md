@@ -104,7 +104,7 @@ pageserver, control plane, safekeeper (optional)
   try to write to the same keys.
 - **Safety in split brain for multiple nodes running with
   the same node ID** is provided by the pageserver calling out to the control plane
-  on startup, to increment the generations of any attached tenants
+  on startup, to re-attach and thereby increment the generations of any attached tenants
 - **Safety for deletions** is achieved by deferring the DELETE from S3 to a point in time where the deleting node has validated with control plane that no attachment with a higher generation has a reference to the to-be-DELETEd key.
 - **The control plane is used to issue generation numbers** to avoid the need for
   a built-in consensus system in the pageserver, although this could in principle
