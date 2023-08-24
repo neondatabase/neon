@@ -804,14 +804,14 @@ impl DeltaLayerInner {
         }
     }
 
-    pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
-        this: &T,
-    ) -> Result<Vec<DeltaEntry<'_>>> {
-        let dl = this.as_ref();
-        let file = &dl.file;
+    pub(super) async fn load_keys(&self) -> Result<Vec<DeltaEntry<'_>>> {
+        let file = &self.file;
 
-        let tree_reader =
-            DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
 
         let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
 
@@ -824,7 +824,7 @@ impl DeltaLayerInner {
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
                         reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
-                            Adapter(dl),
+                            Adapter(self),
                         )),
                     };
                     let pos = BlobRef(value).pos();
@@ -848,7 +848,7 @@ impl DeltaLayerInner {
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of value storage,
             // which corresponds to beginning of the index
-            last.size = dl.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
+            last.size = self.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
         }
         Ok(all_keys)
     }
