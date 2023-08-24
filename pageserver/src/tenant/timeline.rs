@@ -1516,20 +1516,25 @@ impl Timeline {
 
                     let stats = LayerAccessStats::for_loading_layer(status);
 
-                    let layer = match (name, &decision) {
-                        (name, UseLocal(m) | NeedsUpload(m)) => {
-                            // FIXME: needsupload need to be ResidentLayers
+                    let layer = match decision {
+                        NeedsUpload(m) => {
                             total_physical_size += m.file_size();
-                            Arc::new(LayerE::new(conf, &this, &name, m.file_size(), stats))
+                            let resident = LayerE::for_resident(conf, &this, name, &m);
+                            let layer = resident.as_ref().clone();
+                            needs_upload.push((resident, m));
+                            layer
                         }
-                        (name, Evicted(remote) | UseRemote { remote, .. }) => {
+                        UseLocal(m) => {
+                            total_physical_size += m.file_size();
+                            let resident = LayerE::for_resident(conf, &this, name, &m);
+                            resident.drop_eviction_guard()
+                        }
+                        Evicted(remote) | UseRemote { remote, .. } => {
+                            // FIXME: there ought to be a known evicted factory instead of generic
+                            // new
                             Arc::new(LayerE::new(conf, &this, &name, remote.file_size(), stats))
                         }
                     };
-
-                    if let NeedsUpload(m) = decision {
-                        needs_upload.push((layer.clone(), m));
-                    }
 
                     loaded_layers.push(layer);
                 }
