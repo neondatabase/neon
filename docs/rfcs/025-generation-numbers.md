@@ -302,38 +302,19 @@ the same generation validation requirement.
 Calls to `/v1/tenant/{tenant_id}/attach` are augmented with an additional
 `generation` field in the body.
 
-The pageserver must persist this attachment generation number before starting
-the `Tenant` tasks. We will create a new per-tenant metadata file that records
-the attachment generation number, and will also be used in future work for
-implementing fast migration, where the tenant has more states than simple
-attached & detached.
+The pageserver does not persist this: a generation is only good for the lifetime
+of a process.
 
 #### Re-attachment on startup
 
-As it currently does, the pageserver may use local disk state to identify which tenants/timelines
-were attached before its most recent restart. However, it is now necessary
-to call out to the control plane to advance the generation number before
-doing any remote I/O for the attachment: we call this process **re-attaching**
-on startup.
+On startup, the pageserver will call out to an new control plane `/re-attach`
+API (see [Generation API](#generation-api)). This returns a list of
+tenants that should be attached to the pageserver, and their generation numbers, which
+the control plane will increment before returning.
 
-Advancing the generation number is necessary to avoid the pageserver assuming
-that it is running in an environment where a previous instance of "itself" must
-have been fenced before this instance started: e.g. if running in an environment
-with containers/VMs using shared block storage where some stale container/VM might
-still think it has the same tenants attached that we do.
-
-To avoid sending O(tenants) requests to the control plane, in practice
-we would send a batched request to re-attach many tenants at once.
-
-Re-attaching has two possible outcomes for each tenant:
-
-- Increment the generation number, and return the incremented number: this
-  tenant may now go active with the new generation number.
-- Do not increment the generation number: this tenant may start, but may
-  not write to remote storage. This case is for nodes that the control
-  plane is intentionally leaving on a stale generation, for example when
-  doing a migration between pageservers, and the origin pageserver restarts
-  during the migration.
+The pageserver should still scan its local disk on startup, but should _delete_
+any local content for tenants not indicated in the `/re-attach` response: their
+absence is an implicit detach operation.
 
 #### Reconciliation
 
