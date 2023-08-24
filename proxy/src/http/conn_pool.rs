@@ -199,6 +199,7 @@ impl GlobalConnPool {
                 client.session.send(session_id)?;
                 return Ok(Client {
                     inner: Some(client),
+                    span: Span::current(),
                     pool,
                 });
             }
@@ -242,6 +243,7 @@ impl GlobalConnPool {
 
         new_client.map(|inner| Client {
             inner: Some(inner),
+            span: Span::current(),
             pool,
         })
     }
@@ -478,7 +480,6 @@ async fn connect_to_compute_once(
     );
 
     Ok(ClientInner {
-        span: Span::current(),
         inner: client,
         session: tx,
         ids,
@@ -486,7 +487,6 @@ async fn connect_to_compute_once(
 }
 
 struct ClientInner {
-    span: Span,
     inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     ids: Ids,
@@ -499,6 +499,7 @@ impl Client {
 }
 
 pub struct Client {
+    span: Span,
     inner: Option<ClientInner>,
     pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
 }
@@ -509,7 +510,11 @@ pub struct Discard<'a> {
 
 impl Client {
     pub fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
-        let Self { inner, pool } = self;
+        let Self {
+            inner,
+            pool,
+            span: _,
+        } = self;
         (
             &mut inner
                 .as_mut()
@@ -553,15 +558,6 @@ impl Deref for Client {
             .inner
     }
 }
-// impl DerefMut for Client<'_> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         &mut self
-//             .inner
-//             .as_mut()
-//             .expect("client inner should not be removed")
-//             .inner
-//     }
-// }
 
 impl Drop for Client {
     fn drop(&mut self) {
@@ -570,7 +566,7 @@ impl Drop for Client {
             .take()
             .expect("client inner should not be removed");
         if let Some((conn_info, conn_pool)) = self.pool.take() {
-            let current_span = client.span.clone();
+            let current_span = self.span.clone();
             // return connection to the pool
             tokio::task::spawn_blocking(move || {
                 let _span = current_span.enter();
