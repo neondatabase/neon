@@ -656,22 +656,40 @@ impl RemoteTimelineClient {
         // from latest_files, but not yet scheduled for deletion. Use a closure
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            for name in names {
-                if upload_queue.latest_files.remove(name).is_some() {
-                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                }
-            }
+            // Decorate our list of names with each name's generation, dropping
+            // makes that are unexpectedly missing from our metadata.
+            let with_generations: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    // Remove from latest_files, learning the file's remote generation in the process
+                    let meta = upload_queue.latest_files.remove(name);
+
+                    if meta.is_none() {
+                        // This is unexpected: latest_files is meant to be kept up to
+                        // date.  We can't delete the layer if we have forgotten what
+                        // generation it was in.
+                        warn!("Deleting layer {name} not found in latest_files list");
+                        None
+                    } else {
+                        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                        let generation = meta.map(|m| m.generation).flatten();
+                        Some((name, generation))
+                    }
+                })
+                .filter_map(|i| i)
+                .collect();
 
             if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
                 self.schedule_index_upload(upload_queue, metadata);
             }
 
             // schedule the actual deletions
-            for name in names {
+            for (name, generation) in with_generations {
                 let op = UploadOp::Delete(Delete {
                     file_kind: RemoteOpFileKind::Layer,
                     layer_file_name: name.clone(),
                     scheduled_from_timeline_delete: false,
+                    generation: generation,
                 });
                 self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
@@ -828,12 +846,14 @@ impl RemoteTimelineClient {
                 .reserve(stopped.upload_queue_for_deletion.latest_files.len());
 
             // schedule the actual deletions
-            for name in stopped.upload_queue_for_deletion.latest_files.keys() {
+            for (name, meta) in &stopped.upload_queue_for_deletion.latest_files {
                 let op = UploadOp::Delete(Delete {
                     file_kind: RemoteOpFileKind::Layer,
                     layer_file_name: name.clone(),
                     scheduled_from_timeline_delete: true,
+                    generation: meta.generation,
                 });
+
                 self.calls_unfinished_metric_begin(&op);
                 stopped
                     .upload_queue_for_deletion
@@ -1060,7 +1080,7 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer_file_name, ref layer_metadata) => {
-                    let mut path = self
+                    let path = self
                         .conf
                         .timeline_path(&self.tenant_id, &self.timeline_id)
                         .join(layer_file_name.file_name());
@@ -1120,7 +1140,7 @@ impl RemoteTimelineClient {
                         .conf
                         .timeline_path(&self.tenant_id, &self.timeline_id)
                         .join(delete.layer_file_name.file_name());
-                    delete::delete_layer(self.conf, &self.storage_impl, path)
+                    delete::delete_layer(self.conf, &self.storage_impl, path, delete.generation)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
@@ -1420,17 +1440,21 @@ pub fn remote_index_path(
 pub fn remote_path(
     conf: &PageServerConf,
     local_path: &Path,
-    generation: Generation,
+    generation: Option<Generation>,
 ) -> anyhow::Result<RemotePath> {
     let stripped = local_path
         .strip_prefix(&conf.workdir)
         .context("Failed to strip workdir prefix")?;
 
-    let suffixed = format!(
-        "{0}{1}",
-        stripped.to_string_lossy(),
-        generation.get_suffix()
-    );
+    let suffixed = if let Some(generation) = generation {
+        format!(
+            "{0}{1}",
+            stripped.to_string_lossy(),
+            generation.get_suffix()
+        )
+    } else {
+        stripped.to_string_lossy().to_string()
+    };
 
     RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
         format!(

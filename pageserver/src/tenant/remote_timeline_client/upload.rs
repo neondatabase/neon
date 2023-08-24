@@ -58,7 +58,7 @@ pub(super) async fn upload_timeline_layer<'a>(
         bail!("failpoint before-upload-layer")
     });
 
-    let storage_path = remote_path(conf, source_path, generation)?;
+    let storage_path = remote_path(conf, source_path, Some(generation))?;
     let source_file_res = fs::File::open(&source_path).await;
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
