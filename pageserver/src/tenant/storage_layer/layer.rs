@@ -58,6 +58,7 @@ impl AsLayerDesc for Layer {
 }
 
 impl Layer {
+    /// Creates a layer value for a file we know not to be downloaded or resident.
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
@@ -86,6 +87,7 @@ impl Layer {
         owner
     }
 
+    /// Creates a Layer value for a file we know to be resident in timeline directory.
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
@@ -153,6 +155,12 @@ impl Layer {
         Ok(ResidentLayer { downloaded, owner })
     }
 
+    /// Requests the layer to be evicted and waits for this to be done.
+    ///
+    /// If the file is not resident, an [`EvictionError::NotFound`] is returned.
+    ///
+    /// If for a bad luck or blocking of the executor, we miss the actual eviction and the layer is
+    /// re-downloaded, [`EvictionError::Downloaded`] is returned.
     pub(crate) async fn evict_and_wait(
         &self,
         rtc: &RemoteTimelineClient,
@@ -627,7 +635,7 @@ impl LayerInner {
                                 },
                                 Err(e) => {
                                     // our caller is cancellation safe, but we might be racing with
-                                    // another attempt to reinitialize. before we have cancellation
+                                    // another attempt to initialize. before we have cancellation
                                     // token support: these attempts should converge regardless of
                                     // their completion order.
                                     tracing::error!("layer file download failed, and additionally failed to communicate this to caller: {e:?}");
@@ -673,8 +681,8 @@ impl LayerInner {
                     }
                 }
             } else {
-                // the file is present locally and we could even be running without remote
-                // storage
+                // the file is present locally, probably by a previous but cancelled call to
+                // get_or_maybe_download.
             }
 
             let res = Arc::new(DownloadedLayer {
@@ -912,6 +920,7 @@ pub(crate) enum EvictionError {
     Downloaded,
 }
 
+/// Error internal to the [`LayerInner::get_or_maybe_download`]
 #[derive(Debug, thiserror::Error)]
 enum DownloadError {
     #[error("timeline has already shutdown")]
