@@ -43,6 +43,7 @@ pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 use self::delta_layer::DeltaEntry;
+use super::remote_timeline_client::index::LayerFileMetadata;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::Timeline;
 use utils::sync::heavier_once_cell;
@@ -517,6 +518,56 @@ impl LayerE {
             inner: Default::default(),
             version: AtomicUsize::new(0),
             status: tokio::sync::broadcast::channel(1).0,
+        }
+    }
+
+    pub(crate) fn for_resident(
+        conf: &'static PageServerConf,
+        timeline: &Arc<Timeline>,
+        file_name: LayerFileName,
+        metadata: &LayerFileMetadata,
+    ) -> ResidentLayer {
+        let path = conf
+            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
+            .join(file_name.file_name());
+
+        let desc = PersistentLayerDesc::from_filename(
+            timeline.tenant_id,
+            timeline.timeline_id,
+            file_name,
+            metadata.file_size(),
+        );
+
+        let mut resident = None;
+
+        let outer = Arc::new_cyclic(|owner| {
+            let inner = Arc::new(DownloadedLayer {
+                owner: owner.clone(),
+                kind: tokio::sync::OnceCell::default(),
+            });
+            resident = Some(inner.clone());
+            LayerE {
+                conf,
+                path,
+                desc,
+                timeline: Arc::downgrade(timeline),
+                have_remote_client: timeline.remote_client.is_some(),
+                access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+                wanted_garbage_collected: AtomicBool::new(false),
+                wanted_evicted: AtomicBool::new(false),
+                inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),
+                version: AtomicUsize::new(0),
+                status: tokio::sync::broadcast::channel(1).0,
+            }
+        });
+
+        debug_assert!(outer.needs_download_blocking().unwrap().is_none());
+
+        let _downloaded = resident.expect("just initialized");
+
+        ResidentLayer {
+            _downloaded,
+            owner: outer,
         }
     }
 
