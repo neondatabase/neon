@@ -465,7 +465,7 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("vm-monitor-addr")
                 .long("vm-monitor-addr")
-                .default_value("127.0.0.1:10369")
+                .default_value("0.0.0.0:10301")
                 .value_name("VM_MONITOR_ADDR"),
         )
         .arg(
