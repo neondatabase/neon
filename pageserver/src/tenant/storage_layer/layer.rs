@@ -318,6 +318,7 @@ struct LayerInner {
 
     /// Allow subscribing to when the layer actually gets evicted.
     status: tokio::sync::broadcast::Sender<Status>,
+    consecutive_failures: AtomicUsize,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -423,6 +424,7 @@ impl LayerInner {
             },
             version: AtomicUsize::new(0),
             status: tokio::sync::broadcast::channel(1).0,
+            consecutive_failures: AtomicUsize::new(0),
         }
     }
 
@@ -647,12 +649,24 @@ impl LayerInner {
                             // this is really a bug in needs_download or remote timeline client
                             panic!("post-condition failed: needs_download returned {reason:?}");
                         }
+
+                        self.consecutive_failures.store(0, Ordering::Relaxed);
                     }
                     Ok(Err(e)) => {
-                        tracing::error!("layer file download failed: {e:#}");
+                        let consecutive_failures =
+                            self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
+                        let backoff = utils::backoff::exponential_backoff_duration_seconds(
+                            consecutive_failures.min(u32::MAX as usize) as u32,
+                            1.5,
+                            60.0,
+                        );
+                        let backoff = std::time::Duration::from_secs_f64(backoff);
+
+                        // unless we get cancelled, we will hold off the semaphore init
+                        tokio::time::sleep(backoff).await;
+
                         return Err(DownloadError::DownloadFailed);
-                        // FIXME: we need backoff here so never spiral to download loop, maybe,
-                        // because remote timeline client already retries
                     }
                     Err(_gone) => {
                         return Err(DownloadError::DownloadCancelled);
