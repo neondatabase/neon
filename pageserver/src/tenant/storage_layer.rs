@@ -10,7 +10,6 @@ use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Key;
 use crate::task_mgr::TaskKind;
-use crate::tenant::storage_layer::delta_layer::Ref;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use anyhow::Result;
@@ -1239,10 +1238,11 @@ impl ResidentLayer {
         self.into()
     }
 
+    /// Loads all keys stored in the layer. Returns key, lsn and value size.
     pub(crate) async fn load_keys(
         &self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<Ref<&'_ delta_layer::DeltaLayerInner>>>> {
+    ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         use LayerKind::*;
 
         match self.downloaded.get().await? {
@@ -1254,11 +1254,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                let resident = Ref(d);
-
-                delta_layer::DeltaLayerInner::load_keys(&resident)
-                    .await
-                    .context("Layer index is corrupted")
+                d.load_keys().await.context("Layer index is corrupted")
             }
             Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
         }
@@ -1372,44 +1368,6 @@ impl DownloadedLayer {
                     .await
             }
             Image(i) => i.get_value_reconstruct_data(key, reconstruct_data).await,
-        }
-    }
-
-    /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub(crate) async fn load_keys(
-        &self,
-    ) -> anyhow::Result<Vec<DeltaEntry<Ref<&'_ delta_layer::DeltaLayerInner>>>> {
-        use LayerKind::*;
-
-        match self.get().await? {
-            Delta(d) => {
-                let resident = Ref(d);
-                delta_layer::DeltaLayerInner::load_keys(&resident)
-                    .await
-                    .context("Layer index is corrupted")
-            }
-            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ResidentDeltaLayer(Arc<DownloadedLayer>);
-
-impl AsRef<delta_layer::DeltaLayerInner> for ResidentDeltaLayer {
-    fn as_ref(&self) -> &delta_layer::DeltaLayerInner {
-        use LayerKind::*;
-
-        let kind = self
-            .0
-            .kind
-            .get()
-            .expect("ResidentDeltaLayer must not be created before the delta is init");
-
-        match kind {
-            Ok(Delta(ref d)) => d,
-            Err(_) => unreachable!("ResidentDeltaLayer must not be created for failed loads"),
-            _ => unreachable!("checked before creating ResidentDeltaLayer"),
         }
     }
 }

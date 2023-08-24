@@ -307,7 +307,6 @@ impl DeltaLayer {
             let desc = match dump_blob(val).await {
                 Ok(desc) => desc,
                 Err(err) => {
-                    let err: anyhow::Error = err;
                     format!("ERROR: {err}")
                 }
             };
@@ -406,20 +405,6 @@ impl DeltaLayer {
     /// Path to the layer file
     fn path(&self) -> PathBuf {
         self.path.clone()
-    }
-    /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
-    ///
-    /// The value can be obtained via the [`ValueRef::load`] function.
-    #[allow(dead_code)] // for now, until I know if this can be done with borrows and
-                        // ResidentDeltaLayer
-    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .await
-            .context("load delta layer keys")?;
-        DeltaLayerInner::load_keys(inner)
-            .await
-            .context("Layer index is corrupted")
     }
 }
 
