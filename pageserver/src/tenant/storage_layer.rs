@@ -490,37 +490,6 @@ impl Drop for LayerE {
 }
 
 impl LayerE {
-    pub(crate) fn new(
-        conf: &'static PageServerConf,
-        timeline: &Arc<Timeline>,
-        filename: &LayerFileName,
-        file_size: u64,
-        access_stats: LayerAccessStats,
-    ) -> LayerE {
-        let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_id,
-            timeline.timeline_id,
-            filename.clone(),
-            file_size,
-        );
-        let path = conf
-            .timeline_path(&desc.tenant_id, &desc.timeline_id)
-            .join(desc.filename().to_string());
-        LayerE {
-            conf,
-            path,
-            desc,
-            timeline: Arc::downgrade(timeline),
-            have_remote_client: timeline.remote_client.is_some(),
-            access_stats,
-            wanted_garbage_collected: AtomicBool::new(false),
-            wanted_evicted: AtomicBool::new(false),
-            inner: Default::default(),
-            version: AtomicUsize::new(0),
-            status: tokio::sync::broadcast::channel(1).0,
-        }
-    }
-
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
