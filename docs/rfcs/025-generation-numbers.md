@@ -129,23 +129,8 @@ split-brain issues in storage:
 - If there are multiple pageservers running with the same node ID, we may unambiguously know which
   of them "wins" by picking the higher generation number.
 
-**Note** If we ever run pageservers on infrastructure that might transparently restart
-a pageserver while leaving an old process running (e.g. a VM gets rescheduled
-without the old one being fenced), then there is a risk of corruption, when
-the control plane attaches the tenant, as follows:
-
-- if the control plane sends an /attach request
-  to node A, then node A dies and is replaced, and the control plane times out
-  the request and restarts, then it could end up with two physical nodes both using
-  the same attachment generation.
-- This is not an issue when using EC2 instances with ephemeral storage, as long
-  as the control plane never re-uses a node ID, but it would need re-examining
-  if running on different infrastructure.
-- To robustly protect against this class of issue, we would either:
-  - add a "node generation" to distinguish between different processes holding the
-    same node_id.
-  - or, dispense with static node_id entirely and issue an ephemeral ID to each
-    pageserver process when it starts.
+As long as the infrastructure does not transparently replace an underlying
+physical machine, we are totally safe. See the later [unsafe case](#unsafe-case-on-badly-behaved-infrastructure) section for details.
 
 ### Object Key Changes
 
@@ -587,6 +572,29 @@ Examples:
     write out index_part.json files with
     stale attachment generation: these will be eventually cleaned up
     by the same mechanism as other old indices.
+
+### Unsafe case on badly behaved infrastructure
+
+This section is only relevant if running on a different environment
+than EC2 machines with ephemeral disks.
+
+If we ever run pageservers on infrastructure that might transparently restart
+a pageserver while leaving an old process running (e.g. a VM gets rescheduled
+without the old one being fenced), then there is a risk of corruption, when
+the control plane attaches the tenant, as follows:
+
+- if the control plane sends an /attach request
+  to node A, then node A dies and is replaced, and the control plane times out
+  the request and restarts, then it could end up with two physical nodes both using
+  the same attachment generation.
+- This is not an issue when using EC2 instances with ephemeral storage, as long
+  as the control plane never re-uses a node ID, but it would need re-examining
+  if running on different infrastructure.
+- To robustly protect against this class of issue, we would either:
+  - add a "node generation" to distinguish between different processes holding the
+    same node_id.
+  - or, dispense with static node_id entirely and issue an ephemeral ID to each
+    pageserver process when it starts.
 
 ## Implementation Part 2: Optimizations
 
