@@ -737,34 +737,6 @@ jobs:
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --cleanup
 
-      # Due to a kaniko bug, we can't use cache for extensions image, thus it takes about the same amount of time as compute-node image to build (~10 min)
-      # During the transition period we need to have extensions in both places (in S3 and in compute-node image),
-      # so we won't build extension twice, but extract them from compute-node.
-      #
-      # For now we use extensions image only for new custom extensitons
-      - name: Kaniko build extensions only
-        run: |
-          # Kaniko is suposed to clean up after itself if --cleanup flag is set, but it doesn't.
-          # Despite some fixes were made in https://github.com/GoogleContainerTools/kaniko/pull/2504 (in kaniko v1.11.0),
-          # it still fails with error:
-          #   error building image: could not save file: copying file: symlink postgres /kaniko/1/usr/local/pgsql/bin/postmaster: file exists
-          #
-          # Ref https://github.com/GoogleContainerTools/kaniko/issues/1406
-          find /kaniko -maxdepth 1 -mindepth 1 -type d -regex "/kaniko/[0-9]*" -exec rm -rv {} \;
-
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true \
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-                           --context . \
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }} \
-                           --build-arg PG_VERSION=${{ matrix.version }} \
-                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}} \
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
-                           --dockerfile Dockerfile.compute-node \
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-                           --destination neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-                           --cleanup \
-                           --target postgres-extensions
-
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
@@ -973,57 +945,10 @@ jobs:
               }
             }"
 
-  upload-postgres-extensions-to-s3:
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-       github.event_name != 'workflow_dispatch'
-    runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
-    needs: [ tag, promote-images ]
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [ v14, v15 ]
-
-    env:
-      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{ github.ref_name == 'release' && 'latest' || needs.tag.outputs.build-tag }}
-      AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
-      AWS_SECRET_ACCESS_KEY: ${{ github.ref_name == 'release' && secrets.AWS_SECRET_KEY_PROD || secrets.AWS_SECRET_KEY_DEV }}
-      S3_BUCKETS: ${{ github.ref_name == 'release' && vars.S3_EXTENSIONS_BUCKETS_PROD || vars.S3_EXTENSIONS_BUCKETS_DEV }}
-
-    steps:
-      - name: Pull postgres-extensions image
-        run: |
-          docker pull ${EXTENSIONS_IMAGE}
-
-      - name: Create postgres-extensions container
-        id: create-container
-        run: |
-          EID=$(docker create ${EXTENSIONS_IMAGE} true)
-          echo "EID=${EID}" >> $GITHUB_OUTPUT
-
-      - name: Extract postgres-extensions from container
-        run: |
-          rm -rf ./extensions-to-upload # Just in case
-          mkdir -p extensions-to-upload
-
-          docker cp ${{ steps.create-container.outputs.EID }}:/extensions/ ./extensions-to-upload/
-          docker cp ${{ steps.create-container.outputs.EID }}:/ext_index.json ./extensions-to-upload/
-
-      - name: Upload postgres-extensions to S3
-        run: |
-          for BUCKET in $(echo ${S3_BUCKETS:-[]} | jq --raw-output '.[]'); do
-            aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
-          done
-
-      - name: Cleanup
-        if: ${{ always() && steps.create-container.outputs.EID }}
-        run: |
-          docker rm ${{ steps.create-container.outputs.EID }} || true
-
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ upload-postgres-extensions-to-s3, promote-images, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
