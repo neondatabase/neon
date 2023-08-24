@@ -1365,7 +1365,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::{Layer, PersistentLayerDesc},
+            storage_layer::Layer,
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -1541,46 +1541,26 @@ mod tests {
             std::fs::write(timeline_path.join(filename.file_name()), content).unwrap();
         }
 
-        let layer_file_1 = Layer::for_written(
+        let layer_file_1 = Layer::for_resident(
             harness.conf,
             &timeline,
-            PersistentLayerDesc::from_filename(
-                timeline.tenant_id,
-                timeline.timeline_id,
-                layer_file_name_1.clone(),
-                content_1.len() as u64,
-            ),
-        )
-        .unwrap();
+            layer_file_name_1.clone(),
+            LayerFileMetadata::new(content_1.len() as u64),
+        );
 
-        // FIXME: need that api for local files
-        assert!(layer_file_1.needs_download_blocking().unwrap().is_none());
-
-        let layer_file_2 = Layer::for_written(
+        let layer_file_2 = Layer::for_resident(
             harness.conf,
             &timeline,
-            PersistentLayerDesc::from_filename(
-                timeline.tenant_id,
-                timeline.timeline_id,
-                layer_file_name_2.clone(),
-                content_2.len() as u64,
-            ),
-        )
-        .unwrap();
-        assert!(layer_file_2.needs_download_blocking().unwrap().is_none());
+            layer_file_name_2.clone(),
+            LayerFileMetadata::new(content_2.len() as u64),
+        );
 
-        let layer_file_3 = Layer::for_written(
+        let layer_file_3 = Layer::for_resident(
             harness.conf,
             &timeline,
-            PersistentLayerDesc::from_filename(
-                timeline.tenant_id,
-                timeline.timeline_id,
-                layer_file_name_3.clone(),
-                content_3.len() as u64,
-            ),
-        )
-        .unwrap();
-        assert!(layer_file_3.needs_download_blocking().unwrap().is_none());
+            layer_file_name_3.clone(),
+            LayerFileMetadata::new(content_3.len() as u64),
+        );
 
         client
             .schedule_layer_file_upload(
@@ -1721,20 +1701,12 @@ mod tests {
         )
         .unwrap();
 
-        let layer_file_1 = Layer::for_written(
+        let layer_file_1 = Layer::for_resident(
             harness.conf,
             &timeline,
-            PersistentLayerDesc::from_filename(
-                timeline.tenant_id,
-                timeline.timeline_id,
-                layer_file_name_1.clone(),
-                content_1.len() as u64,
-            ),
-        )
-        .unwrap();
-
-        // FIXME: need that api for local files that actually exist
-        assert!(layer_file_1.needs_download_blocking().unwrap().is_none());
+            layer_file_name_1.clone(),
+            LayerFileMetadata::new(content_1.len() as u64),
+        );
 
         #[derive(Debug, PartialEq)]
         struct BytesStartedFinished {
