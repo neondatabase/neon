@@ -521,11 +521,49 @@ impl LayerE {
         }
     }
 
+    pub(crate) fn for_evicted(
+        conf: &'static PageServerConf,
+        timeline: &Arc<Timeline>,
+        file_name: LayerFileName,
+        metadata: LayerFileMetadata,
+    ) -> Arc<LayerE> {
+        let path = conf
+            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
+            .join(file_name.file_name());
+
+        let desc = PersistentLayerDesc::from_filename(
+            timeline.tenant_id,
+            timeline.timeline_id,
+            file_name,
+            metadata.file_size(),
+        );
+
+        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
+
+        let outer = Arc::new(LayerE {
+            conf,
+            path,
+            desc,
+            timeline: Arc::downgrade(timeline),
+            access_stats,
+            inner: heavier_once_cell::OnceCell::default(),
+            wanted_garbage_collected: AtomicBool::default(),
+            wanted_evicted: AtomicBool::default(),
+            version: AtomicUsize::default(),
+            have_remote_client: timeline.remote_client.is_some(),
+            status: tokio::sync::broadcast::channel(1).0,
+        });
+
+        debug_assert!(outer.needs_download_blocking().unwrap().is_some());
+
+        outer
+    }
+
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         file_name: LayerFileName,
-        metadata: &LayerFileMetadata,
+        metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let path = conf
             .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
@@ -537,6 +575,8 @@ impl LayerE {
             file_name,
             metadata.file_size(),
         );
+
+        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
 
         let mut resident = None;
 
@@ -552,7 +592,7 @@ impl LayerE {
                 desc,
                 timeline: Arc::downgrade(timeline),
                 have_remote_client: timeline.remote_client.is_some(),
-                access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+                access_stats,
                 wanted_garbage_collected: AtomicBool::new(false),
                 wanted_evicted: AtomicBool::new(false),
                 inner: heavier_once_cell::OnceCell::new(ResidentOrWantedEvicted::Resident(inner)),

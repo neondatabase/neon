@@ -1509,30 +1509,20 @@ impl Timeline {
                         Image(i) => assert!(i.lsn <= disk_consistent_lsn),
                     }
 
-                    let status = match &decision {
-                        UseLocal(_) | NeedsUpload(_) => LayerResidenceStatus::Resident,
-                        Evicted(_) | UseRemote { .. } => LayerResidenceStatus::Evicted,
-                    };
-
-                    let stats = LayerAccessStats::for_loading_layer(status);
-
                     let layer = match decision {
                         NeedsUpload(m) => {
                             total_physical_size += m.file_size();
-                            let resident = LayerE::for_resident(conf, &this, name, &m);
+                            let resident = LayerE::for_resident(conf, &this, name, m.clone());
                             let layer = resident.as_ref().clone();
                             needs_upload.push((resident, m));
                             layer
                         }
                         UseLocal(m) => {
                             total_physical_size += m.file_size();
-                            let resident = LayerE::for_resident(conf, &this, name, &m);
-                            resident.drop_eviction_guard()
+                            LayerE::for_resident(conf, &this, name, m).drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
-                            // FIXME: there ought to be a known evicted factory instead of generic
-                            // new
-                            Arc::new(LayerE::new(conf, &this, &name, remote.file_size(), stats))
+                            LayerE::for_evicted(conf, &this, name, remote)
                         }
                     };
 
