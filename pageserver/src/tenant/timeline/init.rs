@@ -106,7 +106,6 @@ pub(super) fn reconcile(
     disk_consistent_lsn: Lsn,
 ) -> Vec<(LayerFileName, Result<Decision, FutureLayer>)> {
     use Decision::*;
-    use LayerFileName::*;
 
     // name => (local, remote)
     type Collected = HashMap<LayerFileName, (Option<LayerFileMetadata>, Option<LayerFileMetadata>)>;
