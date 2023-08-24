@@ -737,34 +737,6 @@ jobs:
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --cleanup
 
-      # Due to a kaniko bug, we can't use cache for extensions image, thus it takes about the same amount of time as compute-node image to build (~10 min)
-      # During the transition period we need to have extensions in both places (in S3 and in compute-node image),
-      # so we won't build extension twice, but extract them from compute-node.
-      #
-      # For now we use extensions image only for new custom extensitons
-      - name: Kaniko build extensions only
-        run: |
-          # Kaniko is suposed to clean up after itself if --cleanup flag is set, but it doesn't.
-          # Despite some fixes were made in https://github.com/GoogleContainerTools/kaniko/pull/2504 (in kaniko v1.11.0),
-          # it still fails with error:
-          #   error building image: could not save file: copying file: symlink postgres /kaniko/1/usr/local/pgsql/bin/postmaster: file exists
-          #
-          # Ref https://github.com/GoogleContainerTools/kaniko/issues/1406
-          find /kaniko -maxdepth 1 -mindepth 1 -type d -regex "/kaniko/[0-9]*" -exec rm -rv {} \;
-
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true \
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-                           --context . \
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }} \
-                           --build-arg PG_VERSION=${{ matrix.version }} \
-                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}} \
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
-                           --dockerfile Dockerfile.compute-node \
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-                           --destination neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-                           --cleanup \
-                           --target postgres-extensions
-
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
