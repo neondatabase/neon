@@ -154,9 +154,16 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub(crate) fn track_new_image_layers(&mut self, image_layers: &[ResidentLayer]) {
+    pub(crate) fn track_new_image_layers(
+        &mut self,
+        image_layers: &[ResidentLayer],
+        metrics: &crate::metrics::TimelineMetrics,
+    ) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
+            metrics
+                .resident_physical_size_gauge
+                .add(layer.layer_desc().file_size);
             layer.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,

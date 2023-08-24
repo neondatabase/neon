@@ -12,8 +12,7 @@ use bytes::Bytes;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-    LayerResidenceEventReason, LayerResidenceStatus, TimelineState,
+    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo, TimelineState,
 };
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
@@ -2749,17 +2748,7 @@ impl Timeline {
 
         let mut guard = self.layers.write().await;
 
-        for l in &image_layers {
-            // FIXME: these should be in guard
-            self.metrics
-                .resident_physical_size_gauge
-                .add(l.layer_desc().file_size);
-            l.access_stats().record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
-        }
-        guard.track_new_image_layers(&image_layers);
+        guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
 
