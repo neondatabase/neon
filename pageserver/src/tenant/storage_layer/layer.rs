@@ -847,8 +847,6 @@ impl LayerInner {
             LayerResidenceEventReason::ResidenceChange,
         );
 
-        drop(self.status.send(Status::Evicted));
-
         match capture_mtime_and_remove(&self.path) {
             Ok(local_layer_mtime) => {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
@@ -881,6 +879,8 @@ impl LayerInner {
                 tracing::warn!("failed to evict file from disk: {e:#}");
             }
         }
+
+        drop(self.status.send(Status::Evicted));
     }
 }
 
