@@ -126,6 +126,9 @@ pub async fn init_tenant_mgr(
                     match schedule_local_tenant_processing(
                         conf,
                         &tenant_dir_path,
+                        // TODO: call into control plane, don't start Tenants
+                        // purely because they are on disk
+                        Generation::none(),
                         resources.clone(),
                         Some(init_order.clone()),
                         &TENANTS,
@@ -162,6 +165,7 @@ pub async fn init_tenant_mgr(
 pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
+    generation: Generation,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -203,7 +207,7 @@ pub(crate) fn schedule_local_tenant_processing(
             match Tenant::spawn_attach(
                 conf,
                 tenant_id,
-                Generation::none(),
+                generation,
                 resources.broker_client,
                 tenants,
                 remote_storage,
@@ -357,6 +361,7 @@ pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
@@ -374,7 +379,8 @@ pub async fn create_tenant(
             remote_storage,
         };
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, tenant_resources, None, &TENANTS, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory,
+                generation, tenant_resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -537,7 +543,9 @@ pub async fn load_tenant(
             broker_client,
             remote_storage,
         };
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path,  resources, None,  &TENANTS, ctx)
+        // TODO: remove the `/load` API once generation support is complete:
+        // it becomes equivalent to attaching.
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, Generation::none(), resources, None,  &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -601,6 +609,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    generation: Generation,
     tenant_conf: TenantConfOpt,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
@@ -622,7 +631,7 @@ pub async fn attach_tenant(
             broker_client,
             remote_storage: Some(remote_storage),
         };
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

@@ -383,7 +383,6 @@ paths:
         schema:
           type: string
           format: hex
-
     post:
       description: |
         Schedules attach operation to happen in the background for the given tenant.
@@ -1020,6 +1019,9 @@ components:
       properties:
         config:
           $ref: '#/components/schemas/TenantConfig'
+        generation:
+          type: integer
+          description: Attachment generation number.
     TenantConfigRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'

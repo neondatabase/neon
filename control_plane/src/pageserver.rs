@@ -317,6 +317,7 @@ impl PageServerNode {
     pub fn tenant_create(
         &self,
         new_tenant_id: Option<TenantId>,
+        generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
@@ -387,6 +388,7 @@ impl PageServerNode {
 
         let request = models::TenantCreateRequest {
             new_tenant_id,
+            generation,
             config,
         };
         if !settings.is_empty() {

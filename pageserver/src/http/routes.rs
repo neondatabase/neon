@@ -32,11 +32,13 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
+use crate::tenant::timeline::Timeline;
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
     auth::JwtAuth,
+    generation::Generation,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
@@ -472,7 +474,7 @@ async fn tenant_attach_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
-    let tenant_conf = match maybe_body {
+    let tenant_conf = match &maybe_body {
         Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
         None => TenantConfOpt::default(),
     };
@@ -483,10 +485,25 @@ async fn tenant_attach_handler(
 
     let state = get_state(&request);
 
+    let generation = if state.conf.control_plane_api.is_some() {
+        // If we have been configured with a control plane URI, then generations are
+        // mandatory, as we will attempt to re-attach on startup.
+        maybe_body
+            .as_ref()
+            .and_then(|tar| tar.generation)
+            .map(Generation::new)
+            .ok_or(ApiError::BadRequest(anyhow!(
+                "generation attribute missing"
+            )))?
+    } else {
+        Generation::placeholder()
+    };
+
     if let Some(remote_storage) = &state.remote_storage {
         mgr::attach_tenant(
             state.conf,
             tenant_id,
+            generation,
             tenant_conf,
             state.broker_client.clone(),
             remote_storage.clone(),
@@ -867,6 +884,12 @@ async fn tenant_create_handler(
     let tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
+    // TODO: make generation mandatory here once control plane supports it.
+    let generation = request_data
+        .generation
+        .map(Generation::new)
+        .unwrap_or(Generation::none());
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let state = get_state(&request);
@@ -875,6 +898,7 @@ async fn tenant_create_handler(
         state.conf,
         tenant_conf,
         target_tenant_id,
+        generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,

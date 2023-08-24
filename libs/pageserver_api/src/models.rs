@@ -194,6 +194,9 @@ pub struct TimelineCreateRequest {
 pub struct TenantCreateRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub new_tenant_id: TenantId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -241,15 +244,6 @@ pub struct StatusResponse {
     pub id: NodeId,
 }
 
-impl TenantCreateRequest {
-    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
-        TenantCreateRequest {
-            new_tenant_id,
-            config: TenantConfig::default(),
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -293,9 +287,11 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TenantAttachRequest {
     pub config: TenantAttachConfig,
+    #[serde(default)]
+    pub generation: Option<u32>,
 }
 
 /// Newtype to enforce deny_unknown_fields on TenantConfig for

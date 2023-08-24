@@ -278,6 +278,14 @@ fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantId>> {
         .context("Failed to parse tenant id from the argument string")
 }
 
+fn parse_generation(sub_match: &ArgMatches) -> anyhow::Result<Option<u32>> {
+    sub_match
+        .get_one::<String>("generation")
+        .map(|tenant_id| u32::from_str(tenant_id))
+        .transpose()
+        .context("Failed to parse generation rom the argument string")
+}
+
 fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId>> {
     sub_match
         .get_one::<String>("timeline-id")
@@ -343,11 +351,13 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
         }
         Some(("create", create_match)) => {
             let initial_tenant_id = parse_tenant_id(create_match)?;
+            let generation = parse_generation(create_match)?;
             let tenant_conf: HashMap<_, _> = create_match
                 .get_many::<String>("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
-            let new_tenant_id = pageserver.tenant_create(initial_tenant_id, tenant_conf)?;
+            let new_tenant_id =
+                pageserver.tenant_create(initial_tenant_id, generation, tenant_conf)?;
             println!("tenant {new_tenant_id} successfully created on the pageserver");
 
             // Create an initial timeline for the new tenant
