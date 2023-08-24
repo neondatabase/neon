@@ -1676,7 +1676,7 @@ impl Timeline {
                         Err(FutureLayer { local }) => {
                             if local.is_some() {
                                 path.push(name.file_name());
-                                init::cleanup_future_layer(&path, name, disk_consistent_lsn)?;
+                                init::cleanup_future_layer(&path, &name, disk_consistent_lsn)?;
                                 path.pop();
                             }
                             needs_cleanup.push(name);
