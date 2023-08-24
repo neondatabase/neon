@@ -3416,10 +3416,6 @@ impl Timeline {
             } else if LayerMap::is_l0(l.layer_desc()) {
                 return Err(CompactionError::Other(anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
-                // update the timeline's physical size
-                self.metrics
-                    .resident_physical_size_gauge
-                    .add(l.layer_desc().file_size);
                 insert_layers.push(l);
             }
         }
@@ -3433,7 +3429,12 @@ impl Timeline {
 
         // deletion will happen later, the layer file manager sets wanted_garbage_collected
 
-        guard.finish_compact_l0(&layer_removal_cs, remove_layers, &insert_layers)?;
+        guard.finish_compact_l0(
+            &layer_removal_cs,
+            remove_layers,
+            &insert_layers,
+            &self.metrics,
+        )?;
 
         drop_wlock(guard);
 

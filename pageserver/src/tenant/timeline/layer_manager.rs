@@ -206,6 +206,7 @@ impl LayerManager {
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Arc<LayerE>>,
         compact_to: &[ResidentLayer],
+        metrics: &crate::metrics::TimelineMetrics,
     ) -> Result<()> {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
@@ -213,6 +214,10 @@ impl LayerManager {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+            metrics
+                .resident_physical_size_gauge
+                .add(l.layer_desc().file_size);
+
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         for l in compact_from {
