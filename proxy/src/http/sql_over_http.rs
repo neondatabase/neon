@@ -43,7 +43,7 @@ struct QueryData {
 impl QueryData {
     async fn into_statement(self, client: &Client) -> anyhow::Result<StatementData> {
         let stmt = client.prepare(&self.query).await?;
-        let params = json_to_pg_text(self.params)?;
+        let params = json_to_pg_text(self.params);
         Ok(StatementData { stmt, params })
     }
 }
@@ -90,20 +90,18 @@ static HEADER_REPEATABLE_READ: HeaderValue = HeaderValue::from_static("Repeatabl
 // Convert json non-string types to strings, so that they can be passed to Postgres
 // as parameters.
 //
-fn json_to_pg_text(json: Vec<Value>) -> Result<Vec<Option<String>>, serde_json::Error> {
+fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
     json.iter()
         .map(|value| {
             match value {
                 // special care for nulls
-                Value::Null => Ok(None),
+                Value::Null => None,
 
                 // convert to text with escaping
-                Value::Bool(_) => serde_json::to_string(value).map(Some),
-                Value::Number(_) => serde_json::to_string(value).map(Some),
-                Value::Object(_) => serde_json::to_string(value).map(Some),
+                v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
                 // avoid escaping here, as we pass this as a parameter
-                Value::String(s) => Ok(Some(s.to_string())),
+                Value::String(s) => Some(s.to_string()),
 
                 // special care for arrays
                 Value::Array(_) => json_array_to_pg_array(value),
@@ -120,29 +118,26 @@ fn json_to_pg_text(json: Vec<Value>) -> Result<Vec<Option<String>>, serde_json::
 //
 // Example of the same escaping in node-postgres: packages/pg/lib/utils.js
 //
-fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::Error> {
+fn json_array_to_pg_array(value: &Value) -> Option<String> {
     match value {
         // special care for nulls
-        Value::Null => Ok(None),
+        Value::Null => None,
 
         // convert to text with escaping
-        Value::Bool(_) => serde_json::to_string(value).map(Some),
-        Value::Number(_) => serde_json::to_string(value).map(Some),
-
         // here string needs to be escaped, as it is part of the array
-        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
-        Value::String(_) => serde_json::to_string(value).map(Some),
+        v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => Some(v.to_string()),
+        v @ Value::Object(_) => json_array_to_pg_array(&Value::String(v.to_string())),
 
         // recurse into array
         Value::Array(arr) => {
             let vals = arr
                 .iter()
                 .map(json_array_to_pg_array)
-                .map(|r| r.map(|v| v.unwrap_or_else(|| "NULL".to_string())))
-                .collect::<Result<Vec<_>, _>>()?
+                .map(|v| v.unwrap_or_else(|| "NULL".to_string()))
+                .collect::<Vec<_>>()
                 .join(",");
 
-            Ok(Some(format!("{{{}}}", vals)))
+            Some(format!("{{{}}}", vals))
         }
     }
 }
@@ -735,22 +730,22 @@ mod tests {
     #[test]
     fn test_atomic_types_to_pg_params() {
         let json = vec![Value::Bool(true), Value::Bool(false)];
-        let pg_params = json_to_pg_text(json).unwrap();
+        let pg_params = json_to_pg_text(json);
         assert_eq!(
             pg_params,
             vec![Some("true".to_owned()), Some("false".to_owned())]
         );
 
         let json = vec![Value::Number(serde_json::Number::from(42))];
-        let pg_params = json_to_pg_text(json).unwrap();
+        let pg_params = json_to_pg_text(json);
         assert_eq!(pg_params, vec![Some("42".to_owned())]);
 
         let json = vec![Value::String("foo\"".to_string())];
-        let pg_params = json_to_pg_text(json).unwrap();
+        let pg_params = json_to_pg_text(json);
         assert_eq!(pg_params, vec![Some("foo\"".to_owned())]);
 
         let json = vec![Value::Null];
-        let pg_params = json_to_pg_text(json).unwrap();
+        let pg_params = json_to_pg_text(json);
         assert_eq!(pg_params, vec![None]);
     }
 
@@ -759,7 +754,7 @@ mod tests {
         // atoms and escaping
         let json = "[true, false, null, \"NULL\", 42, \"foo\", \"bar\\\"-\\\\\"]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        let pg_params = json_to_pg_text(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(
@@ -770,7 +765,7 @@ mod tests {
         // nested arrays
         let json = "[[true, false], [null, 42], [\"foo\", \"bar\\\"-\\\\\"]]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        let pg_params = json_to_pg_text(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(
@@ -780,7 +775,7 @@ mod tests {
         // array of objects
         let json = r#"[{"foo": 1},{"bar": 2}]"#;
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        let pg_params = json_to_pg_text(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
