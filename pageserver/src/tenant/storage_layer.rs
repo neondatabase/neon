@@ -355,8 +355,7 @@ impl ResidentOrWantedEvicted {
 /// There are two kinds of layers, in-memory and on-disk layers. In-memory
 /// layers are used to ingest incoming WAL, and provide fast access to the
 /// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
+/// immutable. This type represents the on-disk kind.
 ///
 /// Furthermore, there are two kinds of on-disk layers: delta and image layers.
 /// A delta layer contains all modifications within a range of LSNs and keys.
