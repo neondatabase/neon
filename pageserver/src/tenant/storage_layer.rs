@@ -777,9 +777,6 @@ impl LayerE {
             // no need to make the evict_and_wait wait for the actual download to complete
             drop(self.status.send(Status::Downloaded));
 
-            // drop the old one, it at most held the weak or had not been initialized ever
-            // locked.take();
-
             // technically the mutex could be dropped here.
             let timeline = self
                 .timeline
@@ -796,9 +793,6 @@ impl LayerE {
                 .map_err(DownloadError::PreStatFailed)?;
 
             if let Some(reason) = needs_download {
-                // what to do if we have a concurrent eviction request when we are downloading? eviction
-                // api's use ResidentLayer, so evict could be moved there, or we just reset the state here.
-                //
                 // only reset this after we've decided we really need to download. otherwise it'd
                 // be impossible to mark cancelled downloads for eviction, like one could imagine
                 // we would like to do for prefetching which was not needed.
@@ -833,12 +827,6 @@ impl LayerE {
                                 && !self.conf.ondemand_download_behavior_treat_error_as_warn;
 
                             if really_error {
-                                // originally this returned
-                                // return Err(PageReconstructError::NeedsDownload(
-                                //     TenantTimelineId::new(self.tenant_id, self.timeline_id),
-                                //     remote_layer.filename(),
-                                // ))
-                                //
                                 // this check is only probablistic, seems like flakyness footgun
                                 return Err(DownloadError::ContextAndConfigReallyDeniesDownloads);
                             }
@@ -898,7 +886,8 @@ impl LayerE {
                                     // or redownload.
                                     //
                                     // however, could be that we should consider marking the layer
-                                    // for eviction?
+                                    // for eviction? alas, cannot: because only DownloadedLayer
+                                    // will handle that.
                                 },
                                 Err(e) => {
                                     // our caller is cancellation safe, but we might be racing with
@@ -939,14 +928,6 @@ impl LayerE {
                 // the file is present locally and we could even be running without remote
                 // storage
             }
-
-            // the assumption is that we own the layer residentness, no operator should go in
-            // and delete random files. this would be evident when trying to access the file
-            // Nth time (N>1) while having the VirtualFile evicted in between.
-            //
-            // we could support this by looping on NotFound from the layer access methods, but
-            // it's difficult to implement this so that the operator does not delete
-            // not-yet-uploaded files.
 
             let res = Arc::new(DownloadedLayer {
                 owner: Arc::downgrade(self),
