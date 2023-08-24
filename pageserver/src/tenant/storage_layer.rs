@@ -984,6 +984,11 @@ impl LayerE {
                 kind: tokio::sync::OnceCell::default(),
             });
 
+            self.access_stats.record_residence_event(
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::ResidenceChange,
+            );
+
             Ok(if self.wanted_evicted.load(Ordering::Acquire) {
                 // because we reset wanted_evictness earlier, this most likely means when we were downloading someone
                 // wanted to evict this layer.
@@ -1155,6 +1160,8 @@ impl LayerE {
                     });
 
                     let res = capture_mtime_and_delete.await;
+
+                    this.access_stats.record_residence_event(LayerResidenceStatus::Evicted, LayerResidenceEventReason::ResidenceChange);
 
                     drop(this.status.send(Status::Evicted));
 
