@@ -41,34 +41,38 @@ We cannot roll back or complete the timeline directory update during which we cr
 The implications of the above are primarily problematic for compaction.
 Specifically, the part of it that compats L0 layers into L1 layers.
 
-* Recap: compaction takes a set of L0 layers and reshuffles the delta records in them into L1 layer files.
-  Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
-  It then deletes the L0 layers locally, and schedules an upload of the L1 layers and and updated index part.
-* If we crash before deleting L0s, but after writing out L1s, the next compaction after restart will re-digest the L0s and produce new L1s.
-  * This will produce the same L1s as before (same key & lsn range) iff the compaction algorithm remains unchanged.
-    * It means we're overwriting previously written L1s.
-    * If the contents are the same, that's generally unproblematic.
-    * If the contents are different, that's a violation of our assumptions in https://github.com/neondatabase/neon/pull/4919
-  * If the compaction algorithm is changed between restarts, then it may produce different L1s.
-    But the old L1s will still be in the layer map.
-    So, there will be old and new L1s, and a delta record from the L0s may be present twice, once in the old L1 and once in a new L1.
-* If we crash after having written out all the L1s and having deleted some but not all L0s, the next compaction run will likely produce L1s that are different than the compaction run before the crash.
-  The reason is that the inputs to the post-crash compact are a *subset* of pre-crash-L0s and some *new* post-crash L0s, i.e., new data.
-  * The data in the pre-crash-L0s that weren't deleted before the crash is now duplicated in the repository.
-  * If we're unlucky, and/or the compaction algorithm changed, post-crash compaction may produce L1s that have identical key & lsn range, but different contents.
+Remember that compaction takes a set of L0 layers and reshuffles the delta records in them into L1 layer files.
+Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
+It then deletes the L0 layers locally, and schedules an upload of the L1 layers and and updated index part.
 
-Basically, two things can happen:
-* there is duplicate data in the repository (it will eventually be turned into an image, so, that's a transient problem)
-* we can overwrite a layer file with same S3 key but a different set of delta records within it.
+If we crash before deleting L0s, but after writing out L1s, the next compaction after restart will re-digest the L0s and produce new L1s.
+This means the compaction after restart will **overwrite** the previously written L1s.
+Currently we also schedule an S3 upload of the overwritten L1.
 
-The latter is a problem for the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919) which assumes that layer objects keys remain identical.
-In that RFC, if a stale node overwrites a layer file with a different content, and subsequently updates the index part, the earlier version of its `index_part.json` that the current not-stale node bases its world view on beocmes invalid.
+If the compaction algorithm doesn't change between the two compaction runs, is deterministic, and uses the same set of L0s as input, then the second run will produce identical L1s and the overwrites will go unnoticed.
 
-Technically, the split-brain RFC only requires equal content, not bit-for-bit equality.
-Also, technically, I'm not 100% certain that the *current* compaction algorithm will ever overwrite an L1 layer file with different contents.
+*However*:
+1. the file size of the overwritten L1s may not be identical, and
+2. the bit pattern of the overwritten L1s may not be identical, and, and, and, and
+3. in the future, we may want to make the compaction code non-determinstic, influenced by past access patterns, or otherwise change it, resulting in L1 overwrites with a different set of delta records than before the overwrite
 
-But, in any way, it's better to avoid making too much code dependent on details of the compaction code.
-**Let's instead re-establish the currently broadly-assumed invariant that layer files are written once and immutable, both locally and in S3.**
+The items above are a problem for the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919) because it assumes that layer files in S3 are only ever deleted, but never replaced (overPUTted).
+
+For example, if an unresponsive node A becomes active again after control plane has relocated the tenant to a new node B, the node A may overwrite some L1s.
+But node B based its world view on the version of node A's `index_part.json` from _before_ the overwrite.
+That earlier `index_part.json`` contained the file size of the pre-overwrite L1.
+Pageserver currently treat file size as a checksum, and because it mismatches, the node B will refuse to read data from the L1.
+Effectively, the data in the L1 has become inaccessible to node B.
+If node B already uploaded an index part itself, all subsequent attachments will use node B's index part, and run into the same probem.
+
+If we ever introduce checksums instead of checking just the file size, then a mismatching bit pattern (2) will cause similar problems.
+
+In case of (1) and (2), where we know that the logical content of the layers is still the same, we can recover by manually patching the `index_part.json` of the new node to the overwritten L1's file size / checksum.
+
+But if (3) ever happens, the logical content may be different, and, we could have truly lost data.
+
+Given the above considerations, we should avoid making correctness of split-brain protection dependent on overwrites preserving _logical_ layer file contents.
+**It is a much cleaner separation of concerns to require that layer files are truly immutable in S3, i.e., PUT once and then only DELETEd, never overwritten (overPUTted).**
 
 ## Design
 
