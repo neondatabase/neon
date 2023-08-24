@@ -3027,14 +3027,14 @@ impl Timeline {
         let first_level0_delta = level0_deltas_iter.next().unwrap();
         let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = Vec::with_capacity(level0_deltas.len());
-        deltas_to_compact.push(first_level0_delta.clone());
+        deltas_to_compact.push(first_level0_delta.guard_against_eviction(true).await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(l.clone());
+            deltas_to_compact.push(l.guard_against_eviction(true).await?);
             prev_lsn_end = lsn_range.end;
         }
         let lsn_range = Range {
@@ -3353,7 +3353,10 @@ impl Timeline {
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
-            deltas_to_compact,
+            deltas_to_compact: deltas_to_compact
+                .into_iter()
+                .map(|x| x.drop_eviction_guard())
+                .collect::<Vec<_>>(),
         })
     }
 

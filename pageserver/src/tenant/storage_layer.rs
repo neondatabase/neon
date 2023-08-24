@@ -10,6 +10,7 @@ use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Key;
 use crate::task_mgr::TaskKind;
+use crate::tenant::storage_layer::delta_layer::Ref;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use anyhow::Result;
@@ -563,10 +564,10 @@ impl LayerE {
 
         debug_assert!(outer.needs_download_blocking().unwrap().is_none());
 
-        let _downloaded = resident.expect("just initialized");
+        let downloaded = resident.expect("just initialized");
 
         ResidentLayer {
-            _downloaded,
+            downloaded,
             owner: outer,
         }
     }
@@ -619,7 +620,7 @@ impl LayerE {
         // but the files would be left.
 
         Ok(ResidentLayer {
-            _downloaded: resident.expect("just wrote Some"),
+            downloaded: resident.expect("just wrote Some"),
             owner: outer,
         })
     }
@@ -718,17 +719,6 @@ impl LayerE {
             .await
     }
 
-    pub(crate) async fn load_keys(
-        self: &Arc<Self>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<ResidentDeltaLayer>>> {
-        let layer = self.get_or_maybe_download(true, Some(ctx)).await?;
-        self.access_stats
-            .record_access(LayerAccessKind::KeyIter, ctx);
-
-        layer.load_keys().await
-    }
-
     /// Creates a guard object which prohibit evicting this layer as long as the value is kept
     /// around.
     pub(crate) async fn guard_against_eviction(
@@ -738,7 +728,7 @@ impl LayerE {
         let downloaded = self.get_or_maybe_download(allow_download, None).await?;
 
         Ok(ResidentLayer {
-            _downloaded: downloaded,
+            downloaded,
             owner: self.clone(),
         })
     }
@@ -1229,7 +1219,7 @@ impl NeedsDownload {
 #[derive(Clone)]
 pub(crate) struct ResidentLayer {
     owner: Arc<LayerE>,
-    _downloaded: Arc<DownloadedLayer>,
+    downloaded: Arc<DownloadedLayer>,
 }
 
 impl std::fmt::Display for ResidentLayer {
@@ -1247,6 +1237,31 @@ impl std::fmt::Debug for ResidentLayer {
 impl ResidentLayer {
     pub(crate) fn drop_eviction_guard(self) -> Arc<LayerE> {
         self.into()
+    }
+
+    pub(crate) async fn load_keys(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<DeltaEntry<Ref<&'_ delta_layer::DeltaLayerInner>>>> {
+        use LayerKind::*;
+
+        match self.downloaded.get().await? {
+            Delta(d) => {
+                self.owner
+                    .access_stats
+                    .record_access(LayerAccessKind::KeyIter, ctx);
+
+                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+                // while it's being held.
+                let resident = Ref(d);
+
+                delta_layer::DeltaLayerInner::load_keys(&resident)
+                    .await
+                    .context("Layer index is corrupted")
+            }
+            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
+        }
     }
 }
 
@@ -1361,12 +1376,14 @@ impl DownloadedLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    async fn load_keys(self: &Arc<Self>) -> anyhow::Result<Vec<DeltaEntry<ResidentDeltaLayer>>> {
+    pub(crate) async fn load_keys(
+        &self,
+    ) -> anyhow::Result<Vec<DeltaEntry<Ref<&'_ delta_layer::DeltaLayerInner>>>> {
         use LayerKind::*;
 
         match self.get().await? {
-            Delta(_) => {
-                let resident = ResidentDeltaLayer(self.clone());
+            Delta(d) => {
+                let resident = Ref(d);
                 delta_layer::DeltaLayerInner::load_keys(&resident)
                     .await
                     .context("Layer index is corrupted")
