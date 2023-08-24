@@ -189,7 +189,7 @@ object key changes given above_
 
 Pageservers can of course list objects in S3 at any time, but in practice their
 visible set is based on the contents of their LayerMap, which is initialized
-from the `index_part.json` that they load.
+from the `index_part.json.???` that they load.
 
 Starting with the `index_part` from the most recent previous generation
 (see [loading index_part](#finding-the-remote-indices-for-timelines)), a pageserver
