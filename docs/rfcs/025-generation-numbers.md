@@ -72,7 +72,7 @@ These are not requirements, but are ideas that guide the following design:
 ## Non Goals
 
 The changes in this RFC intentionally isolate the design decision of how to define
-logical generations IDs and object storage format in a way that is somewhat flexible with
+logical generations numbers and object storage format in a way that is somewhat flexible with
 respect to how actual orchestration of failover works.
 
 This RFC intentionally does not cover:
