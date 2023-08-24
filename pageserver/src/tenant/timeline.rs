@@ -36,8 +36,9 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, Layer, LayerAccessStatsReset,
-    LayerFileName, ResidentLayer, ValueReconstructResult, ValueReconstructState,
+    AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
+    LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
+    ValueReconstructState,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -1086,16 +1087,6 @@ impl Timeline {
         assert_eq!(results.len(), layers_to_evict.len());
         Ok(results)
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum EvictionError {
-    #[error("layer was already evicted")]
-    NotFound,
-
-    /// Evictions must always lose to downloads in races, and this time it happened.
-    #[error("layer was downloaded instead")]
-    Downloaded,
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
