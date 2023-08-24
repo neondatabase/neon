@@ -238,7 +238,7 @@ impl<'de> Deserialize<'de> for TimelineMetadata {
         D: serde::Deserializer<'de>,
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{}", e)))
+        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
     }
 }
 
