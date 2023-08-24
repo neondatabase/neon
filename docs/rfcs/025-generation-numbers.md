@@ -177,7 +177,7 @@ from the `index_part.json.???` that they load.
 
 Starting with the `index_part` from the most recent previous generation
 (see [loading index_part](#finding-the-remote-indices-for-timelines)), a pageserver
-initially has visibility of all the objects that its predecessor generation referenced.
+initially has visibility of all the objects that were referenced in the loaded index.
 These objects are guaranteed to remain visible until the current generation is
 superseded, via pageservers in older generations avoiding deletions (see [deletion](#deletion)).
 
