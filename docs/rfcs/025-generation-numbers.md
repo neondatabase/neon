@@ -22,7 +22,9 @@ network partition, pathologically long delays (e.g. suspended VM), or software b
 In the current deployment model, control plane guarantees that a tenant is attached to one
 pageserver at a time, thereby ruling out split-brain conditions resulting from dual
 attachment (however, there is always the risk of a control plane bug). This control
-plane guarantee prevents robust response to failures, as if a pageserver is unresponsive we may not detach from it. The mechanism in this RFC
+plane guarantee prevents robust response to failures, as if a pageserver is unresponsive
+we may not detach from it. The mechanism in this RFC fixes this, by making it safe to
+attach to a new, different pageserver even if an unresponsive pageserver may be running.
 
 Futher, lack of safety during split-brain conditions blocks two important features where occasional
 split-brain conditions are part of the design assumptions:
