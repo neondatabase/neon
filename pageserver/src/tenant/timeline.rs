@@ -67,6 +67,7 @@ use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
 use utils::{
     completion,
+    generation::Generation,
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
@@ -151,6 +152,9 @@ pub struct Timeline {
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+
+    // The generation of the tenant that instantiated us: this is used for safety when writing remote objects
+    generation: Generation,
 
     pub pg_version: u32,
 
@@ -1198,7 +1202,7 @@ impl Timeline {
                 Ok(delta) => Some(delta),
             };
 
-        let layer_metadata = LayerFileMetadata::new(layer_file_size);
+        let layer_metadata = LayerFileMetadata::new(layer_file_size, self.generation);
 
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
@@ -1376,6 +1380,7 @@ impl Timeline {
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
+        generation: Generation,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         resources: TimelineResources,
         pg_version: u32,
@@ -1405,6 +1410,7 @@ impl Timeline {
                 myself: myself.clone(),
                 timeline_id,
                 tenant_id,
+                generation,
                 pg_version,
                 layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
                 wanted_image_layers: Mutex::new(None),
@@ -1614,6 +1620,9 @@ impl Timeline {
         let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
         let span = tracing::Span::current();
 
+        // Copy to move into the task we're about to spawn
+        let generation = self.generation;
+
         let (loaded_layers, to_sync, total_physical_size) = tokio::task::spawn_blocking({
             move || {
                 let _g = span.entered();
@@ -1655,8 +1664,12 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(
+                    discovered_layers,
+                    index_part.as_ref(),
+                    disk_consistent_lsn,
+                    generation,
+                );
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_upload = Vec::new();
@@ -2659,7 +2672,7 @@ impl Timeline {
                 (
                     HashMap::from([(
                         layer.filename(),
-                        LayerFileMetadata::new(layer.layer_desc().file_size),
+                        LayerFileMetadata::new(layer.layer_desc().file_size, self.generation),
                     )]),
                     Some(layer),
                 )
@@ -3055,7 +3068,10 @@ impl Timeline {
                 .metadata()
                 .with_context(|| format!("reading metadata of layer file {}", path.file_name()))?;
 
-            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
+            layer_paths_to_upload.insert(
+                path,
+                LayerFileMetadata::new(metadata.len(), self.generation),
+            );
 
             self.metrics
                 .resident_physical_size_gauge
@@ -3730,7 +3746,7 @@ impl Timeline {
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
                     &l.filename(),
-                    &LayerFileMetadata::new(metadata.len()),
+                    &LayerFileMetadata::new(metadata.len(), self.generation),
                 )?;
             }
 
@@ -3739,7 +3755,10 @@ impl Timeline {
                 .resident_physical_size_gauge
                 .add(metadata.len());
 
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
+            new_layer_paths.insert(
+                new_delta_path,
+                LayerFileMetadata::new(metadata.len(), self.generation),
+            );
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
