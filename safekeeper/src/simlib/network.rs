@@ -54,7 +54,7 @@ impl Delay {
 #[derive(Clone)]
 pub struct NetworkOptions {
     /// Connection will be automatically closed after this timeout.
-    pub timeout: Option<u64>,
+    pub keepalive_timeout: Option<u64>,
     pub connect_delay: Delay,
     pub send_delay: Delay,
 }
@@ -117,7 +117,7 @@ impl VirtualConnection {
 
     /// Notify the future about the possible timeout.
     fn schedule_timeout(self: &Arc<Self>) {
-        if let Some(timeout) = self.options.timeout {
+        if let Some(timeout) = self.options.keepalive_timeout {
             self.world.schedule(timeout, self.as_event());
         }
     }
@@ -139,7 +139,7 @@ impl VirtualConnection {
 
         // Close the one side of the connection by timeout if the node
         // has not received any messages for a long time.
-        if let Some(timeout) = self.options.timeout {
+        if let Some(timeout) = self.options.keepalive_timeout {
             let mut to_close = [false, false];
             for direction in 0..2 {
                 let node_idx = direction ^ 1;

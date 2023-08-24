@@ -1,4 +1,5 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use tracing::debug;
 use std::{
     cell::RefCell,
     ops::DerefMut,
@@ -71,7 +72,6 @@ impl World {
 
     /// Create a new node.
     pub fn new_node(self: &Arc<Self>) -> Arc<Node> {
-        // TODO: verify
         let mut nodes = self.nodes.lock();
         let id = nodes.len() as NodeId;
         let node = Arc::new(Node::new(id, self.clone(), self.new_rng()));
@@ -202,14 +202,14 @@ impl World {
 
     /// Print full world state to stdout.
     pub fn debug_print_state(&self) {
-        println!(
-            "[DEBUG] World state, nodes.len()={:?}, parking.len()={:?}",
+        debug!(
+            "World state, nodes.len()={:?}, parking.len()={:?}",
             self.nodes.lock().len(),
             self.unconditional_parking.lock().len()
         );
         for node in self.nodes.lock().iter() {
-            println!(
-                "[DEBUG] node id={:?} status={:?}",
+            debug!(
+                "node id={:?} status={:?}",
                 node.id,
                 node.status.lock()
             );
@@ -424,7 +424,7 @@ impl Node {
             NodeStatus::Waiting | NodeStatus::Parked => {}
         }
 
-        println!("Node {} is crashing, status={:?}", self.id, status);
+        debug!("Node {} is crashing, status={:?}", self.id, status);
         self.world.debug_print_state();
 
         let park = self.world.find_parked_node(self);

@@ -284,8 +284,8 @@ impl ConnState {
             match msg {
                 ProposerAcceptorMessage::Greeting(ref greeting) => {
                     info!(
-                        "start handshake with walproposer {:?} sysid {} timeline {}",
-                        self.tcp, greeting.system_id, greeting.tli,
+                        "start handshake with walproposer {:?}",
+                        self.tcp,
                     );
                     let server_info = ServerInfo {
                         pg_version: greeting.pg_version,

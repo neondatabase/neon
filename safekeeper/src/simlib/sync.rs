@@ -163,7 +163,7 @@ impl Park {
         }
 
         if state.panic {
-            panic!("thread was crashed by the simulation");
+            panic!("node {} was crashed by the simulation", node.id);
         }
 
         // println!("PARKING ENDED: node {:?}", node.id);

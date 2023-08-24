@@ -19,7 +19,7 @@ fn run_rust_c_test() {
     };
 
     let network = NetworkOptions {
-        timeout: Some(50),
+        keepalive_timeout: Some(50),
         connect_delay: delay.clone(),
         send_delay: delay.clone(),
     };

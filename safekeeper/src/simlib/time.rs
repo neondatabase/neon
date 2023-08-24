@@ -143,3 +143,10 @@ impl Debug for NetworkEvent {
             .finish()
     }
 }
+
+#[derive(Copy, Clone, Debug)]
+pub struct EmptyEvent;
+
+impl Event for EmptyEvent {
+    fn process(&self) {}
+}

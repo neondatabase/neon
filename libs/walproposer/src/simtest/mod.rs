@@ -8,3 +8,4 @@ pub mod disk;
 pub mod safekeeper;
 pub mod storage;
 pub mod log;
+pub mod util;
