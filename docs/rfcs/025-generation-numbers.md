@@ -65,9 +65,6 @@ These are not requirements, but are ideas that guide the following design:
   have a Paxos implementation in the safekeeper.
 - Avoiding locking in to specific models of how failover will work (e.g. do not assume that
   all the tenants on a pageserver will fail over as a unit).
-- Avoid doing synchronization that scales with the number of tenants, unless absolutely
-  necessary. For example, a pageserver should be able to start up without having to
-  have each tenant individually re-attached.
 - Be strictly correct when it comes to data integrity. Occasional failures of availability
   are tolerable, occasional data loss is not.
 
