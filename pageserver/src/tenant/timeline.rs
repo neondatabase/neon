@@ -37,9 +37,8 @@ use crate::context::{
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
-    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats,
-    LayerAccessStatsReset, LayerE, LayerFileName, ResidentLayer, ValueReconstructResult,
-    ValueReconstructState,
+    AsLayerDesc, DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStatsReset, LayerE,
+    LayerFileName, ResidentLayer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -2386,13 +2385,7 @@ impl Timeline {
         // the mapping in `create_delta_layer`.
         {
             let mut guard = self.layers.write().await;
-
-            if let Some(ref l) = delta_layer_to_add {
-                // TODO: move access stats, metrics update, etc. into layer manager.
-            }
-
             guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
-            // release lock on 'layers'
         }
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
