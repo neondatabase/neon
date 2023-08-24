@@ -126,8 +126,6 @@ split-brain issues in storage:
   while attaching the second one.
 - If there are multiple pageservers running with the same node ID, they are guaranteed to have different generation numbers, because the generation would increment
   when the second node started and re-attached its tenants.
-- If there are multiple pageservers running with the same node ID, we may unambiguously know which
-  of them "wins" by picking the higher generation number.
 
 As long as the infrastructure does not transparently replace an underlying
 physical machine, we are totally safe. See the later [unsafe case](#unsafe-case-on-badly-behaved-infrastructure) section for details.
