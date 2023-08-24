@@ -288,15 +288,15 @@ impl LayerManager {
         Ok(())
     }
 
-    pub(crate) fn contains(&self, layer: &Arc<LayerE>) -> bool {
+    pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.layer_fmgr.contains(layer)
     }
 }
 
-pub(crate) struct LayerFileManager<T: AsLayerDesc + ?Sized>(HashMap<PersistentLayerKey, Arc<T>>);
+pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
 
-impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
+impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
@@ -306,14 +306,14 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             .clone()
     }
 
-    pub(crate) fn insert(&mut self, layer: Arc<T>) {
+    pub(crate) fn insert(&mut self, layer: T) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
     }
 
-    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
+    pub(crate) fn contains(&self, layer: &T) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
     }
 
@@ -321,7 +321,7 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         Self(HashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: &Arc<T>) {
+    pub(crate) fn remove(&mut self, layer: &T) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
