@@ -2,7 +2,7 @@
 
 ## Summary
 
-A scheme of logical "generation numbers" for pageservers and their attachments is proposed, along with
+A scheme of logical "generation numbers" for tenant attachment to pageservers is proposed, along with
 changes to the remote storage format to include these generation numbers in S3 keys.
 
 Using the control plane as the issuer of these generation numbers enables strong anti-split-brain
@@ -20,8 +20,9 @@ they have the same tenant attached, and both can write to S3. This can happen in
 network partition, pathologically long delays (e.g. suspended VM), or software bugs.
 
 In the current deployment model, control plane guarantees that a tenant is attached to one
-pageserver at a time, thereby ruling out split-brain conditions.
-However, there is always the risk of a control plane bug.
+pageserver at a time, thereby ruling out split-brain conditions resulting from dual
+attachment (however, there is always the risk of a control plane bug). This control
+plane guarantee prevents robust response to failures, as if a pageserver is unresponsive we may not detach from it. The mechanism in this RFC
 
 Futher, lack of safety during split-brain conditions blocks two important features where occasional
 split-brain conditions are part of the design assumptions:
@@ -38,7 +39,8 @@ split-brain conditions are part of the design assumptions:
 This RFC has broad similarities to the proposal to implement a MVCC scheme in
 S3 object names, but this RFC avoids a general purpose transaction scheme in
 favour of more specialized "generations" that work like a transaction ID that
-always has the same lifetime as a pageserver process and/or tenant attachment.
+always has the same lifetime as a pageserver process or tenant attachment, whichever
+is shorter.
 
 ## Requirements
 
@@ -91,21 +93,19 @@ pageserver, control plane, safekeeper (optional)
 
 ### Summary
 
-- **Generation numbers** are introduced for pageserver node lifetimes and tenant attachments.
+- **Generation numbers** are introduced for tenants when attached to a pageserver
 
-  - node generation increments each time a pageserver starts, before it can write to S3
-  - attachment generation increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver (an _attachment_'s lifetime is the association between a tenant and a pageserver)
-  - the two generations are independent: a pageserver may restart while keeping the same
-    attachment generation numbers, and attachments may be changed while a pageserver's
-    generation number stays the same.
+  - attachment generation increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver, or when the assigned pageserver restarts
+  - the control plane is the authority for generation numbers: only it may
+    increment a generation number.
 
-- **Object keys are suffixed** with a tuple of attachment & node generation numbers
-- **Safety in split brain for multiple nodes running with
-  the same node ID** is provided by the pageserver node generation in the object key: the concurrent nodes
-  will not write to the same key.
+- **Object keys are suffixed** with the generation number
 - **Safety for multiply-attached tenants** is provided by the
   tenant attach generation in the object key: the competing pageservers will not
   try to write to the same keys.
+- **Safety in split brain for multiple nodes running with
+  the same node ID** is provided by the pageserver calling out to the control plane
+  on startup, to increment the generations of any attached tenants
 - **Safety for deletions** is provided by pageservers validating with control plane that neither pageserver process nor the attachment has been superseded since it last updated a timeline's index.
 - **The control plane is used to issue generation numbers** to avoid the need for
   a built-in consensus system in the pageserver, although this could in principle
@@ -113,126 +113,71 @@ pageserver, control plane, safekeeper (optional)
 
 ### Generation numbers
 
-Two logical entities will get new "generation numbers", which are monotonically increasing
-integers with a global guarantee that they will not be re-used:
+A generation number is associated with each tenant in the control plane,
+and each time the attachment status of the tenant changes, this is incremented.
+Changes in attachment status include:
 
-- Pageserver processes: for a given pageserver node ID, each time a pageserver process starts,
-  the per-node-ID generation number increases.
-- Tenant attachments: for a given tenant, each time its attachment is changed, a per-tenant generation
-  number increases.
+- Attaching the tenant to a different pageserver
+- A page server restarting, and "re-attaching" its tenants on startup
 
-This provides some important invariants:
+These increments of attachment generation provide invariants we need to avoid
+split-brain issues in storage:
 
-- If two pageservers have the same tenant attached, they are guaranteed to have different attachment
-  generation numbers.
-- If there are multiple pageservers running with the same node ID, they are guaranteed to have
-  a different generation number.
+- If two pageservers have the same tenant attached, they are guaranteed to have different attachment generation numbers, because the generation would increment
+  while attaching the second one.
+- If there are multiple pageservers running with the same node ID, they are guaranteed to have different generation numbers, because the generation would increment
+  when the second node started and re-attached its tenants.
 - If there are multiple pageservers running with the same node ID, we may unambiguously know which
   of them "wins" by picking the higher generation number.
 
-The requirement for two generations numbers is not intrinsic to our storage
-format: in our [object keys](#object-key-changes) we will concatenate the generations into a single suffix. Using two generation numbers provides more flexibility
-in how the control plane may be implemented, and accommodates its current
-model of long-lived attachments that span pageserver process lifetimes.
+**Note** If we ever run pageservers on infrastructure that might transparently restart
+a pageserver while leaving an old process running (e.g. a VM gets rescheduled
+without the old one being fenced), then there is a risk of corruption, when
+the control plane attaches the tenant, as follows:
 
-The use of a pageserver _node generation_ in addition to the current static
-`node_id` is an implementation detail: one could in future collapse the two
-concepts into an ephemeral node ID that is issued on each pageserver process
-start.
-
-#### Distinction between attachment and node generation id
-
-The most important generation number is the tenant attachment number: this alone would be sufficient
-to implement safe tenant migration and instance failover, if we assume that our control plane will never concurrently
-run two nodes with the same node ID.
-
-Running two nodes with the same ID might sound far-fetched, but it would happen very easily if we
-ran the pageserver in a k8s environment with a StatefulSet, as k8s provides no guarantee that
-an old pod is dead before starting a new one.
-
-The node generation is useful other ways, beyond it's core correctness purpose:
-
-- The node generation is also useful for managing remote objects which are not per-tenant,
-  such as the persistent per-node deletion queue which is proposed in this RFC, without
-  having to involve the control plane in attaching these: each node has an implicit
-  "attachment" of all its per-node remote storage that
-- node generation numbers enable building fencing into any network protocol (for example
-  communication with safekeepers) to refuse to communicate with stale/partitioned nodes.
-
-Note that the two generation numbers have a different behavior for stale generations:
-
-- A pageserver with a stale node generation number should immediately terminate: it is never intended
-  to have two pageservers with the same node ID. This is not necessary for correctness, as the
-  node generation appears in object keys, but objects written in a stale node generation are never
-  read later, so waste storage.
-- An attachment with a stale generation number is permitted to continue operating (ingesting WAL
-  and serving reads), but not to do any deletions. This enables a multi-attached state for tenants,
-  facilitating live migration (this will be articulated in the next RFC that describes HA and
-  migrations). Operating in a stale attachment generation is safe, although for efficiency reasons
-  should not be done over long periods of time, as the data in the stale generation has to avoid
-  doing operations involving deletion, like remote compaction.
+- if the control plane sends an /attach request
+  to node A, then node A dies and is replaced, and the control plane times out
+  the request and restarts, then it could end up with two physical nodes both using
+  the same attachment generation.
+- This is not an issue when using EC2 instances with ephemeral storage, as long
+  as the control plane never re-uses a node ID, but it would need re-examining
+  if running on different infrastructure.
+- To robustly protect against this class of issue, we would either:
+  - add a "node generation" to distinguish between different processes holding the
+    same node_id.
+  - or, dispense with static node_id entirely and issue an ephemeral ID to each
+    pageserver process when it starts.
 
 ### Object Key Changes
 
 #### Generation suffix
 
-All object keys (layer objects and index objects) will contain a numeric [suffix](#why-a-generation-suffix-rather-than-prefix) that
-advances as the attachment generation and node generation advance.
+All object keys (layer objects and index objects) will contain the attachment
+generation as a [suffix](#why-a-generation-suffix-rather-than-prefix).
 This suffix is the primary mechanism for protecting against split-brain situations, and
 enabling safe multi-attachment of tenants:
 
 - Two pageservers running with the same node ID (e.g. after a failure, where there is
-  some rogue pageserver still running) will not try to write to the same objects.
-- Multiple attachments of the same tenant will not try to write to the same objects, as
-  each attachment would have a distinct attachment generation.
+  some rogue pageserver still running) will not try to write to the same objects, because at startup they will have re-attached tenants and thereby incremented
+  generation numbers.
+- Multiple attachments (to different pageservers) of the same tenant will not try to write to the same objects, as each attachment would have a distinct generation.
 
-To avoid coupling our storage format tightly with the way we manage generation numbers,
-they will be packed into a single u64 that must obey just the following properties:
+The generation is appended in hex format (8 byte string representing
+u32), to all our existing key names. A u32's range limit would permit
+27 restarts _per second_ over a 5 year system lifetime: orders of magnitude more than
+is realistic.
 
-- On a node restart, the suffix must increase
-- On a change to the attachment, the suffix must increase
-- Sorting the suffixes numerically must give the most logically recent data ([visibility](#visibility))
-
-```
-00000000 00000000
-^^^^^^^^------------------- 32 bit attachment generation
-
-         ^^^^^^^^---------  32 bit node generation
-```
-
-Hereafter, when referring to "the suffix", we mean this u64 composite that contains the
-attachment generation and the node generation. Suffixes are written in a human-frendly
-form with dashes between the elements.
-
-For example, we would write the suffix for attachment generation 7 to node ID 0 with node generation 1
-like so, while the actual object suffix would be packed into a u64:
-
-```
-   00000007-00000001
-
-```
-
-The semantic meaning of these bits may change as the system design evolves: for example, if we
-switched to a model of ephemeral node IDs that changed on each startup, then the
-way we compose the suffix would change, but the actual object & index format would
-remain the same (it just sees an opaque u64).
-
-The fixed number of bits for each field is used to provide a fixed key length. The justification
-for the lengths being sufficient are:
-
-- 24 bit generations are enough for to increment 9000 times per day over
-  a 5 year system lifetime (in practice generation increments are expected to be far rarer,
-  perhaps of the order of 1 per day if we are dynamically balancing load)
+The exact meaning of the generation suffix can evolve over time if necessary, for
+example if we chose to implement a failover mechanism internally to the pageservers
+rather than going via the control plane. The storage format just sees it as a number,
+with the only semantic property being that the highest numbered index is the latest.
 
 #### Index changes
 
-Since object keys now include a generation suffix, the index of these keys must also be updated.
-
-IndexPart currently stores keys and LSNs sufficient to reconstruct key names: this would be
-extended to store the suffix as well.
+Since object keys now include a generation suffix, the index of these keys must also be updated. IndexPart currently stores keys and LSNs sufficient to reconstruct key names: this would be extended to store the generation as well.
 
 This will increase the size of the file, but only modestly: layers are already encoded as
-their string-ized form, so the overhead is about 20 bytes per layer. This will be less if/when
+their string-ized form, so the overhead is about 10 bytes per layer. This will be less if/when
 the index storage format is migrated to a binary format from JSON.
 
 #### Visibility
@@ -246,23 +191,23 @@ Pageservers can of course list objects in S3 at any time, but in practice their
 visible set is based on the contents of their LayerMap, which is initialized
 from the `index_part.json` that they load.
 
-Starting with the `index_part` from the most recent previous generation suffix
+Starting with the `index_part` from the most recent previous generation
 (see [loading index_part](#finding-the-remote-indices-for-timelines)), a pageserver
 initially has visibility of all the objects that its predecessor generation referenced.
 These objects are guaranteed to remain visible until the current generation is
 superseded, via pageservers in older generations avoiding deletions (see [deletion](#deletion)).
 
-The "most recent previous generation suffix" is _not_ necessarily the most recent
+The "most recent previous generation" is _not_ necessarily the most recent
 in terms of walltime, it is the one that is readable at the time a new generation
 starts. Consider the following sequence of a tenant being re-attached to different
 pageserver nodes:
 
-- Create + attach on PS1 in attach generation 1
+- Create + attach on PS1 in generation 1
 - PS1 Do some work, write out index_part.json-0001
-- Attach to PS2 in attach generation 2
+- Attach to PS2 in generation 2
 - Read index_part.json-0001
 - PS2 starts doing some work...
-- Attach to PS3 in attach generation 3
+- Attach to PS3 in generation 3
 - Read index_part.json-0001
 - **...PS2 finishes its work: now it writes index_part.json-0002**
 - PS3 writes out index_part.json-0003
@@ -287,13 +232,13 @@ Because index_part.json is now written with a generation suffix, which data
 is visible depends on which generation the reader is operating in:
 
 - If one was passively reading from S3 from outside of a pageserver, the
-  visibility of data would depend on which index_part.json-<suffix> file
+  visibility of data would depend on which index_part.json-<generation> file
   one had chosen to read from.
 - If two pageservers have the same tenant attached, they may have different
   data visible as they're independently replaying the WAL, and maintaining
   independent LayerMaps that are written to independent index_part.json files.
   Data does not have to be remotely committed to be visible.
-- For a pageserver writing with a stale generation suffix, historic LSNs
+- For a pageserver writing with a stale generation, historic LSNs
   remain readable until another pageserver (with a higher generation suffix)
   decides to execute GC deletions. At this point, we may think of the stale
   attachment's generation as having logically ended: during its existence
@@ -317,12 +262,12 @@ that deletions strictly obey the following ordering:
 
 1. Write out index_part.json: this guarantees that any subsequent reader of the metadata will
    not try and read the object we unlinked.
-2. Call out to control plane to validate that the suffix which we just used is still the latest.
+2. Call out to control plane to validate that the generation which we use for our attachment is still the latest.
 3. If step 2 passes, it is safe to delete the object. Why? The check-in with control plane
-   together with our visibility rules guarantees that any later attachment / node generation
+   together with our visibility rules guarantees that any later generation
    will use either the exact `index_part.json` that we uploaded in step 1, or a successor
    of it; not an earlier one. In both cases, the `index_part.json` doesn't reference the
-   key we are deleting anymore, so, the key is invisible to any later attachment / node generation.
+   key we are deleting anymore, so, the key is invisible to any later attachment generation.
    Hence it's safe to delete it.
 
 Note that at step 2 we are only confirming that deletions of objects _no longer referenced
@@ -342,19 +287,19 @@ Remote objects are not the only kind of deletion the pageserver does: it also in
 WAL data, by feeding back remote_consistent_lsn to safekeepers, as a signal to the safekeepers that
 they may drop data below this LSN.
 
-For the same reasons that deletion of objects must be guarded by a node generation & attachment generation number
+For the same reasons that deletion of objects must be guarded by an attachment generation number
 validation step, updates to `remote_consistent_lsn` are subject to the same rules, using
 an ordering as follows:
 
 1. persist index_part that covers data up to LSN `L0`
-2. call to control plane to validate their attachment + node generation number
+2. call to control plane to validate their attachment generation
 3. update the `remote_consistent_lsn` that they send to the safekeepers to `L0`
 
 **Note:** at step 3 we are not advertising the _latest_ remote_consistent_lsn, we are
 advertising the value immediately before we started the validation RPC. This provides
 a strong ordering guarantee.
 
-Internally, the pageserver will have two remote_consistent_lsn values: the one that
+Internally to the pageserver, each timeline will have two remote_consistent_lsn values: the one that
 reflects its latest write to remote storage, and the one that reflects the most
 recent validation of generation number. It is only the latter value that may
 be advertised to the outside world (i.e. to the safekeeper).
@@ -370,27 +315,43 @@ the same generation validation requirement.
 
 ### Pageserver attach/startup changes
 
-#### Pageserver node startup
-
-- The pageserver must obtain a node generation number by some means (see Control Plane Changes below) before
-  doing any remote writes.
-- The pageserver _may_ also do some synchronization of its attachments to see which are still
-  valid, see "Synchronizing attachments on pageserver startup" in the optimizations section.
-
 #### Attachment
 
-Calls to `/v1/tenant/{tenant_id}/attach` are augmented with generation details:
-
-- Required: provide an attachment generation number
-- Nice to have: provide the attachment generation, node generation of
-  where the tenant was previously attached, to help this node calculate where
-  to find the latest index_part file.
+Calls to `/v1/tenant/{tenant_id}/attach` are augmented with an additional
+`generation` field in the body.
 
 The pageserver must persist this attachment generation number before starting
 the `Tenant` tasks. We will create a new per-tenant metadata file that records
 the attachment generation number, and will also be used in future work for
 implementing fast migration, where the tenant has more states than simple
 attached & detached.
+
+#### Re-attachment on startup
+
+As it currently does, the pageserver may use local disk state to identify which tenants/timelines
+were attached before its most recent restart. However, it is now necessary
+to call out to the control plane to advance the generation number before
+doing any remote I/O for the attachment: we call this process **re-attaching**
+on startup.
+
+Advancing the generation number is necessary to avoid the pageserver assuming
+that it is running in an environment where a previous instance of "itself" must
+have been fenced before this instance started: e.g. if running in an environment
+with containers/VMs using shared block storage where some stale container/VM might
+still think it has the same tenants attached that we do.
+
+To avoid sending O(tenants) requests to the control plane, in practice
+we would send a batched request to re-attach many tenants at once.
+
+Re-attaching has two possible outcomes for each tenant:
+
+- Increment the generation number, and return the incremented number: this
+  tenant may now go active with the new generation number.
+- Do not increment the generation number: this tenant may start, but may
+  not write to remote storage. This case is for nodes that the control
+  plane is intentionally leaving on a stale generation, for example when
+  doing a migration between pageservers, and the origin pageserver restarts
+  during the migration.
 
 #### Reconciliation
 
@@ -422,23 +383,30 @@ Because index files are now suffixed with generation numbers, the pageserver
 cannot always GET the remote index in one request, because it can't always
 know a-priori what the latest remote index is.
 
+Typically, the most recent generation to write an index would be our own
+generation minus 1. However, this might not be the case: the previous
+node might have started and acquired a generation number, and then crashed
+before writing out a remote index.
+
 In the general case and as a fallback, the pageserver may list all the index*part.json
 files for a timeline, sort them by generation suffix, and pick the highest that is <=
-the suffix for its current generation numbers. The tenant should never load an index with
-an attachment generation \_newer* than its own: tenants
+the suffix for its current generation numbers. The tenant should never load an index
+with an attachment generation \_newer* than its own: tenants
 are allowed to be attached with stale attachment generations during a multiply-attached
 phase in a migration, and in this instance if the old location's pageserver restarts,
 it should not try and load the newer generation's index.
 
-To avoid object listing in most cases, a couple of optimizations can be used:
+To summarize, on starting a timeline, the pageserver will:
 
-- On a restart of a previously attached tenant, try subtracting one from our
-  node generation number: if we find an index_part.json with that suffix, it
-  should be the last one we wrote out before restarting.
-- Otherwise, consult the previous attachment information that was provided by
-  the control plane in [attachment](#attachment), and try loading with that
-  suffix.
-- If neither of the above return a 200, then fall back to doing an object listing.
+1. Issue a GET for index_part.json-<my generation - 1>
+2. If 1 failed, issue a ListObjectsv2 request for index_part.json\* and
+   pick the newest.
+
+One could optimize this further by using the control plane to record specifically
+which generation most recently wrote an index_part.json, if necessary, to increase
+the probability of finding the index_part.json in one GET. One could also improve
+the chances by having pageservers proactively write out index_part.json after they
+get a new generation ID.
 
 #### Cleaning up previous generations' remote indices
 
@@ -446,14 +414,7 @@ Deletion of old indices is not necessary for correctness, although it is necessa
 to avoid the ListObjects fallback in the previous section becoming ever more expensive.
 
 Once the new attachment has written out its index_part.json, it may asynchronously clean up historic index_part.json
-objects that were found, unless the control plane has indicated to us that the tenant is multiply attached
-(see the subsequent HA RFC for this concept).
-
-Deletion of historic index_part.json files doesn't necessarily have to go through
-the deletion queue (it is always safe to drop these files once a more recent generation
-has written its index), but it is beneficial to delay the deletions, for the benefit of
-other nodes trying to read from the previous generation's data (e.g. some future read
-replica feature) to delay these deletions, so the deletion queue should be used anyway.
+objects that were found.
 
 We may choose to implement this deletion either as an explicit step after we
 write out index_part for the first time in a pageserver's lifetime, or for
@@ -470,7 +431,7 @@ simplicity just do it periodically as part of the background scrub (see [scrubbi
   generation number each time the tenant is attached to a different server: the same database
   transaction that changes the assigned pageserver should also change the attachment generation.
 
-#### The Generation API
+#### Generation API
 
 This section describes an API that could be provided directly by the control plane,
 or built as a separate microservice. In earlier parts of the RFC, when we
@@ -480,8 +441,7 @@ The API endpoints used by the pageserver to acquire and validate generation
 numbers are quite simple, and only require access to some persistent and
 linerizable storage (such as a database).
 
-Building this into the control plane
-is proposed as a least-effort option to exploit existing infrastructure and enable
+Building this into the control plane is proposed as a least-effort option to exploit existing infrastructure and enable
 updating attachment generations in the same transaction as updating
 the `Project` itself, but it is not mandatory: this "Generation API" could
 be built as a microservice. In practice, we will write such a miniature service
@@ -489,50 +449,44 @@ anyway, to enable E2E pageserver/compute testing without control plane.
 
 The endpoints required by pageservers are:
 
-##### `/register/node`
+##### `/re-attach`
 
-- Request: `{'node_id': <id>, 'metadata': {...}}`
+- Request: `{node_id: <u32>}`
 - Response:
-  - 200: `{'node_generation': <gen>}`
+  - 200 `{tenants: [{id: <TenantId>, gen: <u32>}]}`
   - 404: unknown node_id
-  - (Future: 429: flapping detected, nodes are fighting for the same node ID)
-- Purpose: issue each pageserver process in a particular node_id with a unique generation number
-- Server behavior: on each call, node generation number is persistently incremented
-  before sending a response, concurrent calls are linearized such that all responses
-  for a given node_id get a unique generation.
-- Client behavior: client will not do any writes to S3 until it receives a successful response. On a 4xx response,
-  client will terminate: this indicates to the client that is is misconfigured.
+  - (Future: 429: flapping detected, perhaps nodes are fighting for the same node ID,
+    or perhaps this node was in a retry loop)
+  - (On unknown tenants, omit tenant from `tenants` array)
+- Server behavior: query database for which tenants should be attached to this pageserver.
+  - for each tenant that should be attached, increment the attachment generation and
+    include the new generation in the response
+- Client behavior:
+  - for all tenants in the response, activate with the new generation number
+  - for any local disk content _not_ referenced in the response, act as if we
+    had been asked to detach it (i.e. delete local files)
+
+**Note** this process currently deletes local state and avoids dual-attaching, but
+this will change when the control plane is updated in subsequent work to have
+the concept of multiple locations.
+
+**Note** the `node_id` in this request will change in future if we move to ephemeral
+node IDs, to be replaced with some correlation ID that helps the control plane realize
+if a process is running with the same storage as a previous pageserver process (e.g.
+we might use EC instance ID, or we might just write some UUID to the disk the first
+time we use it)
 
 ##### `/validate`
 
-- Request: `{'node_id': <id>, 'node_gen': <gen>, 'tenants': [{tenant: <tenant id>, attach_gen: <gen>}, ...]}'`
+- Request: `{'tenants': [{tenant: <tenant id>, attach_gen: <gen>}, ...]}'`
 - Response:
-  - 200 `{'node_status': <bool>, 'tenants': [{tenant: <tenant id>, status: <bool>}...]}`
-  - 404: unknown node_id
+  - 200 `{'tenants': [{tenant: <tenant id>, status: <bool>}...]}`
   - (On unknown tenants, omit tenant from `tenants` array)
 - Purpose: enable the pageserver to discover whether the generations it holds are still current
 - Server behavior: this is a read-only operation: simply compare the generations in the request with
   the generations known to the server, and set status to `true` if they match.
 - Client behavior: clients must not do deletions within a tenant's remote data until they have
   received a response indicating the generation they hold for the tenant is current.
-
-If the above endpoints are implemented by the control plane, then just the two endpoints are required, as
-the control plane may advance attachment generation numbers directly in the database. However, if the
-generation API was implement in a standalone service, then that service would also expose:
-
-##### `/fence/tenant` (not needed if the above endpoints are built into control plane)
-
-- Request: `{'tenant_id': <id>, 'attach_gen': <gen>}`
-- Response: 200: `{'attach_gen': <gen> }`
-  - (on unknown tenant_id, intitialize attach_gen to 1)
-- Purpose: enable the control plane to safely attach a tenant to a new pageserver, without
-  being certain that the previous pageserver has detached or stopped.
-- Server behavior: increment latest attach gen by 1 and return new attach_gen
-- Client behavior: the next attachment of the tenant should use the returned attach_gen. It is forbidden
-  to attach a tenant to a different pageserver without calling this API, unless the old pageserver has
-  return 200 to a detach request. In practice this API should be called between all attachment changes.
-
-For use in automated tests of the pageserver, a stub implementation would provide all three endpoints.
 
 ### Timeline/Branch creation
 
@@ -555,7 +509,7 @@ We must be safe against scenarios such as:
   is sent there too.
 
 To properly complete a timeline create/delete request, we must
-be sure _after_ the pageserver write to remote storage, that its
+be sure _after_ the pageserver writes to remote storage, that its
 generation number is still up to date:
 
 - The pageserver can do this by calling into the control plane
@@ -574,7 +528,12 @@ that already exists will just emit an index_part.json with
 an old generation suffix.
 
 Timeline IDs are never reused, so we don't have
-to worry about the case of create/delete/create cycles.
+to worry about the case of create/delete/create cycles. If they
+were re-used during a disaster recovery "un-delete" of a timeline,
+that special case can be handled by calling out to all available pageservers
+to check that they return 404 for the timeline, and to flush their
+deletion queues in case they had any deletions pending from the
+timeline.
 
 **During timeline/tenant deletion, the control plane must not regard an operation
 as complete when it receives a `202 Accepted` response**, because the node
@@ -590,14 +549,12 @@ a timeline/tenant before issuing any RPCs, and then once it starts, it must
 keep retrying until the tenant/timeline is gone. This is already handled
 by using a persistent `Operation` record that is retried indefinitely.
 
-Tenant/timeline deletion operations don't necessarily have to go through
-the deletion queue, as they are not subject to generation gating: once a
+Tenant/timeline deletion operations are exempt from generation validation
+on deletes, and therefore don't have to go through the same deletion
+queue as GC/compaction layer deletions. This is because once a
 delete is issued by the control plane, it is a promise that the
 control plane will keep trying until the deletion is done, so even stale
-pageservers are permitted to go ahead and delete the objects. However,
-using the deletion queue will still make sense in practice so that the
-pageserver can use the same logic for coalescing deletions in DeleteObjects
-requests.
+pageservers are permitted to go ahead and delete the objects.
 
 Timeline deletion may result in a special kind of object leak, where
 the latest generation attachment completes a deletion (including erasing
@@ -628,7 +585,7 @@ Examples:
     request to whoever is the latest attachment point for the tenant
     until it succeeds.
   - Stale nodes may be trying to execute timeline creation: they will
-    write out index_part.json files with stale node generation or
+    write out index_part.json files with
     stale attachment generation: these will be eventually cleaned up
     by the same mechanism as other old indices.
 
@@ -645,141 +602,183 @@ DeleteObjects requests, but we would also like to minimize leakage by executing
 deletions promptly.
 
 To resolve this, we may make the deletion queue persistent, writing out
-deletion lists as S3 objects for later execution. This shrinks the window
-of possible object loss to the gap between writing index_part.json, and
-writing the next deletion list ot S3. The actual deletion of objects
-(with its requirement to sync with the control plane) may happen much
-later.
+_deletion lists_ as soon as a Timeline decides to commit to a deletion,
+and then executing these in the background at a later time.
+
+_Note: The deletion queue's reason for existence is optimization rather than correctness,
+so there is a lot of flexibility in exactly how the it should work,
+as long as it obeys the rule to validate generations before executing deletions,
+so the following details are not essential to the overall RFC._
+
+#### Scope
+
+The deletion queue will be global per pageserver, not per-tenant. There
+are several reasons for this choice:
+
+- Use the queue as a central point to coalesce validation requests to the
+  control plane: this avoids individual `Timeline` objects ever touching
+  the control plane API, and avoids them having to know the rules about
+  validating deletions. This separation of concerns will avoid burdening
+  the already many-LoC `Timeline` type with even more responsibility.
+- Decouple the deletion queue from Tenant attachment lifetime: we may
+  "hibernate" an inactive tenant by tearing down its `Tenant`/`Timeline`
+  objects in the pageserver, without having to wait for deletions to be done.
+- Amortize the cost of I/O for the persistent queue, instead of having many
+  tiny queues.
+- Coalesce deletions into a smaller number of larger DeleteObjects calls
+
+Because of the cost of doing I/O for persistence, and the desire to coalesce
+generation validation requests across tenants, and coalesce deletions into
+larger DeleteObjects requests, there will be one deletion queue per pageserver
+rather than one per tenant. This has the added benefit that when deactivating
+a tenant, we do not have to drain their deletion queue: deletions can proceed
+for a tenant whose main `Tenant` object has been torn down.
+
+#### Flow of deletion
 
 The flow of deletion becomes:
 
-1. Enqueue in memory
+1. Enqueue in memory: build up some deletions to write out a deletion list
 2. Enqueue persistently by writing out a deletion list, storing the
-   attachment generations and node generation.
-3. Validate the deletion list by calling to the control plane
-4. Execute the valid parts of the deletion list (i.e. call DeleteObjects)
+   attachment generations for each timeline with layers referenced in the list.
+3. Validate the deletion list by calling to the control plane, and persist
+   some record that the list is valid (or rewrite it to remove invalid parts).
+4. Delete the keys that were enqueued with a generation that passed the validation
+   in the previous step
 
-Note that steps 2 and 3 can be swapped: it depends on whether we would like
-to optimize for delaying validation for a long time in bounded memory (persist
-first, delete later), or optimize for I/O (validate first, then persist).
+#### Ordering
 
-There is existing work (https://github.com/neondatabase/neon/pull/4960) to
-create a deletion queue: this would be extended by adding the "step 3" validation
-step.
+Deletions may only be persisted to the queue once the remote index_part.json
+reflecting the deletion has been written.
 
-Since its reason for existence is optimization rather than correctness,
-there is a lot of flexibility in exactly how the deletion queue should work,
-as long as it obeys the rule to validate generations before executing deletions:
+If a deletion list is read from local disk after a restart, it is guaranteed
+that whatever generation wrote that deletion list has therefore already
+uploaded its index_part.json file, and therefore when we started up, we would
+have seen that remote metadata if it was in the generation immediately before
+our own.
 
-- Option A (simplest):validate the
-  deletion list before persisting it. This has the downside of delaying
-  persistence of deletes until the control plane is available.
-- Option B: validate a list at the point of executing it. This has the downside
-  that because we're doing the validation much later, there is a good chance
-  some attachments might have changed, and we will end up leaking objects.
-- Option C (preferred): validate lazily in the background after persistence of the list, maintaining
-  an "executable" pointer into the list of deletion lists to reflect
-  which ones are elegible for execution, and re-writing deletion lists if
-  they are found to contain some operations not elegible for execution. This
-  is the most efficient approach in terms of I/O, at the cost of some complexity
-  in implementation.
+This enables the following reasoning:
 
-As well as reducing leakage, the ability of a persistent queue to accumulate
-deletions over long timescale has side benefits:
+- a) If I validate my current generation and the deletion list is in that
+  generation, I may execute it.
+- b) If I validate my current generation and the deletion list is from
+  the immediately preceding generation _and_ that preceding generation
+  ran on the same server I am running on, then I may execute it.
 
-- Over enough time we will always accumulate enough keys to issue full-sized
-  (1000 object) DeleteObjects requests, minimizing overall request count.
-- If in future we implement a read-only mode for pageservers to read the
-  data of tenants, then delaying deletions avoids the need for that remote
-  pageserver to be fully up to date with the latest index when serving reads
-  from old LSNs. The read-only node might be using stale metadata that refers
-  to objects eliminated in a recent compaction, but can still service reads
-  without refreshing metadata as long as the old objects deletion is delayed.
+The `b` case is the nuanced one, but also the important one: it is what
+enables replaying a persistent deletion queue after restart without
+having to drop any un-validated entries. After a restart, the main
+pageserver startup code may tip off the deletion queue about which timelines
+have incremented their attachment generation by exactly one, and are therefore
+elegible to validate deletions from the previous generation.
+
+#### Validation
+
+Deletion execution is gated on validation of the generations associated with
+each deletion.
+
+We may validate lists as a whole, sequentially number the lists, and track
+validation with a "validated sequence number" pointer into the list. To advance it,
+some background task would do the following procedure for each deletion list
+in order:
+
+1. Scan the DeletionList and aggregate a map of tenant to attachment generation
+2. Send a request to the control plane to validate these generations
+3. Update the queue as follows:
+
+- If all generations are valid (the usual case) then
+  the whole list may be executed. We may efficiently record the result of
+  this validation by advancing a "valid sequence" to point to the sequence
+  number of the deletion list we just validated.
+- If only some contents of a list are valid, then rather than storing
+  some structured validation result, we will just re-write the list
+  to omit the parts we can't validate, log a warning about the leaked
+  objects, and then advance our valid sequence number to point to
+  the re-written list.
+
+4. At some later point, actually execute the list that we validated
+   in step 3.
+
+#### Deletion queue replay on startup
+
+At startup, the pageserver will replay the lists on disk. Validation
+will pick up where it left off: if there are unvalidated lists present,
+then it may still be possible to validate them if the timeline's attachment
+generation is only 1 greater than that in the list, and it was attached
+to this node in its previous generation.
+
+The number of objects leaked in this process depends on how frequently we
+do validation during normal operations, and whether the previous pageserver
+instance was terminated cleanly and validated its lists in the process. Usually,
+we would have shut down cleanly and not leak any objects.
+
+#### Proactive validation-flush
+
+There are some circumstances where it is helpful to intentionally
+flush the validation process (i.e. validate all prior deletions):
+
+- On graceful pagegserver shutdown, as we anticipate that some or
+  all of our attachments may be re-assigned while we are offline.
+- On tenant detach.
+
+This flushing is entirely optional, and may be time-bound: e.g.
+if it takes more than 5 seconds to flush during shutdown, just give
+up.
 
 #### Deletion queue persistence format
 
-_Note: the following format describes a persistent format for "Option C" in
-the previous section. It would be simpler in "Option A", as one would not
-need to store generation information for pre-validated deletes_
-
-Persistence is to S3 rather than local disk so that if a pageserver
-is stopped uncleanly and then the same node_id is started on a fresh
-physical machine, the deletion queue can still continue without leaking
-objects.
+Persistence is to local disk, rather than S3, to avoid any possible
+split-brain issues and to avoid having to clean up objects after a pageserver
+is decommissioned. However, when decommissioned cleanly, a pageserver
+should be requested to drain its deletion queue before we dispose
+of it, to avoid leaking some objects. If we unexpectedly lose a pageserver
+node and its disk, we will leak some objects: not harmful for correctness,
+and to be cleaned up eventually by the [scrubber](#cleaning-up-orphan-objects-scrubbing)
 
 The persisted queue is broken up into a series of lists, written out
 once some threshold number of deletions are accumulated. This should
-be tuned to target an object size of ~1MB to avoid the expense of
-writing and reading many tiny objects.
+be tuned to target a file size of ~1MB to avoid the expense of
+writing and reading many tiny files. The lists are written and read
+atomically, to avoid coupling the code too much to use of a local filesystem,
+in case we wanted to switch to using an object store in future.
 
 Each deletion list has a sequence number: this records the logical
 ordering of the lists, so that we may use sequence numbers to succinctly
 store knowledge about up to which point the deletions have been validated.
 
-In addition to the lists themselves, a header object would be used
-to store state about how far validation has proceeded (in the "Option C" case
-above, for background validation), and to record the next sequence number in
-case there are no deletion lists at present.
+In addition to the lists themselves, a header file is used
+to store state about how far validation has proceeded: if the header's
+"valid sequence" has passed a particular list, then that list may
+be executed.
 
-Deletion queue objects will be stored outside the `tenants/` path, and
+Deletion queue files will be stored in a sibling of the `tenants/` directory, and
 with the node generation number in the name. The paths would look something like:
 
 ```bash
   # Deletion List
   deletion/<node id>/<sequence>-<generation>.list
 
-  # Header object, stores the highest sequence & clean sequence
+  # Header object, stores the highest sequence & validated sequence
   deletion/<node id>/header-<generation>
 ```
 
 Each entry in a deletion list is structured to contain the tenant & timeline,
-and the node generation & attachment generation.
+and the attachment generation.
 
 ```rust
 /// One of these per deletion list object
 struct DeletionList {
   deletions: Vec<DeletionEntry>
-  node_gen: NodeGeneration
 }
 
 /// N of these per deletion list
 struct DeletionEntry {
   tenant_id: TenantId,
   timeline_id: TimelineId,
+  generation: AttachmentGeneration
   keys: Vec<String>,
-  attach_gen: AttachmentGeneration
 }
 ```
-
-#### Deletion queue replay on startup
-
-When starting up with a new generation number, a pageserver should avoid
-leaking objects by ingesting the deletion queue from its previous lifetime, but
-ignore any un-validated content:
-
-1. List all objects in `deletion/<node id>`. Fetch the header.
-2. Drop any that are not below the validated horizon in the header
-3. Write a new header in the current generation number
-4. Process the validated lists from the previous generation in the same
-   way as any lists that would be generated within this generation.
-
-The number of objects leaked in this process depends on how frequently we
-do validation during normal operations, and whether the previous pageserver
-instance was terminated cleanly and validated its lists in the process.
-
-#### Background generation validation
-
-Deletion execution is gated on the "validated sequence" advancing. To advance it,
-some background task would do the following procedure for each deletion list
-in order:
-
-1. Scan the DeletionList and aggregate a map of tenant to attachment generation
-2. Send a request to the control plane to validate these generations and the
-   DeletionList's node generation.
-3. Conditional on result:
-   - a. If all are valid, then advance validated sequence number
-   - b. If some are invalid, then rewrite the deletion list to exclude all non-valid
-     deletions, persist to S3, then advance the validated sequence number.
 
 #### Operations that may skip the queue
 
@@ -795,34 +794,6 @@ deletion queue should expose two input channels: one for deletions that must be
 processed in a generation-aware way, and a fast path for timeline deletions, where
 that fast path may skip validation and the persistent queue.
 
-### Synchronizing attachments on pageserver startup
-
-For correctness, it is not necessary for a node to synchronize its attachments on startup: it
-may continue to ingest+serve tenants on stale attachment generation numbers harmlessly.
-
-As an optimization, we may avoid doing spurious S3 writes within a stale generation,
-by using the same generation-checking API that is used for deletions. On startup,
-concurrently with loading state from disk, the pageserver may issue RPCs to
-the control plane to discover if any of its attachments are stale.
-
-If an attachment is stale, then the pageserver will not do any S3 writes. However,
-the attachment will still ingest the WAL and serve reads: this is necessary
-for high availability, as some endpoint might still be using this
-node for reads. To avoid overwhelming local disk with data that cannot be
-offloaded to remote storage, we may impose some time/space threshold on
-the attachment when operating in this mode: when exceeded, the attachment
-would go into Broken state. It is the responsibility of the control plane
-to ensure that endpoints are using the latest attachment location before this
-happens.
-
-In principle we could avoid the need to exchange O(attachment_count) information
-at startup by having the control plane keep track of whether any changes
-happened that would affect the pageserver's attachments while it was unavailable,
-but this would impose complexity on the control plane code to track such
-dirty/clean state. It is simpler to just check all the attachments, and
-relatively inexpensive since validating generation numbers is a read-only
-request to the control plane.
-
 ### Cleaning up orphan objects (scrubbing)
 
 An orphan object is any object which is no longer referenced by a running node or by metadata.
@@ -833,6 +804,8 @@ Examples of how orphan objects arise:
   index_part.json that references that layer.
 - A partition node carries on running for some time, and writes out an unbounded number of
   objects while it believes itself to be the rightful writer for a tenant.
+- A pageserver crashes between un-linking an object from the index, and persisting
+  the object to its deletion queue.
 
 Orphan objects are functionally harmless, but have a small cost due to S3 capacity consumed. We
 may clean them up at some time in the future, but doing a ListObjectsv2 operation and cross
@@ -843,44 +816,6 @@ validation as all other deletions: the attachment generation must be
 fresh. This avoids the possibility of a stale pageserver incorrectly
 thinking than an object written by a newer generation is stale, and deleting
 it.
-
-### Publishing generation numbers to storage broker
-
-The storage broker acts as an ephemeral store of some per-timeline
-metadata, updated by the safekeeper.
-
-Generation numbers may be passed from pageserver back to safekeeper
-in the feedback messages on wal connections and stored in the storage
-broker by the safekeeper. This is the same data path already used
-for `remote_consistent_lsn` updates.
-
-Nothing we publish to the storage broker is for use in correctness, just
-certain optimizations like:
-
-- Discovering the latest generation's index without doing a ListObjects
-  request
-- Retaining safekeeper knowledge of which pageserver generations are
-  stale across restarts.
-- In future, for remote nodes doing passive reads of historical LSNs from
-  S3 to notice when the current generation for a tenant changes.
-
-### Safekeeper optimization for stale pageservers
-
-As an optimization, we may extend the safekeeper to be asynchronously updated about pageserver node
-generation numbers. We may do this by including the node generation in messages from pageserver to safekeeper,
-and having the safekeeper write the highest generation number it has seen for each node to the storage broker.
-
-Once the safekeeper has visibility of the most recent generation, it may reject requests from pageservers
-with stale node generation numbers: this would reduce any possible extra load on the safekeeper from stale pageservers,
-and provide feedback to stale pageservers that they should shut down.
-
-This is not required for safety: reads from a stale pageserver are functionally harmless and only
-waste system resources. Logical writes (i.e. updates to remote_persistent_lsn that can cause trimming)
-are handled on the pageserver side (see "WAL trim changes" above).
-
-Note that the safekeeper should only reject reads for stale _pageserver_ generations. Stale _attachment_
-generations are valid for reads, as a tenant may be multi-attached during a migration, where two different
-pageservers are both replaying the WALs for the same tenant.
 
 ## Operational impact
 
@@ -910,7 +845,7 @@ For a managed service, the general approach should be to make sure we are monito
 that control plane outages are bounded in time. The separation of console and control plane will also help
 to keep the control plane itself simple and robust.
 
-We should also implement an "escape hatch" config for node generation numbers, where in a major disaster outage,
+We will also implement an "escape hatch" config generation numbers, where in a major disaster outage,
 we may manually run pageservers with a hand-selected generation number, so that we can bring them online
 independently of a control plane.
 
@@ -923,14 +858,8 @@ independently of the control plane: initially they can just use a static generat
 
 The pageserver is deployed with some special config to:
 
-- Always act like everything is generation 1 and do not wait for a control plane issued generation on startup.
+- Always act like everything is generation 1 and do not wait for a control plane issued generation on attach
 - Skip the places in deletion and remote_consistent_lsn updates where we would call into control plane
-
-The storage broker will tolerate the timeline state omitting generation numbers (only
-relevant if we implement [publishing generation numbers to the storage broker](#publishing-generation-numbers-to-storage-broker).
-
-The safekeeper will be aware of both new and old versions of `PageserverFeedback` message, and tolerate
-the old version.
 
 #### Phase 2
 
@@ -939,8 +868,8 @@ The control plane changes are deployed: control plane will now track and increme
 #### Phase 3
 
 The pageserver is deployed with its control-plane-dependent changes enabled: it will now require
-the control plane to issue a node generation number, and require to communicate with the control plane
-prior to processing deletions.
+the control plane to service re-attach requests on startup, and handle generation
+validation requests.
 
 ### On-disk backward compatibility
 
@@ -985,39 +914,20 @@ not needed: one could imagine listing by generation while scrubbing (so that
 a particular generation's layers could be scrubbed), but this is not part
 of normal operations, and the [scrubber](#cleaning-up-orphan-objects-scrubbing) probably won't work that way anyway.
 
-## Can't we do without the separate node generation?
+## Wouldn't it be simpler to have a separate deletion queue per timeline?
 
-Eventually yes, but in the current control plane design it is convenient to build
-our suffix from a tuple of node generation and attachment generation.
+Functionally speaking, we could. That's how RemoteTimelineClient currently works,
+but this approach does not map well to a long-lived persistent queue with
+generation validation.
 
-The storage format in [object keys](#object-key-changes) only
-uses a single u64 suffix, so the idea of multiple node generations is not encoded
-into how we store data.
+Anything we do per-timeline generates tiny random I/O, on a pageserver with
+tens of thousands of timelines operating: to be ready for high scale, we should:
 
-Generating those suffixes from the tuple of (attach_gen, node_gen) enables
-us to avoid centrally updating per-attachment generation numbers each time a node
-restarts. In future, we may move to a model where attachments are explicitly
-per-process-lifetime (see [ephemeral node IDs](#ephemeral-node-ids)) -- at that point,
-without changing the storage format, we may eliminate the concept of node generations.
+- A) Amortize costs where we can (e.g. a shared deletion queue)
+- B) Expect to put tenants into a quiescent state while they're not
+  busy: i.e. we shouldn't keep a tenant alive to service its deletion queue.
 
-## Wouldn't it be simpler to have a separate deletion queue per tenant?
-
-We could. That's how RemoteTimelineClient currently works, but this approach does not map
-well to a long-lived persistent queue with generation validation:
-
-- Load on the control plane from validations would be much higher if we are sending
-  one request per timeline, rather than a batched request. Because generation validation
-  is a small read transaction to the control plane database, these requests will be dominated
-  by per-request overhead & benefit a lot from batching.
-- Writing deletion queues per-timeline either bloats the index_part with an inline
-  deletion queue, or incurs extra small PUTs per timeline (bear in mind we expect
-  many thousands of timelines) to maintain separate queues for each one.
-- If there are deletions pending for a timeline, but the timeline is idle and we
-  would like to detach it or put it into a "sleep" state to save resources, then
-  it is helpful to have offloaded deletions into a queue that will no go to sleep
-  with the tenant.
-- The recovery/replay of the deletion queue at startup is more expensive to do
-  across thousands of individual queues than for one queue.
+This was discussed in the [scope](#scope) part of the deletion queue section.
 
 # Appendix A: Examples of use in high availability/failover
 
@@ -1029,15 +939,15 @@ failover scenarios and models. The sections below sketch how they would work in 
 "fast" here means that the restart is done before any other element in the system
 has taken action in response to the node being down.
 
-- After restart, the node does no writes until it can obtain a fresh generation
-  number from the control plane.
-- Once it has a node generation number, it may activate all existing attachments. The
-  generation of its attachments is stored on disk. This may be stale, but that is
-  safe.
+- After restart, the node issues a re-attach request to the control plane, and
+  receives new generation numbers for all its attached tenants.
+- Tenants may be activated with the generation number in the re-attach response.
 - If any of its attachments were in fact stale (i.e. had be reassigned to another
-  node while this node was offline), then:
-  - Deletions to those attachments will be blocked by generation validation on the
-    delete path
+  node while this node was offline), then
+  - the re-attach response will inform
+    the tenant of this by _not_ incrementing the generation for that attachment.
+  - This will implicitly block deletions in the tenant, but as an optimization
+    the pageserver should also proactively stop doing S3 uploads when it notices this stale-generation state.
   - The control plane is expected to eventually detach this tenant from the
     pageserver.
 
@@ -1049,10 +959,7 @@ to S3.
 
 #### Case A: re-attachment to other nodes
 
-In this section we use the <attach_gen>-<node_gen> shorthand for object
-suffixes, see [generation numbers](#generation-numbers)
-
-1. Let's say node 0 fails in a cluster of three nodes 0, 1, 2.
+1. Let's say node 0 becomes unresponsive in a cluster of three nodes 0, 1, 2.
 2. Some external mechanism notices that the node is unavailable and initiates
    movement of all tenants attached to that node to a different node. In
    this example it would mean incrementing the attachment generation
@@ -1060,42 +967,34 @@ suffixes, see [generation numbers](#generation-numbers)
    to node 1 or 2 based on some distribution rule (this might be round
    robin, or capacity based).
 3. A tenant which is now attached to node 1 will _also_ still be attached to node
-   0, from the perspective of node 0. Let's say it was originally attached with
-   generation suffix 00000001-00000001 -- its new suffix on node 1
-   might be 00000002-00000001 (attachment gen 2, on node 1).
-4. S3 writes will continue from nodes 0 and 1: there will be an index_part.json-00000001-00000001
-   \_and\* an index_part.json-00000002-00000001. Objects written under the old suffix
+   0, from the perspective of node 0. Node 0 will still be using its old generation,
+   node 1 will be using a newer generation.
+4. S3 writes will continue from nodes 0 and 1: there will be an index_part.json-00000001
+   \_and\* an index_part.json-00000002. Objects written under the old suffix
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
    written by node 0 are just garbage that can be cleaned up at leisure. Node 0 will
    not do any deletions because it can't synchronize with control plane, or if it could, it would be informed that is no longer the most recent generation and hence not do the garbage collection.
 
-Eventually, node 0 will somehow realize it should stop running by some means, although
-this is not necessary for correctness:
+Node 0 is not "failed" per-se in this situation: if it becomes responsive again,
+then the control plane may detach the tenants that have been re-attached
+elsewhere from node 0.
 
-- A hard-stop of the VM it is running on
-- It tries to communicate with another peer that sends it an error response
-  indicating its node generation is out of date
-- It tries to do some deletions, and discovers when synchronizing with the
-  control plane that its node generation number is stale.
+#### Case B: direct node replacement with same node_id and drive
 
-#### Case B: direct node replacement with same node_id
-
-This is the scenario we would experience if running a kubernetes Statefulset
-of pageservers: kubernetes would start a new node without guaranteeing that the
-old "failed" node is really dead.
+This is the scenario we would experience if running pageservers in some dynamic
+VM/container environment that would auto-replace a given node_id when it became
+unresponsive, with the node's storage supplied by some network block device
+that is attached to the replacement VM/container.
 
 1. Let's say node 0 fails, and there may be some other peers but they aren't relevant.
 2. Some external mechanism notices that the node is unavailable, and creates
    a "new node 0" (Node 0b) which is a physically separate server. The original node 0
-   (Node 0a) may still be running.
-3. On startup, node 0b acquires a new generation number. It doesn't have any local state,
-   so the control plane must send attach requests to node 0b for all the tenants. However,
-   these do not have to increment the attachment generation as they're still attached to
-   logical node 0, it's just a different physical node. So we have an O(tenant_count) communication
-   to the pageserver, but not an O(tenant_count) write to the database.
+   (Node 0a) may still be running, because we do not assume the environment fences nodes.
+3. On startup, node 0b re-attaches and gets higher attachment generations for
+   all tenants.
 4. S3 writes continue from nodes 0a and 0b, but the writes do not collide due to different
-   node generation in the suffix, and the writes from node 0a are not visible to the rest
+   generation in the suffix, and the writes from node 0a are not visible to the rest
    of the system because endpoints are reading only from node 0b.
 
 # Appendix B: interoperability with other features
@@ -1112,6 +1011,9 @@ for a tenant are assigned to different pageservers:
 
 ## Read replicas
 
+_This section is about a passive reader of S3 pageserver state, not a postgres
+read replica_
+
 For historical reads to LSNs below the remote persistent LSN, any node may act as a reader at any
 time: remote data is logically immutable data, and the use of deferred deletion in this RFC helps
 mitigate the fact that remote data is not _physically_ immutable (i.e. the actual data for a given
@@ -1119,7 +1021,7 @@ page moves around as compaction happens).
 
 A read replica needs to be aware of generations in remote data in order to read the latest
 metadata (find the index_part.json with the latest suffix). It may either query this
-from the control plane, or more efficiently read it from the storage broker (see [storage broker section in optimizations](#publishing-generation-numbers-to-storage-broker)).
+from the control plane, or find it with ListObjectsv2 request
 
 ## Seamless migration
 
@@ -1154,7 +1056,3 @@ as the pageserver ID would change on restart. In this model, separate node and a
 generations are unnecessary, but the storage format doesn't change: the [generation suffix](#generation-suffix)
 may simply be the attachment generation, without any per-node component, as the attachment
 generation would change any time an attached node restarted.
-
-That is just one possible future direction for node management: the imporant thing is just that
-we avoid coding in assumptions about cluster management into our storage format, hence the opaque
-u64 used in the object suffix.
