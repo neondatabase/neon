@@ -15,12 +15,10 @@ use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
-use tokio_postgres::Client;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Row;
-use tokio_postgres::Statement;
 use tokio_postgres::Transaction;
 use tracing::error;
 use tracing::instrument;
@@ -40,19 +38,6 @@ struct QueryData {
     params: Vec<serde_json::Value>,
 }
 
-impl QueryData {
-    async fn into_statement(self, client: &Client) -> anyhow::Result<StatementData> {
-        let stmt = client.prepare(&self.query).await?;
-        let params = json_to_pg_text(self.params);
-        Ok(StatementData { stmt, params })
-    }
-}
-
-struct StatementData {
-    stmt: Statement,
-    params: Vec<Option<String>>,
-}
-
 #[derive(serde::Deserialize)]
 struct BatchQueryData {
     queries: Vec<QueryData>,
@@ -63,11 +48,6 @@ struct BatchQueryData {
 enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
-}
-
-enum PreparedPayload {
-    Single(StatementData),
-    Batch(Vec<StatementData>),
 }
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
@@ -81,10 +61,6 @@ static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only
 static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
-static HEADER_SERIALIZABLE: HeaderValue = HeaderValue::from_static("Serializable");
-static HEADER_READ_UNCOMITTED: HeaderValue = HeaderValue::from_static("ReadUncommitted");
-static HEADER_READ_COMITTED: HeaderValue = HeaderValue::from_static("ReadCommitted");
-static HEADER_REPEATABLE_READ: HeaderValue = HeaderValue::from_static("RepeatableRead");
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -328,21 +304,6 @@ async fn handle_inner(
 
     let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
-    // Prepare the statements
-    let prepared = match payload {
-        Payload::Single(query) => query
-            .into_statement(&client)
-            .await
-            .map(PreparedPayload::Single)?,
-        Payload::Batch(batch_query) => {
-            let mut statements = Vec::with_capacity(batch_query.queries.len());
-            for query in batch_query.queries {
-                statements.push(query.into_statement(&client).await?);
-            }
-            PreparedPayload::Batch(statements)
-        }
-    };
-
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
@@ -352,10 +313,10 @@ async fn handle_inner(
     //
     let mut size = 0;
     let result =
-        match prepared {
-            PreparedPayload::Single(stmt) => {
+        match payload {
+            Payload::Single(stmt) => {
                 let (status, results) =
-                    query_to_json(&*client, stmt, &mut size, raw_output, array_mode)
+                    query_to_json(&*client, stmt, &mut 0, raw_output, array_mode)
                         .await
                         .map_err(|e| {
                             client.discard();
@@ -364,7 +325,7 @@ async fn handle_inner(
                 client.check_idle(status);
                 results
             }
-            PreparedPayload::Batch(statements) => {
+            Payload::Batch(statements) => {
                 let (inner, mut discard) = client.inner();
                 let mut builder = inner.build_transaction();
                 if let Some(isolation_level) = txn_isolation_level {
@@ -449,14 +410,14 @@ async fn handle_inner(
 
 async fn query_batch(
     transaction: &Transaction<'_>,
-    statements: Vec<StatementData>,
+    queries: BatchQueryData,
     total_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
 ) -> anyhow::Result<Vec<Value>> {
-    let mut results = Vec::with_capacity(statements.len());
+    let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
-    for stmt in statements {
+    for stmt in queries.queries {
         // TODO: maybe we should check that the transaction bit is set here
         let (_, values) =
             query_to_json(transaction, stmt, &mut current_size, raw_output, array_mode).await?;
@@ -468,13 +429,13 @@ async fn query_batch(
 
 async fn query_to_json<T: GenericClient>(
     client: &T,
-    data: StatementData,
+    data: QueryData,
     current_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
-    // let query_params = json_to_pg_text(data.params)?;
-    let row_stream = client.query_raw_txt(&data.stmt, data.params).await?;
+    let query_params = json_to_pg_text(data.params);
+    let row_stream = client.query_raw_txt(&data.query, query_params).await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too

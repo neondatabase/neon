@@ -494,7 +494,7 @@ struct ClientInner {
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(self.ids.clone())
+        USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
     }
 }
 
