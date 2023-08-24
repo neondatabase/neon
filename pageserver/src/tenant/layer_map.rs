@@ -50,7 +50,6 @@ use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
-use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;
