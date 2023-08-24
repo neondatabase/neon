@@ -365,8 +365,6 @@ impl ResidentOrWantedEvicted {
 /// This type models the on-disk layers, which can be evicted and on-demand downloaded.
 // TODO:
 // - internal arc, because I've now worked away majority of external wrapping
-// - load time api which checks that files are present, fixmes in load time, remote timeline
-//  client tests
 pub(crate) struct LayerE {
     // do we really need this?
     conf: &'static PageServerConf,
