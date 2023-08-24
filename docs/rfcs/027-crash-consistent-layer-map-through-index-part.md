@@ -76,7 +76,7 @@ Given the above considerations, we should avoid making correctness of split-brai
 
 ## Design
 
-Instead of reonciling a layer map from local timeline directory contents and remote index part, this RFC proposed to view the remote index part as authoritative during timeline load.
+Instead of reonciling a layer map from local timeline directory contents and remote index part, this RFC proposes to view the remote index part as authoritative during timeline load.
 Local layer files will be recognized if they match what's listed in remote index part, and removed otherwise.
 
 During **timeline load**, the only thing that matter is the remote index part content.
