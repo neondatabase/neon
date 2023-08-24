@@ -21,7 +21,7 @@ pub struct EphemeralFile {
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
     file: VirtualFile,
-    size: u64,
+    len: u64,
     /// An ephemeral file is append-only.
     /// We keep the last page, which can still be modified, in [`Self::mutable_tail`].
     /// The other pages, which can no longer be modified, are accessed through the page cache.
@@ -52,13 +52,13 @@ impl EphemeralFile {
             _tenant_id: tenant_id,
             _timeline_id: timeline_id,
             file,
-            size: 0,
+            len: 0,
             mutable_tail: [0u8; PAGE_SZ],
         })
     }
 
-    pub(crate) fn size(&self) -> u64 {
-        self.size
+    pub(crate) fn len(&self) -> u64 {
+        self.len
     }
 
     pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
@@ -72,8 +72,8 @@ impl EphemeralFile {
         impl<'a> Writer<'a> {
             fn new(ephemeral_file: &'a mut EphemeralFile) -> io::Result<Writer<'a>> {
                 Ok(Writer {
-                    blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
-                    off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
+                    blknum: (ephemeral_file.len / PAGE_SZ as u64) as u32,
+                    off: (ephemeral_file.len % PAGE_SZ as u64) as usize,
                     ephemeral_file,
                 })
             }
@@ -142,7 +142,7 @@ impl EphemeralFile {
             }
         }
 
-        let pos = self.size;
+        let pos = self.len;
         let mut writer = Writer::new(self)?;
 
         // Write the length field
@@ -160,11 +160,11 @@ impl EphemeralFile {
         writer.push_bytes(srcbuf).await?;
 
         if srcbuf.len() < 0x80 {
-            self.size += 1;
+            self.len += 1;
         } else {
-            self.size += 4;
+            self.len += 4;
         }
-        self.size += srcbuf.len() as u64;
+        self.len += srcbuf.len() as u64;
 
         Ok(pos)
     }
@@ -205,7 +205,7 @@ impl Drop for EphemeralFile {
 
 impl BlockReader for EphemeralFile {
     fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
-        let flushed_blknums = 0..self.size / PAGE_SZ as u64;
+        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
             loop {
@@ -239,7 +239,7 @@ impl BlockReader for EphemeralFile {
                 };
             }
         } else {
-            debug_assert_eq!(blknum as u64, self.size / PAGE_SZ as u64);
+            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
             Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
         }
     }
