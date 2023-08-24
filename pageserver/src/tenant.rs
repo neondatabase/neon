@@ -72,7 +72,6 @@ use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
-use crate::tenant::storage_layer::Layer;
 use crate::InitializationOrder;
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;

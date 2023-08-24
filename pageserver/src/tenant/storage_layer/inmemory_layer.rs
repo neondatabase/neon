@@ -85,11 +85,11 @@ impl std::fmt::Debug for InMemoryLayerInner {
 }
 
 impl InMemoryLayer {
-    pub fn get_timeline_id(&self) -> TimelineId {
+    pub(crate) fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
 
-    pub fn info(&self) -> InMemoryLayerInfo {
+    pub(crate) fn info(&self) -> InMemoryLayerInfo {
         let lsn_start = self.start_lsn;
 
         if let Some(&lsn_end) = self.end_lsn.get() {
@@ -99,32 +99,22 @@ impl InMemoryLayer {
         }
     }
 
-    fn assert_writable(&self) {
+    pub(crate) fn assert_writable(&self) {
         assert!(self.end_lsn.get().is_none());
     }
 
-    fn end_lsn_or_max(&self) -> Lsn {
+    pub(crate) fn end_lsn_or_max(&self) -> Lsn {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
-}
 
-#[async_trait::async_trait]
-impl Layer for InMemoryLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        Key::MIN..Key::MAX
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
+    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
     }
 
-    fn is_incremental(&self) -> bool {
-        // in-memory layer is always considered incremental.
-        true
-    }
-
     /// debugging function to print out the contents of the layer
-    async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    ///
+    /// this is likely completly unused
+    pub async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
@@ -171,7 +161,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given value in the layer.
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -218,6 +208,20 @@ impl Layer for InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Layer for InMemoryLayer {
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
+            .await
     }
 }
 
@@ -317,7 +321,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub async fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub(crate) async fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
