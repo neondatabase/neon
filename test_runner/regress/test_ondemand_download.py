@@ -369,7 +369,7 @@ def test_download_remote_layers_api(
     filled_current_physical = get_api_current_physical_size()
     log.info(filled_current_physical)
     filled_size = get_resident_physical_size()
-    log.info(filled_size)
+    log.info(f"filled_size: {filled_size}")
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     env.pageserver.stop()
@@ -377,7 +377,7 @@ def test_download_remote_layers_api(
     # remove all the layer files
     # XXX only delete some of the layer files, to show that it really just downloads all the layers
     for layer in (Path(env.repo_dir) / "tenants").glob("*/timelines/*/*-*_*"):
-        log.info(f"unlinking layer {layer}")
+        log.info(f"unlinking layer {layer.name}")
         layer.unlink()
 
     # Shut down safekeepers before starting the pageserver.
@@ -403,7 +403,7 @@ def test_download_remote_layers_api(
         filled_current_physical == get_api_current_physical_size()
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
     post_unlink_size = get_resident_physical_size()
-    log.info(post_unlink_size)
+    log.info(f"post_unlink_size: {post_unlink_size}")
     assert (
         post_unlink_size < filled_size
     ), "we just deleted layers and didn't cause anything to re-download them yet"

@@ -135,7 +135,7 @@
 //! - Initiate upload queue with that [`IndexPart`].
 //! - Reschedule all lost operations by comparing the local filesystem state
 //!   and remote state as per [`IndexPart`]. This is done in
-//!   [`Tenant::timeline_init_and_sync`] and [`Timeline::reconcile_with_remote`].
+//!   [`Tenant::timeline_init_and_sync`].
 //!
 //! Note that if we crash during file deletion between the index update
 //! that removes the file from the list of files, and deleting the remote file,
@@ -172,7 +172,6 @@
 //!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
 //!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
 //!
-//! Most of the above steps happen in [`Timeline::reconcile_with_remote`] or its callers.
 //! We keep track of the fact that a client is in `Attaching` state in a marker
 //! file on the local disk. This is critical because, when we restart the pageserver,
 //! we do not want to do the `List timelines` step for each tenant that has already
@@ -192,14 +191,14 @@
 //! not created and the uploads are skipped.
 //! Theoretically, it should be ok to remove and re-add remote storage configuration to
 //! the pageserver config at any time, since it doesn't make a difference to
-//! `reconcile_with_remote`.
+//! [`Timeline::load_layer_map`].
 //! Of course, the remote timeline dir must not change while we have de-configured
 //! remote storage, i.e., the pageserver must remain the owner of the given prefix
 //! in remote storage.
 //! But note that we don't test any of this right now.
 //!
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
-//! [`Timeline::reconcile_with_remote`]: super::Timeline::reconcile_with_remote
+//! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
 mod delete;
 mod download;
@@ -355,6 +354,10 @@ impl RemoteTimelineClient {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
         self.update_remote_physical_size_gauge(Some(index_part));
+        info!(
+            "initialized upload queue from remote index with {} layer files",
+            index_part.layer_metadata.len()
+        );
         Ok(())
     }
 
@@ -367,6 +370,7 @@ impl RemoteTimelineClient {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata)?;
         self.update_remote_physical_size_gauge(None);
+        info!("initialized upload queue as empty");
         Ok(())
     }
 
