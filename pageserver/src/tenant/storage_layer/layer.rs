@@ -966,6 +966,7 @@ impl std::fmt::Debug for ResidentLayer {
 }
 
 impl ResidentLayer {
+    /// Release the eviction guard, making this back into a plain [`Layer`].
     pub(crate) fn drop_eviction_guard(self) -> Layer {
         self.into()
     }
@@ -977,11 +978,11 @@ impl ResidentLayer {
     ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         use LayerKind::*;
 
-        let inner = &self.owner.0;
+        let owner = &self.owner.0;
 
-        match self.downloaded.get(inner).await? {
+        match self.downloaded.get(owner).await? {
             Delta(d) => {
-                inner
+                owner
                     .access_stats
                     .record_access(LayerAccessKind::KeyIter, ctx);
 
@@ -1053,10 +1054,10 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
+    /// The owner is required so that we don't have to upgrade the `Self::owner`, which will only
+    /// be used on drop. This way, initializing a DownloadedLayer with the owner gone is
+    /// impossible.
     async fn get(&self, owner: &LayerInner) -> anyhow::Result<&LayerKind> {
-        // the owner is required so that we don't have to upgrade the self.owner, which will only
-        // be used on drop. this way, initializing a DownloadedLayer without an owner is statically
-        // impossible, so we can just not worry about it.
         let init = || async {
             // there is nothing async here, but it should be async
             if owner.desc.is_delta {
