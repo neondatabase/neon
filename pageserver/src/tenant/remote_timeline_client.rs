@@ -1104,7 +1104,7 @@ impl RemoteTimelineClient {
                         self.update_remote_physical_size_gauge(Some(index_part));
                         if mention_having_future_layers {
                             // find rationale near crate::tenant::timeline::init::cleanup_future_layer
-                            tracing::info!("Uploaded a index_part.json with future layers -- this is ok! if shutdown now, expect future layer cleanup");
+                            tracing::info!(disk_consistent_lsn=%_lsn, "uploaded an index_part.json with future layers -- this is ok! if shutdown now, expect future layer cleanup");
                         }
                     }
                     res
