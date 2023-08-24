@@ -35,7 +35,6 @@
 //!
 use std::collections::HashMap;
 use std::fs::File;
-use std::panic;
 use std::path::Path;
 use std::process::exit;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
@@ -271,6 +270,55 @@ fn main() -> Result<()> {
         }
     };
 
+    // Start the vm-monitor if directed to. The vm-monitor only runs on linux
+    // because it requires cgroups.
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            use std::env;
+            use tokio_util::sync::CancellationToken;
+            use tracing::warn;
+            let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+            let cgroup = matches.get_one::<String>("filecache-connstr");
+            let file_cache_connstr = matches.get_one::<String>("cgroup");
+
+            // Only make a runtime if we need to.
+            // Note: it seems like you can make a runtime in an inner scope and
+            // if you start a task in it it won't be dropped. However, make it
+            // in the outermost scope just to be safe.
+            let rt = match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
+                (None, None) => None,
+                (None, Some(_)) => {
+                    warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
+                    None
+                }
+                (Some(_), None) => {
+                    panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
+                }
+                (Some(_), Some(_)) => Some(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
+                        .enable_all()
+                        .build()
+                        .expect("failed to create tokio runtime for monitor"),
+                ),
+            };
+
+            // This token is used internally by the monitor to clean up all threads
+            let token = CancellationToken::new();
+
+            let vm_monitor = &rt.as_ref().map(|rt| {
+                rt.spawn(vm_monitor::start(
+                    Box::leak(Box::new(vm_monitor::Args {
+                        cgroup: cgroup.cloned(),
+                        pgconnstr: file_cache_connstr.cloned(),
+                        addr: vm_monitor_addr.cloned().unwrap(),
+                    })),
+                    token.clone(),
+                ))
+            });
+        }
+    }
+
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
     if let Some(mut pg) = pg {
@@ -282,6 +330,24 @@ fn main() -> Result<()> {
             .expect("failed to start waiting on Postgres process");
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
+    }
+
+    // Terminate the vm_monitor so it releases the file watcher on
+    // /sys/fs/cgroup/neon-postgres.
+    // Note: the vm-monitor only runs on linux because it requires cgroups.
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            if let Some(handle) = vm_monitor {
+                // Kills all threads spawned by the monitor
+                token.cancel();
+                // Kills the actual task running the monitor
+                handle.abort();
+
+                // If handle is some, rt must have been used to produce it, and
+                // hence is also some
+                rt.unwrap().shutdown_timeout(Duration::from_secs(2));
+            }
+        }
     }
 
     // Maybe sync safekeepers again, to speed up next startup
@@ -392,6 +458,29 @@ fn cli() -> clap::Command {
                 .short('r')
                 .long("remote-ext-config")
                 .value_name("REMOTE_EXT_CONFIG"),
+        )
+        // TODO(fprasx): we currently have default arguments because the cloud PR
+        // to pass them in hasn't been merged yet. We should get rid of them once
+        // the PR is merged.
+        .arg(
+            Arg::new("vm-monitor-addr")
+                .long("vm-monitor-addr")
+                .default_value("127.0.0.1:10369")
+                .value_name("VM_MONITOR_ADDR"),
+        )
+        .arg(
+            Arg::new("cgroup")
+                .long("cgroup")
+                .default_value("neon-postgres")
+                .value_name("CGROUP"),
+        )
+        .arg(
+            Arg::new("filecache-connstr")
+                .long("filecache-connstr")
+                .default_value(
+                    "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
+                )
+                .value_name("FILECACHE_CONNSTR"),
         )
 }
 
