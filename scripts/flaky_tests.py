@@ -16,7 +16,7 @@ FLAKY_TESTS_QUERY = """
     FROM
         (
             SELECT
-                revision,
+                reference,
                 jsonb_array_elements(data -> 'children') ->> 'name' as parent_suite,
                 jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') ->> 'name' as suite,
                 jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') ->> 'name' as test,
@@ -25,12 +25,13 @@ FLAKY_TESTS_QUERY = """
                 to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' ->> 'start')::bigint / 1000)::date as timestamp
             FROM
                 regress_test_results
-            WHERE
-                reference = 'refs/heads/main'
         ) data
     WHERE
         timestamp > CURRENT_DATE - INTERVAL '%s' day
-        AND (status IN ('failed', 'broken') OR retries_status_change::boolean)
+        AND (
+            (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
+            OR retries_status_change::boolean
+        )
     ;
 """
 
