@@ -1,12 +1,14 @@
 use std::{ffi::CString, path::Path, str::FromStr, sync::Arc};
 
+use rand::{Rng, SeedableRng};
 use safekeeper::simlib::{
     network::{Delay, NetworkOptions},
     proto::AnyMessage,
+    time::EmptyEvent,
     world::World,
-    world::{Node, NodeEvent}, time::EmptyEvent,
+    world::{Node, NodeEvent},
 };
-use tracing::{info, error, warn, debug};
+use tracing::{debug, error, info, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
@@ -16,7 +18,10 @@ use crate::{
         MyInsertRecord, WalProposerCleanup, WalProposerRust,
     },
     c_context,
-    simtest::{safekeeper::run_server, log::{SimClock, init_logger}},
+    simtest::{
+        log::{init_logger, SimClock},
+        safekeeper::run_server,
+    },
 };
 
 use super::disk::Disk;
@@ -272,7 +277,6 @@ impl Test {
             }
         }
 
-
         let mut wait_node = self.launch_sync();
         // fake walproposer
         let mut wp = WalProposer {
@@ -297,7 +301,10 @@ impl Test {
             if sync_in_progress && wait_node.is_finished() {
                 let res = wait_node.result.lock().clone();
                 if res.0 != 0 {
-                    anyhow::bail!("non-zero exitcode: {:?}", res);
+                    warn!("sync non-zero exitcode: {:?}", res);
+                    debug!("restarting walproposer");
+                    wait_node = self.launch_sync();
+                    continue;
                 }
                 let lsn = Lsn::from_str(&res.1)?;
                 debug!("sync-safekeepers finished at LSN {}", lsn);
@@ -350,7 +357,10 @@ impl Test {
             if wait_node.is_finished() {
                 while self.world.step() && self.world.now() < next_event_time {}
             } else {
-                while self.world.step() && self.world.now() < next_event_time && !wait_node.is_finished() {}
+                while self.world.step()
+                    && self.world.now() < next_event_time
+                    && !wait_node.is_finished()
+                {}
             }
         }
 
@@ -425,7 +435,7 @@ impl WalProposer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TestAction {
     WriteTx(usize),
     RestartSafekeeper(usize),
@@ -433,3 +443,24 @@ pub enum TestAction {
 }
 
 pub type Schedule = Vec<(u64, TestAction)>;
+
+pub fn generate_schedule(seed: u64) -> Schedule {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut schedule = Vec::new();
+    let mut time = 0;
+
+    let cnt = rng.gen_range(1..100);
+
+    for _ in 0..cnt {
+        time += rng.gen_range(0..100);
+        let action = match rng.gen_range(0..3) {
+            0 => TestAction::WriteTx(rng.gen_range(1..10)),
+            1 => TestAction::RestartSafekeeper(rng.gen_range(0..3)),
+            2 => TestAction::RestartWalProposer,
+            _ => unreachable!(),
+        };
+        schedule.push((time, action));
+    }
+
+    schedule
+}

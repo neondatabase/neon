@@ -7,7 +7,7 @@ use safekeeper::simlib::{
     world::World,
     world::{Node, NodeEvent},
 };
-use tracing::info;
+use tracing::{info, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
@@ -17,10 +17,17 @@ use crate::{
         MyInsertRecord, WalProposerCleanup, WalProposerRust,
     },
     c_context,
-    simtest::{safekeeper::run_server, log::{SimClock, init_logger}, util::TestConfig},
+    simtest::{
+        log::{init_logger, SimClock},
+        safekeeper::run_server,
+        util::{generate_schedule, TestConfig},
+    },
 };
 
-use super::{disk::Disk, util::{Schedule, TestAction}};
+use super::{
+    disk::Disk,
+    util::{Schedule, TestAction},
+};
 
 #[test]
 fn sync_empty_safekeepers() {
@@ -118,7 +125,7 @@ fn test_simple_restart() {
 }
 
 #[test]
-fn test_simple_schedule() {
+fn test_simple_schedule() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
     config.network.keepalive_timeout = Some(100);
@@ -142,13 +149,15 @@ fn test_simple_schedule() {
         (1000, TestAction::WriteTx(5)),
     ];
 
-    test.run_schedule(&schedule).unwrap();
+    test.run_schedule(&schedule)?;
     info!("Test finished, stopping all threads");
     test.world.stop_all();
+
+    Ok(())
 }
 
 #[test]
-fn test_random_schedules() {
+fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
     config.network.keepalive_timeout = Some(100);
@@ -156,8 +165,40 @@ fn test_random_schedules() {
     for i in 0..1000 {
         let seed: u64 = rand::thread_rng().gen();
         let test = config.start(seed);
-        info!("Running test with seed {}", seed);
+        warn!("Running test with seed {}", seed);
+
+        let schedule = generate_schedule(seed);
+        test.run_schedule(&schedule)?;
 
         test.world.stop_all();
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_one_schedule() -> anyhow::Result<()> {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    config.network.keepalive_timeout = Some(100);
+
+    // let seed = 6762900106769428342;
+    // let test = config.start(seed);
+    // warn!("Running test with seed {}", seed);
+
+    // let schedule = generate_schedule(seed);
+    // info!("schedule: {:?}", schedule);
+    // test.run_schedule(&schedule)?;
+    // test.world.stop_all();
+
+    let seed = 14035854184686918762;
+    let test = config.start(seed);
+    warn!("Running test with seed {}", seed);
+
+    let schedule = generate_schedule(seed);
+    info!("schedule: {:?}", schedule);
+    test.run_schedule(&schedule).unwrap();
+    test.world.stop_all();
+
+    Ok(())
 }

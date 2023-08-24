@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     ffi::{CStr, CString},
 };
+use tracing::trace;
 
 use crate::sim_proto::{anymessage_tag, AnyMessageTag, Event, EventTag, MESSAGE_BUF};
 
@@ -209,7 +210,7 @@ pub extern "C" fn sim_now() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
-    debug!("sim_exit({}, {:?})", code, msg);
+    trace!("sim_exit({}, {:?})", code, msg);
     sim_set_result(code, msg);
 
     // I tried to make use of pthread_exit, but it doesn't work.
@@ -226,5 +227,6 @@ pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
 pub extern "C" fn sim_set_result(code: i32, msg: *const u8) {
     let msg = unsafe { CStr::from_ptr(msg as *const i8) };
     let msg = msg.to_string_lossy().into_owned();
+    debug!("sim_set_result({}, {:?})", code, msg);
     os().set_result(code, msg);
 }

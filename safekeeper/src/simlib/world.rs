@@ -1,11 +1,11 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use tracing::debug;
 use std::{
     cell::RefCell,
     ops::DerefMut,
     panic::AssertUnwindSafe,
     sync::{atomic::AtomicU64, Arc},
 };
+use tracing::debug;
 
 use super::{
     chan::Chan,
@@ -215,11 +215,7 @@ impl World {
             self.unconditional_parking.lock().len()
         );
         for node in self.nodes.lock().iter() {
-            debug!(
-                "node id={:?} status={:?}",
-                node.id,
-                node.status.lock()
-            );
+            debug!("node id={:?} status={:?}", node.id, node.status.lock());
         }
         for park in self.unconditional_parking.lock().iter() {
             park.debug_print();
@@ -422,6 +418,8 @@ impl Node {
     }
 
     pub fn crash_stop(self: &Arc<Self>) {
+        self.world.await_all();
+
         let status = self.status.lock().clone();
         match status {
             NodeStatus::NotStarted | NodeStatus::Finished | NodeStatus::Failed => return,
@@ -444,6 +442,7 @@ impl Node {
         };
 
         park.debug_print();
+        // self.world.debug_print_state();
 
         // unplug old network socket, and create a new one
         *self.network.lock() = Chan::new();

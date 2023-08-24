@@ -305,6 +305,8 @@ impl VirtualConnection {
 
         let send_buffer = &mut state.buffers[node_idx];
         send_buffer.send_closed = true;
+        drop(state);
+
         // TODO: notify the other side?
 
         self.dst_sockets[node_idx].send(NodeEvent::Closed(TCP::new(self.clone(), node_idx as u8)));

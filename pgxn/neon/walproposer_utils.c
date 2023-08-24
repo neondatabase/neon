@@ -486,9 +486,9 @@ XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 void
 XLogWalPropClose(XLogRecPtr recptr)
 {
-	Assert(walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size));
+	// Assert(walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size));
 
-	if (close(walpropFile) != 0)
+	if (walpropFile >= 0 && close(walpropFile) != 0)
 	{
 		char		xlogfname[MAXFNAMELEN];
 

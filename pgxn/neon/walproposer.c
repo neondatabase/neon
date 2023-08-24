@@ -347,6 +347,8 @@ void WalProposerCleanup()
 		SpinLockInit(&walprop_shared->mutex);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 	}
+
+	XLogWalPropClose(0);
 }
 
 void InitMyInsert();
@@ -644,6 +646,9 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 		{
 			walprop_log(FATAL, "Too many safekeepers");
 		}
+
+		memset(&safekeeper[n_safekeepers], 0, sizeof(Safekeeper));
+
 		safekeeper[n_safekeepers].host = host;
 		safekeeper[n_safekeepers].port = port;
 		safekeeper[n_safekeepers].state = SS_OFFLINE;
