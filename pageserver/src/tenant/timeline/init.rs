@@ -134,16 +134,7 @@ pub(super) fn reconcile(
     discovered
         .into_iter()
         .map(|(name, (local, remote))| {
-            let is_in_future = match &name {
-                Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
-                Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
-                _ => false,
-            };
-
-            // future image layers are allowed to be produced always for not yet flushed to disk
-            // lsns stored in InMemoryLayer.
-
-            let decision = if is_in_future {
+            let decision = if name.is_in_future(disk_consistent_lsn) {
                 Err(FutureLayer { local })
             } else {
                 Ok(match (local, remote) {
@@ -201,6 +192,8 @@ pub(super) fn cleanup_future_layer(
         Delta(_) => "delta",
         Image(_) => "image",
     };
+    // future image layers are allowed to be produced always for not yet flushed to disk
+    // lsns stored in InMemoryLayer.
     tracing::info!("found future {kind} layer {name} disk_consistent_lsn is {disk_consistent_lsn}");
     crate::tenant::timeline::rename_to_backup(path)?;
     Ok(())
