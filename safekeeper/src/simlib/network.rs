@@ -6,6 +6,7 @@ use std::{
 };
 
 use rand::{rngs::StdRng, Rng};
+use tracing::debug;
 
 use super::{
     chan::Chan,
@@ -151,9 +152,9 @@ impl VirtualConnection {
                 }
                 if let Some(last_recv) = buffer.last_recv {
                     if now - last_recv >= timeout {
-                        println!(
-                            "NET(time={}): connection {} timed out at node {}",
-                            now, self.connection_id, node.id
+                        debug!(
+                            "NET: connection {} timed out at node {}",
+                            self.connection_id, node.id
                         );
                         to_close[node_idx] = true;
                     }
@@ -186,9 +187,9 @@ impl VirtualConnection {
             let msg = buffer.buf.pop_front().unwrap().1;
             let callback = TCP::new(self.clone(), direction ^ 1);
 
-            // println!(
-            //     "NET(time={}): {:?} delivered, {}=>{}",
-            //     now, msg, from_node.id, to_node.id
+            // debug!(
+            //     "NET: {:?} delivered, {}=>{}",
+            //     msg, from_node.id, to_node.id
             // );
             buffer.last_recv = Some(now);
             self.schedule_timeout();
@@ -214,7 +215,7 @@ impl VirtualConnection {
 
         let buffer = &mut state.buffers[direction as usize];
         if buffer.send_closed {
-            println!(
+            debug!(
                 "NET: TCP #{} dropped message {:?} (broken pipe)",
                 self.connection_id, msg
             );
@@ -222,7 +223,7 @@ impl VirtualConnection {
         }
 
         if close {
-            println!(
+            debug!(
                 "NET: TCP #{} dropped message {:?} (pipe just broke)",
                 self.connection_id, msg
             );
@@ -231,7 +232,7 @@ impl VirtualConnection {
         }
 
         if buffer.recv_closed {
-            println!(
+            debug!(
                 "NET: TCP #{} dropped message {:?} (recv closed)",
                 self.connection_id, msg
             );
@@ -257,7 +258,7 @@ impl VirtualConnection {
         let delay = if let Some(ms) = delay {
             ms
         } else {
-            println!("NET: TCP #{} dropped connect", self.connection_id);
+            debug!("NET: TCP #{} dropped connect", self.connection_id);
             buffer.send_closed = true;
             return;
         };
@@ -283,20 +284,20 @@ impl VirtualConnection {
         let mut state = self.state.lock();
         let recv_buffer = &mut state.buffers[1 ^ node_idx];
         if recv_buffer.recv_closed {
-            println!(
+            debug!(
                 "NET: TCP #{} closed twice at node {}",
                 self.connection_id, node.id
             );
             return;
         }
 
-        println!(
+        debug!(
             "NET: TCP #{} closed at node {}",
             self.connection_id, node.id
         );
         recv_buffer.recv_closed = true;
         for msg in recv_buffer.buf.drain(..) {
-            println!(
+            debug!(
                 "NET: TCP #{} dropped message {:?} (closed)",
                 self.connection_id, msg
             );

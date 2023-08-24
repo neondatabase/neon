@@ -1,5 +1,7 @@
 use std::{backtrace::Backtrace, sync::Arc};
 
+use tracing::debug;
+
 use super::world::{Node, NodeId, World};
 
 pub type Mutex<T> = parking_lot::Mutex<T>;
@@ -123,15 +125,12 @@ impl Park {
 
         if state.can_continue {
             // unconditional parking
-            // println!("YIELD PARKING: node {:?}", node.id);
 
             parking_lot::MutexGuard::unlocked(&mut state, || {
                 // first put to world parking, then decrease the running threads counter
                 node.internal_parking_middle(self.clone());
             });
         } else {
-            // println!("AWAIT PARKING: node {:?}", node.id);
-
             parking_lot::MutexGuard::unlocked(&mut state, || {
                 // conditional parking, decrease the running threads counter without parking
                 node.internal_parking_start(self.clone());
@@ -146,7 +145,6 @@ impl Park {
                 panic!("thread was crashed by the simulation");
             }
 
-            // println!("CONDITION MET: node {:?}", node.id);
             // condition is met, we are now running instead of the waker thread.
             // the next thing is to park the thread in the world, then decrease
             // the running threads counter
@@ -166,8 +164,6 @@ impl Park {
             panic!("node {} was crashed by the simulation", node.id);
         }
 
-        // println!("PARKING ENDED: node {:?}", node.id);
-
         // We are the only running thread now, we just need to update the state,
         // and continue the execution.
         node.internal_parking_end();
@@ -178,7 +174,6 @@ impl Park {
         let park = Park::new(true);
         let node = Node::current();
         Self::init_state(&mut park.lock.lock(), &node);
-        // println!("PARKING MIDDLE alt: node {:?}", node.id);
         node.internal_parking_ahead(park.clone());
         park
     }
@@ -194,7 +189,7 @@ impl Park {
 
         let mut state = self.lock.lock();
         if state.can_continue {
-            println!(
+            debug!(
                 "WARN wake() called on a thread that is already waked, node {:?}",
                 state.node_id
             );
@@ -220,7 +215,7 @@ impl Park {
 
         let mut state = self.lock.lock();
         if state.can_continue {
-            println!(
+            debug!(
                 "WARN external_wake() called on a thread that is already waked, node {:?}",
                 state.node_id
             );
@@ -237,7 +232,7 @@ impl Park {
     pub fn internal_world_wake(&self) {
         let mut state = self.lock.lock();
         if state.finished {
-            println!(
+            debug!(
                 "WARN internal_world_wake() called on a thread that is already waked, node {:?}",
                 state.node_id
             );
@@ -260,8 +255,8 @@ impl Park {
     /// Print debug info about the parked thread.
     pub fn debug_print(&self) {
         // let state = self.lock.lock();
-        // println!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
-        // println!("DEBUG: node {:?} wake1={} wake2={}, trace={:?}", state.node_id, state.can_continue, state.finished, state.backtrace);
+        // debug!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
+        // debug!("DEBUG: node {:?} wake1={} wake2={}, trace={:?}", state.node_id, state.can_continue, state.finished, state.backtrace);
     }
 
     /// It feels that this function can cause deadlocks.

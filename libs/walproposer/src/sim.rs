@@ -1,3 +1,4 @@
+use log::debug;
 use safekeeper::simlib::{network::TCP, node_os::NodeOs, world::NodeEvent};
 use std::{
     cell::RefCell,
@@ -208,7 +209,7 @@ pub extern "C" fn sim_now() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn sim_exit(code: i32, msg: *const u8) {
-    println!("sim_exit({}, {:?})", code, msg);
+    debug!("sim_exit({}, {:?})", code, msg);
     sim_set_result(code, msg);
 
     // I tried to make use of pthread_exit, but it doesn't work.

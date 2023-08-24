@@ -16,6 +16,7 @@ use safekeeper::{
     timeline::TimelineError,
     SafeKeeperConf,
 };
+use tracing::debug;
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -52,7 +53,7 @@ impl GlobalMap {
         let mut timelines = HashMap::new();
 
         for (&ttid, disk) in disk.timelines.lock().iter() {
-            info!("loading timeline {}", ttid);
+            debug!("loading timeline {}", ttid);
             let state = disk.state.lock().clone();
 
             if state.server.wal_seg_size == 0 {
@@ -96,7 +97,7 @@ impl GlobalMap {
             bail!("timeline {} already exists", ttid);
         }
 
-        info!("creating new timeline {}", ttid);
+        debug!("creating new timeline {}", ttid);
 
         let commit_lsn = Lsn::INVALID;
         let local_start_lsn = Lsn::INVALID;
@@ -146,7 +147,7 @@ impl GlobalMap {
 }
 
 pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
-    println!("started server {}", os.id());
+    debug!("started server {}", os.id());
     let conf = SafeKeeperConf {
         workdir: PathBuf::from("."),
         my_id: NodeId(os.id() as u64),
@@ -194,11 +195,11 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                     if let Some(conn) = conn {
                         let res = conn.process_any(msg, &mut global);
                         if res.is_err() {
-                            println!("conn {:?} error: {:#}", tcp, res.unwrap_err());
+                            debug!("conn {:?} error: {:#}", tcp, res.unwrap_err());
                             conns.remove(&tcp.id());
                         }
                     } else {
-                        println!("conn {:?} was closed, dropping msg {:?}", tcp, msg);
+                        debug!("conn {:?} was closed, dropping msg {:?}", tcp, msg);
                     }
                 }
                 NodeEvent::Internal(_) => {}
@@ -213,7 +214,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
         conns.retain(|_, conn| {
             let res = conn.flush(&mut global);
             if res.is_err() {
-                println!("conn {:?} error: {:?}", conn.tcp, res);
+                debug!("conn {:?} error: {:?}", conn.tcp, res);
             }
             res.is_ok()
         });
@@ -230,7 +231,7 @@ impl ConnState {
             }
 
             let msg = ProposerAcceptorMessage::parse(copy_data)?;
-            // println!("got msg: {:?}", msg);
+            debug!("got msg: {:?}", msg);
             return self.process(msg, global);
         } else {
             bail!("unexpected message, expected AnyMessage::Bytes");
@@ -283,7 +284,7 @@ impl ConnState {
 
             match msg {
                 ProposerAcceptorMessage::Greeting(ref greeting) => {
-                    info!(
+                    debug!(
                         "start handshake with walproposer {:?}",
                         self.tcp,
                     );
@@ -343,12 +344,8 @@ impl ConnState {
             //     // TODO:
             // }
 
-            // println!("sending reply: {:?}", reply);
-
             let mut buf = BytesMut::with_capacity(128);
             reply.serialize(&mut buf)?;
-
-            // println!("sending reply len={}: {}", buf.len(), hex::encode(&buf));
 
             self.tcp.send(AnyMessage::Bytes(buf.into()));
         }
@@ -358,7 +355,7 @@ impl ConnState {
 
 impl Drop for ConnState {
     fn drop(&mut self) {
-        println!("dropping conn: {:?}", self.tcp);
+        debug!("dropping conn: {:?}", self.tcp);
         if !std::thread::panicking() {
             self.tcp.close();
         }

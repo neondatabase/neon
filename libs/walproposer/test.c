@@ -80,7 +80,7 @@ void MyContextInit() {
         if (!SelectConfigFiles(NULL, progname))
             exit(1);
 
-        log_min_messages = LOG;
+        log_min_messages = FATAL;
         Log_line_prefix = "[%p] ";
 
         InitializeMaxBackends();

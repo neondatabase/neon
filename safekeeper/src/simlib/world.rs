@@ -98,6 +98,13 @@ impl World {
         }
     }
 
+    pub fn stop_all(&self) {
+        let nodes = self.nodes.lock().clone();
+        for node in nodes {
+            node.crash_stop();
+        }
+    }
+
     /// Returns a writable end of a TCP connection, to send src->dst messages.
     pub fn open_tcp(self: &Arc<World>, src: &Arc<Node>, dst: NodeId) -> TCP {
         // TODO: replace unwrap() with /dev/null socket.
@@ -168,7 +175,7 @@ impl World {
         // First try to wake up unconditional thread.
         let to_resume = self.thread_to_unpark();
         if let Some(park) = to_resume {
-            // println!("Waking up park at node {:?}", park.node_id());
+            // debug!("Waking up park at node {:?}", park.node_id());
 
             // Wake up the chosen thread. To do that:
             // 1. Increment the counter of running threads.
@@ -189,7 +196,7 @@ impl World {
         // when code is waiting for external events.
         let time_event = self.timing.lock().step();
         if let Some(event) = time_event {
-            // println!("Processing event: {:?}", event.event);
+            // debug!("Processing event: {:?}", event.event);
             event.process();
 
             // to have a clean state after each step, wait for all threads to finish
@@ -327,22 +334,22 @@ impl Node {
             *status = NodeStatus::Running;
             drop(status);
 
-            // park the current thread, [`launch`] will wait until it's parked
-            Park::yield_thread();
-
-            if let Some(nodes_init) = world.nodes_init.as_ref() {
-                nodes_init(NodeOs::new(world.clone(), node.clone()));
-            }
-
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                // park the current thread, [`launch`] will wait until it's parked
+                Park::yield_thread();
+
+                if let Some(nodes_init) = world.nodes_init.as_ref() {
+                    nodes_init(NodeOs::new(world.clone(), node.clone()));
+                }
+
                 f(NodeOs::new(world, node.clone()));
             }));
             match res {
                 Ok(_) => {
-                    println!("Node {} finished successfully", node.id);
+                    debug!("Node {} finished successfully", node.id);
                 }
                 Err(e) => {
-                    println!("Node {} finished with panic: {:?}", node.id, e);
+                    debug!("Node {} finished with panic: {:?}", node.id, e);
                 }
             }
 
@@ -425,7 +432,6 @@ impl Node {
         }
 
         debug!("Node {} is crashing, status={:?}", self.id, status);
-        self.world.debug_print_state();
 
         let park = self.world.find_parked_node(self);
 

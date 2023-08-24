@@ -1,3 +1,5 @@
+use tracing::info;
+
 use crate::simlib::{
     node_os::NodeOs,
     proto::{AnyMessage, ReplCell},
@@ -6,7 +8,7 @@ use crate::simlib::{
 
 /// Copy all data from array to the remote node.
 pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
-    println!("started client");
+    info!("started client");
 
     let epoll = os.epoll();
     let mut delivered = 0;
@@ -15,7 +17,7 @@ pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
 
     while delivered < data.len() {
         let num = &data[delivered];
-        println!("sending data: {:?}", num.clone());
+        info!("sending data: {:?}", num.clone());
         sock.send(AnyMessage::ReplCell(num.clone()));
 
         // loop {
@@ -27,7 +29,7 @@ pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
                 }
             }
             NodeEvent::Closed(_) => {
-                println!("connection closed, reestablishing");
+                info!("connection closed, reestablishing");
                 sock = os.open_tcp(dst);
             }
             _ => {}
@@ -38,9 +40,9 @@ pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
 
     let sock = os.open_tcp(dst);
     for num in data {
-        println!("sending data: {:?}", num.clone());
+        info!("sending data: {:?}", num.clone());
         sock.send(AnyMessage::ReplCell(num.clone()));
     }
 
-    println!("sent all data and finished client");
+    info!("sent all data and finished client");
 }

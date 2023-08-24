@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 
 use safekeeper::simlib::node_os::NodeOs;
+use tracing::info;
 
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -10,8 +11,8 @@ pub mod bindings {
 
 #[no_mangle]
 pub extern "C" fn rust_function(a: u32) {
-    println!("Hello from Rust!");
-    println!("a: {}", a);
+    info!("Hello from Rust!");
+    info!("a: {}", a);
 }
 
 pub mod sim;

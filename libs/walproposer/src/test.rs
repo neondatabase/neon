@@ -1,3 +1,5 @@
+use tracing::info;
+
 use crate::bindings::{TestFunc, MyContextInit};
 
 #[test]
@@ -9,7 +11,7 @@ fn test_rust_c_calls() {
         };
         res
     }).join().unwrap();
-    println!("res: {}", res);
+    info!("res: {}", res);
 }
 
 #[test]

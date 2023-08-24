@@ -1,3 +1,5 @@
+use tracing::info;
+
 use crate::simlib::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
 
 use super::disk::Storage;
@@ -23,17 +25,17 @@ use super::disk::Storage;
 // }
 
 pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
-    println!("started server");
+    info!("started server");
 
     let epoll = os.epoll();
     loop {
         let event = epoll.recv();
-        println!("got event: {:?}", event);
+        info!("got event: {:?}", event);
         match event {
             NodeEvent::Message((msg, tcp)) => match msg {
                 AnyMessage::ReplCell(cell) => {
                     if cell.seqno != storage.flush_pos() {
-                        println!("got out of order data: {:?}", cell);
+                        info!("got out of order data: {:?}", cell);
                         continue;
                     }
                     storage.write(cell.value);

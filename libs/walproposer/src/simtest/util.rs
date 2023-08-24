@@ -6,7 +6,7 @@ use safekeeper::simlib::{
     world::World,
     world::{Node, NodeEvent}, time::EmptyEvent,
 };
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
@@ -45,7 +45,7 @@ impl SkNode {
         // start the server thread
         self.node.launch(move |os| {
             let res = run_server(os, disk);
-            println!("server {} finished: {:?}", id, res);
+            debug!("server {} finished: {:?}", id, res);
         });
     }
 
@@ -101,7 +101,6 @@ impl TestConfig {
         ];
 
         let server_ids = [servers[0].id, servers[1].id, servers[2].id];
-        info!("safekeepers: {:?}", server_ids);
 
         let safekeepers_guc = server_ids.map(|id| format!("node:{}", id)).join(",");
         let ttid = TenantTimelineId::generate();
@@ -164,7 +163,7 @@ pub struct Test {
 impl Test {
     fn launch_sync(&self) -> Arc<Node> {
         let client_node = self.world.new_node();
-        info!("sync-safekeepers started at node {}", client_node.id);
+        debug!("sync-safekeepers started at node {}", client_node.id);
 
         // start the client thread
         let guc = self.safekeepers_guc.clone();
@@ -301,10 +300,10 @@ impl Test {
                     anyhow::bail!("non-zero exitcode: {:?}", res);
                 }
                 let lsn = Lsn::from_str(&res.1)?;
-                info!("sync-safekeepers finished at LSN {}", lsn);
+                debug!("sync-safekeepers finished at LSN {}", lsn);
                 wp = self.launch_walproposer(lsn);
                 wait_node = wp.node.clone();
-                info!("walproposer started at node {}", wait_node.id);
+                debug!("walproposer started at node {}", wait_node.id);
                 sync_in_progress = false;
             }
 
@@ -322,18 +321,18 @@ impl Test {
                                 started_tx += 1;
                                 wp.write_tx();
                             }
-                            info!("written {} transactions", size);
+                            debug!("written {} transactions", size);
                         } else {
                             skipped_tx += size;
-                            info!("skipped {} transactions", size);
+                            debug!("skipped {} transactions", size);
                         }
                     }
                     TestAction::RestartSafekeeper(id) => {
-                        info!("restarting safekeeper {}", id);
+                        debug!("restarting safekeeper {}", id);
                         self.servers[*id as usize].restart();
                     }
                     TestAction::RestartWalProposer => {
-                        info!("restarting walproposer");
+                        debug!("restarting walproposer");
                         wait_node.crash_stop();
                         sync_in_progress = true;
                         wait_node = self.launch_sync();
@@ -346,7 +345,6 @@ impl Test {
                 break;
             }
             let next_event_time = schedule[schedule_ptr].0;
-            info!("next event at {}, polling", next_event_time);
 
             // poll until the next event
             if wait_node.is_finished() {
@@ -356,10 +354,10 @@ impl Test {
             }
         }
 
-        info!("finished schedule");
-        info!("skipped_tx: {}", skipped_tx);
-        info!("started_tx: {}", started_tx);
-        info!("finished_tx: {}", finished_tx);
+        debug!("finished schedule");
+        debug!("skipped_tx: {}", skipped_tx);
+        debug!("started_tx: {}", started_tx);
+        debug!("finished_tx: {}", finished_tx);
 
         Ok(())
     }
@@ -401,12 +399,12 @@ impl WalProposer {
         match lsn {
             Ok(lsn) => {
                 self.commit_lsn = lsn;
-                info!("commit_lsn: {}", lsn);
+                debug!("commit_lsn: {}", lsn);
 
                 while self.last_committed_tx < self.txes.len()
                     && self.txes[self.last_committed_tx] <= lsn
                 {
-                    info!(
+                    debug!(
                         "Tx #{} was commited at {}, last_commit_lsn={}",
                         self.last_committed_tx, self.txes[self.last_committed_tx], self.commit_lsn
                     );

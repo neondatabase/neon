@@ -2,6 +2,7 @@ use std::{sync::Arc, fmt};
 
 use safekeeper::simlib::{world::World, sync::Mutex};
 use tracing_subscriber::fmt::{time::FormatTime, format::Writer};
+use utils::logging;
 
 
 #[derive(Clone)]
@@ -42,8 +43,12 @@ pub fn init_logger() -> SimClock {
         .with_target(false)
         .with_timer(clock.clone())
         .with_ansi(true)
+        // .with_max_level(tracing::Level::DEBUG)
         .with_writer(std::io::stdout);
     base_logger.init();
+
+    // logging::replace_panic_hook_with_tracing_panic_hook().forget();
+    std::panic::set_hook(Box::new(|_| {}));
 
     clock
 }

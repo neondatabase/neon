@@ -1,11 +1,13 @@
 use std::{ffi::CString, path::Path, str::FromStr, sync::Arc};
 
+use rand::Rng;
 use safekeeper::simlib::{
     network::{Delay, NetworkOptions},
     proto::AnyMessage,
     world::World,
     world::{Node, NodeEvent},
 };
+use tracing::info;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
@@ -28,11 +30,11 @@ fn sync_empty_safekeepers() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced empty safekeepers at 0/0");
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced (again) empty safekeepers at 0/0");
+    info!("Sucessfully synced (again) empty safekeepers at 0/0");
 }
 
 #[test]
@@ -44,7 +46,7 @@ fn run_walproposer_generate_wal() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced empty safekeepers at 0/0");
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
     let mut wp = test.launch_walproposer(lsn);
 
@@ -66,7 +68,7 @@ fn crash_safekeeper() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced empty safekeepers at 0/0");
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
     let mut wp = test.launch_walproposer(lsn);
 
@@ -95,7 +97,7 @@ fn test_simple_restart() {
 
     let lsn = test.sync_safekeepers().unwrap();
     assert_eq!(lsn, Lsn(0));
-    println!("Sucessfully synced empty safekeepers at 0/0");
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
     let mut wp = test.launch_walproposer(lsn);
 
@@ -112,7 +114,7 @@ fn test_simple_restart() {
     drop(wp);
 
     let lsn = test.sync_safekeepers().unwrap();
-    println!("Sucessfully synced safekeepers at {}", lsn);
+    info!("Sucessfully synced safekeepers at {}", lsn);
 }
 
 #[test]
@@ -141,4 +143,21 @@ fn test_simple_schedule() {
     ];
 
     test.run_schedule(&schedule).unwrap();
+    info!("Test finished, stopping all threads");
+    test.world.stop_all();
+}
+
+#[test]
+fn test_random_schedules() {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    config.network.keepalive_timeout = Some(100);
+
+    for i in 0..1000 {
+        let seed: u64 = rand::thread_rng().gen();
+        let test = config.start(seed);
+        info!("Running test with seed {}", seed);
+
+        test.world.stop_all();
+    }
 }
