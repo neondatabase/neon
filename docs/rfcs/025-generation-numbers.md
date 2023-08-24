@@ -451,6 +451,17 @@ time we use it)
 - Client behavior: clients must not do deletions within a tenant's remote data until they have
   received a response indicating the generation they hold for the tenant is current.
 
+#### Use of `/load` and `/ignore` APIs
+
+Because the pageserver will be changed to only attach tenants on startup
+based on the control plane's response to a `/re-attach` request, the load/ignore
+APIs no longer make sense in their current form.
+
+The `/load` API becomes functionally equivalent to attach, and will be removed:
+any location that used `/load` before should just attach instead.
+
+The `/ignore` API is equivalent to detaching, but without deleting local files.
+
 ### Timeline/Branch creation
 
 All of the previous arguments for safety have described operations within
