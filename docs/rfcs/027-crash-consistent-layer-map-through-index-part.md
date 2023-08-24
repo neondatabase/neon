@@ -41,7 +41,7 @@ We cannot roll back or complete the timeline directory update during which we cr
 The implications of the above are primarily problematic for compaction.
 Specifically, the part of it that compats L0 layers into L1 layers.
 
-* Recap: compaction takes a set of L0 layers and reshuffels the delta records in them into L1 layer files.
+* Recap: compaction takes a set of L0 layers and reshuffles the delta records in them into L1 layer files.
   Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
   It then deletes the L0 layers locally, and schedules an upload of the L1 layers and and updated index part.
 * If we crash before deleting L0s, but after writing out L1s, the next compaction after restart will re-digest the L0s and produce new L1s.
@@ -209,7 +209,7 @@ Note that the test case introduced in https://github.com/neondatabase/neon/pull/
 
 1. Remove support for `remote_storage=None`, because we now rely on the existence of an index part.
 
-    - The nasty part here is to fix all the tests that fiddle with the loca timeline directory.
+    - The nasty part here is to fix all the tests that fiddle with the local timeline directory.
       Possibly they are just irrelevant with this change, but, each case will require inspection.
 
 2. Implement the design above.
