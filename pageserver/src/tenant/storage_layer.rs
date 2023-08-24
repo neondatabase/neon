@@ -308,47 +308,6 @@ impl LayerAccessStats {
     }
 }
 
-/// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
-///
-/// However when we want something evicted, we cannot evict it right away as there might be current
-/// reads happening on it. It has been for example searched from [`LayerMap`] but not yet
-/// [`Layer::get_value_reconstruct_data`].
-///
-/// [`LayerMap`]: crate::tenant::layer_map::LayerMap
-enum ResidentOrWantedEvicted {
-    Resident(Arc<DownloadedLayer>),
-    WantedEvicted(Weak<DownloadedLayer>),
-}
-
-impl ResidentOrWantedEvicted {
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
-        match self {
-            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
-            ResidentOrWantedEvicted::WantedEvicted(weak) => weak.upgrade(),
-        }
-    }
-    /// When eviction is first requested, drop down to holding a [`Weak`].
-    ///
-    /// Returns `true` if this was the first time eviction was requested.
-    fn downgrade(&mut self) -> &Weak<DownloadedLayer> {
-        let _was_first = match self {
-            ResidentOrWantedEvicted::Resident(strong) => {
-                let weak = Arc::downgrade(strong);
-                *self = ResidentOrWantedEvicted::WantedEvicted(weak);
-                // returning the weak is not useful, because the drop could had already ran with
-                // the replacement above, and that will take care of cleaning the Option we are in
-                true
-            }
-            ResidentOrWantedEvicted::WantedEvicted(_) => false,
-        };
-
-        match self {
-            ResidentOrWantedEvicted::WantedEvicted(ref weak) => weak,
-            _ => unreachable!("just wrote wanted evicted"),
-        }
-    }
-}
-
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -620,8 +579,47 @@ impl Layer {
     }
 }
 
-// TODO:
-// - internal arc, because I've now worked away majority of external wrapping
+/// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
+///
+/// However when we want something evicted, we cannot evict it right away as there might be current
+/// reads happening on it. It has been for example searched from [`LayerMap`] but not yet
+/// [`Layer::get_value_reconstruct_data`].
+///
+/// [`LayerMap`]: crate::tenant::layer_map::LayerMap
+enum ResidentOrWantedEvicted {
+    Resident(Arc<DownloadedLayer>),
+    WantedEvicted(Weak<DownloadedLayer>),
+}
+
+impl ResidentOrWantedEvicted {
+    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+        match self {
+            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
+            ResidentOrWantedEvicted::WantedEvicted(weak) => weak.upgrade(),
+        }
+    }
+    /// When eviction is first requested, drop down to holding a [`Weak`].
+    ///
+    /// Returns `true` if this was the first time eviction was requested.
+    fn downgrade(&mut self) -> &Weak<DownloadedLayer> {
+        let _was_first = match self {
+            ResidentOrWantedEvicted::Resident(strong) => {
+                let weak = Arc::downgrade(strong);
+                *self = ResidentOrWantedEvicted::WantedEvicted(weak);
+                // returning the weak is not useful, because the drop could had already ran with
+                // the replacement above, and that will take care of cleaning the Option we are in
+                true
+            }
+            ResidentOrWantedEvicted::WantedEvicted(_) => false,
+        };
+
+        match self {
+            ResidentOrWantedEvicted::WantedEvicted(ref weak) => weak,
+            _ => unreachable!("just wrote wanted evicted"),
+        }
+    }
+}
+
 struct LayerInner {
     // only needed to check ondemand_download_behavior_treat_error_as_warn
     conf: &'static PageServerConf,
