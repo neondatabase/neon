@@ -858,10 +858,8 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
