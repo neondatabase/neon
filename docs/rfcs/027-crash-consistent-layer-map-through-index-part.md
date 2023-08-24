@@ -194,6 +194,33 @@ And it's silly that we wouldn't be able to use the results of compaction or imag
 
 Lastly, a temporarily clogged-up upload queue (e.g. S3 is down) shouldn't immediately render ingestion unavailable.
 
+### Alternative 3: Sequence Numbers For Layers
+
+Instead of what's proposed in this RFC, we could use unique numbers to identify layer files:
+
+```
+# before
+tenants/$tenant/timelines/$timeline/$key_and_lsn_range
+# after
+tenants/$tenant/timelines/$timeline/$layer_file_id-$key_and_lsn_range
+```
+
+To guarantee uniqueness, the unqiue number is a sequence number, stored in `index_part.json`.
+
+This alternative does not solve atomic layer map updates.
+In our crash-during-compaction scenario above, the compaction run after the crash will not overwrite the L1s, but write/PUT new files with new sequence numbers.
+In fact, this alternative makes it worse because the data is now duplicated in the not-overwritten and overwritten L1 layer files.
+We'd need to write a deduplication pass that checks if perfectly overlapping layers have identical contents.
+
+However, this alternative is appealing because it systematically prevents overwrites at a lower level than this RFC.
+
+So, this alternative is sufficient for the needs of the split-brain safety RFC (immutable layer files locally and in S3).
+But it doesn't solve the problems with crash-during-compaction outlined earlier in this RFC, and in fact, makes it much more accute.
+The proposed design in this RFC addresses both.
+
+So, if this alternative sounds appealing, we should implement the proposal in this RFC first, then implement this alternative on top.
+That way, we avoid a phase where the crash-during-compaction problem is accute.
+
 ## Related issues
 
 - https://github.com/neondatabase/neon/issues/4749
