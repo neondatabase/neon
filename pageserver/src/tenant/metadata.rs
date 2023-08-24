@@ -249,7 +249,7 @@ impl Serialize for TimelineMetadata {
     {
         let bytes = self
             .to_bytes()
-            .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?;
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
         bytes.serialize(serializer)
     }
 }
