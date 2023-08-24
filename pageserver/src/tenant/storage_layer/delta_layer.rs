@@ -218,12 +218,6 @@ pub struct DeltaLayerInner {
     file: FileBlockReader<VirtualFile>,
 }
 
-impl AsRef<DeltaLayerInner> for DeltaLayerInner {
-    fn as_ref(&self) -> &DeltaLayerInner {
-        self
-    }
-}
-
 impl std::fmt::Debug for DeltaLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeltaLayerInner")
