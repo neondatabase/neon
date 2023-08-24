@@ -1,4 +1,4 @@
-# Pageserver generation numbers for safe failover & tenant migration
+# Pageserver: split-brain safety for remote storage through generation numbers
 
 ## Summary
 
@@ -92,15 +92,15 @@ pageserver, control plane, safekeeper (optional)
 
 ### Summary
 
-- **Generation numbers** are introduced for tenants when attached to a pageserver
-
-  - attachment generation increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver, or when the assigned pageserver restarts
+- A per-tenant **generation number** is introduced to uniquely identifying tenant attachments to pageserver processes.
+  
+  - This generation number increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver, or when the assigned pageserver restarts.
   - the control plane is the authority for generation numbers: only it may
     increment a generation number.
 
 - **Object keys are suffixed** with the generation number
 - **Safety for multiply-attached tenants** is provided by the
-  tenant attach generation in the object key: the competing pageservers will not
+  generation number in the object key: the competing pageservers will not
   try to write to the same keys.
 - **Safety in split brain for multiple nodes running with
   the same node ID** is provided by the pageserver calling out to the control plane
@@ -122,9 +122,9 @@ Changes in attachment status include:
 These increments of attachment generation provide invariants we need to avoid
 split-brain issues in storage:
 
-- If two pageservers have the same tenant attached, they are guaranteed to have different generation numbers, because the generation would increment
+- If two pageservers have the same tenant attached, the attachments are guaranteed to have different generation numbers, because the generation would increment
   while attaching the second one.
-- If there are multiple pageservers running with the same node ID, they are guaranteed to have different generation numbers, because the generation would increment
+- If there are multiple pageservers running with the same node ID, all the attachments on all pageservers are guaranteed to have different generation numbers, because the generation would increment
   when the second node started and re-attached its tenants.
 
 As long as the infrastructure does not transparently replace an underlying
@@ -274,8 +274,8 @@ validation step, updates to `remote_consistent_lsn` are subject to the same rule
 an ordering as follows:
 
 1. upload the index_part that covers data up to LSN `L0` to S3
-2. call to control plane to validate their attachment generation
-3. update the `remote_consistent_lsn` that they send to the safekeepers to `L0`
+2. Call out to control plane to validate that the generation which we use for our attachment is still the latest.
+3. advance the `remote_consistent_lsn` that we advertise to the safekeepers to `L0`
 
 **Note:** at step 3 we are not advertising the _latest_ remote_consistent_lsn, we are
 advertising the value in the index_part that we uploaded in step 1. This provides
@@ -354,7 +354,12 @@ before writing out a remote index.
 In the general case and as a fallback, the pageserver may list all the `index_part.json`
 files for a timeline, sort them by generation, and pick the highest that is `<=`
 its current generation for this attachment. The tenant should never load an index
-with an attachment generation _newer_ than its own: tenants
+with an attachment generation _newer_ than its own.
+These two rules combined ensure that objects written by later generations are never visible to earlier generations.
+
+Note that if a given attachment picks an index part from an earlier generation (say n-2), but crashes & restarts before it writes its own generation's index part, next time it tries to pick an index part there may be an index part from generation n-1.
+It would pick the n-1 index part in that case, because it's sorted higher than the previous one from generation n-2.
+So, above rules guarantee no determinism in selecting the index part.
 are allowed to be attached with stale attachment generations during a multiply-attached
 phase in a migration, and in this instance if the old location's pageserver restarts,
 it should not try and load the newer generation's index.
@@ -387,12 +392,12 @@ simplicity just do it periodically as part of the background scrub (see [scrubbi
 
 #### Store generations for attaching tenants
 
-- The `Project` table must store an attachment generation number for use when
+- The `Project` table must store the generation number for use when
   attaching the tenant to a new pageserver.
-- The `/v1/tenant/:tenant_id/attach` pageserver API will require an attachment generation number,
-  which the control plane can supply by simply incrementing the `Project`'s attachment
+- The `/v1/tenant/:tenant_id/attach` pageserver API will require the generation number,
+  which the control plane can supply by simply incrementing the `Project`'s
   generation number each time the tenant is attached to a different server: the same database
-  transaction that changes the assigned pageserver should also change the attachment generation.
+  transaction that changes the assigned pageserver should also change the generation number.
 
 #### Generation API
 
@@ -404,9 +409,8 @@ The API endpoints used by the pageserver to acquire and validate generation
 numbers are quite simple, and only require access to some persistent and
 linerizable storage (such as a database).
 
-Building this into the control plane is proposed as a least-effort option to exploit existing infrastructure and enable
-updating attachment generations in the same transaction as updating
-the `Project` itself, but it is not mandatory: this "Generation API" could
+Building this into the control plane is proposed as a least-effort option to exploit existing infrastructure and implement generation number issuance in the same transaction that mandates it (i.e., the transaction that updates the `Project` assignment to another pageserver).
+However, this is not mandatory: this "Generation Number Issuer" could
 be built as a microservice. In practice, we will write such a miniature service
 anyway, to enable E2E pageserver/compute testing without control plane.
 
@@ -445,11 +449,11 @@ time we use it)
 - Response:
   - 200 `{'tenants': [{tenant: <tenant id>, status: <bool>}...]}`
   - (On unknown tenants, omit tenant from `tenants` array)
-- Purpose: enable the pageserver to discover whether the generations it holds are still current
+- Purpose: enable the pageserver to discover for the given attachments whether they are still the latest.
 - Server behavior: this is a read-only operation: simply compare the generations in the request with
   the generations known to the server, and set status to `true` if they match.
 - Client behavior: clients must not do deletions within a tenant's remote data until they have
-  received a response indicating the generation they hold for the tenant is current.
+  received a response indicating the generation they hold for the attachment is current.
 
 #### Use of `/load` and `/ignore` APIs
 
