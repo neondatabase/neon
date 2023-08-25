@@ -373,49 +373,58 @@ impl Drop for LayerInner {
 
         // SEMITODO: this could be spawn_blocking or not; we are only doing the filesystem delete
         // right now, later this will be a submit to the global deletion queue.
-        let span = tracing::info_span!(parent: None, "layer_drop", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
-        let _g = span.entered();
+        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
 
-        let mut removed = false;
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {
-                removed = true;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // until we no longer do detaches by removing all local files before removing the
-                // tenant from the global map, we will always get these errors even if we knew what
-                // is the latest state.
-                //
-                // we currently do not track the latest state, so we'll also end up here on evicted
-                // layers.
-            }
-            Err(e) => {
-                tracing::error!(layer = %self, "failed to remove garbage collected layer: {e}");
-            }
-        }
+        let path = std::mem::take(&mut self.path);
+        let file_name = self.layer_desc().filename();
+        let file_size = self.layer_desc().file_size;
+        let timeline = self.timeline.clone();
 
-        if let Some(timeline) = self.timeline.upgrade() {
-            if removed {
-                timeline
-                    .metrics
-                    .resident_physical_size_gauge
-                    .sub(self.layer_desc().file_size);
-            }
-            if let Some(remote_client) = timeline.remote_client.as_ref() {
-                let res =
-                    remote_client.schedule_layer_file_deletion(&[self.layer_desc().filename()]);
+        crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
+            let _g = span.entered();
 
-                if let Err(e) = res {
-                    if !timeline.is_active() {
-                        // downgrade the warning to info maybe?
-                    }
-                    tracing::warn!(layer=%self, "scheduling deletion on drop failed: {e:#}");
+            let mut removed = false;
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    removed = true;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // until we no longer do detaches by removing all local files before removing the
+                    // tenant from the global map, we will always get these errors even if we knew what
+                    // is the latest state.
+                    //
+                    // we currently do not track the latest state, so we'll also end up here on evicted
+                    // layers.
+                }
+                Err(e) => {
+                    tracing::error!("failed to remove garbage collected layer: {e}");
                 }
             }
-        } else {
-            // no need to nag that timeline is gone: under normal situation on
-            // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-        }
+
+            if let Some(timeline) = timeline.upgrade() {
+                if removed {
+                    timeline.metrics.resident_physical_size_gauge.sub(file_size);
+                }
+                if let Some(remote_client) = timeline.remote_client.as_ref() {
+                    let res = remote_client.schedule_layer_file_deletion(&[file_name]);
+
+                    if let Err(e) = res {
+                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                        // demonstrating this deadlock (without spawn_blocking): stop will drop
+                        // queued items, which will have ResidentLayer's, and those drops would try
+                        // to re-entrantly lock the RemoteTimelineClient inner state.
+                        if !timeline.is_active() {
+                            tracing::info!("scheduling deletion on drop failed: {e:#}");
+                        } else {
+                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
+                        }
+                    }
+                }
+            } else {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+            }
+        });
     }
 }
 
