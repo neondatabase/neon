@@ -132,11 +132,11 @@ impl FileCacheConfig {
 
         // Conversions to ensure we don't overflow from floating-point ops
         let size_from_spread =
-            0_i64.max((available as f64 / (1.0 + self.spread_factor)) as i64) as u64;
+            i64::max(0, (available as f64 / (1.0 + self.spread_factor)) as i64) as u64;
 
         let size_from_normal = (total as f64 * self.resource_multiplier) as u64;
 
-        let byte_size = size_from_spread.min(size_from_normal);
+        let byte_size = u64::min(size_from_spread, size_from_normal);
 
         // The file cache operates in units of mebibytes, so the sizes we produce should
         // be rounded to a mebibyte. We round down to be conservative.
@@ -268,7 +268,7 @@ impl FileCacheState {
             .context("failed to extract max file cache size from query result")?;
 
         let max_mb = max_bytes / MiB;
-        let num_mb = (num_bytes / MiB).max(max_mb);
+        let num_mb = u64::min(num_bytes, max_bytes) / MiB;
 
         let capped = if num_bytes > max_bytes {
             " (capped by maximum size)"
