@@ -517,23 +517,24 @@ It is better to issue a timelien deletion request to the stale attachment.
 
 #### Timeline Deletion
 
-During timeline/tenant deletion, the control plane must wait for the deletion to
-be truly complete (status 404) and also handle the case where the pageserver
-becomes unavailable, either by waiting for a replacement with the same node_id,
-or by *re-attaching the tenant elsewhere.
-
-**Sending a tenant/timeline deletion to a stale pageserver will still result
-in deletion** -- the control plane must persist its intent to delete
-a timeline/tenant before issuing any RPCs, and then once it starts, it must
-keep retrying until the tenant/timeline is gone. This is already handled
-by using a persistent `Operation` record that is retried indefinitely.
-
 Tenant/timeline deletion operations are exempt from generation validation
 on deletes, and therefore don't have to go through the same deletion
 queue as GC/compaction layer deletions. This is because once a
 delete is issued by the control plane, it is a promise that the
 control plane will keep trying until the deletion is done, so even stale
 pageservers are permitted to go ahead and delete the objects.
+
+The implications of this for control plane are:
+
+- During timeline/tenant deletion, the control plane must wait for the deletion to
+  be truly complete (status 404) and also handle the case where the pageserver
+  becomes unavailable, either by waiting for a replacement with the same node_id,
+  or by *re-attaching the tenant elsewhere.
+
+- The control plane must persist its intent to delete
+  a timeline/tenant before issuing any RPCs, and then once it starts, it must
+  keep retrying until the tenant/timeline is gone. This is already handled
+  by using a persistent `Operation` record that is retried indefinitely.
 
 Timeline deletion may result in a special kind of object leak, where
 the latest generation attachment completes a deletion (including erasing
