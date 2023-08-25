@@ -1614,7 +1614,7 @@ impl Timeline {
         let (conf, tenant_id, timeline_id) = (self.conf, self.tenant_id, self.timeline_id);
         let span = tracing::Span::current();
 
-        let (loaded_layers, sync, total_physical_size) = tokio::task::spawn_blocking({
+        let (loaded_layers, to_sync, total_physical_size) = tokio::task::spawn_blocking({
             move || {
                 let _g = span.entered();
                 let discovered = init::scan_timeline_dir(&timeline_path)?;
@@ -1749,7 +1749,7 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
-            let (needs_upload, needs_cleanup) = sync;
+            let (needs_upload, needs_cleanup) = to_sync;
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
