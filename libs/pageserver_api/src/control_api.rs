@@ -3,39 +3,39 @@ use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
 #[derive(Serialize, Deserialize)]
-struct ReAttachRequest {
-    node_id: NodeId,
+pub struct ReAttachRequest {
+    pub node_id: NodeId,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ReAttachResponseTenant {
-    id: TenantId,
-    generation: u32,
+pub struct ReAttachResponseTenant {
+    pub id: TenantId,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ReAttachResponse {
-    tenants: Vec<ReAttachResponseTenant>,
+pub struct ReAttachResponse {
+    pub tenants: Vec<ReAttachResponseTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateRequestTenant {
-    id: TenantId,
-    gen: u32,
+pub struct ValidateRequestTenant {
+    pub id: TenantId,
+    pub gen: u32,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateRequest {
-    tenants: Vec<ValidateRequestTenant>,
+pub struct ValidateRequest {
+    pub tenants: Vec<ValidateRequestTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateResponse {
-    tenants: Vec<ValidateResponseTenant>,
+pub struct ValidateResponse {
+    pub tenants: Vec<ValidateResponseTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateResponseTenant {
-    id: TenantId,
-    valid: bool,
+pub struct ValidateResponseTenant {
+    pub id: TenantId,
+    pub valid: bool,
 }
