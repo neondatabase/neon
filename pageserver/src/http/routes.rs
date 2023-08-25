@@ -479,19 +479,26 @@ async fn tenant_attach_handler(
         None => TenantConfOpt::default(),
     };
 
-    // TODO: make generation mandatory here once control plane supports it
-    let generation = maybe_body
-        .as_ref()
-        .map(|tar| tar.generation)
-        .flatten()
-        .map(|g| Generation::new(g))
-        .unwrap_or(Generation::none());
-
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     info!("Handling tenant attach {tenant_id}");
 
     let state = get_state(&request);
+
+    let generation = if state.conf.control_plane_api.is_some() {
+        // If we have been configured with a control plane URI, then generations are
+        // mandatory, as we will attempt to re-attach on startup.
+        maybe_body
+            .as_ref()
+            .map(|tar| tar.generation)
+            .flatten()
+            .map(|g| Generation::new(g))
+            .ok_or(ApiError::BadRequest(anyhow!(
+                "generation attribute missing"
+            )))?
+    } else {
+        Generation::placeholder()
+    };
 
     if let Some(remote_storage) = &state.remote_storage {
         mgr::attach_tenant(
