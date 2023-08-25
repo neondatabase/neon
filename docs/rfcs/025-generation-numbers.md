@@ -724,10 +724,11 @@ operations:
 Item 1. would mean that some in-place restarts that previously would have resumed service even if the control plane were
 unavailable, will now not resume service to users until the control plane is available. We could
 avoid this by having a timeout on communication with the control plane, and after some timeout,
-resume service with the node's previous generation (assuming this was persisted to disk). However,
+resume service with the previous generation numbers (assuming this was persisted to disk). However,
 this is unlikely to be needed as the control plane is already an essential & highly available component. Also, having a node re-use an old generation number would complicate
-reasoning about the system, as it would break the invariant that one (node_id, generation)
-tuple uniquely identifies one process lifetime -- it is not recommended to implement this.
+reasoning about the system, as it would break the invariant that a generation number uniquely identifies
+a tenant's attachment to a given pageserver _process_: it would merely identify the tenant's attachment
+to the pageserver _machine_ or its _on-disk-state_.
 
 Item 2. is a non-issue operationally: it's harmless to delay deletions, the only impact of objects pending deletion is
 the S3 capacity cost.
@@ -735,8 +736,13 @@ the S3 capacity cost.
 Item 3. is an issue if safekeepers are low on disk space and the control plane is unavailable for a long time.
 
 For a managed service, the general approach should be to make sure we are monitoring & respond fast enough
-that control plane outages are bounded in time. The separation of console and control plane will also help
-to keep the control plane itself simple and robust.
+that control plane outages are bounded in time.
+
+There is also the fact that control plane runs in a single region.
+The latency for distant regions is not a big concern for us because all request types added by this RFC are either infrequent or not in the way of the data path.
+However, we lose region isolation for the operations listed above.
+The ongoing work to split console and control will give us per-region control plane, and all operations in this RFC can be handled by these per-region control planes.
+With that in mind, we accept the trade-offs outlined in this paragraph.
 
 We will also implement an "escape hatch" config generation numbers, where in a major disaster outage,
 we may manually run pageservers with a hand-selected generation number, so that we can bring them online
@@ -798,9 +804,8 @@ The choice is motivated by object listing, since one can list by prefix but not
 suffix.
 
 In [finding remote indices](#finding-the-remote-indices-for-timelines), we rely
-on being able to do a prefix listing for `<tenant>/<timeline>/index_part.json*`:
-we don't care about listing layers within a particular generation, and if
-we already know the index generation we would GET the index directly.
+on being able to do a prefix listing for `<tenant>/<timeline>/index_part.json*`.
+That relies on the prefix listing.
 
 The converse case of using a generation prefix and listing by generation is
 not needed: one could imagine listing by generation while scrubbing (so that
@@ -827,9 +832,9 @@ This was discussed in the [scope](#scope) part of the deletion queue section.
 The generation numbers proposed in this RFC are adaptable to a variety of different
 failover scenarios and models. The sections below sketch how they would work in practice.
 
-### Fast restart of a pageserver
+### In-place restart of a pageserver
 
-"fast" here means that the restart is done before any other element in the system
+"In-place" here means that the restart is done before any other element in the system
 has taken action in response to the node being down.
 
 - After restart, the node issues a re-attach request to the control plane, and
@@ -837,12 +842,20 @@ has taken action in response to the node being down.
 - Tenants may be activated with the generation number in the re-attach response.
 - If any of its attachments were in fact stale (i.e. had be reassigned to another
   node while this node was offline), then
-  - the re-attach response will inform
+  - the re-attach response will inform the tenant about this by not including
     the tenant of this by _not_ incrementing the generation for that attachment.
   - This will implicitly block deletions in the tenant, but as an optimization
     the pageserver should also proactively stop doing S3 uploads when it notices this stale-generation state.
   - The control plane is expected to eventually detach this tenant from the
     pageserver.
+
+If the control plane does not include a tenant in the re-attach response,
+but there is still local state for the tenant in the filesystem, the pageserver
+deletes the local state in response and does not load/active the tenant.
+See the [earlier section on pageserver startup](#pageserver-attachstartup-changes) for details.
+Control plane can use this mechanism to clean up a pageserver that has been
+down for so long that all its tenants were migrated away before it came back
+up again and asked for re-attach.
 
 ### Failure of a pageserver
 
@@ -854,11 +867,10 @@ to S3.
 
 1. Let's say node 0 becomes unresponsive in a cluster of three nodes 0, 1, 2.
 2. Some external mechanism notices that the node is unavailable and initiates
-   movement of all tenants attached to that node to a different node. In
-   this example it would mean incrementing the attachment generation
-   of all tenants that were attached to node 0, and attaching them
-   to node 1 or 2 based on some distribution rule (this might be round
-   robin, or capacity based).
+   movement of all tenants attached to that node to a different node according
+   to some distribution rule.
+   In this example, it would mean incrementing the generation
+   of all tenants that were attached to node 0, as each tenant's assigned pageserver changes.
 3. A tenant which is now attached to node 1 will _also_ still be attached to node
    0, from the perspective of node 0. Node 0 will still be using its old generation,
    node 1 will be using a newer generation.
@@ -867,7 +879,8 @@ to S3.
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
    written by node 0 are just garbage that can be cleaned up at leisure. Node 0 will
-   not do any deletions because it can't synchronize with control plane, or if it could, it would be informed that is no longer the most recent generation and hence not do the garbage collection.
+   not do any deletions because it can't synchronize with control plane, or if it could,
+   its deletion queue processing would get errors for the validation requests.
 
 Node 0 is not "failed" per-se in this situation: if it becomes responsive again,
 then the control plane may detach the tenants that have been re-attached
@@ -884,7 +897,7 @@ that is attached to the replacement VM/container.
 2. Some external mechanism notices that the node is unavailable, and creates
    a "new node 0" (Node 0b) which is a physically separate server. The original node 0
    (Node 0a) may still be running, because we do not assume the environment fences nodes.
-3. On startup, node 0b re-attaches and gets higher attachment generations for
+3. On startup, node 0b re-attaches and gets higher generation numbers for
    all tenants.
 4. S3 writes continue from nodes 0a and 0b, but the writes do not collide due to different
    generation in the suffix, and the writes from node 0a are not visible to the rest
@@ -923,7 +936,8 @@ a tenant briefly, serving reads from the old node while waiting for the new node
 
 This RFC enables that double-attachment: two nodes may be attached at the same time, with the migration destination
 having a higher generation number. The old node will be able to ingest and serve reads, but not
-do any deletes. The new node's attachment must also avoid doing deletes, a new piece of state
+do any deletes. The new node's attachment must also avoid deleting layers that the old node may
+still use. A new piece of state
 will be needed for this in the control plane's definition of an attachment.
 
 ## Warm secondary locations
