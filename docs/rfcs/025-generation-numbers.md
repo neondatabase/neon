@@ -93,7 +93,7 @@ pageserver, control plane, safekeeper (optional)
 ### Summary
 
 - A per-tenant **generation number** is introduced to uniquely identifying tenant attachments to pageserver processes.
-  
+
   - This generation number increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver, or when the assigned pageserver restarts.
   - the control plane is the authority for generation numbers: only it may
     increment a generation number.
@@ -466,7 +466,7 @@ any location that used `/load` before should just attach instead.
 
 The `/ignore` API is equivalent to detaching, but without deleting local files.
 
-### Timeline/Branch creation
+### Timeline/Branch creation & deletion
 
 All of the previous arguments for safety have described operations within
 a timeline, where we may describe a sequence that includes updates to
@@ -486,15 +486,7 @@ We must be safe against scenarios such as:
   different pageserver B, and the timeline creation request
   is sent there too.
 
-To properly complete a timeline create/delete request, we must
-be sure _after_ the pageserver writes to remote storage, that its
-generation number is still up to date:
-
-- The pageserver can do this by calling into the control plane
-  before responding to a request.
-- Alternatively, the pageserver can include its generation in
-  the response, and let the control plane validate that this
-  generation is still current after receiving the response.
+#### Timeline Creation
 
 If some very slow node tries to do a timeline creation _after_
 a more recent generation node has already created the timeline
@@ -512,6 +504,18 @@ that special case can be handled by calling out to all available pageservers
 to check that they return 404 for the timeline, and to flush their
 deletion queues in case they had any deletions pending from the
 timeline.
+
+The above makes it safe for control plane to change the assignment of
+tenant to pageserver in control plane while a timeline creation is ongoing.
+The reason is that the creation request against the new assigned pageserver
+uses a new generation number. However, care must be taken by control plane
+to ensure that a "timeline creation successul" response from some pageserver
+is checked for the pageserver's generation for that timeline's tenant still being the latest.
+If it is not the latest, the response does not constitute a successful timeline creation.
+It is acceptable to discard such responses, the scrubber will clean up the S3 state.
+It is better to issue a timelien deletion request to the stale attachment.
+
+#### Timeline Deletion
 
 **During timeline/tenant deletion, the control plane must not regard an operation
 as complete when it receives a `202 Accepted` response**, because the node
