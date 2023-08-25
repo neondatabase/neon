@@ -258,8 +258,7 @@ where
     for &id_to_delete in batched_ids {
         let mut continuation_token = None;
         let mut subtargets = vec![target_producer(s3_target, id_to_delete)];
-        while !subtargets.is_empty() {
-            let current_target = subtargets.pop().expect("Subtargets is not empty");
+        while let Some(current_target) = subtargets.pop() {
             loop {
                 let fetch_response = list_objects_with_retries(
                     s3_client,

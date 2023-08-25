@@ -5,6 +5,7 @@ pub mod delete_batch_producer;
 mod s3_deletion;
 
 use std::env;
+use std::fmt::Display;
 use std::time::Duration;
 
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
@@ -31,10 +32,19 @@ pub struct S3Target {
     pub delimiter: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversingDepth {
     Tenant,
     Timeline,
+}
+
+impl Display for TraversingDepth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Tenant => "tenant",
+            Self::Timeline => "timeline",
+        })
+    }
 }
 
 impl S3Target {
