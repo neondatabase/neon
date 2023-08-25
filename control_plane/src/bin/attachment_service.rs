@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
+use pageserver_api::control_api::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
@@ -108,22 +109,6 @@ fn get_state(request: &Request<Body>) -> &State {
         .as_ref()
 }
 
-#[derive(Serialize, Deserialize)]
-struct ReAttachRequest {
-    node_id: NodeId,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ReAttachResponseTenant {
-    id: TenantId,
-    generation: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ReAttachResponse {
-    tenants: Vec<ReAttachResponseTenant>,
-}
-
 /// Pageserver calls into this on startup, to learn which tenants it should attach
 async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let reattach_req = json_request::<ReAttachRequest>(&mut req).await?;
@@ -150,28 +135,6 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
         .map_err(|e| ApiError::InternalServerError(e))?;
 
     json_response(StatusCode::OK, response)
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValidateRequestTenant {
-    id: TenantId,
-    gen: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValidateRequest {
-    tenants: Vec<ValidateRequestTenant>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValidateResponse {
-    tenants: Vec<ValidateResponseTenant>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValidateResponseTenant {
-    id: TenantId,
-    valid: bool,
 }
 
 /// Pageserver calls into this before doing deletions, to confirm that it still
