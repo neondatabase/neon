@@ -93,7 +93,7 @@ pageserver, control plane, safekeeper (optional)
 ### Summary
 
 - A per-tenant **generation number** is introduced to uniquely identifying tenant attachments to pageserver processes.
-  
+
   - This generation number increments each time the control plane modifies a tenant (`Project`)'s assigned pageserver, or when the assigned pageserver restarts.
   - the control plane is the authority for generation numbers: only it may
     increment a generation number.
@@ -466,7 +466,7 @@ any location that used `/load` before should just attach instead.
 
 The `/ignore` API is equivalent to detaching, but without deleting local files.
 
-### Timeline/Branch creation
+### Timeline/Branch creation & deletion
 
 All of the previous arguments for safety have described operations within
 a timeline, where we may describe a sequence that includes updates to
@@ -486,15 +486,7 @@ We must be safe against scenarios such as:
   different pageserver B, and the timeline creation request
   is sent there too.
 
-To properly complete a timeline create/delete request, we must
-be sure _after_ the pageserver writes to remote storage, that its
-generation number is still up to date:
-
-- The pageserver can do this by calling into the control plane
-  before responding to a request.
-- Alternatively, the pageserver can include its generation in
-  the response, and let the control plane validate that this
-  generation is still current after receiving the response.
+#### Timeline Creation
 
 If some very slow node tries to do a timeline creation _after_
 a more recent generation node has already created the timeline
@@ -513,19 +505,17 @@ to check that they return 404 for the timeline, and to flush their
 deletion queues in case they had any deletions pending from the
 timeline.
 
-**During timeline/tenant deletion, the control plane must not regard an operation
-as complete when it receives a `202 Accepted` response**, because the node
-that sent that response might become permanently unavailable. The control
-plane must wait for the deletion to be truly complete (e.g. by polling
-for 404 while the tenant is still attached to the same pageserver), and
-handle the case where the pageserver becomes unavailable, either by waiting
-for a replacement with the same node_id, or by re-attaching the tenant elsewhere.
+The above makes it safe for control plane to change the assignment of
+tenant to pageserver in control plane while a timeline creation is ongoing.
+The reason is that the creation request against the new assigned pageserver
+uses a new generation number. However, care must be taken by control plane
+to ensure that a "timeline creation successul" response from some pageserver
+is checked for the pageserver's generation for that timeline's tenant still being the latest.
+If it is not the latest, the response does not constitute a successful timeline creation.
+It is acceptable to discard such responses, the scrubber will clean up the S3 state.
+It is better to issue a timelien deletion request to the stale attachment.
 
-**Sending a tenant/timeline deletion to a stale pageserver will still result
-in deletion** -- the control plane must persist its intent to delete
-a timeline/tenant before issuing any RPCs, and then once it starts, it must
-keep retrying until the tenant/timeline is gone. This is already handled
-by using a persistent `Operation` record that is retried indefinitely.
+#### Timeline Deletion
 
 Tenant/timeline deletion operations are exempt from generation validation
 on deletes, and therefore don't have to go through the same deletion
@@ -533,6 +523,18 @@ queue as GC/compaction layer deletions. This is because once a
 delete is issued by the control plane, it is a promise that the
 control plane will keep trying until the deletion is done, so even stale
 pageservers are permitted to go ahead and delete the objects.
+
+The implications of this for control plane are:
+
+- During timeline/tenant deletion, the control plane must wait for the deletion to
+  be truly complete (status 404) and also handle the case where the pageserver
+  becomes unavailable, either by waiting for a replacement with the same node_id,
+  or by *re-attaching the tenant elsewhere.
+
+- The control plane must persist its intent to delete
+  a timeline/tenant before issuing any RPCs, and then once it starts, it must
+  keep retrying until the tenant/timeline is gone. This is already handled
+  by using a persistent `Operation` record that is retried indefinitely.
 
 Timeline deletion may result in a special kind of object leak, where
 the latest generation attachment completes a deletion (including erasing
@@ -547,7 +549,7 @@ that, we may implement some other top-level scrub of timelines in
 an external tool, to identify any tenant/timeline paths that are not found
 in the control plane database.
 
-Examples:
+#### Examples
 
 - Deletion, node restarts partway through:
   - By the time we returned 204, we have written a remote delete marker
@@ -577,10 +579,10 @@ a pageserver while leaving an old process running (e.g. a VM gets rescheduled
 without the old one being fenced), then there is a risk of corruption, when
 the control plane attaches the tenant, as follows:
 
-- if the control plane sends an /attach request
-  to node A, then node A dies and is replaced, and the control plane times out
-  the request and restarts, then it could end up with two physical nodes both using
-  the same attachment generation.
+- If the control plane sends an `/attach` request to node A, then node A dies
+  and is replaced, and the control plane's retries the request without
+  incrementing that attachment ID, then it could end up with two physical nodes
+  both using the same generation number.
 - This is not an issue when using EC2 instances with ephemeral storage, as long
   as the control plane never re-uses a node ID, but it would need re-examining
   if running on different infrastructure.
@@ -801,9 +803,9 @@ An orphan object is any object which is no longer referenced by a running node o
 
 Examples of how orphan objects arise:
 
-- A node is doing compaction and writes a layer object, then crashes before it writes the
+- A node PUTs a layer object, then crashes before it writes the
   index_part.json that references that layer.
-- A partition node carries on running for some time, and writes out an unbounded number of
+- A stale node carries on running for some time, and writes out an unbounded number of
   objects while it believes itself to be the rightful writer for a tenant.
 - A pageserver crashes between un-linking an object from the index, and persisting
   the object to its deletion queue.
