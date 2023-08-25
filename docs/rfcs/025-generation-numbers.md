@@ -579,10 +579,10 @@ a pageserver while leaving an old process running (e.g. a VM gets rescheduled
 without the old one being fenced), then there is a risk of corruption, when
 the control plane attaches the tenant, as follows:
 
-- if the control plane sends an /attach request
-  to node A, then node A dies and is replaced, and the control plane times out
-  the request and restarts, then it could end up with two physical nodes both using
-  the same attachment generation.
+- If the control plane sends an `/attach` request to node A, then node A dies
+  and is replaced, and the control plane's retries the request without
+  incrementing that attachment ID, then it could end up with two physical nodes
+  both using the same generation number.
 - This is not an issue when using EC2 instances with ephemeral storage, as long
   as the control plane never re-uses a node ID, but it would need re-examining
   if running on different infrastructure.
