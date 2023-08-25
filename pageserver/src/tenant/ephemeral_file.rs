@@ -3,8 +3,7 @@
 
 use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::{BlockLease, BlockReader};
+use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::fs::OpenOptions;
@@ -22,7 +21,7 @@ pub struct EphemeralFile {
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
     file: VirtualFile,
-    size: u64,
+    len: u64,
     /// An ephemeral file is append-only.
     /// We keep the last page, which can still be modified, in [`Self::mutable_tail`].
     /// The other pages, which can no longer be modified, are accessed through the page cache.
@@ -53,27 +52,56 @@ impl EphemeralFile {
             _tenant_id: tenant_id,
             _timeline_id: timeline_id,
             file,
-            size: 0,
+            len: 0,
             mutable_tail: [0u8; PAGE_SZ],
         })
     }
 
-    pub(crate) fn size(&self) -> u64 {
-        self.size
+    pub(crate) fn len(&self) -> u64 {
+        self.len
     }
-}
 
-/// Does the given filename look like an ephemeral file?
-pub fn is_ephemeral_file(filename: &str) -> bool {
-    if let Some(rest) = filename.strip_prefix("ephemeral-") {
-        rest.parse::<u32>().is_ok()
-    } else {
-        false
+    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
+        if flushed_blknums.contains(&(blknum as u64)) {
+            let cache = page_cache::get();
+            loop {
+                match cache
+                    .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            // order path before error because error is anyhow::Error => might have many contexts
+                            format!(
+                                "ephemeral file: read immutable page #{}: {}: {:#}",
+                                blknum,
+                                self.file.path.display(),
+                                e,
+                            ),
+                        )
+                    })? {
+                    page_cache::ReadBufResult::Found(guard) => {
+                        return Ok(BlockLease::PageReadGuard(guard))
+                    }
+                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                        let buf: &mut [u8] = write_guard.deref_mut();
+                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                        self.file
+                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
+                        write_guard.mark_valid();
+
+                        // Swap for read lock
+                        continue;
+                    }
+                };
+            }
+        } else {
+            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
+            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
+        }
     }
-}
 
-impl BlobWriter for EphemeralFile {
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
+    pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
             /// The block to which the next [`push_bytes`] will write.
@@ -84,13 +112,13 @@ impl BlobWriter for EphemeralFile {
         impl<'a> Writer<'a> {
             fn new(ephemeral_file: &'a mut EphemeralFile) -> io::Result<Writer<'a>> {
                 Ok(Writer {
-                    blknum: (ephemeral_file.size / PAGE_SZ as u64) as u32,
-                    off: (ephemeral_file.size % PAGE_SZ as u64) as usize,
+                    blknum: (ephemeral_file.len / PAGE_SZ as u64) as u32,
+                    off: (ephemeral_file.len % PAGE_SZ as u64) as usize,
                     ephemeral_file,
                 })
             }
             #[inline(always)]
-            fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+            async fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
@@ -154,31 +182,40 @@ impl BlobWriter for EphemeralFile {
             }
         }
 
-        let pos = self.size;
+        let pos = self.len;
         let mut writer = Writer::new(self)?;
 
         // Write the length field
         if srcbuf.len() < 0x80 {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            writer.push_bytes(&len_buf)?;
+            writer.push_bytes(&len_buf).await?;
         }
 
         // Write the payload
-        writer.push_bytes(srcbuf)?;
+        writer.push_bytes(srcbuf).await?;
 
         if srcbuf.len() < 0x80 {
-            self.size += 1;
+            self.len += 1;
         } else {
-            self.size += 4;
+            self.len += 4;
         }
-        self.size += srcbuf.len() as u64;
+        self.len += srcbuf.len() as u64;
 
         Ok(pos)
+    }
+}
+
+/// Does the given filename look like an ephemeral file?
+pub fn is_ephemeral_file(filename: &str) -> bool {
+    if let Some(rest) = filename.strip_prefix("ephemeral-") {
+        rest.parse::<u32>().is_ok()
+    } else {
+        false
     }
 }
 
@@ -207,52 +244,15 @@ impl Drop for EphemeralFile {
 }
 
 impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
-        let flushed_blknums = 0..self.size / PAGE_SZ as u64;
-        if flushed_blknums.contains(&(blknum as u64)) {
-            let cache = page_cache::get();
-            loop {
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum)
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.file.path.display(),
-                                e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
-                        write_guard.mark_valid();
-
-                        // Swap for read lock
-                        continue;
-                    }
-                };
-            }
-        } else {
-            debug_assert_eq!(blknum as u64, self.size / PAGE_SZ as u64);
-            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
-        }
+    fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
+        BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::blob_io::BlobWriter;
-    use crate::tenant::block_io::BlockCursor;
+    use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
     use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
@@ -280,12 +280,12 @@ mod tests {
 
         let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
 
-        let pos_foo = file.write_blob(b"foo")?;
+        let pos_foo = file.write_blob(b"foo").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
         );
-        let pos_bar = file.write_blob(b"bar")?;
+        let pos_bar = file.write_blob(b"bar").await?;
         assert_eq!(
             b"foo",
             file.block_cursor().read_blob(pos_foo).await?.as_slice()
@@ -298,17 +298,17 @@ mod tests {
         let mut blobs = Vec::new();
         for i in 0..10000 {
             let data = Vec::from(format!("blob{}", i).as_bytes());
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
         // also test with a large blobs
         for i in 0..100 {
             let data = format!("blob{}", i).as_bytes().repeat(100);
-            let pos = file.write_blob(&data)?;
+            let pos = file.write_blob(&data).await?;
             blobs.push((pos, data));
         }
 
-        let cursor = BlockCursor::new(&file);
+        let cursor = BlockCursor::new(BlockReaderRef::EphemeralFile(&file));
         for (pos, expected) in blobs {
             let actual = cursor.read_blob(pos).await?;
             assert_eq!(actual, expected);
@@ -318,7 +318,7 @@ mod tests {
         let mut large_data = Vec::new();
         large_data.resize(20000, 0);
         thread_rng().fill_bytes(&mut large_data);
-        let pos_large = file.write_blob(&large_data)?;
+        let pos_large = file.write_blob(&large_data).await?;
         let result = file.block_cursor().read_blob(pos_large).await?;
         assert_eq!(result, large_data);
 

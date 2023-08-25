@@ -212,8 +212,19 @@ pub enum LayerFileName {
 }
 
 impl LayerFileName {
-    pub fn file_name(&self) -> String {
+    pub(crate) fn file_name(&self) -> String {
         self.to_string()
+    }
+
+    /// Determines if this layer file is considered to be in future meaning we will discard these
+    /// layers during timeline initialization from the given disk_consistent_lsn.
+    pub(crate) fn is_in_future(&self, disk_consistent_lsn: Lsn) -> bool {
+        use LayerFileName::*;
+        match self {
+            Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
+            Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
+            _ => false,
+        }
     }
 }
 
@@ -263,8 +274,8 @@ impl serde::Serialize for LayerFileName {
         S: serde::Serializer,
     {
         match self {
-            Self::Image(fname) => serializer.serialize_str(&fname.to_string()),
-            Self::Delta(fname) => serializer.serialize_str(&fname.to_string()),
+            Self::Image(fname) => serializer.collect_str(fname),
+            Self::Delta(fname) => serializer.collect_str(fname),
         }
     }
 }

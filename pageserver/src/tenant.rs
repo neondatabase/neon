@@ -422,13 +422,53 @@ impl Tenant {
             init_order,
             CreateTimelineCause::Load,
         )?;
-        let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
-            new_disk_consistent_lsn.is_valid(),
+            disk_consistent_lsn.is_valid(),
             "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
         );
+        assert_eq!(
+            disk_consistent_lsn,
+            up_to_date_metadata.disk_consistent_lsn(),
+            "these are used interchangeably"
+        );
+
+        // Save the metadata file to local disk.
+        if !picked_local {
+            save_metadata(
+                self.conf,
+                &tenant_id,
+                &timeline_id,
+                up_to_date_metadata,
+                first_save,
+            )
+            .context("save_metadata")?;
+        }
+
+        let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
+
+        if let Some(index_part) = index_part {
+            timeline
+                .remote_client
+                .as_ref()
+                .unwrap()
+                .init_upload_queue(index_part)?;
+        } else if self.remote_storage.is_some() {
+            // No data on the remote storage, but we have local metadata file. We can end up
+            // here with timeline_create being interrupted before finishing index part upload.
+            // By doing what we do here, the index part upload is retried.
+            // If control plane retries timeline creation in the meantime, the mgmt API handler
+            // for timeline creation will coalesce on the upload we queue here.
+            let rtc = timeline.remote_client.as_ref().unwrap();
+            rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
+            rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
+        }
+
         timeline
-            .load_layer_map(new_disk_consistent_lsn)
+            .load_layer_map(
+                disk_consistent_lsn,
+                remote_startup_data.map(|x| x.index_part),
+            )
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -452,19 +492,6 @@ impl Tenant {
             }
         };
 
-        if self.remote_storage.is_some() {
-            // Reconcile local state with remote storage, downloading anything that's
-            // missing locally, and scheduling uploads for anything that's missing
-            // in remote storage.
-            timeline
-                .reconcile_with_remote(
-                    up_to_date_metadata,
-                    remote_startup_data.as_ref().map(|r| &r.index_part),
-                )
-                .await
-                .context("failed to reconcile with remote")?
-        }
-
         // Sanity check: a timeline should have some content.
         anyhow::ensure!(
             ancestor.is_some()
@@ -478,18 +505,6 @@ impl Tenant {
                     .is_some(),
             "Timeline has no ancestor and no layer files"
         );
-
-        // Save the metadata file to local disk.
-        if !picked_local {
-            save_metadata(
-                self.conf,
-                &tenant_id,
-                &timeline_id,
-                up_to_date_metadata,
-                first_save,
-            )
-            .context("save_metadata")?;
-        }
 
         Ok(())
     }
