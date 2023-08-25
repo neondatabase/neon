@@ -8,6 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use compute_api::spec::ComputeMode;
+use control_plane::attachment_service::AttachmentService;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
@@ -43,6 +44,8 @@ project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "15";
 
+const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/";
+
 fn default_conf() -> String {
     format!(
         r#"
@@ -56,11 +59,13 @@ listen_pg_addr = '{DEFAULT_PAGESERVER_PG_ADDR}'
 listen_http_addr = '{DEFAULT_PAGESERVER_HTTP_ADDR}'
 pg_auth_type = '{trust_auth}'
 http_auth_type = '{trust_auth}'
+control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
 
 [[safekeepers]]
 id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
+
 "#,
         trust_auth = AuthType::Trust,
     )
@@ -107,6 +112,7 @@ fn main() -> Result<()> {
             "start" => handle_start_all(sub_args, &env),
             "stop" => handle_stop_all(sub_args, &env),
             "pageserver" => handle_pageserver(sub_args, &env),
+            "attachment_service" => handle_attachment_service(sub_args, &env),
             "safekeeper" => handle_safekeeper(sub_args, &env),
             "endpoint" => handle_endpoint(sub_args, &env),
             "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
@@ -827,6 +833,33 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
+fn handle_attachment_service(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+    let svc = AttachmentService::from_env(env);
+    match sub_match.subcommand() {
+        Some(("start", _start_match)) => {
+            if let Err(e) = svc.start() {
+                eprintln!("start failed: {e}");
+                exit(1);
+            }
+        }
+
+        Some(("stop", stop_match)) => {
+            let immediate = stop_match
+                .get_one::<String>("stop-mode")
+                .map(|s| s.as_str())
+                == Some("immediate");
+
+            if let Err(e) = svc.stop(immediate) {
+                eprintln!("stop failed: {}", e);
+                exit(1);
+            }
+        }
+        Some((sub_name, _)) => bail!("Unexpected attachment_service subcommand '{}'", sub_name),
+        None => bail!("no attachment_service subcommand provided"),
+    }
+    Ok(())
+}
+
 fn get_safekeeper(env: &local_env::LocalEnv, id: NodeId) -> Result<SafekeeperNode> {
     if let Some(node) = env.safekeepers.iter().find(|node| node.id == id) {
         Ok(SafekeeperNode::from_env(env, node))
@@ -907,6 +940,13 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     broker::start_broker_process(env)?;
 
+    let attachment_service = AttachmentService::from_env(env);
+    if let Err(e) = attachment_service.start() {
+        eprintln!("attachment_service start failed: {:#}", e);
+        try_stop_all(env, true);
+        exit(1);
+    }
+
     let pageserver = PageServerNode::from_env(env);
     if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
         eprintln!("pageserver {} start failed: {:#}", env.pageserver.id, e);
@@ -964,6 +1004,11 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
     if let Err(e) = broker::stop_broker_process(env) {
         eprintln!("neon broker stop failed: {e:#}");
+    }
+
+    let attachment_service = AttachmentService::from_env(env);
+    if let Err(e) = attachment_service.stop(immediate) {
+        eprintln!("attachment service stop failed: {e:#}");
     }
 }
 
@@ -1147,6 +1192,14 @@ fn cli() -> Command {
                 .subcommand(Command::new("stop").about("Stop local pageserver")
                             .arg(stop_mode_arg.clone()))
                 .subcommand(Command::new("restart").about("Restart local pageserver").arg(pageserver_config_args.clone()))
+        )
+        .subcommand(
+            Command::new("attachment_service")
+                .arg_required_else_help(true)
+                .about("Manage attachment_service")
+                .subcommand(Command::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
+                .subcommand(Command::new("stop").about("Stop local pageserver")
+                            .arg(stop_mode_arg.clone()))
         )
         .subcommand(
             Command::new("safekeeper")

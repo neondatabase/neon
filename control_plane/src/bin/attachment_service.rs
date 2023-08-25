@@ -12,6 +12,7 @@ use pageserver_api::control_api::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
+use utils::logging::{self, LogFormat};
 
 use utils::{
     http::{
@@ -218,7 +219,17 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    logging::init(
+        LogFormat::Plain,
+        logging::TracingErrorLayerEnablement::Disabled,
+    )?;
+
     let args = Cli::parse();
+    tracing::info!(
+        "Starting, state at {}, listening on {}",
+        args.path.to_string_lossy(),
+        args.listen
+    );
 
     let persistent_state = PersistentState::load_or_new(&args.path).await;
 
@@ -229,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
     let service = utils::http::RouterService::new(router).unwrap();
     let server = hyper::Server::from_tcp(http_listener)?.serve(service);
 
+    tracing::info!("Serving on {0}", args.listen.as_str());
     server.await?;
 
     Ok(())
