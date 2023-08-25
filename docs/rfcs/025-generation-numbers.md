@@ -832,9 +832,9 @@ This was discussed in the [scope](#scope) part of the deletion queue section.
 The generation numbers proposed in this RFC are adaptable to a variety of different
 failover scenarios and models. The sections below sketch how they would work in practice.
 
-### Fast restart of a pageserver
+### In-place restart of a pageserver
 
-"fast" here means that the restart is done before any other element in the system
+"In-place" here means that the restart is done before any other element in the system
 has taken action in response to the node being down.
 
 - After restart, the node issues a re-attach request to the control plane, and
@@ -842,12 +842,20 @@ has taken action in response to the node being down.
 - Tenants may be activated with the generation number in the re-attach response.
 - If any of its attachments were in fact stale (i.e. had be reassigned to another
   node while this node was offline), then
-  - the re-attach response will inform
+  - the re-attach response will inform the tenant about this by not including
     the tenant of this by _not_ incrementing the generation for that attachment.
   - This will implicitly block deletions in the tenant, but as an optimization
     the pageserver should also proactively stop doing S3 uploads when it notices this stale-generation state.
   - The control plane is expected to eventually detach this tenant from the
     pageserver.
+
+If the control plane does not include a tenant in the re-attach response,
+but there is still local state for the tenant in the filesystem, the pageserver
+deletes the local state in response and does not load/active the tenant.
+See the [earlier section on pageserver startup](#pageserver-attachstartup-changes) for details.
+Control plane can use this mechanism to clean up a pageserver that has been
+down for so long that all its tenants were migrated away before it came back
+up again and asked for re-attach.
 
 ### Failure of a pageserver
 
