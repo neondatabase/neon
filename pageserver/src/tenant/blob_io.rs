@@ -12,14 +12,11 @@
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use crate::page_cache::PAGE_SZ;
-use crate::tenant::block_io::{BlockCursor, BlockReader};
+use crate::tenant::block_io::BlockCursor;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
-impl<R> BlockCursor<R>
-where
-    R: BlockReader,
-{
+impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
