@@ -68,6 +68,10 @@ impl<'a> Deref for BlockLease<'a> {
     }
 }
 
+/// Provides the ability to read blocks from different sources,
+/// similar to using traits for this purpose.
+///
+/// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
     FileBlockReaderVirtual(&'a FileBlockReader<VirtualFile>),
     FileBlockReaderFile(&'a FileBlockReader<std::fs::File>),
