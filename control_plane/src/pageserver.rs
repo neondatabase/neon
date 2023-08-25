@@ -126,6 +126,13 @@ impl PageServerNode {
             broker_endpoint_param,
         ];
 
+        if let Some(control_plane_api) = &self.env.pageserver.control_plane_api {
+            overrides.push(format!(
+                "control_plane_api='{}'",
+                control_plane_api.as_str()
+            ));
+        }
+
         if self.env.pageserver.http_auth_type != AuthType::Trust
             || self.env.pageserver.pg_auth_type != AuthType::Trust
         {

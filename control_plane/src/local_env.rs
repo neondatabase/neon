@@ -118,6 +118,9 @@ pub struct PageServerConf {
     // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+
+    // Control plane location
+    pub control_plane_api: Option<Url>,
 }
 
 impl Default for PageServerConf {
@@ -128,6 +131,7 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            control_plane_api: None,
         }
     }
 }
@@ -200,6 +204,10 @@ impl LocalEnv {
 
     pub fn pageserver_bin(&self) -> PathBuf {
         self.neon_distrib_dir.join("pageserver")
+    }
+
+    pub fn attachment_service_bin(&self) -> PathBuf {
+        self.neon_distrib_dir.join("attachment_service")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {
