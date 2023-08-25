@@ -752,7 +752,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.16.3
+      VM_BUILDER_VERSION: v0.17.5
 
     steps:
       - name: Checkout
@@ -775,6 +775,7 @@ jobs:
         run: |
           ./vm-builder \
             -enable-file-cache \
+            -cgroup-uid=postgres \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
