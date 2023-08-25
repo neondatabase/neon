@@ -780,7 +780,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.16.3
+      VM_BUILDER_VERSION: v0.17.5
 
     steps:
       - name: Checkout
@@ -790,7 +790,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -fL ec2-user@ec2-18-217-40-54.us-east-2.compute.amazonaws.com:8000/vm-builder -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
