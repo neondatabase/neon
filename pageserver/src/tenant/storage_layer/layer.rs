@@ -523,7 +523,6 @@ impl LayerInner {
             // no need to make the evict_and_wait wait for the actual download to complete
             drop(self.status.send(Status::Downloaded));
 
-            // technically the mutex could be dropped here.
             let timeline = self
                 .timeline
                 .upgrade()
@@ -712,7 +711,7 @@ impl LayerInner {
                 );
                 let backoff = std::time::Duration::from_secs_f64(backoff);
 
-                // unless we get cancelled, we will hold off the semaphore init
+                // unless we get cancelled, we will hold off the init semaphore
                 tokio::time::sleep(backoff).await;
 
                 Err(DownloadError::DownloadFailed)
@@ -885,8 +884,6 @@ impl LayerInner {
 }
 
 fn capture_mtime_and_remove(path: &Path) -> Result<SystemTime, std::io::Error> {
-    // FIXME: we can now initialize the mtime during first get_or_download,
-    // and track that in-memory for the following? does that help?
     let m = path.metadata()?;
     let local_layer_mtime = m.modified()?;
     std::fs::remove_file(path)?;
