@@ -268,6 +268,7 @@ pub struct PageWriteGuard<'i> {
     inner: RwLockWriteGuard<'i, SlotInner>,
 
     // Are the page contents currently valid?
+    // Used to mark pages as invalid that are assigned but not yet filled with data.
     valid: bool,
 }
 
