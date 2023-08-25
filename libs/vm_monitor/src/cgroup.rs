@@ -634,7 +634,7 @@ impl CgroupWatcher {
             .context("failed to get memory subsystem")?
             .set_mem(cgroups_rs::memory::SetMemory {
                 low: None,
-                high: Some(MaxValue::Value(bytes.min(i64::MAX as u64) as i64)),
+                high: Some(MaxValue::Value(u64::min(bytes, i64::MAX as u64) as i64)),
                 min: None,
                 max: None,
             })
@@ -654,8 +654,10 @@ impl CgroupWatcher {
             .set_mem(cgroups_rs::memory::SetMemory {
                 min: None,
                 low: None,
-                high: Some(MaxValue::Value(limits.high.min(i64::MAX as u64) as i64)),
-                max: Some(MaxValue::Value(limits.max.min(i64::MAX as u64) as i64)),
+                high: Some(MaxValue::Value(
+                    u64::min(limits.high, i64::MAX as u64) as i64
+                )),
+                max: Some(MaxValue::Value(u64::min(limits.max, i64::MAX as u64) as i64)),
             })
             .context("failed to set memory limits")
     }
