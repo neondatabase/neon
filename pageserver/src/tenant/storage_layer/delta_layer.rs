@@ -242,16 +242,7 @@ impl AsLayerDesc for DeltaLayer {
 
 impl DeltaLayer {
     pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
-            self.desc.tenant_id,
-            self.desc.timeline_id,
-            self.desc.key_range.start,
-            self.desc.key_range.end,
-            self.desc.lsn_range.start,
-            self.desc.lsn_range.end,
-            self.desc.file_size,
-        );
+        self.desc.dump();
 
         if !verbose {
             return Ok(());
@@ -259,55 +250,7 @@ impl DeltaLayer {
 
         let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
-        println!(
-            "index_start_blk: {}, root {}",
-            inner.index_start_blk, inner.index_root_blk
-        );
-
-        let file = &inner.file;
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        tree_reader.dump().await?;
-
-        let keys = DeltaLayerInner::load_keys(&inner).await?;
-
-        // A subroutine to dump a single blob
-        async fn dump_blob(val: ValueRef<'_>) -> Result<String> {
-            let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
-            let val = Value::des(&buf)?;
-            let desc = match val {
-                Value::Image(img) => {
-                    format!(" img {} bytes", img.len())
-                }
-                Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
-                    format!(
-                        " rec {} bytes will_init: {} {}",
-                        buf.len(),
-                        rec.will_init(),
-                        wal_desc
-                    )
-                }
-            };
-            Ok(desc)
-        }
-
-        for entry in keys {
-            let DeltaEntry { key, lsn, val, .. } = entry;
-            let desc = match dump_blob(val).await {
-                Ok(desc) => desc,
-                Err(err) => {
-                    format!("ERROR: {err}")
-                }
-            };
-            println!("  key {key} at {lsn}: {desc}");
-        }
-
-        Ok(())
+        inner.dump().await
     }
 
     fn temp_path_for(
@@ -825,6 +768,57 @@ impl DeltaLayerInner {
             last.size = self.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
         }
         Ok(all_keys)
+    }
+
+    pub(super) async fn dump(&self) -> anyhow::Result<()> {
+        println!(
+            "index_start_blk: {}, root {}",
+            self.index_start_blk, self.index_root_blk
+        );
+
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        tree_reader.dump().await?;
+
+        let keys = self.load_keys().await?;
+
+        async fn dump_blob(val: ValueRef<'_>) -> anyhow::Result<String> {
+            let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        }
+
+        for entry in keys {
+            let DeltaEntry { key, lsn, val, .. } = entry;
+            let desc = match dump_blob(val).await {
+                Ok(desc) => desc,
+                Err(err) => {
+                    format!("ERROR: {err}")
+                }
+            };
+            println!("  key {key} at {lsn}: {desc}");
+        }
+
+        Ok(())
     }
 }
 

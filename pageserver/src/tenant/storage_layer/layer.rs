@@ -247,6 +247,20 @@ impl Layer {
     pub(crate) fn local_path(&self) -> &Path {
         &self.0.path
     }
+
+    /// Traditional debug dumping facility
+    #[allow(unused)]
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> anyhow::Result<()> {
+        self.0.desc.dump();
+
+        if verbose {
+            // for now, unconditionally download everything, even if that might not be wanted.
+            let l = self.0.get_or_maybe_download(true, Some(ctx)).await?;
+            l.dump(&self.0).await?
+        }
+
+        Ok(())
+    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
@@ -1101,6 +1115,16 @@ impl DownloadedLayer {
             }
             Image(i) => i.get_value_reconstruct_data(key, reconstruct_data).await,
         }
+    }
+
+    async fn dump(&self, owner: &LayerInner) -> anyhow::Result<()> {
+        use LayerKind::*;
+        match self.get(owner).await? {
+            Delta(d) => d.dump().await?,
+            Image(i) => i.dump().await?,
+        }
+
+        Ok(())
     }
 }
 

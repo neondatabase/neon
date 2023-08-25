@@ -639,8 +639,8 @@ impl LayerMap {
         }
 
         println!("historic_layers:");
-        for layer in self.iter_historic_layers() {
-            layer.dump(verbose, ctx)?;
+        for desc in self.iter_historic_layers() {
+            desc.dump();
         }
         println!("End dump LayerMap");
         Ok(())

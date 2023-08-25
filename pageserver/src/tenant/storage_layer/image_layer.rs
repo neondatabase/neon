@@ -169,6 +169,25 @@ impl std::fmt::Debug for ImageLayerInner {
     }
 }
 
+impl ImageLayerInner {
+    pub(super) async fn dump(&self) -> anyhow::Result<()> {
+        let file = &self.file;
+        let tree_reader =
+            DiskBtreeReader::<_, KEY_SIZE>::new(self.index_start_blk, self.index_root_blk, file);
+
+        tree_reader.dump().await?;
+
+        tree_reader
+            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+                println!("key: {} offset {}", hex::encode(key), value);
+                true
+            })
+            .await?;
+
+        Ok(())
+    }
+}
+
 /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
 impl std::fmt::Display for ImageLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -184,34 +203,15 @@ impl AsLayerDesc for ImageLayer {
 
 impl ImageLayer {
     pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
-            self.desc.tenant_id,
-            self.desc.timeline_id,
-            self.desc.key_range.start,
-            self.desc.key_range.end,
-            self.lsn,
-            self.desc.is_incremental(),
-            self.desc.file_size
-        );
+        self.desc.dump();
 
         if !verbose {
             return Ok(());
         }
 
         let inner = self.load(LayerAccessKind::Dump, ctx).await?;
-        let file = &inner.file;
-        let tree_reader =
-            DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        tree_reader.dump().await?;
-
-        tree_reader
-            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-                println!("key: {} offset {}", hex::encode(key), value);
-                true
-            })
-            .await?;
+        inner.dump().await?;
 
         Ok(())
     }
