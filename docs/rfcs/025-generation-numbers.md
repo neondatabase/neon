@@ -604,8 +604,7 @@ like to delay and batch deletions to
 On the other hand we would also like to minimize leakage by executing
 deletions promptly.
 
-To resolve this, we may make the deletion queue persistent, writing out
-_DeletionList_s as soon as a Timeline decides to commit to a deletion,
+To resolve this, we may make the deletion queue persistent
 and then executing these in the background at a later time.
 
 _Note: The deletion queue's reason for existence is optimization rather than correctness,
