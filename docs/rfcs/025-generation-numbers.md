@@ -736,8 +736,13 @@ the S3 capacity cost.
 Item 3. is an issue if safekeepers are low on disk space and the control plane is unavailable for a long time.
 
 For a managed service, the general approach should be to make sure we are monitoring & respond fast enough
-that control plane outages are bounded in time. The separation of console and control plane will also help
-to keep the control plane itself simple and robust.
+that control plane outages are bounded in time.
+
+There is also the fact that control plane runs in a single region.
+The latency for distant regions is not a big concern for us because all request types added by this RFC are either infrequent or not in the way of the data path.
+However, we lose region isolation for the operations listed above.
+The ongoing work to split console and control will give us per-region control plane, and all operations in this RFC can be handled by these per-region control planes.
+With that in mind, we accept the trade-offs outlined in this paragraph.
 
 We will also implement an "escape hatch" config generation numbers, where in a major disaster outage,
 we may manually run pageservers with a hand-selected generation number, so that we can bring them online
