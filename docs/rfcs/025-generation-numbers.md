@@ -517,13 +517,10 @@ It is better to issue a timelien deletion request to the stale attachment.
 
 #### Timeline Deletion
 
-**During timeline/tenant deletion, the control plane must not regard an operation
-as complete when it receives a `202 Accepted` response**, because the node
-that sent that response might become permanently unavailable. The control
-plane must wait for the deletion to be truly complete (e.g. by polling
-for 404 while the tenant is still attached to the same pageserver), and
-handle the case where the pageserver becomes unavailable, either by waiting
-for a replacement with the same node_id, or by re-attaching the tenant elsewhere.
+During timeline/tenant deletion, the control plane must wait for the deletion to
+be truly complete (status 404) and also handle the case where the pageserver
+becomes unavailable, either by waiting for a replacement with the same node_id,
+or by *re-attaching the tenant elsewhere.
 
 **Sending a tenant/timeline deletion to a stale pageserver will still result
 in deletion** -- the control plane must persist its intent to delete
