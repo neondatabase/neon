@@ -467,8 +467,6 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        // why call get instead of looking at the watch? because get will downgrade any
-        // Arc<_> it finds, because we set the wanted_evicted
         if self.get().is_none() {
             // it was not evictable in the first place
             // our store to the wanted_evicted does not matter; it will be reset by next download
@@ -1033,10 +1031,6 @@ impl From<ResidentLayer> for Layer {
         value.owner
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("Layer has been removed from LayerMap already")]
-pub(crate) struct RemovedFromLayerMap;
 
 /// Holds the actual downloaded layer, and handles evicting the file on drop.
 pub(crate) struct DownloadedLayer {
