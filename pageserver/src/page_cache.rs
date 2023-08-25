@@ -168,6 +168,7 @@ struct Slot {
 
 struct SlotInner {
     key: Option<CacheKey>,
+    slot_idx: usize,
     buf: &'static mut [u8; PAGE_SZ],
 }
 
@@ -305,17 +306,16 @@ impl PageWriteGuard<'_> {
 }
 
 impl Drop for PageWriteGuard<'_> {
-    ///
     /// If the buffer was allocated for a page that was not already in the
     /// cache, but the lock_for_read/write() caller dropped the buffer without
-    /// initializing it, remove the mapping from the page cache.
-    ///
+    /// initializing it, make [`PageCache::find_victim`] remove the mapping
+    /// from the page cache.
     fn drop(&mut self) {
         assert!(self.inner.key.is_some());
         if !self.valid {
-            let self_key = self.inner.key.as_ref().unwrap();
-            PAGE_CACHE.get().unwrap().remove_mapping(self_key);
-            self.inner.key = None;
+            // Make sure that the page gets freed at the next time we look for a
+            // victim page.
+            PAGE_CACHE.get().unwrap().slots[self.inner.slot_idx].set_usage_count(0);
         }
     }
 }
@@ -831,11 +831,16 @@ impl PageCache {
 
         let slots = page_buffer
             .chunks_exact_mut(PAGE_SZ)
-            .map(|chunk| {
+            .enumerate()
+            .map(|(slot_idx, chunk)| {
                 let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
 
                 Slot {
-                    inner: RwLock::new(SlotInner { key: None, buf }),
+                    inner: RwLock::new(SlotInner {
+                        key: None,
+                        slot_idx,
+                        buf,
+                    }),
                     usage_count: AtomicU8::new(0),
                 }
             })
