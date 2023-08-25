@@ -597,13 +597,15 @@ the control plane attaches the tenant, as follows:
 Between writing our a new index_part.json that doesn't reference an object,
 and executing the deletion, an object passes through a window where it is
 only referenced in memory, and could be leaked if the pageserver is stopped
-uncleanly. That introduces conflicting incentives: we would like to delay
-deletions to minimize control plane load and allow aggregation of full-sized
-DeleteObjects requests, but we would also like to minimize leakage by executing
+uncleanly. That introduces conflicting incentives: on the one hand, we would
+like to delay and batch deletions to
+1. minimize the cost of the mandatory validations calls to control plane, and
+2. minimize cost for DeleteObjects requests.
+On the other hand we would also like to minimize leakage by executing
 deletions promptly.
 
 To resolve this, we may make the deletion queue persistent, writing out
-_deletion lists_ as soon as a Timeline decides to commit to a deletion,
+_DeletionList_s as soon as a Timeline decides to commit to a deletion,
 and then executing these in the background at a later time.
 
 _Note: The deletion queue's reason for existence is optimization rather than correctness,
@@ -639,10 +641,10 @@ for a tenant whose main `Tenant` object has been torn down.
 
 The flow of deletion becomes:
 
-1. Enqueue in memory: build up some deletions to write out a deletion list
-2. Enqueue persistently by writing out a deletion list, storing the
+1. Enqueue in memory: build up some deletions to write out a DeletionList
+2. Enqueue persistently by writing out a DeletionList, storing the
    attachment generations for each timeline with layers referenced in the list.
-3. Validate the deletion list by calling to the control plane, and persist
+3. Validate the DeletionList by calling to the control plane, and persist
    some record that the list is valid (or rewrite it to remove invalid parts).
 4. Delete the keys that were enqueued with a generation that passed the validation
    in the previous step
@@ -652,17 +654,17 @@ The flow of deletion becomes:
 Deletions may only be persisted to the queue once the remote index_part.json
 reflecting the deletion has been written.
 
-If a deletion list is read from local disk after a restart, it is guaranteed
-that whatever generation wrote that deletion list has therefore already
+If a DeletionList is read from local disk after a restart, it is guaranteed
+that whatever generation wrote that DeletionList has therefore already
 uploaded its index_part.json file, and therefore when we started up, we would
 have seen that remote metadata if it was in the generation immediately before
 our own.
 
 This enables the following reasoning:
 
-- a) If I validate my current generation and the deletion list is in that
+- a) If I validate my current generation and the DeletionList is in that
   generation, I may execute it.
-- b) If I validate my current generation and the deletion list is from
+- b) If I validate my current generation and the DeletionList is from
   the immediately preceding generation _and_ that preceding generation
   ran on the same server I am running on, then I may execute it.
 
@@ -680,7 +682,7 @@ each deletion.
 
 We may validate lists as a whole, sequentially number the lists, and track
 validation with a "validated sequence number" pointer into the list. To advance it,
-some background task would do the following procedure for each deletion list
+some background task would do the following procedure for each DeletionList
 in order:
 
 1. Scan the DeletionList and aggregate a map of tenant to attachment generation
@@ -690,7 +692,7 @@ in order:
 - If all generations are valid (the usual case) then
   the whole list may be executed. We may efficiently record the result of
   this validation by advancing a "valid sequence" to point to the sequence
-  number of the deletion list we just validated.
+  number of the DeletionList we just validated.
 - If only some contents of a list are valid, then rather than storing
   some structured validation result, we will just re-write the list
   to omit the parts we can't validate, log a warning about the leaked
@@ -743,7 +745,7 @@ writing and reading many tiny files. The lists are written and read
 atomically, to avoid coupling the code too much to use of a local filesystem,
 in case we wanted to switch to using an object store in future.
 
-Each deletion list has a sequence number: this records the logical
+Each DeletionList has a sequence number: this records the logical
 ordering of the lists, so that we may use sequence numbers to succinctly
 store knowledge about up to which point the deletions have been validated.
 
