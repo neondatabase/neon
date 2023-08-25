@@ -203,6 +203,11 @@ impl Slot {
             Err(usage_count) => usage_count,
         }
     }
+
+    /// Sets the usage count to a specific value.
+    fn set_usage_count(&self, count: u8) {
+        self.usage_count.store(count, Ordering::Relaxed);
+    }
 }
 
 pub struct PageCache {
@@ -556,7 +561,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
-            slot.usage_count.store(1, Ordering::Relaxed);
+            slot.set_usage_count(1);
 
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
                 inner,
@@ -617,7 +622,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
-            slot.usage_count.store(1, Ordering::Relaxed);
+            slot.set_usage_count(1);
 
             return Ok(WriteBufResult::NotFound(PageWriteGuard {
                 inner,
