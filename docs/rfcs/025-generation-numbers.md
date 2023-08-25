@@ -599,13 +599,14 @@ the control plane attaches the tenant, as follows:
 Between writing our a new index_part.json that doesn't reference an object,
 and executing the deletion, an object passes through a window where it is
 only referenced in memory, and could be leaked if the pageserver is stopped
-uncleanly. That introduces conflicting incentives: we would like to delay
-deletions to minimize control plane load and allow aggregation of full-sized
-DeleteObjects requests, but we would also like to minimize leakage by executing
+uncleanly. That introduces conflicting incentives: on the one hand, we would
+like to delay and batch deletions to
+1. minimize the cost of the mandatory validations calls to control plane, and
+2. minimize cost for DeleteObjects requests.
+On the other hand we would also like to minimize leakage by executing
 deletions promptly.
 
-To resolve this, we may make the deletion queue persistent, writing out
-_deletion lists_ as soon as a Timeline decides to commit to a deletion,
+To resolve this, we may make the deletion queue persistent
 and then executing these in the background at a later time.
 
 _Note: The deletion queue's reason for existence is optimization rather than correctness,
@@ -639,153 +640,42 @@ for a tenant whose main `Tenant` object has been torn down.
 
 #### Flow of deletion
 
-The flow of deletion becomes:
+The flow of a deletion is becomes:
 
-1. Enqueue in memory: build up some deletions to write out a deletion list
-2. Enqueue persistently by writing out a deletion list, storing the
-   attachment generations for each timeline with layers referenced in the list.
-3. Validate the deletion list by calling to the control plane, and persist
-   some record that the list is valid (or rewrite it to remove invalid parts).
-4. Delete the keys that were enqueued with a generation that passed the validation
-   in the previous step
+1. Need for deletion of an object (=> layer file) is identified.
+2. Unlink the object from all the places that reference it (=> `index_part.json`).
+3. Enqueue the deletion to a persistent queue.
+   Each entry is `tenant_id, attachment_generation, S3 key`.
+4. Validate & execute in batches:
+  4.1 For a batch of entries, call into control plane.
+  4.2 For the subset of entries that passed validation, execute a `DeleteObjects` S3 DELETE request for their S3 keys.
 
-#### Ordering
+As outlined in the Part 1 on correctness, it is critical that deletions are only
+executed once the key is not referenced anywhere in S3.
+This property is obviously upheld by the scheme above.
 
-Deletions may only be persisted to the queue once the remote index_part.json
-reflecting the deletion has been written.
+#### We Accept Object Leakage In Acceptable Circumcstances
 
-If a deletion list is read from local disk after a restart, it is guaranteed
-that whatever generation wrote that deletion list has therefore already
-uploaded its index_part.json file, and therefore when we started up, we would
-have seen that remote metadata if it was in the generation immediately before
-our own.
+If we crash in the flow above between (2) and (3), we lose track of unreferenced object.
+Further, enqueuing a single to the persistent queue may not be durable immediately to amortize cost of flush to disk.
+This is acceptable for now, it can be caught by [the scrubber](#cleaning-up-orphan-objects-scrubbing).
 
-This enables the following reasoning:
+There are various measures we can take to improve this in the future.
+1. Cap amount of time until enqueued entry becomes durable (timeout for flush-to-tisk)
+2. Proactively flush:
+    - On graceful shutdown, as we anticipate that some or
+      all of our attachments may be re-assigned while we are offline.
+    - On tenant detach.
+3. For each entry, keep track of whether it has passed (2).
+   Only admit entries to (4) one they have passed (2).
+   This requires re-writing / two queue entries (intent, commit) per deletion.
 
-- a) If I validate my current generation and the deletion list is in that
-  generation, I may execute it.
-- b) If I validate my current generation and the deletion list is from
-  the immediately preceding generation _and_ that preceding generation
-  ran on the same server I am running on, then I may execute it.
-
-The `b` case is the nuanced one, but also the important one: it is what
-enables replaying a persistent deletion queue after restart without
-having to drop any un-validated entries. After a restart, the main
-pageserver startup code may tip off the deletion queue about which timelines
-have incremented their attachment generation by exactly one, and are therefore
-elegible to validate deletions from the previous generation.
-
-#### Validation
-
-Deletion execution is gated on validation of the generations associated with
-each deletion.
-
-We may validate lists as a whole, sequentially number the lists, and track
-validation with a "validated sequence number" pointer into the list. To advance it,
-some background task would do the following procedure for each deletion list
-in order:
-
-1. Scan the DeletionList and aggregate a map of tenant to attachment generation
-2. Send a request to the control plane to validate these generations
-3. Update the queue as follows:
-
-- If all generations are valid (the usual case) then
-  the whole list may be executed. We may efficiently record the result of
-  this validation by advancing a "valid sequence" to point to the sequence
-  number of the deletion list we just validated.
-- If only some contents of a list are valid, then rather than storing
-  some structured validation result, we will just re-write the list
-  to omit the parts we can't validate, log a warning about the leaked
-  objects, and then advance our valid sequence number to point to
-  the re-written list.
-
-4. At some later point, actually execute the list that we validated
-   in step 3.
-
-#### Deletion queue replay on startup
-
-At startup, the pageserver will replay the lists on disk. Validation
-will pick up where it left off: if there are unvalidated lists present,
-then it may still be possible to validate them if the timeline's attachment
-generation is only 1 greater than that in the list, and it was attached
-to this node in its previous generation.
-
-The number of objects leaked in this process depends on how frequently we
-do validation during normal operations, and whether the previous pageserver
-instance was terminated cleanly and validated its lists in the process. Usually,
-we would have shut down cleanly and not leak any objects.
-
-#### Proactive validation-flush
-
-There are some circumstances where it is helpful to intentionally
-flush the validation process (i.e. validate all prior deletions):
-
-- On graceful pagegserver shutdown, as we anticipate that some or
-  all of our attachments may be re-assigned while we are offline.
-- On tenant detach.
-
-This flushing is entirely optional, and may be time-bound: e.g.
-if it takes more than 5 seconds to flush during shutdown, just give
-up.
-
-#### Deletion queue persistence format
-
-Persistence is to local disk, rather than S3, to avoid any possible
-split-brain issues and to avoid having to clean up objects after a pageserver
-is decommissioned. However, when decommissioned cleanly, a pageserver
-should be requested to drain its deletion queue before we dispose
-of it, to avoid leaking some objects. If we unexpectedly lose a pageserver
-node and its disk, we will leak some objects: not harmful for correctness,
-and to be cleaned up eventually by the [scrubber](#cleaning-up-orphan-objects-scrubbing)
-
-The persisted queue is broken up into a series of lists, written out
-once some threshold number of deletions are accumulated. This should
-be tuned to target a file size of ~1MB to avoid the expense of
-writing and reading many tiny files. The lists are written and read
-atomically, to avoid coupling the code too much to use of a local filesystem,
-in case we wanted to switch to using an object store in future.
-
-Each deletion list has a sequence number: this records the logical
-ordering of the lists, so that we may use sequence numbers to succinctly
-store knowledge about up to which point the deletions have been validated.
-
-In addition to the lists themselves, a header file is used
-to store state about how far validation has proceeded: if the header's
-"valid sequence" has passed a particular list, then that list may
-be executed.
-
-Deletion queue files will be stored in a sibling of the `tenants/` directory, and
-with the node generation number in the name. The paths would look something like:
-
-```bash
-  # Deletion List
-  deletion/<node id>/<sequence>-<generation>.list
-
-  # Header object, stores the highest sequence & validated sequence
-  deletion/<node id>/header-<generation>
-```
-
-Each entry in a deletion list is structured to contain the tenant & timeline,
-and the attachment generation.
-
-```rust
-/// One of these per deletion list object
-struct DeletionList {
-  deletions: Vec<DeletionEntry>
-}
-
-/// N of these per deletion list
-struct DeletionEntry {
-  tenant_id: TenantId,
-  timeline_id: TimelineId,
-  generation: AttachmentGeneration
-  keys: Vec<String>,
-}
-```
+The important take-away with any of the above is that it's not
+disastrous to leak objects in exceptional circumstances.
 
 #### Operations that may skip the queue
 
-Deletions of an entire timeline are exempt from generation number validation. Once the
+Deletions of an entire timeline are [exempt](#Timeline-Deletion) from generation number validation. Once the
 control plane sends the deletion request, there is no requirement to retain the readability
 of any data within the timeline, and all objects within the timeline path may be deleted
 at any time from the control plane's deletion request onwards.
