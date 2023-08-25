@@ -804,9 +804,8 @@ The choice is motivated by object listing, since one can list by prefix but not
 suffix.
 
 In [finding remote indices](#finding-the-remote-indices-for-timelines), we rely
-on being able to do a prefix listing for `<tenant>/<timeline>/index_part.json*`:
-we don't care about listing layers within a particular generation, and if
-we already know the index generation we would GET the index directly.
+on being able to do a prefix listing for `<tenant>/<timeline>/index_part.json*`.
+That relies on the prefix listing.
 
 The converse case of using a generation prefix and listing by generation is
 not needed: one could imagine listing by generation while scrubbing (so that
