@@ -268,7 +268,7 @@ impl FileCacheState {
             .context("failed to extract max file cache size from query result")?;
 
         let max_mb = max_bytes / MiB;
-        let num_mb = (num_bytes / MiB).max(max_mb);
+        let num_mb = (num_bytes / MiB).min(max_mb);
 
         let capped = if num_bytes > max_bytes {
             " (capped by maximum size)"
