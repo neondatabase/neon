@@ -903,7 +903,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ promote-images, tag ]
+    needs: [ tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
