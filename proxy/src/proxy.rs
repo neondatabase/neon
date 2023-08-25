@@ -101,15 +101,18 @@ pub async fn task_main(
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
-                let mut socket = WithClientIp::new(socket);
-                let peer_addr = socket.wait_for_socket().await?.unwrap_or(peer_addr);
+                let (socket, _) = accept_result?;
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
                 connections.spawn(
                     async move {
                         info!("accepted postgres client connection");
+
+                        let mut socket = WithClientIp::new(socket);
+                        if let Some(ip) = socket.wait_for_socket().await? {
+                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                        }
 
                         socket
                             .inner
@@ -118,7 +121,7 @@ pub async fn task_main(
 
                         handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
                     }
-                    .instrument(info_span!("handle_client", ?session_id, %peer_addr))
+                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
                         error!(?session_id, "per-client task finished with an error: {e:#}");
