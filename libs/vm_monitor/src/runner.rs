@@ -408,7 +408,9 @@ impl Runner {
                 // there is a message from the informant
                 msg = self.dispatcher.source.next() => {
                     if let Some(msg) = msg {
-                        info!(message = ?msg, "received message");
+                        // Don't use 'message' as a key as the string also uses
+                        // that for its key
+                        info!(?msg, "received message");
                         match msg {
                             Ok(msg) => {
                                 let message: InboundMsg = match msg {
@@ -417,7 +419,9 @@ impl Runner {
                                     }
                                     other => {
                                         warn!(
-                                            message = ?other,
+                                            // Don't use 'message' as a key as the
+                                            // string also uses that for its key
+                                            msg = ?other,
                                             "informant should only send text messages but received different type"
                                         );
                                         continue
@@ -429,7 +433,7 @@ impl Runner {
                                     Ok(None) => continue,
                                     Err(e) => {
                                         let error = e.to_string();
-                                        warn!(%error, "error handling message");
+                                        warn!(?error, "error handling message");
                                         OutboundMsg::new(
                                             OutboundMsgKind::InternalError {
                                                 error

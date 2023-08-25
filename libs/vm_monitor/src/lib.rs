@@ -200,6 +200,6 @@ async fn start_monitor(
 
     match monitor.run().await {
         Ok(()) => info!("monitor was killed due to new connection"),
-        Err(e) => error!(error = ?e, "monitor terminated by itself"),
+        Err(e) => error!(error = ?e, "monitor terminated unexpectedly"),
     }
 }
