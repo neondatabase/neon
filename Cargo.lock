@@ -2615,6 +2615,7 @@ dependencies = [
  "consumption_metrics",
  "crc32c",
  "criterion",
+ "crossbeam-channel",
  "crossbeam-utils",
  "either",
  "enum-map",

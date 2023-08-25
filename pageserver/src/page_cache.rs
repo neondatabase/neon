@@ -82,6 +82,7 @@ use std::{
 };
 
 use anyhow::Context;
+use crossbeam_channel::{Receiver, Sender};
 use once_cell::sync::OnceCell;
 use utils::{
     id::{TenantId, TimelineId},
@@ -233,6 +234,9 @@ pub struct PageCache {
     next_evict_slot: AtomicUsize,
 
     size_metrics: &'static PageCacheSizeMetrics,
+
+    /// Upcoming evictions
+    queued_file_evictions: (Sender<FileId>, Receiver<FileId>),
 }
 
 ///
@@ -431,13 +435,20 @@ impl PageCache {
         self.lock_for_read(&mut cache_key)
     }
 
-    /// Immediately drop all buffers belonging to given file
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
+    /// Schedule the buffers belonging to the given file for eviction
+    pub fn enqueue_buffer_drops_for_immutable(&self, drop_file_id: FileId) {
+        self.queued_file_evictions
+            .0
+            .send(drop_file_id)
+            .expect("page cache destroyed while trying to send");
+    }
 
-            let mut inner = slot.inner.write().unwrap();
-            if let Some(key) = &inner.key {
+    fn empty_queued_file_evictions(&self) {
+        while let Ok(drop_file_id) = self.queued_file_evictions.1.try_recv() {
+            // Drop all buffers belonging to given file
+            for slot in self.slots.iter() {
+                let mut inner = slot.inner.write().unwrap();
+                let Some(key) = &inner.key else { continue };
                 match key {
                     CacheKey::ImmutableFilePage { file_id, blkno: _ }
                         if *file_id == drop_file_id =>
@@ -779,6 +790,7 @@ impl PageCache {
     ///
     /// On return, the slot is empty and write-locked.
     fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
+        self.empty_queued_file_evictions();
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -852,6 +864,7 @@ impl PageCache {
             slots,
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
+            queued_file_evictions: crossbeam_channel::unbounded(),
         }
     }
 }

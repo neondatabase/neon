@@ -24,6 +24,7 @@ const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
+crossbeam-channel.workspace = true
 either.workspace = true
 flate2.workspace = true
 fail.workspace = true
