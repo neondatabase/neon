@@ -549,7 +549,7 @@ that, we may implement some other top-level scrub of timelines in
 an external tool, to identify any tenant/timeline paths that are not found
 in the control plane database.
 
-Examples:
+#### Examples
 
 - Deletion, node restarts partway through:
   - By the time we returned 204, we have written a remote delete marker
