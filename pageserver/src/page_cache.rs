@@ -816,6 +816,8 @@ impl PageCache {
     fn new(num_pages: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
+        // We use Box::leak here and into_boxed_slice to avoid leaking uninitialized
+        // memory that Vec's might contain.
         let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
