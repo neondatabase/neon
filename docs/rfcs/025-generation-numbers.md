@@ -724,10 +724,11 @@ operations:
 Item 1. would mean that some in-place restarts that previously would have resumed service even if the control plane were
 unavailable, will now not resume service to users until the control plane is available. We could
 avoid this by having a timeout on communication with the control plane, and after some timeout,
-resume service with the node's previous generation (assuming this was persisted to disk). However,
+resume service with the previous generation numbers (assuming this was persisted to disk). However,
 this is unlikely to be needed as the control plane is already an essential & highly available component. Also, having a node re-use an old generation number would complicate
-reasoning about the system, as it would break the invariant that one (node_id, generation)
-tuple uniquely identifies one process lifetime -- it is not recommended to implement this.
+reasoning about the system, as it would break the invariant that a generation number uniquely identifies
+a tenant's attachment to a given pageserver _process_: it would merely identify the tenant's attachment
+to the pageserver _machine_ or its _on-disk-state_.
 
 Item 2. is a non-issue operationally: it's harmless to delay deletions, the only impact of objects pending deletion is
 the S3 capacity cost.
