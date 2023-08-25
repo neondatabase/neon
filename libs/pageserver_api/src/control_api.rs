@@ -8,8 +8,8 @@ use utils::id::{NodeId, TenantId};
 /// See docs/rfcs/025-generation-numbers.md
 
 #[derive(Serialize, Deserialize)]
-struct ReAttachRequest {
-    node_id: NodeId,
+pub struct ReAttachRequest {
+    pub node_id: NodeId,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -19,8 +19,8 @@ pub struct ReAttachResponseTenant {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ReAttachResponse {
-    tenants: Vec<ReAttachResponseTenant>,
+pub struct ReAttachResponse {
+    pub tenants: Vec<ReAttachResponseTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,13 +30,13 @@ pub struct ValidateRequestTenant {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateRequest {
-    tenants: Vec<ValidateRequestTenant>,
+pub struct ValidateRequest {
+    pub tenants: Vec<ValidateRequestTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ValidateResponse {
-    tenants: Vec<ValidateResponseTenant>,
+pub struct ValidateResponse {
+    pub tenants: Vec<ValidateResponseTenant>,
 }
 
 #[derive(Serialize, Deserialize)]
