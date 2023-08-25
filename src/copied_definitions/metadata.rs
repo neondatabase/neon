@@ -1,0 +1,282 @@
+//! Every image of a certain timeline from [`crate::tenant::Tenant`]
+//! has a metadata that needs to be stored persistently.
+//!
+//! Later, the file gets is used in [`crate::remote_storage::storage_sync`] as a part of
+//! external storage import and export operations.
+//!
+//! The module contains all structs and related helper methods related to timeline metadata.
+
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+use tracing::info_span;
+
+use crate::copied_definitions::bin_ser::BeSer;
+
+use super::id::{TenantId, TimelineId};
+use super::lsn::Lsn;
+
+/// Use special format number to enable backward compatibility.
+const METADATA_FORMAT_VERSION: u16 = 4;
+
+/// Previous supported format versions.
+const METADATA_OLD_FORMAT_VERSION: u16 = 3;
+
+/// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
+///
+/// This is the same assumption that PostgreSQL makes with the control file,
+/// see PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SIZE: usize = 512;
+
+/// Metadata stored on disk for each timeline
+///
+/// The fields correspond to the values we hold in memory, in Timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineMetadata {
+    hdr: TimelineMetadataHeader,
+    body: TimelineMetadataBodyV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineMetadataHeader {
+    checksum: u32,       // CRC of serialized metadata body
+    size: u16,           // size of serialized metadata
+    format_version: u16, // metadata format version (used for compatibility checks)
+}
+const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineMetadataBodyV2 {
+    disk_consistent_lsn: Lsn,
+    // This is only set if we know it. We track it in memory when the page
+    // server is running, but we only track the value corresponding to
+    // 'last_record_lsn', not 'disk_consistent_lsn' which can lag behind by a
+    // lot. We only store it in the metadata file when we flush *all* the
+    // in-memory data so that 'last_record_lsn' is the same as
+    // 'disk_consistent_lsn'.  That's OK, because after page server restart, as
+    // soon as we reprocess at least one record, we will have a valid
+    // 'prev_record_lsn' value in memory again. This is only really needed when
+    // doing a clean shutdown, so that there is no more WAL beyond
+    // 'disk_consistent_lsn'
+    prev_record_lsn: Option<Lsn>,
+    ancestor_timeline: Option<TimelineId>,
+    ancestor_lsn: Lsn,
+    latest_gc_cutoff_lsn: Lsn,
+    initdb_lsn: Lsn,
+    pg_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineMetadataBodyV1 {
+    disk_consistent_lsn: Lsn,
+    // This is only set if we know it. We track it in memory when the page
+    // server is running, but we only track the value corresponding to
+    // 'last_record_lsn', not 'disk_consistent_lsn' which can lag behind by a
+    // lot. We only store it in the metadata file when we flush *all* the
+    // in-memory data so that 'last_record_lsn' is the same as
+    // 'disk_consistent_lsn'.  That's OK, because after page server restart, as
+    // soon as we reprocess at least one record, we will have a valid
+    // 'prev_record_lsn' value in memory again. This is only really needed when
+    // doing a clean shutdown, so that there is no more WAL beyond
+    // 'disk_consistent_lsn'
+    prev_record_lsn: Option<Lsn>,
+    ancestor_timeline: Option<TimelineId>,
+    ancestor_lsn: Lsn,
+    latest_gc_cutoff_lsn: Lsn,
+    initdb_lsn: Lsn,
+}
+
+impl TimelineMetadata {
+    pub fn new(
+        disk_consistent_lsn: Lsn,
+        prev_record_lsn: Option<Lsn>,
+        ancestor_timeline: Option<TimelineId>,
+        ancestor_lsn: Lsn,
+        latest_gc_cutoff_lsn: Lsn,
+        initdb_lsn: Lsn,
+        pg_version: u32,
+    ) -> Self {
+        Self {
+            hdr: TimelineMetadataHeader {
+                checksum: 0,
+                size: 0,
+                format_version: METADATA_FORMAT_VERSION,
+            },
+            body: TimelineMetadataBodyV2 {
+                disk_consistent_lsn,
+                prev_record_lsn,
+                ancestor_timeline,
+                ancestor_lsn,
+                latest_gc_cutoff_lsn,
+                initdb_lsn,
+                pg_version,
+            },
+        }
+    }
+
+    fn upgrade_timeline_metadata(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut hdr = TimelineMetadataHeader::des(&metadata_bytes[0..METADATA_HDR_SIZE])?;
+
+        // backward compatible only up to this version
+        assert!(
+            hdr.format_version == METADATA_OLD_FORMAT_VERSION,
+            "unsupported metadata format version {}",
+            hdr.format_version
+        );
+
+        let metadata_size = hdr.size as usize;
+
+        let body: TimelineMetadataBodyV1 =
+            TimelineMetadataBodyV1::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
+
+        let body = TimelineMetadataBodyV2 {
+            disk_consistent_lsn: body.disk_consistent_lsn,
+            prev_record_lsn: body.prev_record_lsn,
+            ancestor_timeline: body.ancestor_timeline,
+            ancestor_lsn: body.ancestor_lsn,
+            latest_gc_cutoff_lsn: body.latest_gc_cutoff_lsn,
+            initdb_lsn: body.initdb_lsn,
+            pg_version: 14, // All timelines created before this version had pg_version 14
+        };
+
+        hdr.format_version = METADATA_FORMAT_VERSION;
+
+        Ok(Self { hdr, body })
+    }
+
+    pub fn from_bytes(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
+        assert!(
+            metadata_bytes.len() == METADATA_MAX_SIZE,
+            "metadata bytes size is wrong"
+        );
+        let hdr = TimelineMetadataHeader::des(&metadata_bytes[0..METADATA_HDR_SIZE])?;
+
+        let metadata_size = hdr.size as usize;
+        assert!(
+            metadata_size <= METADATA_MAX_SIZE,
+            "corrupted metadata file"
+        );
+        let calculated_checksum = crc32c::crc32c(&metadata_bytes[METADATA_HDR_SIZE..metadata_size]);
+        assert!(
+            hdr.checksum == calculated_checksum,
+            "metadata checksum mismatch"
+        );
+
+        if hdr.format_version != METADATA_FORMAT_VERSION {
+            // If metadata has the old format,
+            // upgrade it and return the result
+            TimelineMetadata::upgrade_timeline_metadata(metadata_bytes)
+        } else {
+            let body =
+                TimelineMetadataBodyV2::des(&metadata_bytes[METADATA_HDR_SIZE..metadata_size])?;
+            assert!(
+                body.disk_consistent_lsn.is_aligned(),
+                "disk_consistent_lsn is not aligned"
+            );
+            Ok(TimelineMetadata { hdr, body })
+        }
+    }
+
+    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let body_bytes = self.body.ser()?;
+        let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+        let hdr = TimelineMetadataHeader {
+            size: metadata_size as u16,
+            format_version: METADATA_FORMAT_VERSION,
+            checksum: crc32c::crc32c(&body_bytes),
+        };
+        let hdr_bytes = hdr.ser()?;
+        let mut metadata_bytes = vec![0u8; METADATA_MAX_SIZE];
+        metadata_bytes[0..METADATA_HDR_SIZE].copy_from_slice(&hdr_bytes);
+        metadata_bytes[METADATA_HDR_SIZE..metadata_size].copy_from_slice(&body_bytes);
+        Ok(metadata_bytes)
+    }
+
+    /// [`Lsn`] that corresponds to the corresponding timeline directory
+    /// contents, stored locally in the pageserver workdir.
+    pub fn disk_consistent_lsn(&self) -> Lsn {
+        self.body.disk_consistent_lsn
+    }
+
+    pub fn prev_record_lsn(&self) -> Option<Lsn> {
+        self.body.prev_record_lsn
+    }
+
+    pub fn ancestor_timeline(&self) -> Option<TimelineId> {
+        self.body.ancestor_timeline
+    }
+
+    pub fn ancestor_lsn(&self) -> Lsn {
+        self.body.ancestor_lsn
+    }
+
+    pub fn latest_gc_cutoff_lsn(&self) -> Lsn {
+        self.body.latest_gc_cutoff_lsn
+    }
+
+    pub fn initdb_lsn(&self) -> Lsn {
+        self.body.initdb_lsn
+    }
+
+    pub fn pg_version(&self) -> u32 {
+        self.body.pg_version
+    }
+}
+
+/// Save timeline metadata to file
+pub fn save_metadata(
+    metadata_path: &Path,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
+    data: &TimelineMetadata,
+    first_save: bool,
+) -> anyhow::Result<()> {
+    let _enter = info_span!("saving metadata").entered();
+    // use OpenOptions to ensure file presence is consistent with first_save
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(first_save)
+        .open(metadata_path)
+        .context("open_with_options")?;
+
+    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
+
+    if file.write(&metadata_bytes)? != metadata_bytes.len() {
+        anyhow::bail!("Could not write all the metadata bytes in a single call");
+    }
+    file.sync_all()?;
+
+    // fsync the parent directory to ensure the directory entry is durable
+    if first_save {
+        let timeline_dir = File::open(
+            metadata_path
+                .parent()
+                .expect("Metadata should always have a parent dir"),
+        )?;
+        timeline_dir.sync_all()?;
+    }
+
+    Ok(())
+}
+
+pub fn load_metadata(
+    metadata_path: &Path,
+    timeline_id: TimelineId,
+    tenant_id: TenantId,
+) -> anyhow::Result<TimelineMetadata> {
+    let metadata_bytes = std::fs::read(metadata_path).with_context(|| {
+        format!(
+            "Failed to read metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })?;
+    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
+        format!(
+            "Failed to parse metadata bytes from path {}",
+            metadata_path.display()
+        )
+    })
+}
