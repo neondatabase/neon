@@ -936,7 +936,8 @@ a tenant briefly, serving reads from the old node while waiting for the new node
 
 This RFC enables that double-attachment: two nodes may be attached at the same time, with the migration destination
 having a higher generation number. The old node will be able to ingest and serve reads, but not
-do any deletes. The new node's attachment must also avoid doing deletes, a new piece of state
+do any deletes. The new node's attachment must also avoid deleting layers that the old node may
+still use. A new piece of state
 will be needed for this in the control plane's definition of an attachment.
 
 ## Warm secondary locations
