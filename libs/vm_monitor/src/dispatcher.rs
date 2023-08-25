@@ -111,9 +111,7 @@ impl Dispatcher {
                     .unwrap(),
                 ))
                 .await
-                .context(
-                    "failed to notify agent of no overlap between protocol version ranges",
-                )?;
+                .context("failed to notify agent of no overlap between protocol version ranges")?;
                 Err(e).context("error determining suitable protocol version range")?
             }
         };
