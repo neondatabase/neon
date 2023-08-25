@@ -410,7 +410,7 @@ impl Runner {
                     if let Some(msg) = msg {
                         // Don't use 'message' as a key as the string also uses
                         // that for its key
-                        info!(inbound_message = ?msg, "received message");
+                        info!(?msg, "received message");
                         match msg {
                             Ok(msg) => {
                                 let message: InboundMsg = match msg {
@@ -421,7 +421,7 @@ impl Runner {
                                         warn!(
                                             // Don't use 'message' as a key as the
                                             // string also uses that for its key
-                                            unknown = ?other,
+                                            msg = ?other,
                                             "informant should only send text messages but received different type"
                                         );
                                         continue
