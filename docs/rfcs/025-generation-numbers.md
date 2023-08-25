@@ -867,11 +867,10 @@ to S3.
 
 1. Let's say node 0 becomes unresponsive in a cluster of three nodes 0, 1, 2.
 2. Some external mechanism notices that the node is unavailable and initiates
-   movement of all tenants attached to that node to a different node. In
-   this example it would mean incrementing the attachment generation
-   of all tenants that were attached to node 0, and attaching them
-   to node 1 or 2 based on some distribution rule (this might be round
-   robin, or capacity based).
+   movement of all tenants attached to that node to a different node according
+   to some distribution rule.
+   In this example, it would mean incrementing the generation
+   of all tenants that were attached to node 0, as each tenant's assigned pageserver changes.
 3. A tenant which is now attached to node 1 will _also_ still be attached to node
    0, from the perspective of node 0. Node 0 will still be using its old generation,
    node 1 will be using a newer generation.
@@ -880,7 +879,8 @@ to S3.
    after the new attachment was created do not matter from the rest of the system's
    perspective: the endpoints are reading from the new attachment location. Objects
    written by node 0 are just garbage that can be cleaned up at leisure. Node 0 will
-   not do any deletions because it can't synchronize with control plane, or if it could, it would be informed that is no longer the most recent generation and hence not do the garbage collection.
+   not do any deletions because it can't synchronize with control plane, or if it could,
+   its deletion queue processing would get errors for the validation requests.
 
 Node 0 is not "failed" per-se in this situation: if it becomes responsive again,
 then the control plane may detach the tenants that have been re-attached
@@ -897,7 +897,7 @@ that is attached to the replacement VM/container.
 2. Some external mechanism notices that the node is unavailable, and creates
    a "new node 0" (Node 0b) which is a physically separate server. The original node 0
    (Node 0a) may still be running, because we do not assume the environment fences nodes.
-3. On startup, node 0b re-attaches and gets higher attachment generations for
+3. On startup, node 0b re-attaches and gets higher generation numbers for
    all tenants.
 4. S3 writes continue from nodes 0a and 0b, but the writes do not collide due to different
    generation in the suffix, and the writes from node 0a are not visible to the rest
