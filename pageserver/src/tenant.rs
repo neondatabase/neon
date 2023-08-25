@@ -698,10 +698,7 @@ impl Tenant {
             debug!("successfully downloaded index part for timeline {timeline_id}");
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
-                    timeline_ancestors.insert(
-                        timeline_id,
-                        index_part.parse_metadata().context("parse_metadata")?,
-                    );
+                    timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
                 MaybeDeletedIndexPart::Deleted(index_part) => {
@@ -752,7 +749,7 @@ impl Tenant {
             DeleteTimelineFlow::resume_deletion(
                 Arc::clone(self),
                 timeline_id,
-                &index_part.parse_metadata().context("parse_metadata")?,
+                &index_part.metadata,
                 Some(remote_timeline_client),
                 None,
             )
@@ -1314,10 +1311,7 @@ impl Tenant {
                         }
                     };
 
-                    let remote_metadata = index_part
-                        .parse_metadata()
-                        .context("parse_metadata")
-                        .map_err(LoadLocalTimelineError::Load)?;
+                    let remote_metadata = index_part.metadata.clone();
                     (
                         Some(RemoteStartupData {
                             index_part,
@@ -4107,7 +4101,7 @@ mod tests {
         let mut found_error_message = false;
         let mut err_source = err.source();
         while let Some(source) = err_source {
-            if source.to_string() == "metadata checksum mismatch" {
+            if source.to_string().contains("metadata checksum mismatch") {
                 found_error_message = true;
                 break;
             }

@@ -541,8 +541,7 @@ impl RemoteTimelineClient {
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.latest_metadata = metadata.clone();
 
-        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
-        self.schedule_index_upload(upload_queue, metadata_bytes);
+        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
 
         Ok(())
     }
@@ -562,8 +561,7 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
-            self.schedule_index_upload(upload_queue, metadata_bytes);
+            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
         }
 
         Ok(())
@@ -573,7 +571,7 @@ impl RemoteTimelineClient {
     fn schedule_index_upload(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        metadata_bytes: Vec<u8>,
+        metadata: TimelineMetadata,
     ) {
         info!(
             "scheduling metadata upload with {} files ({} changed)",
@@ -586,7 +584,7 @@ impl RemoteTimelineClient {
         let index_part = IndexPart::new(
             upload_queue.latest_files.clone(),
             disk_consistent_lsn,
-            metadata_bytes,
+            metadata,
         );
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
         self.calls_unfinished_metric_begin(&op);
@@ -642,7 +640,7 @@ impl RemoteTimelineClient {
 
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
         // so we don't need update it. Just serialize it.
-        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+        let metadata = upload_queue.latest_metadata.clone();
 
         // Update the remote index file, removing the to-be-deleted files from the index,
         // before deleting the actual files.
@@ -658,7 +656,7 @@ impl RemoteTimelineClient {
             }
 
             if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-                self.schedule_index_upload(upload_queue, metadata_bytes);
+                self.schedule_index_upload(upload_queue, metadata);
             }
 
             // schedule the actual deletions
@@ -1610,8 +1608,7 @@ mod tests {
                 &layer_file_name_2.file_name(),
             ],
         );
-        let downloaded_metadata = index_part.parse_metadata().unwrap();
-        assert_eq!(downloaded_metadata, metadata);
+        assert_eq!(index_part.metadata, metadata);
 
         // Schedule upload and then a deletion. Check that the deletion is queued
         client
