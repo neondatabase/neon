@@ -803,9 +803,9 @@ An orphan object is any object which is no longer referenced by a running node o
 
 Examples of how orphan objects arise:
 
-- A node is doing compaction and writes a layer object, then crashes before it writes the
+- A node PUTs a layer object, then crashes before it writes the
   index_part.json that references that layer.
-- A partition node carries on running for some time, and writes out an unbounded number of
+- A stale node carries on running for some time, and writes out an unbounded number of
   objects while it believes itself to be the rightful writer for a tenant.
 - A pageserver crashes between un-linking an object from the index, and persisting
   the object to its deletion queue.
