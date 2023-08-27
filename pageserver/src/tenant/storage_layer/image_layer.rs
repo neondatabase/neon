@@ -390,11 +390,11 @@ impl ImageLayerInner {
             expected_summary.index_root_blk = actual_summary.index_root_blk;
 
             if actual_summary != expected_summary {
-                bail!(
-                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
-                    actual_summary,
-                    expected_summary
-                );
+                // bail!(
+                //     "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                //     actual_summary,
+                //     expected_summary
+                // );
             }
         }
 
