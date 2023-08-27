@@ -4900,6 +4900,7 @@ dependencies = [
  "nix",
  "once_cell",
  "pin-project-lite",
+ "postgres_connection",
  "pq_proto",
  "rand",
  "regex",
