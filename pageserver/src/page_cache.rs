@@ -77,7 +77,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
+        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError, TryLockResult,
     },
 };
 
@@ -430,7 +430,27 @@ impl PageCache {
         for slot_idx in 0..self.slots.len() {
             let slot = &self.slots[slot_idx];
 
-            let mut inner = slot.inner.write().unwrap();
+            let mut inner = match slot.inner.try_write() {
+                TryLockResult::Ok(guard) => guard,
+                TryLockResult::Err(e @ TryLockError::Poisoned(_)) => {
+                    panic!("slot lock {slot_idx} poisoned: {e:?}")
+                }
+                TryLockResult::Err(TryLockError::WouldBlock) => {
+                    // This function is only called from the `Drop` impl of EphemeralFile.
+                    // So, there shouldn't be any page cache users that are reading from
+                    // that EphemeralFile anymore, because,
+                    // 1. EphemeralFile doesn't hand out page cache read guards and
+                    // 2. there can't be any concurrent `EphemeralFile::reads`s because it's being dropped.
+                    //
+                    // So, the only reason why the page is locked right now is `find_victim`
+                    // trying to claim this page.
+                    //
+                    // Avoid waiting and keep the page in the cache.
+                    // Sooner or later it'll become a victim and get evicted.
+                    continue;
+                }
+            };
+
             if let Some(key) = &inner.key {
                 match key {
                     CacheKey::ImmutableFilePage { file_id, blkno: _ }

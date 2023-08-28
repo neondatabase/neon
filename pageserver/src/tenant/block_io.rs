@@ -36,7 +36,7 @@ where
 
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
-    PageReadGuard(PageReadGuard<'static>),
+    PageReadGuard(PageReadGuard<'a>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),

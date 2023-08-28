@@ -848,6 +848,7 @@ impl DeltaLayerInner {
 
         let summary_blk = file.read_blk(0)?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        drop(summary_blk);
 
         if let Some(mut expected_summary) = summary {
             // production code path
