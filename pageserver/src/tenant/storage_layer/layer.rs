@@ -770,7 +770,7 @@ impl LayerInner {
     }
 
     fn is_file_present_and_good_size(&self, m: &std::fs::Metadata) -> Result<(), NeedsDownload> {
-        // in future, this should include sha2-256 the file.
+        // in future, this should include sha2-256 of the file.
         if !m.is_file() {
             Err(NeedsDownload::NotFile)
         } else if m.len() != self.desc.file_size {
