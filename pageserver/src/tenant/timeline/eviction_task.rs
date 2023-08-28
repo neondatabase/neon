@@ -270,7 +270,6 @@ impl Timeline {
             Ok(results) => results,
         };
         assert_eq!(results.len(), candidates.len());
-        drop(candidates);
         for result in results {
             match result {
                 None => {
