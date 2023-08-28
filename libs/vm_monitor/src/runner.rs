@@ -1,4 +1,4 @@
-//! Exposes the `Runner`, which handles messages received from informant and
+//! Exposes the `Runner`, which handles messages received from agent and
 //! sends upscale requests.
 //!
 //! This is the "Monitor" part of the monitor binary and is the main entrypoint for
@@ -21,8 +21,8 @@ use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
 use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
 
-/// Central struct that interacts with informant, dispatcher, and cgroup to handle
-/// signals from the informant.
+/// Central struct that interacts with agent, dispatcher, and cgroup to handle
+/// signals from the agent.
 #[derive(Debug)]
 pub struct Runner {
     config: Config,
@@ -371,7 +371,7 @@ impl Runner {
                 Ok(None)
             }
             InboundMsgKind::InternalError { error } => {
-                warn!(error, id, "informant experienced an internal error");
+                warn!(error, id, "agent experienced an internal error");
                 Ok(None)
             }
             InboundMsgKind::HealthCheck {} => {
@@ -405,7 +405,7 @@ impl Runner {
                         .await
                         .context("failed to send message")?;
                 }
-                // there is a message from the informant
+                // there is a message from the agent
                 msg = self.dispatcher.source.next() => {
                     if let Some(msg) = msg {
                         // Don't use 'message' as a key as the string also uses
@@ -422,7 +422,7 @@ impl Runner {
                                             // Don't use 'message' as a key as the
                                             // string also uses that for its key
                                             msg = ?other,
-                                            "informant should only send text messages but received different type"
+                                            "agent should only send text messages but received different type"
                                         );
                                         continue
                                     },

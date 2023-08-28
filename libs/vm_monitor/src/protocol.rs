@@ -1,13 +1,13 @@
-//! Types representing protocols and actual informant-monitor messages.
+//! Types representing protocols and actual agent-monitor messages.
 //!
 //! The pervasive use of serde modifiers throughout this module is to ease
 //! serialization on the go side. Because go does not have enums (which model
 //! messages well), it is harder to model messages, and we accomodate that with
 //! serde.
 //!
-//! *Note*: the informant sends and receives messages in different ways.
+//! *Note*: the agent sends and receives messages in different ways.
 //!
-//! The informant serializes messages in the form and then sends them. The use
+//! The agent serializes messages in the form and then sends them. The use
 //! of `#[serde(tag = "type", content = "content")]` allows us to use `Type`
 //! to determine how to deserialize `Content`.
 //! ```ignore
@@ -25,9 +25,9 @@
 //!     Id   uint64
 //! }
 //! ```
-//! After reading the type field, the informant will decode the entire message
+//! After reading the type field, the agent will decode the entire message
 //! again, this time into the correct type using the embedded fields.
-//! Because the informant cannot just extract the json contained in a certain field
+//! Because the agent cannot just extract the json contained in a certain field
 //! (it initially deserializes to `map[string]interface{}`), we keep the fields
 //! at the top level, so the entire piece of json can be deserialized into a struct,
 //! such as a `DownscaleResult`, with the `Type` and `Id` fields ignored.
@@ -37,7 +37,7 @@ use std::cmp;
 
 use serde::{de::Error, Deserialize, Serialize};
 
-/// A Message we send to the informant.
+/// A Message we send to the agent.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OutboundMsg {
     #[serde(flatten)]
@@ -51,31 +51,31 @@ impl OutboundMsg {
     }
 }
 
-/// The different underlying message types we can send to the informant.
+/// The different underlying message types we can send to the agent.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum OutboundMsgKind {
-    /// Indicates that the informant sent an invalid message, i.e, we couldn't
+    /// Indicates that the agent sent an invalid message, i.e, we couldn't
     /// properly deserialize it.
     InvalidMessage { error: String },
     /// Indicates that we experienced an internal error while processing a message.
     /// For example, if a cgroup operation fails while trying to handle an upscale,
     /// we return `InternalError`.
     InternalError { error: String },
-    /// Returned to the informant once we have finished handling an upscale. If the
+    /// Returned to the agent once we have finished handling an upscale. If the
     /// handling was unsuccessful, an `InternalError` will get returned instead.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     UpscaleConfirmation {},
     /// Indicates to the monitor that we are urgently requesting resources.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     UpscaleRequest {},
-    /// Returned to the informant once we have finished attempting to downscale. If
+    /// Returned to the agent once we have finished attempting to downscale. If
     /// an error occured trying to do so, an `InternalError` will get returned instead.
     /// However, if we are simply unsuccessful (for example, do to needing the resources),
     /// that gets included in the `DownscaleResult`.
     DownscaleResult {
         // FIXME for the future (once the informant is deprecated)
-        // As of the time of writing, the informant/agent version of this struct is
+        // As of the time of writing, the agent/informant version of this struct is
         // called api.DownscaleResult. This struct has uppercase fields which are
         // serialized as such. Thus, we serialize using uppercase names so we don't
         // have to make a breaking change to the agent<->informant protocol. Once
@@ -88,12 +88,12 @@ pub enum OutboundMsgKind {
         status: String,
     },
     /// Part of the bidirectional heartbeat. The heartbeat is initiated by the
-    /// informant.
+    /// agent.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     HealthCheck {},
 }
 
-/// A message received form the informant.
+/// A message received form the agent.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InboundMsg {
     #[serde(flatten)]
@@ -101,7 +101,7 @@ pub struct InboundMsg {
     pub(crate) id: usize,
 }
 
-/// The different underlying message types we can receive from the informant.
+/// The different underlying message types we can receive from the agent.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "content")]
 pub enum InboundMsgKind {
@@ -120,14 +120,14 @@ pub enum InboundMsgKind {
     /// when done.
     DownscaleRequest { target: Resources },
     /// Part of the bidirectional heartbeat. The heartbeat is initiated by the
-    /// informant.
+    /// agent.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     HealthCheck {},
 }
 
 /// Represents the resources granted to a VM.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-// Renamed because the agent/informant has multiple resources types:
+// Renamed because the agent has multiple resources types:
 // `Resources` (milliCPU/memory slots)
 // `Allocation` (vCPU/bytes) <- what we correspond to
 #[serde(rename(serialize = "Allocation", deserialize = "Allocation"))]
@@ -151,7 +151,7 @@ pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion::V1_0;
 pub struct ProtocolVersion(u8);
 
 impl ProtocolVersion {
-    /// Represents v1.0 of the informant<-> monitor protocol - the initial version
+    /// Represents v1.0 of the agent<-> monitor protocol - the initial version
     ///
     /// Currently the latest version.
     const V1_0: ProtocolVersion = ProtocolVersion(1);

@@ -146,7 +146,7 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
 
 /// Handles incoming websocket connections.
 ///
-/// If we are already to connected to an informant, we kill that old connection
+/// If we are already to connected to an agent, we kill that old connection
 /// and accept the new one.
 #[tracing::instrument(name = "/monitor", skip_all, fields(?args))]
 pub async fn ws_handler(
@@ -196,7 +196,7 @@ async fn start_monitor(
             return;
         }
     };
-    info!("connected to informant");
+    info!("connected to agent");
 
     match monitor.run().await {
         Ok(()) => info!("monitor was killed due to new connection"),

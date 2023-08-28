@@ -1,7 +1,7 @@
 //! Managing the websocket connection and other signals in the monitor.
 //!
 //! Contains types that manage the interaction (not data interchange, see `protocol`)
-//! between informant and monitor, allowing us to to process and send messages in a
+//! between agent and monitor, allowing us to to process and send messages in a
 //! straightforward way. The dispatcher also manages that signals that come from
 //! the cgroup (requesting upscale), and the signals that go to the cgroup
 //! (notifying it of upscale).
@@ -24,16 +24,16 @@ use crate::protocol::{
 /// The central handler for all communications in the monitor.
 ///
 /// The dispatcher has two purposes:
-/// 1. Manage the connection to the informant, sending and receiving messages.
+/// 1. Manage the connection to the agent, sending and receiving messages.
 /// 2. Communicate with the cgroup manager, notifying it when upscale is received,
-///    and sending a message to the informant when the cgroup manager requests
+///    and sending a message to the agent when the cgroup manager requests
 ///    upscale.
 #[derive(Debug)]
 pub struct Dispatcher {
-    /// We read informant messages of of `source`
+    /// We read agent messages of of `source`
     pub(crate) source: SplitStream<WebSocket>,
 
-    /// We send messages to the informant through `sink`
+    /// We send messages to the agent through `sink`
     sink: SplitSink<WebSocket, Message>,
 
     /// Used to notify the cgroup when we are upscaled.
@@ -43,7 +43,7 @@ pub struct Dispatcher {
     /// we send an `UpscaleRequst` to the agent.
     pub(crate) request_upscale_events: mpsc::Receiver<()>,
 
-    /// The protocol version we have agreed to use with the informant. This is negotiated
+    /// The protocol version we have agreed to use with the agent. This is negotiated
     /// during the creation of the dispatcher, and should be the highest shared protocol
     /// version.
     ///
@@ -56,9 +56,9 @@ pub struct Dispatcher {
 impl Dispatcher {
     /// Creates a new dispatcher using the passed-in connection.
     ///
-    /// Performs a negotiation with the informant to determine the highest protocol
+    /// Performs a negotiation with the agent to determine the highest protocol
     /// version that both support. This consists of two steps:
-    /// 1. Wait for the informant to sent the range of protocols it supports.
+    /// 1. Wait for the agent to sent the range of protocols it supports.
     /// 2. Send a protocol version that works for us as well, or an error if there
     ///    is no compatible version.
     pub async fn new(
@@ -69,7 +69,7 @@ impl Dispatcher {
         let (mut sink, mut source) = stream.split();
 
         // Figure out the highest protocol version we both support
-        info!("waiting for informant to send protocol version range");
+        info!("waiting for agent to send protocol version range");
         let Some(message) = source.next().await else {
             bail!("websocket connection closed while performing protocol handshake")
         };
@@ -79,7 +79,7 @@ impl Dispatcher {
         let Message::Text(message_text) = message else {
             // All messages should be in text form, since we don't do any
             // pinging/ponging. See nhooyr/websocket's implementation and the
-            // informant/agent for more info
+            // agent for more info
             bail!("received non-text message during proocol handshake: {message:?}")
         };
 
@@ -88,32 +88,30 @@ impl Dispatcher {
             max: PROTOCOL_MAX_VERSION,
         };
 
-        let informant_range: ProtocolRange = serde_json::from_str(&message_text)
+        let agent_range: ProtocolRange = serde_json::from_str(&message_text)
             .context("failed to deserialize protocol version range")?;
 
-        info!(range = ?informant_range, "received protocol version range");
+        info!(range = ?agent_range, "received protocol version range");
 
-        let highest_shared_version = match monitor_range.highest_shared_version(&informant_range) {
+        let highest_shared_version = match monitor_range.highest_shared_version(&agent_range) {
             Ok(version) => {
                 sink.send(Message::Text(
                     serde_json::to_string(&ProtocolResponse::Version(version)).unwrap(),
                 ))
                 .await
-                .context("failed to notify informant of negotiated protocol version")?;
+                .context("failed to notify agent of negotiated protocol version")?;
                 version
             }
             Err(e) => {
                 sink.send(Message::Text(
                     serde_json::to_string(&ProtocolResponse::Error(format!(
                         "Received protocol version range {} which does not overlap with {}",
-                        informant_range, monitor_range
+                        agent_range, monitor_range
                     )))
                     .unwrap(),
                 ))
                 .await
-                .context(
-                    "failed to notify informant of no overlap between protocol version ranges",
-                )?;
+                .context("failed to notify agent of no overlap between protocol version ranges")?;
                 Err(e).context("error determining suitable protocol version range")?
             }
         };
@@ -137,7 +135,7 @@ impl Dispatcher {
             .context("failed to send resources and oneshot sender across channel")
     }
 
-    /// Send a message to the informant.
+    /// Send a message to the agent.
     ///
     /// Although this function is small, it has one major benefit: it is the only
     /// way to send data accross the connection, and you can only pass in a proper
