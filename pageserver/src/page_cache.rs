@@ -427,11 +427,26 @@ impl PageCache {
 
     /// Immediately drop all buffers belonging to given file
     pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
-
-            let mut inner = match slot.inner.try_write() {
-                TryLockResult::Ok(guard) => guard,
+        let mut map = self.immutable_page_map.write().unwrap();
+        map.retain(|(file_id, block_no), slot_idx| {
+            if *file_id != drop_file_id {
+                return true;
+            }
+            let expect_cache_key = CacheKey::ImmutableFilePage {
+                file_id: drop_file_id,
+                blkno: *block_no,
+            };
+            let slot = &self.slots[*slot_idx];
+            match slot.inner.try_write() {
+                TryLockResult::Ok(mut inner) => {
+                    // check again, could have been taken since added to immutable_page_map
+                    if inner.key == Some(expect_cache_key) {
+                        // immutable_page_map was still in sync with reality
+                        // TODO: find a way to share code with `remove_mapping`
+                        self.size_metrics.current_bytes_immutable.sub_page_sz(1);
+                        inner.key = None;
+                    }
+                }
                 TryLockResult::Err(e @ TryLockError::Poisoned(_)) => {
                     panic!("slot lock {slot_idx} poisoned: {e:?}")
                 }
@@ -447,23 +462,10 @@ impl PageCache {
                     //
                     // Avoid waiting and keep the page in the cache.
                     // Sooner or later it'll become a victim and get evicted.
-                    continue;
-                }
-            };
-
-            if let Some(key) = &inner.key {
-                match key {
-                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
-                        if *file_id == drop_file_id =>
-                    {
-                        // remove mapping for old buffer
-                        self.remove_mapping(key);
-                        inner.key = None;
-                    }
-                    _ => {}
                 }
             }
-        }
+            return false;
+        });
     }
 
     //
