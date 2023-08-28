@@ -425,27 +425,6 @@ impl PageCache {
         self.lock_for_read(&mut cache_key)
     }
 
-    /// Immediately drop all buffers belonging to given file
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
-
-            let mut inner = slot.inner.write().unwrap();
-            if let Some(key) = &inner.key {
-                match key {
-                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
-                        if *file_id == drop_file_id =>
-                    {
-                        // remove mapping for old buffer
-                        self.remove_mapping(key);
-                        inner.key = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
     //
     // Section 2: Internal interface functions for lookup/update.
     //
