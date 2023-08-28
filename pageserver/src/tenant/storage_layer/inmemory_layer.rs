@@ -31,7 +31,6 @@ use tokio::sync::RwLock;
 
 use super::{DeltaLayerWriter, ResidentLayer};
 
-/// InMemoryLayer is always incremental.
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -213,17 +212,13 @@ impl std::fmt::Display for InMemoryLayer {
 }
 
 impl InMemoryLayer {
-    ///
     /// Get layer size.
-    ///
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
         Ok(inner.file.len())
     }
 
-    ///
     /// Create a new, empty, in-memory layer
-    ///
     pub fn create(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
