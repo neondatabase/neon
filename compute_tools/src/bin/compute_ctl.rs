@@ -278,8 +278,8 @@ fn main() -> Result<()> {
             use tokio_util::sync::CancellationToken;
             use tracing::warn;
             let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
-            let cgroup = matches.get_one::<String>("filecache-connstr");
-            let file_cache_connstr = matches.get_one::<String>("cgroup");
+            let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
+            let cgroup = matches.get_one::<String>("cgroup");
 
             // Only make a runtime if we need to.
             // Note: it seems like you can make a runtime in an inner scope and
