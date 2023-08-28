@@ -278,10 +278,10 @@ impl Layer {
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
 ///
 /// However when we want something evicted, we cannot evict it right away as there might be current
-/// reads happening on it. It has been for example searched from [`LayerMap`] but not yet
-/// [`Layer::get_value_reconstruct_data`].
+/// reads happening on it. For example: it has been searched from [`LayerMap::search`] but not yet
+/// read with [`Layer::get_value_reconstruct_data`].
 ///
-/// [`LayerMap`]: crate::tenant::layer_map::LayerMap
+/// [`LayerMap::search`]: crate::tenant::layer_map::LayerMap::search
 enum ResidentOrWantedEvicted {
     Resident(Arc<DownloadedLayer>),
     WantedEvicted(Weak<DownloadedLayer>),
