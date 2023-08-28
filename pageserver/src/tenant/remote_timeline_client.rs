@@ -651,8 +651,9 @@ impl RemoteTimelineClient {
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
             for name in names {
-                upload_queue.latest_files.remove(name);
-                upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                if upload_queue.latest_files.remove(name).is_some() {
+                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                }
             }
 
             if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
