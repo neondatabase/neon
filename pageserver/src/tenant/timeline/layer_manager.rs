@@ -283,7 +283,7 @@ impl LayerManager {
         //      map index without actually rebuilding the index.
         updates.remove_historic(desc);
         mapping.remove(&layer);
-        layer.garbage_collect();
+        layer.garbage_collect_on_drop();
 
         Ok(())
     }

@@ -200,9 +200,16 @@ impl Timeline {
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
 
-                // funny: this is the best way to get local layers is to lock them into
-                // memory for the duration of eviction
-                let Ok(guard) = hist_layer.guard_against_eviction(false).await else { continue; };
+                let guard = match hist_layer.keep_resident().await {
+                    Ok(Some(l)) => l,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        // these should not happen, but we cannot make them statically impossible right
+                        // now.
+                        tracing::warn!(layer=%hist_layer, "failed to keep the layer resident: {e:#}");
+                        continue;
+                    }
+                };
 
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.

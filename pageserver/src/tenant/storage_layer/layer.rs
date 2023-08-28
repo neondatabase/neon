@@ -216,19 +216,35 @@ impl Layer {
 
     /// Download the layer if evicted.
     ///
-    /// Will not error when it is already downloaded.
-    pub(crate) async fn get_or_download(&self) -> anyhow::Result<()> {
+    /// Will not error when the layer is already downloaded.
+    pub(crate) async fn download(&self) -> anyhow::Result<()> {
         self.0.get_or_maybe_download(true, None).await?;
         Ok(())
     }
 
-    /// Creates a guard object which prohibit evicting this layer as long as the value is kept
-    /// around.
-    pub(crate) async fn guard_against_eviction(
-        &self,
-        allow_download: bool,
-    ) -> anyhow::Result<ResidentLayer> {
-        let downloaded = self.0.get_or_maybe_download(allow_download, None).await?;
+    /// Assuming the layer is already downloaded, returns a guard which will prohibit eviction
+    /// while the guard exists.
+    ///
+    /// Returns None if the layer is currently evicted.
+    pub(crate) async fn keep_resident(&self) -> anyhow::Result<Option<ResidentLayer>> {
+        let downloaded = match self.0.get_or_maybe_download(false, None).await {
+            Ok(d) => d,
+            // technically there are a lot of possible errors, but in practice it should only be
+            // DownloadRequired which is tripped up. could work to improve this situation
+            // statically later.
+            Err(DownloadError::DownloadRequired) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        Ok(Some(ResidentLayer {
+            downloaded,
+            owner: self.clone(),
+        }))
+    }
+
+    /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
+    pub(crate) async fn download_and_keep_resident(&self) -> anyhow::Result<ResidentLayer> {
+        let downloaded = self.0.get_or_maybe_download(true, None).await?;
 
         Ok(ResidentLayer {
             downloaded,
