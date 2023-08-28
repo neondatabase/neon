@@ -26,7 +26,7 @@
 //! recovered from this file. This is tracked in
 //! <https://github.com/neondatabase/neon/issues/4418>
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::virtual_file::VirtualFile;
 use anyhow::Result;
@@ -151,11 +151,12 @@ impl Manifest {
     /// Load a manifest. Returns the manifest and a list of operations. If the manifest is corrupted,
     /// the bool flag will be set to true and the user is responsible to reconstruct a new manifest and
     /// backup the current one.
-    pub fn load(
-        mut file: VirtualFile,
+    pub async fn load(
+        file: VirtualFile,
     ) -> Result<(Self, Vec<Operation>, ManifestPartiallyCorrupted), ManifestLoadError> {
         let mut buf = vec![];
-        file.read_to_end(&mut buf).map_err(ManifestLoadError::Io)?;
+        file.read_exact_at(&mut buf, 0)
+            .map_err(ManifestLoadError::Io)?;
 
         // Read manifest header
         let mut buf = Bytes::from(buf);
@@ -241,8 +242,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_read_manifest() {
+    #[tokio::test]
+    async fn test_read_manifest() {
         let testdir = crate::config::PageServerConf::test_repo_dir("test_read_manifest");
         std::fs::create_dir_all(&testdir).unwrap();
         let file = VirtualFile::create(&testdir.join("MANIFEST")).unwrap();
@@ -274,7 +275,7 @@ mod tests {
                 .truncate(false),
         )
         .unwrap();
-        let (mut manifest, operations, corrupted) = Manifest::load(file).unwrap();
+        let (mut manifest, operations, corrupted) = Manifest::load(file).await.unwrap();
         assert!(!corrupted.0);
         assert_eq!(operations.len(), 2);
         assert_eq!(
@@ -306,7 +307,7 @@ mod tests {
                 .truncate(false),
         )
         .unwrap();
-        let (_manifest, operations, corrupted) = Manifest::load(file).unwrap();
+        let (_manifest, operations, corrupted) = Manifest::load(file).await.unwrap();
         assert!(!corrupted.0);
         assert_eq!(operations.len(), 3);
         assert_eq!(&operations[0], &Operation::Snapshot(snapshot, Lsn::from(0)));
