@@ -13,7 +13,7 @@
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -427,15 +427,6 @@ impl Drop for VirtualFile {
                 .with_label_values(&["close"])
                 .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
-    }
-}
-
-impl Read for VirtualFile {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-        let pos = self.pos;
-        let n = self.read_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
     }
 }
 
