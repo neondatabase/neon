@@ -9,7 +9,6 @@ use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
-use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
