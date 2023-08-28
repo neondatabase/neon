@@ -205,6 +205,8 @@ impl Slot {
     }
 }
 
+type ImmutablePageMap = HashMap<FileId, RwLock<HashMap<u32, usize>>>;
+
 pub struct PageCache {
     /// This contains the mapping from the cache key to buffer slot that currently
     /// contains the page, if any.
@@ -217,7 +219,7 @@ pub struct PageCache {
     /// can have a separate mapping map, next to this field.
     materialized_page_map: RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    immutable_page_map: RwLock<HashMap<(FileId, u32), usize>>,
+    immutable_page_map: RwLock<ImmutablePageMap>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -657,7 +659,9 @@ impl PageCache {
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                let block_nos = map.get(file_id)?;
+                let block_nos = block_nos.read().unwrap();
+                block_nos.get(blkno).copied()
             }
         }
     }
@@ -680,7 +684,9 @@ impl PageCache {
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
-                Some(*map.get(&(*file_id, *blkno))?)
+                let block_nos = map.get(file_id)?;
+                let block_nos = block_nos.read().unwrap();
+                block_nos.get(blkno).copied()
             }
         }
     }
@@ -712,10 +718,27 @@ impl PageCache {
                 }
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let mut map = self.immutable_page_map.write().unwrap();
-                map.remove(&(*file_id, *blkno))
-                    .expect("could not find old key in mapping");
+                let map = self.immutable_page_map.read().unwrap();
+                let block_nos = map.get(file_id).expect("could not find file_id in mapping");
+                let mut block_nos = block_nos.write().unwrap();
+                block_nos
+                    .remove(blkno)
+                    .expect("could not find blkno in mapping");
                 self.size_metrics.current_bytes_immutable.sub_page_sz(1);
+                if block_nos.is_empty() {
+                    drop(block_nos);
+                    // re-lock map in write mode
+                    drop(map);
+                    let mut map = self.immutable_page_map.write().unwrap();
+                    let Some(block_nos_rwl) = map.get(file_id) else {
+                        return;
+                    };
+                    let block_nos = block_nos_rwl.read().unwrap();
+                    if block_nos.is_empty() {
+                        drop(block_nos);
+                        map.remove(file_id);
+                    }
+                }
             }
         }
     }
@@ -753,7 +776,9 @@ impl PageCache {
 
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let mut map = self.immutable_page_map.write().unwrap();
-                match map.entry((*file_id, *blkno)) {
+                let block_nos = map.entry(*file_id).or_default();
+                let mut block_nos = block_nos.write().unwrap();
+                match block_nos.entry(*blkno) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {
                         entry.insert(slot_idx);
