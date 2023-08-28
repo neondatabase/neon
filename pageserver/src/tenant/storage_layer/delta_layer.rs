@@ -855,3 +855,9 @@ impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
         self.0.as_ref().file.read_blk(blknum)
     }
 }
+
+impl AsRef<DeltaLayerInner> for DeltaLayerInner {
+    fn as_ref(&self) -> &DeltaLayerInner {
+        self
+    }
+}
