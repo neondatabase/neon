@@ -442,6 +442,7 @@ impl ImageLayerInner {
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0)?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        drop(summary_blk); // so we don't borrow `file` for too long
 
         if let Some(mut expected_summary) = summary {
             // production code path

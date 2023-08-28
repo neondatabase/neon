@@ -77,7 +77,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
+        RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError, TryLockResult,
     },
 };
 
@@ -205,7 +205,7 @@ impl Slot {
     }
 }
 
-type ImmutablePageMap = HashMap<FileId, RwLock<HashMap<u32, usize>>>;
+type ImmutablePageMap = HashMap<FileId, HashMap<u32, usize>>;
 
 pub struct PageCache {
     /// This contains the mapping from the cache key to buffer slot that currently
@@ -429,22 +429,52 @@ impl PageCache {
 
     /// Immediately drop all buffers belonging to given file
     pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
-
-            let mut inner = slot.inner.write().unwrap();
-            if let Some(key) = &inner.key {
-                match key {
-                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
-                        if *file_id == drop_file_id =>
-                    {
-                        // remove mapping for old buffer
-                        self.remove_mapping(key);
+        let mut map = self.immutable_page_map.write().unwrap();
+        let Entry::Occupied(mut block_nos_entry) = map.entry(drop_file_id) else {
+            // `find_victim` could have been faster
+            return
+        };
+        block_nos_entry.get_mut().retain(|block_no, slot_idx| {
+            let expect_cache_key = CacheKey::ImmutableFilePage {
+                file_id: drop_file_id,
+                blkno: *block_no,
+            };
+            let slot = &self.slots[*slot_idx];
+            match slot.inner.try_write() {
+                TryLockResult::Ok(mut inner) => {
+                    // check again, could have been taken since added to immutable_page_map
+                    if inner.key == Some(expect_cache_key) {
+                        // immutable_page_map was still in sync with reality
+                        // TODO: find a way to share code with `remove_mapping`
+                        self.size_metrics.current_bytes_immutable.sub_page_sz(1);
                         inner.key = None;
                     }
-                    _ => {}
+                    false
+                }
+                TryLockResult::Err(e @ TryLockError::Poisoned(_)) => {
+                    panic!("slot lock {slot_idx} poisoned: {e:?}")
+                }
+                TryLockResult::Err(TryLockError::WouldBlock) => {
+                    // This function is only called from the `Drop` impl of EphemeralFile.
+                    // So, there shouldn't be any page cache users that are reading from
+                    // that EphemeralFile anymore, because,
+                    // 1. EphemeralFile doesn't hand out page cache read guards that outlive EphemeralFile and
+                    // 2. there can't be any concurrent `EphemeralFile::reads`s because it's being dropped.
+                    //
+                    // So, the only reason why the page is locked right now is `find_victim`
+                    // trying to claim this page.
+                    // So, let `find_victim` do the work.
+                    // Also, it will call `remove_mapping()` to remove the (file_id, block_no)
+                    // from the immutable_page_map; so, keep  the entry in the map here, otherwise
+                    // the `remove_mapping()` call will panic.
+                    true
                 }
             }
+        });
+        if block_nos_entry.get().is_empty() {
+            block_nos_entry.remove();
+        } else {
+            // `find_victim` will do it
         }
     }
 
@@ -660,7 +690,6 @@ impl PageCache {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
                 let block_nos = map.get(file_id)?;
-                let block_nos = block_nos.read().unwrap();
                 block_nos.get(blkno).copied()
             }
         }
@@ -685,7 +714,6 @@ impl PageCache {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
                 let block_nos = map.get(file_id)?;
-                let block_nos = block_nos.read().unwrap();
                 block_nos.get(blkno).copied()
             }
         }
@@ -718,26 +746,17 @@ impl PageCache {
                 }
             }
             CacheKey::ImmutableFilePage { file_id, blkno } => {
-                let map = self.immutable_page_map.read().unwrap();
-                let block_nos = map.get(file_id).expect("could not find file_id in mapping");
-                let mut block_nos = block_nos.write().unwrap();
-                block_nos
+                let mut map = self.immutable_page_map.write().unwrap();
+                let Entry::Occupied(mut block_nos_entry) = map.entry(*file_id) else {
+                    panic!("could not find file_id in mapping")
+                };
+                block_nos_entry
+                    .get_mut()
                     .remove(blkno)
                     .expect("could not find blkno in mapping");
                 self.size_metrics.current_bytes_immutable.sub_page_sz(1);
-                if block_nos.is_empty() {
-                    drop(block_nos);
-                    // re-lock map in write mode
-                    drop(map);
-                    let mut map = self.immutable_page_map.write().unwrap();
-                    let Some(block_nos_rwl) = map.get(file_id) else {
-                        return;
-                    };
-                    let block_nos = block_nos_rwl.read().unwrap();
-                    if block_nos.is_empty() {
-                        drop(block_nos);
-                        map.remove(file_id);
-                    }
+                if block_nos_entry.get().is_empty() {
+                    block_nos_entry.remove();
                 }
             }
         }
@@ -777,7 +796,6 @@ impl PageCache {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let mut map = self.immutable_page_map.write().unwrap();
                 let block_nos = map.entry(*file_id).or_default();
-                let mut block_nos = block_nos.write().unwrap();
                 match block_nos.entry(*blkno) {
                     Entry::Occupied(entry) => Some(*entry.get()),
                     Entry::Vacant(entry) => {

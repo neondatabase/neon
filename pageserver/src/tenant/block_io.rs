@@ -36,7 +36,9 @@ where
 
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
-    PageReadGuard(PageReadGuard<'static>),
+    /// [crate::page_cache::PageCache::drop_buffers_for_immutable] relies on the read guard
+    /// not outiving the EphemeralFile. See the comment in there for details.
+    PageReadGuard(PageReadGuard<'a>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Rc(std::rc::Rc<[u8; PAGE_SZ]>),

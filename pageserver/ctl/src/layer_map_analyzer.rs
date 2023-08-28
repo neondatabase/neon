@@ -99,6 +99,7 @@ async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let summary_blk = file.read_blk(0)?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+    drop(summary_blk); // so we don't borrow `file` for too long
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
         actual_summary.index_root_blk,
