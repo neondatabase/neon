@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
-/// Custom design like [`tokio::sync::OnceCell`] but with extra [`Arc`]s for unsynchronized
-/// initialization and deinitialization.
+/// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
+/// `SemaphorePermit`, allowing use of `take` which does not require holding an outer mutex guard
+/// for the duration of initialization.
 ///
 /// Has no unsafe, builds upon [`tokio::sync::Semaphore`] and [`std::sync::Mutex`].
+///
+/// [`OwnedSemaphorePermit`]: tokio::sync::OwnedSemaphorePermit
 pub struct OnceCell<T> {
     inner: Mutex<Inner<T>>,
 }
