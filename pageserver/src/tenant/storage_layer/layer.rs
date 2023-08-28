@@ -387,8 +387,6 @@ impl Drop for LayerInner {
             return;
         }
 
-        // SEMITODO: this could be spawn_blocking or not; we are only doing the filesystem delete
-        // right now, later this will be a submit to the global deletion queue.
         let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
 
         let path = std::mem::take(&mut self.path);
