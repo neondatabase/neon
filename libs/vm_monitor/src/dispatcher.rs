@@ -79,7 +79,7 @@ impl Dispatcher {
         let Message::Text(message_text) = message else {
             // All messages should be in text form, since we don't do any
             // pinging/ponging. See nhooyr/websocket's implementation and the
-            // agent/agent for more info
+            // agent for more info
             bail!("received non-text message during proocol handshake: {message:?}")
         };
 

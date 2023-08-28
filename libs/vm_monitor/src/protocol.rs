@@ -127,7 +127,7 @@ pub enum InboundMsgKind {
 
 /// Represents the resources granted to a VM.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-// Renamed because the agent/agent has multiple resources types:
+// Renamed because the agent has multiple resources types:
 // `Resources` (milliCPU/memory slots)
 // `Allocation` (vCPU/bytes) <- what we correspond to
 #[serde(rename(serialize = "Allocation", deserialize = "Allocation"))]
