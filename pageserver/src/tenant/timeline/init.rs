@@ -183,7 +183,7 @@ pub(super) fn cleanup_local_file_for_remote(
 
 pub(super) fn cleanup_future_layer(
     path: &Path,
-    name: LayerFileName,
+    name: &LayerFileName,
     disk_consistent_lsn: Lsn,
 ) -> anyhow::Result<()> {
     use LayerFileName::*;
