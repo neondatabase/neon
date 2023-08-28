@@ -221,9 +221,8 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
-        // drop all pages from page cache
-        let cache = page_cache::get();
-        cache.drop_buffers_for_immutable(self.page_cache_file_id);
+        // There might still be pages in the [`crate::page_cache`] for this file.
+        // We leave them there, [`crate::page_cache::PageCache::find_victim`] will evict them when needed.
 
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
