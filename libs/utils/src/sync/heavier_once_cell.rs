@@ -217,7 +217,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reinit_waits_for_deinit() {
-        // witht he tokio::time paused, we will "sleep" for 1s while holding the reinitialization
+        // with he tokio::time paused, we will "sleep" for 1s while holding the reinitialization
         let sleep_for = Duration::from_secs(1);
         let initial = 42;
         let reinit = 1;
