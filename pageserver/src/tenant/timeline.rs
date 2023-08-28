@@ -33,7 +33,6 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
-use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
@@ -729,9 +728,7 @@ impl Timeline {
                     .map_err(anyhow::Error::from)?;
                 if let Some(remote_client) = &self.remote_client {
                     for layer in layers {
-                        let m = LayerFileMetadata::new(layer.layer_desc().file_size);
-
-                        remote_client.schedule_layer_file_upload(layer, &m)?;
+                        remote_client.schedule_layer_file_upload(layer)?;
                     }
                 }
 
@@ -1503,7 +1500,7 @@ impl Timeline {
                             total_physical_size += m.file_size();
                             let resident = Layer::for_resident(conf, &this, name, m.clone());
                             let layer = resident.as_ref().clone();
-                            needs_upload.push((resident, m));
+                            needs_upload.push(resident);
                             layer
                         }
                         UseLocal(m) => {
@@ -1534,8 +1531,8 @@ impl Timeline {
 
         if let Some(rtc) = self.remote_client.as_ref() {
             let (needs_upload, needs_cleanup) = to_sync;
-            for (layer, m) in needs_upload {
-                rtc.schedule_layer_file_upload(layer, &m)?;
+            for layer in needs_upload {
+                rtc.schedule_layer_file_upload(layer)?;
             }
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
@@ -2460,8 +2457,7 @@ impl Timeline {
 
         if let Some(remote_client) = &self.remote_client {
             for layer in layer_paths_to_upload {
-                let m = LayerFileMetadata::new(layer.layer_desc().file_size);
-                remote_client.schedule_layer_file_upload(layer, &m)?;
+                remote_client.schedule_layer_file_upload(layer)?;
             }
             remote_client.schedule_index_upload_for_metadata_update(&metadata)?;
         }
@@ -3382,9 +3378,8 @@ impl Timeline {
 
         for l in new_layers {
             if let Some(remote_client) = &self.remote_client {
-                let m = LayerFileMetadata::new(l.layer_desc().file_size);
                 // upload even if duplicated, because we may have changed the contents
-                remote_client.schedule_layer_file_upload(l.clone(), &m)?;
+                remote_client.schedule_layer_file_upload(l.clone())?;
             }
             if guard.contains(l.as_ref()) {
                 duplicated_layers.insert(l.layer_desc().key());
