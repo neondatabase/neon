@@ -446,6 +446,7 @@ impl PageCache {
                         self.size_metrics.current_bytes_immutable.sub_page_sz(1);
                         inner.key = None;
                     }
+                    return false;
                 }
                 TryLockResult::Err(e @ TryLockError::Poisoned(_)) => {
                     panic!("slot lock {slot_idx} poisoned: {e:?}")
@@ -461,10 +462,13 @@ impl PageCache {
                     // trying to claim this page.
                     //
                     // Avoid waiting and keep the page in the cache.
-                    // Sooner or later it'll become a victim and get evicted.
+                    // The `find_victim` will free up the slot.
+                    // Also, it will call `remove_mapping()` to remove the (file_id, block_no)
+                    // from the immutable_page_map; so, keep  the entry in the map here, otherwise
+                    // the `remove_mapping()` call will panic.
+                    return true;
                 }
             }
-            return false;
         });
     }
 
