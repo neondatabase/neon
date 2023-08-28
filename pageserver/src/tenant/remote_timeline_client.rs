@@ -605,9 +605,6 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        // FIXME: we might be still including no longer existing files in the index_part because
-        // that consistency is built on strings and gentleman agreements, not WeakLayer which
-        // could be upgraded at the time of rendering of index_part.
         upload_queue
             .latest_files
             .insert(layer.layer_desc().filename(), layer_metadata.clone());
