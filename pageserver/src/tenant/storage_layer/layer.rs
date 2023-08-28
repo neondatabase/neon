@@ -169,10 +169,10 @@ impl Layer {
         self.0.evict_and_wait(rtc).await
     }
 
-    /// Delete the layer file when the `self` gets dropped, also schedule a remote index upload
-    /// then perhaps.
-    pub(crate) fn garbage_collect(&self) {
-        self.0.garbage_collect();
+    /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
+    /// then.
+    pub(crate) fn garbage_collect_on_drop(&self) {
+        self.0.garbage_collect_on_drop();
     }
 
     /// Return data needed to reconstruct given page at LSN.
@@ -460,7 +460,7 @@ impl LayerInner {
         }
     }
 
-    fn garbage_collect(&self) {
+    fn garbage_collect_on_drop(&self) {
         self.wanted_garbage_collected.store(true, Ordering::Release);
     }
 
