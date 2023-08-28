@@ -8,7 +8,6 @@ use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
-use std::ops::DerefMut;
 use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -67,7 +66,12 @@ impl EphemeralFile {
             let cache = page_cache::get();
             loop {
                 match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .read_immutable_buf(self.page_cache_file_id, blknum, |buf| {
+                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                        self.file
+                            .read_exact_at(buf, blknum as u64 * PAGE_SZ as u64)?;
+                        Ok(())
+                    })
                     .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -83,13 +87,7 @@ impl EphemeralFile {
                     page_cache::ReadBufResult::Found(guard) => {
                         return Ok(BlockLease::PageReadGuard(guard))
                     }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
-                        write_guard.mark_valid();
-
+                    page_cache::ReadBufResult::MissFilled => {
                         // Swap for read lock
                         continue;
                     }
@@ -138,18 +136,17 @@ impl EphemeralFile {
                                 match cache.read_immutable_buf(
                                     self.ephemeral_file.page_cache_file_id,
                                     self.blknum,
+                                    |buf| {
+                                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                                        buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
+                                        Ok(())
+                                    },
                                 ) {
                                     Ok(page_cache::ReadBufResult::Found(_guard)) => {
                                         // This function takes &mut self, so, it shouldn't be possible to reach this point.
                                         unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);
                                     }
-                                    Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
-                                        let buf: &mut [u8] = write_guard.deref_mut();
-                                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                                        buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
-                                        write_guard.mark_valid();
-                                        // pre-warm successful
-                                    }
+                                    Ok(page_cache::ReadBufResult::MissFilled) => {}
                                     Err(e) => {
                                         error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
                                         // fail gracefully, it's not the end of the world if we can't pre-warm the cache here

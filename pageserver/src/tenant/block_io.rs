@@ -8,7 +8,7 @@ use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::fs::File;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::os::unix::fs::FileExt;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
@@ -174,7 +174,11 @@ where
         let cache = page_cache::get();
         loop {
             match cache
-                .read_immutable_buf(self.file_id, blknum)
+                .read_immutable_buf(self.file_id, blknum, |buf| {
+                    // Read the page from disk into the buffer
+                    self.fill_buffer(buf, blknum)?;
+                    Ok(())
+                })
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -182,14 +186,7 @@ where
                     )
                 })? {
                 ReadBufResult::Found(guard) => break Ok(guard.into()),
-                ReadBufResult::NotFound(mut write_guard) => {
-                    // Read the page from disk into the buffer
-                    self.fill_buffer(write_guard.deref_mut(), blknum)?;
-                    write_guard.mark_valid();
-
-                    // Swap for read lock
-                    continue;
-                }
+                ReadBufResult::MissFilled => continue,
             };
         }
     }
