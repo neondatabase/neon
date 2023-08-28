@@ -321,6 +321,31 @@ impl VirtualFile {
         drop(self);
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        match pos {
+            SeekFrom::Start(offset) => {
+                self.pos = offset;
+            }
+            SeekFrom::End(offset) => {
+                self.pos = self.with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))??
+            }
+            SeekFrom::Current(offset) => {
+                let pos = self.pos as i128 + offset as i128;
+                if pos < 0 {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "offset would be negative",
+                    ));
+                }
+                if pos > u64::MAX as i128 {
+                    return Err(Error::new(ErrorKind::InvalidInput, "offset overflow"));
+                }
+                self.pos = pos as u64;
+            }
+        }
+        Ok(self.pos)
+    }
 }
 
 impl Drop for VirtualFile {
@@ -364,33 +389,6 @@ impl Write for VirtualFile {
         // flush is no-op for File (at least on unix), so we don't need to do
         // anything here either.
         Ok(())
-    }
-}
-
-impl Seek for VirtualFile {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        match pos {
-            SeekFrom::Start(offset) => {
-                self.pos = offset;
-            }
-            SeekFrom::End(offset) => {
-                self.pos = self.with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))??
-            }
-            SeekFrom::Current(offset) => {
-                let pos = self.pos as i128 + offset as i128;
-                if pos < 0 {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "offset would be negative",
-                    ));
-                }
-                if pos > u64::MAX as i128 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "offset overflow"));
-                }
-                self.pos = pos as u64;
-            }
-        }
-        Ok(self.pos)
     }
 }
 
