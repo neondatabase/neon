@@ -755,7 +755,7 @@ impl LayerInner {
 
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
         match tokio::fs::metadata(&self.path).await {
-            Ok(m) => Ok(self.is_file_present_and_good_size(&m)),
+            Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
         }
@@ -763,24 +763,23 @@ impl LayerInner {
 
     fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
         match self.path.metadata() {
-            Ok(m) => Ok(self.is_file_present_and_good_size(&m)),
+            Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
         }
     }
 
-    fn is_file_present_and_good_size(&self, m: &std::fs::Metadata) -> Option<NeedsDownload> {
-        // in future, this should include sha2-256 the file, hopefully rarely, because info uses
-        // this as well
+    fn is_file_present_and_good_size(&self, m: &std::fs::Metadata) -> Result<(), NeedsDownload> {
+        // in future, this should include sha2-256 the file.
         if !m.is_file() {
-            Some(NeedsDownload::NotFile)
+            Err(NeedsDownload::NotFile)
         } else if m.len() != self.desc.file_size {
-            Some(NeedsDownload::WrongSize {
+            Err(NeedsDownload::WrongSize {
                 actual: m.len(),
                 expected: self.desc.file_size,
             })
         } else {
-            None
+            Ok(())
         }
     }
 
