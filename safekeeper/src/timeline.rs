@@ -30,7 +30,7 @@ use crate::receive_wal::WalReceivers;
 use crate::recovery::recovery_main;
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
-    SafekeeperMemState, ServerInfo, Term,
+    SafekeeperMemState, ServerInfo, Term, TermLsn, INVALID_TERM,
 };
 use crate::send_wal::WalSenders;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
@@ -309,6 +309,13 @@ pub struct Timeline {
     commit_lsn_watch_tx: watch::Sender<Lsn>,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 
+    /// Broadcasts (current term, flush_lsn) updates, walsender is interested in
+    /// them when sending in recovery mode (to walproposer or peers). Note: this
+    /// is just a notification, WAL reading should always done with lock held as
+    /// term can change otherwise.
+    term_flush_lsn_watch_tx: watch::Sender<TermLsn>,
+    term_flush_lsn_watch_rx: watch::Receiver<TermLsn>,
+
     /// Safekeeper and other state, that should remain consistent and
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
@@ -340,6 +347,10 @@ impl Timeline {
         let rcl = shared_state.sk.state.remote_consistent_lsn;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state.commit_lsn);
+        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
+            shared_state.sk.get_term(),
+            shared_state.sk.flush_lsn(),
+        )));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
         Ok(Timeline {
@@ -347,6 +358,8 @@ impl Timeline {
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
+            term_flush_lsn_watch_tx,
+            term_flush_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
             walsenders: WalSenders::new(rcl),
             walreceivers: WalReceivers::new(),
@@ -366,6 +379,8 @@ impl Timeline {
         local_start_lsn: Lsn,
     ) -> Result<Timeline> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
+        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
+            watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
@@ -374,6 +389,8 @@ impl Timeline {
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
+            term_flush_lsn_watch_tx,
+            term_flush_lsn_watch_rx,
             mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
             walsenders: WalSenders::new(Lsn(0)),
             walreceivers: WalReceivers::new(),
@@ -551,6 +568,11 @@ impl Timeline {
         self.commit_lsn_watch_rx.clone()
     }
 
+    /// Returns term_flush_lsn watch channel.
+    pub fn get_term_flush_lsn_watch_rx(&self) -> watch::Receiver<TermLsn> {
+        self.term_flush_lsn_watch_rx.clone()
+    }
+
     /// Pass arrived message to the safekeeper.
     pub async fn process_msg(
         &self,
@@ -562,6 +584,7 @@ impl Timeline {
 
         let mut rmsg: Option<AcceptorProposerMessage>;
         let commit_lsn: Lsn;
+        let term_flush_lsn: TermLsn;
         {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
@@ -575,8 +598,11 @@ impl Timeline {
             }
 
             commit_lsn = shared_state.sk.inmem.commit_lsn;
+            term_flush_lsn =
+                TermLsn::from((shared_state.sk.get_term(), shared_state.sk.flush_lsn()));
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
+        self.term_flush_lsn_watch_tx.send(term_flush_lsn)?;
         Ok(rmsg)
     }
 

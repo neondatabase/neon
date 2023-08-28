@@ -34,13 +34,24 @@ pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
 /// Consensus logical timestamp.
 pub type Term = u64;
-const INVALID_TERM: Term = 0;
+pub const INVALID_TERM: Term = 0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
     pub term: Term,
     pub lsn: Lsn,
 }
+
+// Creation from tuple provides less typing (e.g. for unit tests).
+impl From<(Term, Lsn)> for TermLsn {
+    fn from(pair: (Term, Lsn)) -> TermLsn {
+        TermLsn {
+            term: pair.0,
+            lsn: pair.1,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TermHistory(pub Vec<TermLsn>);
 
@@ -555,6 +566,11 @@ where
             .acceptor_state
             .term_history
             .up_to(self.flush_lsn())
+    }
+
+    /// Get current term.
+    pub fn get_term(&self) -> Term {
+        self.state.acceptor_state.term
     }
 
     pub fn get_epoch(&self) -> Term {
