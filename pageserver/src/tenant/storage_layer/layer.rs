@@ -166,7 +166,8 @@ impl Layer {
     /// If for a bad luck or blocking of the executor, we miss the actual eviction and the layer is
     /// re-downloaded, [`EvictionError::Downloaded`] is returned.
     ///
-    /// Cancellation safe.
+    /// Technically cancellation safe, but cancelling might shift the viewpoint of what generation
+    /// of download-evict cycle on retry.
     pub(crate) async fn evict_and_wait(
         &self,
         rtc: &RemoteTimelineClient,
