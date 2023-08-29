@@ -179,20 +179,12 @@ impl DeltaKey {
     }
 }
 
-/// DeltaLayer is the in-memory data structure associated with an on-disk delta
-/// file.
-///
-/// We keep a DeltaLayer in memory for each file, in the LayerMap. If a layer
-/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
-/// Otherwise the struct is just a placeholder for a file that exists on disk,
-/// and it needs to be loaded before using it in queries.
+/// This is used only from `pagectl`. Within pageserver, all layers are
+/// [`crate::tenant::storage_layer::Layer`], which can hold a [`DeltaLayerInner`].
 pub struct DeltaLayer {
     path: PathBuf,
-
     pub desc: PersistentLayerDesc,
-
     access_stats: LayerAccessStats,
-
     inner: OnceCell<Arc<DeltaLayerInner>>,
 }
 
@@ -209,6 +201,8 @@ impl std::fmt::Debug for DeltaLayer {
     }
 }
 
+/// `DeltaLayerInner` is the in-memory data structure associated with an on-disk delta
+/// file.
 pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
