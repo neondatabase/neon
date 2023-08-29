@@ -7,7 +7,10 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("generations", [True, False])
+def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool):
+    neon_env_builder.enable_generations = generations
+
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_pageserver_restart")
