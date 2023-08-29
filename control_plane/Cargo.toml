@@ -10,7 +10,6 @@ clap.workspace = true
 comfy-table.workspace = true
 git-version.workspace = true
 nix.workspace = true
-hex.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
 hyper.workspace = true

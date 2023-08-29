@@ -6,7 +6,6 @@
 ///
 use anyhow::anyhow;
 use clap::Parser;
-use hex::FromHex;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
 use pageserver_api::control_api::*;
@@ -74,41 +73,6 @@ where
     let hex_map = HashMap::<HexTenantId, V>::deserialize(deserializer)?;
 
     Ok(hex_map.into_iter().map(|(k, v)| (k.take(), v)).collect())
-}
-
-#[derive(Eq, PartialEq, Clone, Hash)]
-struct HexTenantId(TenantId);
-
-impl HexTenantId {
-    fn new(t: TenantId) -> Self {
-        Self(t)
-    }
-
-    fn take(self) -> TenantId {
-        self.0
-    }
-}
-
-impl Serialize for HexTenantId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let hex = self.0.hex_encode();
-        serializer.collect_str(&hex)
-    }
-}
-
-impl<'de> Deserialize<'de> for HexTenantId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let string = String::deserialize(deserializer)?;
-        TenantId::from_hex(string)
-            .map(|t| HexTenantId::new(t))
-            .map_err(|e| serde::de::Error::custom(format!("{e}")))
-    }
 }
 
 // Top level state available to all HTTP handlers
@@ -189,7 +153,7 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
         if state.pageserver == Some(reattach_req.node_id) {
             state.generation += 1;
             response.tenants.push(ReAttachResponseTenant {
-                id: t.clone(),
+                id: HexTenantId::new(t.clone()),
                 generation: state.generation,
             });
         }
@@ -216,7 +180,7 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
     };
 
     for req_tenant in validate_req.tenants {
-        if let Some(tenant_state) = locked.tenants.get(&req_tenant.id) {
+        if let Some(tenant_state) = locked.tenants.get(req_tenant.id.as_ref()) {
             let valid = tenant_state.generation == req_tenant.gen;
             response.tenants.push(ValidateResponseTenant {
                 id: req_tenant.id,
@@ -238,7 +202,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 
     let tenant_state = locked
         .tenants
-        .entry(attach_req.tenant_id)
+        .entry(attach_req.tenant_id.take())
         .or_insert_with(|| TenantState {
             pageserver: attach_req.pageserver_id,
             generation: 0,
