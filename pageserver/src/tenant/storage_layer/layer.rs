@@ -816,7 +816,7 @@ impl LayerInner {
     }
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
-    fn on_drop(self: Arc<LayerInner>) {
+    fn on_downloaded_layer_drop(self: Arc<LayerInner>) {
         let gc = self.wanted_garbage_collected.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
@@ -993,7 +993,7 @@ impl std::fmt::Debug for DownloadedLayer {
 impl Drop for DownloadedLayer {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.upgrade() {
-            owner.on_drop();
+            owner.on_downloaded_layer_drop();
         } else {
             // no need to do anything, we are shutting down
         }
