@@ -279,6 +279,22 @@ impl VirtualFile {
             .observe_closure_duration(|| func(&guard)));
     }
 
+    /// Like with_file, but, takes a func that returns a future.
+    async fn with_file_async<F, Fut, R>(&self, op: &str, mut factory: F) -> Result<R, Error>
+    where
+        F: FnOnce(FileSlotGuard) -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let guard = self.get_file_guard()?;
+
+        let start = std::time::Instant::now();
+        let res = factory(guard).await;
+        STORAGE_IO_TIME
+            .with_label_values(&[op])
+            .observe(start.elapsed().as_secs_f64());
+        Ok(res)
+    }
+
     fn get_file_guard(&self) -> Result<FileSlotGuard, Error> {
         let open_files = get_open_files();
 
@@ -483,8 +499,12 @@ impl VirtualFile {
     }
 
     async fn read_at_async(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        // TODO: don't block here
-        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+        let result = self
+            .with_file_async("read", |file| async move {
+                // todo: use async IO here
+                file.read_at(buf, offset)
+            })
+            .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
