@@ -845,7 +845,8 @@ impl DeltaLayerInner {
         path: &std::path::Path,
         summary: Option<Summary>,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path)
+        let file = VirtualFile::open_async(path)
+            .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
 
