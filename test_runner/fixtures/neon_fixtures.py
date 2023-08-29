@@ -2230,13 +2230,6 @@ class Endpoint(PgProtocol):
         self.http_port = http_port
         self.check_stop_result = check_stop_result
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
-        # We don't setup roles and databases in the spec, so we don't need to
-        # do catalog updates. Catalog updates also include check availability
-        # data creation. Yet, we have tests that check that size and db dump
-        # before and after start are the same. So, skip catalog updates,
-        # with this we basically test a case of waking up an idle compute, where
-        # we also skip catalog updates in the cloud.
-        self.skip_pg_catalog_updates = True
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
     def create(
