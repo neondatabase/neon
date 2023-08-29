@@ -346,7 +346,7 @@ struct LayerInner {
 
     /// Do we want to evict this layer as soon as possible? After being set to `true`, all accesses
     /// will try to downgrade [`ResidentOrWantedEvicted`], which will eventually trigger
-    /// [`LayerInner::on_drop`].
+    /// [`LayerInner::on_downloaded_layer_drop`].
     wanted_evicted: AtomicBool,
 
     /// Version is to make sure we will in fact only evict a file if no new download has been
