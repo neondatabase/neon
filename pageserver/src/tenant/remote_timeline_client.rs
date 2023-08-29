@@ -668,10 +668,13 @@ impl RemoteTimelineClient {
                         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
                         Some((name, meta.generation))
                     } else {
-                        // This is unexpected: latest_files is meant to be kept up to
-                        // date.  We can't delete the layer if we have forgotten what
-                        // generation it was in.
-                        warn!("Deleting layer {name} not found in latest_files list");
+                        // This can happen if we are deleting a file that we never
+                        // successfully uploaded.  We log it because it is a rare/strange
+                        // situation, and in case something is misbehaving, we'd like to know which
+                        // layers experienced this.
+                        info!(
+                            "Deleting layer {name} not found in latest_files list, never uploaded?"
+                        );
                         None
                     }
                 })
