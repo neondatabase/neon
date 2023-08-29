@@ -15,7 +15,6 @@ use pageserver::{
     page_cache,
     task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
-    virtual_file,
 };
 use postgres_ffi::ControlFileData;
 use std::path::{Path, PathBuf};
@@ -116,7 +115,6 @@ fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
 
 async fn print_layerfile(path: &Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
-    virtual_file::init(10);
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
     dump_layerfile_from_path(path, true, &ctx).await

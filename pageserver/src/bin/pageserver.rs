@@ -24,7 +24,6 @@ use pageserver::{
     task_mgr::TaskKind,
     task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
-    virtual_file,
 };
 use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
@@ -125,7 +124,6 @@ fn main() -> anyhow::Result<()> {
     let scenario = pageserver::failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;

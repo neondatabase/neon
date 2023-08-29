@@ -87,8 +87,7 @@ impl EphemeralFile {
                         let buf: &mut [u8] = write_guard.deref_mut();
                         debug_assert_eq!(buf.len(), PAGE_SZ);
                         self.file
-                            .read_exact_at_async(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
-                            .await?;
+                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
                         write_guard.mark_valid();
 
                         // Swap for read lock
