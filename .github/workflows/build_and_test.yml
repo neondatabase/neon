@@ -579,7 +579,7 @@ jobs:
           --user "${{ secrets.CI_ACCESS_TOKEN }}" \
           --data \
             "{
-              \"ref\": \"sharnoff/vm-file-cache-on-disk\",
+              \"ref\": \"main\",
               \"inputs\": {
                 \"ci_job_name\": \"neon-cloud-e2e\",
                 \"commit_hash\": \"$COMMIT_SHA\",
