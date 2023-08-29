@@ -2264,7 +2264,12 @@ impl Timeline {
                         )));
                     }
                 }
-                ancestor.wait_lsn(timeline.ancestor_lsn, ctx).await?;
+                ancestor
+                    .wait_lsn(timeline.ancestor_lsn, ctx)
+                    .await
+                    .with_context(|| {
+                        format!("failed to wait for ancestor lsn {}", timeline.ancestor_lsn)
+                    })?;
 
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
