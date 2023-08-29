@@ -110,7 +110,7 @@ impl Runner {
         // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
-            let config = FileCacheConfig::new(!args.file_cache_not_in_memory);
+            let config = FileCacheConfig::new(!args.file_cache_on_disk);
 
             let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
@@ -138,7 +138,7 @@ impl Runner {
                 info!("file cache size actually got set to {actual_size}")
             }
             // Mark the resources given to the file cache as reserved, but only if it's in memory.
-            if !args.file_cache_not_in_memory {
+            if !args.file_cache_on_disk {
                 file_cache_reserved_bytes = actual_size;
             }
 
