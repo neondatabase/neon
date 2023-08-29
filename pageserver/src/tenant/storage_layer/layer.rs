@@ -788,10 +788,7 @@ impl LayerInner {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
-        let remote = self
-            .needs_download_blocking()
-            .map(|maybe| maybe.is_some())
-            .unwrap_or(true);
+        let remote = self.get().is_none();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
