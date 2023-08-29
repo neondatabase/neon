@@ -322,11 +322,13 @@ struct LayerInner {
     /// Only needed to check ondemand_download_behavior_treat_error_as_warn and creation of
     /// [`Self::path`].
     conf: &'static PageServerConf,
+
+    /// Full path to the file; unclear if this should exist anymore.
     path: PathBuf,
 
     desc: PersistentLayerDesc,
 
-    /// Timeline access is needed for metrics.
+    /// Timeline access is needed for remote timeline client and metrics.
     timeline: Weak<Timeline>,
 
     /// Cached knowledge of [`Timeline::remote_client`] being `Some`.
@@ -335,13 +337,10 @@ struct LayerInner {
     access_stats: LayerAccessStats,
 
     /// This custom OnceCell is backed by std mutex, but only held for short time periods.
-    /// Initialization and deinitialization is done while holding a permit.
+    /// Initialization and deinitialization are done while holding a permit.
     inner: heavier_once_cell::OnceCell<ResidentOrWantedEvicted>,
 
-    /// Do we want to garbage collect this when `LayerInner` is dropped, where garbage collection
-    /// means:
-    /// - schedule remote deletion
-    /// - instant local deletion
+    /// Do we want to garbage collect this when `LayerInner` is dropped
     wanted_garbage_collected: AtomicBool,
 
     /// Do we want to evict this layer as soon as possible? After being set to `true`, all accesses
