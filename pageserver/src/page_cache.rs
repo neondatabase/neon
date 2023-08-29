@@ -76,12 +76,10 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
     sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-    sync::RwLock as SyncRwLock,
 };
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -161,7 +159,7 @@ struct Version {
 }
 
 struct Slot {
-    inner: RwLock<SlotInner>,
+    inner: tokio::sync::RwLock<SlotInner>,
     usage_count: AtomicU8,
 }
 
@@ -214,9 +212,9 @@ pub struct PageCache {
     ///
     /// If you add support for caching different kinds of objects, each object kind
     /// can have a separate mapping map, next to this field.
-    materialized_page_map: SyncRwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
+    materialized_page_map: std::sync::RwLock<HashMap<MaterializedPageHashKey, Vec<Version>>>,
 
-    immutable_page_map: SyncRwLock<HashMap<(FileId, u32), usize>>,
+    immutable_page_map: std::sync::RwLock<HashMap<(FileId, u32), usize>>,
 
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
@@ -232,7 +230,7 @@ pub struct PageCache {
 /// PageReadGuard is a "lease" on a buffer, for reading. The page is kept locked
 /// until the guard is dropped.
 ///
-pub struct PageReadGuard<'i>(RwLockReadGuard<'i, SlotInner>);
+pub struct PageReadGuard<'i>(tokio::sync::RwLockReadGuard<'i, SlotInner>);
 
 impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
@@ -259,7 +257,7 @@ impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
 /// to initialize.
 ///
 pub struct PageWriteGuard<'i> {
-    inner: RwLockWriteGuard<'i, SlotInner>,
+    inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
 
     // Are the page contents currently valid?
     valid: bool,
@@ -758,7 +756,9 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    async fn find_victim(&self) -> anyhow::Result<(usize, RwLockWriteGuard<SlotInner>)> {
+    async fn find_victim(
+        &self,
+    ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -812,7 +812,7 @@ impl PageCache {
                 let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
 
                 Slot {
-                    inner: RwLock::new(SlotInner { key: None, buf }),
+                    inner: tokio::sync::RwLock::new(SlotInner { key: None, buf }),
                     usage_count: AtomicU8::new(0),
                 }
             })
