@@ -11,11 +11,12 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
-use crate::tenant::TENANTS_SEGMENT_NAME;
+use crate::page_cache::PageWriteGuard;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -54,7 +55,7 @@ pub struct VirtualFile {
     /// opened, in the VirtualFile::create() function, and strip the flag before
     /// storing it here.
     pub path: Utf8PathBuf,
-    open_options: OpenOptions,
+    open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
 
     // These are strings becase we only use them for metrics, and those expect strings.
     // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
@@ -277,17 +278,17 @@ macro_rules! with_file {
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true)).await
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+        options.read(true);
+        Self::open_with_options_async(path, options).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
     pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(
-            path,
-            OpenOptions::new().write(true).create(true).truncate(true),
-        )
-        .await
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        Self::open_with_options_async(path, options).await
     }
 
     /// Open a file with given options.
@@ -295,6 +296,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
+    #[cfg(test)]
     pub async fn open_with_options(
         path: &Utf8Path,
         open_options: &OpenOptions,
@@ -355,15 +357,15 @@ impl VirtualFile {
             ));
         };
         std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
-        let mut file = Self::open_with_options(
-            tmp_path,
-            OpenOptions::new()
+        let mut file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options
                 .write(true)
                 // Use `create_new` so that, if we race with ourselves or something else,
                 // we bail out instead of causing damage.
-                .create_new(true),
-        )
-        .await?;
+                .create_new(true);
+            Self::open_with_options_async(tmp_path, options).await?
+        };
         file.write_all(content).await?;
         file.sync_all().await?;
         drop(file); // before the rename, that's important!
@@ -374,10 +376,72 @@ impl VirtualFile {
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
-        let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true)).await?;
+        let final_parent_dirfd = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.read(true);
+            Self::open_with_options_async(final_path_parent, options).await?
+        };
         final_parent_dirfd.sync_all().await?;
         Ok(())
+    }
+
+    /// Open a file with given options.
+    ///
+    /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
+    /// they will be applied also when the file is subsequently re-opened, not only
+    /// on the first time. Make sure that's sane!
+    pub async fn open_with_options_async(
+        path: &Utf8Path,
+        open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
+    ) -> Result<VirtualFile, std::io::Error> {
+        let path_str = path.to_string();
+        let parts = path_str.split('/').collect::<Vec<&str>>();
+        let tenant_id;
+        let timeline_id;
+        if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
+            tenant_id = parts[parts.len() - 4].to_string();
+            timeline_id = parts[parts.len() - 2].to_string();
+        } else {
+            tenant_id = "*".to_string();
+            timeline_id = "*".to_string();
+        }
+        let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
+
+        slot_guard.file = Some({
+            let system = tokio_epoll_uring::thread_local_system().await;
+            let file: OwnedFd = system
+                .open(path, &open_options)
+                .await
+                .map_err(|e| match e {
+                    tokio_epoll_uring::Error::Op(e) => e,
+                    tokio_epoll_uring::Error::System(system) => {
+                        std::io::Error::new(std::io::ErrorKind::Other, system)
+                    }
+                })?;
+            let file = File::from(file);
+            file
+        });
+
+        // Strip all options other than read and write.
+        //
+        // It would perhaps be nicer to check just for the read and write flags
+        // explicitly, but OpenOptions doesn't contain any functions to read flags,
+        // only to set them.
+        let mut reopen_options = open_options;
+        reopen_options.create(false);
+        reopen_options.create_new(false);
+        reopen_options.truncate(false);
+
+        let vfile = VirtualFile {
+            handle: RwLock::new(handle),
+            pos: 0,
+            path: path.to_path_buf(),
+            open_options: reopen_options,
+            tenant_id,
+            timeline_id,
+        };
+
+        Ok(vfile)
     }
 
     /// Call File::sync_all() on the underlying File.
@@ -399,7 +463,7 @@ impl VirtualFile {
     ///
     /// We are doing it via a macro as Rust doesn't support async closures that
     /// take on parameters with lifetimes.
-    async fn lock_file(&self) -> Result<FileGuard<'_>, Error> {
+    async fn lock_file(&self) -> Result<FileGuard<'static>, Error> {
         let open_files = get_open_files();
 
         let mut handle_guard = {
@@ -442,7 +506,20 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path))?;
+        let file = {
+            let system = tokio_epoll_uring::thread_local_system().await;
+            let file: OwnedFd = system
+                .open(&self.path, &self.open_options)
+                .await
+                .map_err(|e| match e {
+                    tokio_epoll_uring::Error::Op(e) => e,
+                    tokio_epoll_uring::Error::System(system) => {
+                        std::io::Error::new(std::io::ErrorKind::Other, system)
+                    }
+                })?;
+            let file = File::from(file);
+            file
+        };
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.
@@ -489,24 +566,59 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
-        while !buf.is_empty() {
-            match self.read_at(buf, offset).await {
-                Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "failed to fill whole buffer",
-                    ))
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                    offset += n as u64;
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+    pub async fn read_exact_at(
+        &self,
+        write_guard: PageWriteGuard<'static>,
+        offset: u64,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        let file_guard: FileGuard<'static> = self.lock_file().await?;
+
+        let system = tokio_epoll_uring::thread_local_system().await;
+        struct PageWriteGuardBuf {
+            buf: PageWriteGuard<'static>,
+            init_up_to: usize,
+        }
+        unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
+            fn stable_ptr(&self) -> *const u8 {
+                self.buf.as_ptr()
+            }
+            fn bytes_init(&self) -> usize {
+                self.init_up_to
+            }
+            fn bytes_total(&self) -> usize {
+                self.buf.len()
             }
         }
-        Ok(())
+        unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
+            fn stable_mut_ptr(&mut self) -> *mut u8 {
+                self.buf.as_mut_ptr()
+            }
+
+            unsafe fn set_init(&mut self, pos: usize) {
+                assert!(pos <= self.buf.len());
+                self.init_up_to = pos;
+            }
+        }
+        let buf = PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to: 0,
+        };
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(file_guard.as_ref().as_raw_fd()) };
+        let guard = scopeguard::guard(file_guard, |_| {
+            panic!("must not drop future while operation is ongoing (todo: pass file_guard to tokio_epoll_uring to aovid this)")
+        });
+        let ((owned_fd, buf), res) = system.read(owned_fd, offset, buf).await;
+        let _ = OwnedFd::into_raw_fd(owned_fd);
+        let _ = scopeguard::ScopeGuard::into_inner(guard);
+        let PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to,
+        } = buf;
+        if let Ok(num_read) = res {
+            assert!(init_up_to == num_read); // TODO need to deal with short reads here
+        }
+        res.map(|_| write_guard)
+            .map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -554,18 +666,6 @@ impl VirtualFile {
         let n = self.write_at(buf, pos).await?;
         self.pos += n as u64;
         Ok(n)
-    }
-
-    pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Read, |file| file
-            .as_ref()
-            .read_at(buf, offset));
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
-                .add(size as i64);
-        }
-        result
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
