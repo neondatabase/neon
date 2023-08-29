@@ -321,6 +321,44 @@ impl VirtualFile {
         drop(self);
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
+}
+
+impl Drop for VirtualFile {
+    /// If a VirtualFile is dropped, close the underlying file if it was open.
+    fn drop(&mut self) {
+        let handle = self.handle.get_mut().unwrap();
+
+        // We could check with a read-lock first, to avoid waiting on an
+        // unrelated I/O.
+        let slot = &get_open_files().slots[handle.index];
+        let mut slot_guard = slot.inner.write().unwrap();
+        if slot_guard.tag == handle.tag {
+            slot.recently_used.store(false, Ordering::Relaxed);
+            // there is also operation "close-by-replace" for closes done on eviction for
+            // comparison.
+            STORAGE_IO_TIME
+                .with_label_values(&["close"])
+                .observe_closure_duration(|| drop(slot_guard.file.take()));
+        }
+    }
+}
+
+impl Write for VirtualFile {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        let pos = self.pos;
+        let n = self.write_at(buf, pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        // flush is no-op for File (at least on unix), so we don't need to do
+        // anything here either.
+        Ok(())
+    }
+}
+
+impl VirtualFile {
 
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         match pos {
@@ -407,41 +445,6 @@ impl VirtualFile {
                 .add(size as i64);
         }
         result
-    }
-}
-
-impl Drop for VirtualFile {
-    /// If a VirtualFile is dropped, close the underlying file if it was open.
-    fn drop(&mut self) {
-        let handle = self.handle.get_mut().unwrap();
-
-        // We could check with a read-lock first, to avoid waiting on an
-        // unrelated I/O.
-        let slot = &get_open_files().slots[handle.index];
-        let mut slot_guard = slot.inner.write().unwrap();
-        if slot_guard.tag == handle.tag {
-            slot.recently_used.store(false, Ordering::Relaxed);
-            // there is also operation "close-by-replace" for closes done on eviction for
-            // comparison.
-            STORAGE_IO_TIME
-                .with_label_values(&["close"])
-                .observe_closure_duration(|| drop(slot_guard.file.take()));
-        }
-    }
-}
-
-impl Write for VirtualFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // flush is no-op for File (at least on unix), so we don't need to do
-        // anything here either.
-        Ok(())
     }
 }
 
