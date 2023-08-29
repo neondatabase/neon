@@ -1849,4 +1849,23 @@ mod tests {
             }
         );
     }
+
+    // #[tokio::test]
+    // async fn index_part_download() {
+    //     let TestSetup {
+    //         harness,
+    //         tenant: _tenant,
+    //         timeline: _timeline,
+    //         client,
+    //         ..
+    //     } = TestSetup::new("index_part_download").await.unwrap();
+
+    //     let example_index_part = IndexPart {
+    //         version: 3,
+    //         timeline_layers: HashSet::new(),
+    //         layer_metadata:
+
+    //     }
+
+    // }
 }
