@@ -599,6 +599,7 @@ impl LayerInner {
         )
     }
 
+    /// Nag or fail per RequestContext policy
     fn check_expected_download(&self, ctx: &RequestContext) -> Result<(), DownloadError> {
         use crate::context::DownloadBehavior::*;
         let b = ctx.download_behavior();
