@@ -90,7 +90,7 @@ struct OpenFiles {
 }
 
 struct Slot {
-    inner: RwLock<SlotInner>,
+    inner: tokio::sync::RwLock<SlotInner>,
 
     /// has this file been used since last clock sweep?
     recently_used: AtomicBool,
@@ -249,8 +249,8 @@ impl VirtualFile {
 
 /// The function that constructs the guard guarantees that the respective [`SlotInner::file`] is `Some`.
 enum FileSlotGuard {
-    Write(RwLockWriteGuard<'static, SlotInner>),
-    Read(RwLockReadGuard<'static, SlotInner>),
+    Write(tokio::sync::RwLockWriteGuard<'static, SlotInner>),
+    Read(tokio::sync::RwLockReadGuard<'static, SlotInner>),
 }
 
 impl Deref for FileSlotGuard {
