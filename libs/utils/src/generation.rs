@@ -60,8 +60,12 @@ impl Generation {
         }
     }
 
-    pub fn previous(&self) -> Generation {
-        Generation::new(self.0 - 1)
+    pub fn previous(&self) -> Self {
+        if let Self::Valid(v) = self {
+            Self::new(v - 1)
+        } else {
+            Self::none()
+        }
     }
 }
 
