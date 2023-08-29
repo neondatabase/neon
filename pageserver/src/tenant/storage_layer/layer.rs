@@ -837,8 +837,8 @@ impl LayerInner {
             crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
                 let _g = span.entered();
 
-                // if LayerInner is already dropped here, do nothing for the garbage collection has
-                // already ran while we were in queue
+                // if LayerInner is already dropped here, do nothing because the garbage collection
+                // has already ran while we were in queue
                 let Some(this) = this.upgrade() else { return; };
                 this.evict_blocking(version);
             });
