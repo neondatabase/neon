@@ -2,7 +2,7 @@
 //! page server.
 
 use hyper::StatusCode;
-use pageserver_api::control_api::{ReAttachRequest, ReAttachResponse};
+use pageserver_api::control_api::{HexTenantId, ReAttachRequest, ReAttachResponse};
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -217,7 +217,7 @@ pub async fn init_tenant_mgr(
                     let generation = if let Some(generations) = &tenant_generations {
                         // We have a generation map: treat it as the authority for whether
                         // this tenant is really attached.
-                        if let Some(gen) = generations.get(&tenant_id) {
+                        if let Some(gen) = generations.get(&HexTenantId::new(tenant_id)) {
                             Generation::new(*gen)
                         } else {
                             info!("Detaching tenant {0}, control plane omitted it in re-attach response", tenant_id);
@@ -339,13 +339,7 @@ pub(crate) fn schedule_local_tenant_processing(
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
         Tenant::spawn_load(
-            conf,
-            tenant_id,
-            Generation::none(),
-            resources,
-            init_order,
-            tenants,
-            ctx,
+            conf, tenant_id, generation, resources, init_order, tenants, ctx,
         )
     };
     Ok(tenant)
