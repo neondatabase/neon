@@ -89,6 +89,8 @@ impl RemoteExtSpec {
         &self,
         ext_name: &str,
         is_library: bool,
+        build_tag: &str,
+        pg_major_version: &str,
     ) -> anyhow::Result<(String, RemotePath)> {
         let mut real_ext_name = ext_name;
         if is_library {
@@ -105,10 +107,19 @@ impl RemoteExtSpec {
         }
 
         match self.extension_data.get(real_ext_name) {
-            Some(ext_data) => Ok((
-                real_ext_name.to_string(),
-                RemotePath::from_string(&ext_data.archive_path)?,
-            )),
+            Some(_ext_data) => {
+                // Construct the path to the extension archive
+                // BUILD_TAG/PG_MAJOR_VERSION/extensions/EXTENSION_NAME.tar.zst
+                //
+                // Keep it in sync with path generation in
+                // https://github.com/neondatabase/build-custom-extensions/tree/main
+                let archive_path_str =
+                    format!("{build_tag}/{pg_major_version}/extensions/{real_ext_name}.tar.zst");
+                Ok((
+                    real_ext_name.to_string(),
+                    RemotePath::from_string(&archive_path_str)?,
+                ))
+            }
             None => Err(anyhow::anyhow!(
                 "real_ext_name {} is not found",
                 real_ext_name

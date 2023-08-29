@@ -169,7 +169,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     }
                 };
 
-                remote_extensions.get_ext(&filename, is_library)
+                remote_extensions.get_ext(
+                    &filename,
+                    is_library,
+                    &compute.build_tag,
+                    &compute.pgversion,
+                )
             };
 
             match ext {
