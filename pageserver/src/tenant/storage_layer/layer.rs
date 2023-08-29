@@ -1003,9 +1003,12 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    /// The owner is required so that we don't have to upgrade the `Self::owner`, which will only
-    /// be used on drop. This way, initializing a DownloadedLayer with the owner gone is
-    /// impossible.
+    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
+    /// initialize it permanently.
+    ///
+    /// `owner` parameter is a borrow pointing at the same `LayerInner` as the
+    /// `DownloadedLayer::owner` would point when upgraded. Given how this method ends up called,
+    /// we will however always have the LayerInner on the callstack, so we can just use it.
     async fn get(&self, owner: &LayerInner) -> anyhow::Result<&LayerKind> {
         let init = || async {
             // there is nothing async here, but it should be async
