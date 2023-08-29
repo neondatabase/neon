@@ -5,7 +5,7 @@
 use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
-use crate::page_cache::{self, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+use crate::tenant::disk_btree::PAGE_SZ;
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
@@ -35,7 +35,7 @@ where
 
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
-    PageReadGuard(PageReadGuard<'static>),
+    PageReadGuard(crate::buffer_pool::Buffer),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
@@ -43,8 +43,8 @@ pub enum BlockLease<'a> {
     Vec(Vec<u8>),
 }
 
-impl From<PageReadGuard<'static>> for BlockLease<'static> {
-    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
+impl From<crate::buffer_pool::Buffer> for BlockLease<'static> {
+    fn from(value: crate::buffer_pool::Buffer) -> BlockLease<'static> {
         BlockLease::PageReadGuard(value)
     }
 }
@@ -162,28 +162,26 @@ impl<'a> BlockCursor<'a> {
 /// for modifying the file, nor for invalidating the cache if it is modified.
 pub struct FileBlockReader {
     pub file: VirtualFile,
-
-    /// Unique ID of this file, used as key in the page cache.
-    file_id: page_cache::FileId,
 }
 
 impl FileBlockReader {
     pub fn new(file: VirtualFile) -> Self {
-        let file_id = page_cache::next_file_id();
-
-        FileBlockReader { file_id, file }
+        FileBlockReader { file }
     }
-
     /// Read a page from the underlying file into given buffer.
     async fn fill_buffer(
         &self,
-        buf: PageWriteGuard<'static>,
+        buf: crate::buffer_pool::Buffer,
         blkno: u32,
-    ) -> Result<PageWriteGuard<'static>, std::io::Error> {
+    ) -> Result<crate::buffer_pool::Buffer, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         self.file
-            .read_exact_at_page(buf, blkno as u64 * PAGE_SZ as u64)
+            .read_exact_at(
+                crate::buffer_pool::PageWriteGuardBuf::new(buf),
+                blkno as u64 * PAGE_SZ as u64,
+            )
             .await
+            .map(|guard| guard.assume_init())
     }
     /// Read a block.
     ///
@@ -193,25 +191,12 @@ impl FileBlockReader {
     pub async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
-        let cache = page_cache::get();
-        match cache
-            .read_immutable_buf(self.file_id, blknum, ctx)
-            .await
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to read immutable buf: {e:#}"),
-                )
-            })? {
-            ReadBufResult::Found(guard) => Ok(guard.into()),
-            ReadBufResult::NotFound(write_guard) => {
-                // Read the page from disk into the buffer
-                let write_guard = self.fill_buffer(write_guard, blknum).await?;
-                Ok(write_guard.mark_valid().into())
-            }
-        }
+        let buf = crate::buffer_pool::get();
+        // Read the page from disk into the buffer
+        let write_guard = self.fill_buffer(buf, blknum).await?;
+        Ok(BlockLease::PageReadGuard(write_guard))
     }
 }
 

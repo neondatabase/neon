@@ -24,7 +24,7 @@ use pageserver::{
     config::{defaults::*, PageServerConf},
     context::{DownloadBehavior, RequestContext},
     deletion_queue::DeletionQueue,
-    http, page_cache, page_service, task_mgr,
+    http, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
@@ -131,7 +131,6 @@ fn main() -> anyhow::Result<()> {
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
-    page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
 

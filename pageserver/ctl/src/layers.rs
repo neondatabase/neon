@@ -11,7 +11,7 @@ use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
 use pageserver::tenant::storage_layer::{delta_layer, image_layer};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
-use pageserver::{page_cache, virtual_file};
+use pageserver::virtual_file;
 use pageserver::{
     repository::{Key, KEY_SIZE},
     tenant::{
@@ -60,7 +60,6 @@ pub(crate) enum LayerCmd {
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(10, virtual_file::IoEngineKind::StdFs);
-    page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path).await?);
     let summary_blk = file.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -188,7 +187,6 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_timeline_id,
         } => {
             pageserver::virtual_file::init(10, virtual_file::IoEngineKind::StdFs);
-            pageserver::page_cache::init(100);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
