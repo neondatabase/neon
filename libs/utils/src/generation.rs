@@ -55,7 +55,7 @@ impl Generation {
         if self.0 == Self::NONE {
             "".into()
         } else {
-            format!("-{:08x}", self.0).into()
+            format!("-{:08x}", self.0)
         }
     }
 }

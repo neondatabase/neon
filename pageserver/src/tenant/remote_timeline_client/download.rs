@@ -173,8 +173,8 @@ pub fn is_temp_download_file(path: &Path) -> bool {
 }
 
 /// List timelines of given tenant in remote storage
-pub async fn list_remote_timelines<'a>(
-    storage: &'a GenericRemoteStorage,
+pub async fn list_remote_timelines(
+    storage: &GenericRemoteStorage,
     tenant_id: TenantId,
 ) -> anyhow::Result<HashSet<TimelineId>> {
     let remote_path = remote_timelines_path(&tenant_id);

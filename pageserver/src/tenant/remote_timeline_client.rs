@@ -660,7 +660,7 @@ impl RemoteTimelineClient {
             // makes that are unexpectedly missing from our metadata.
             let with_generations: Vec<_> = names
                 .iter()
-                .map(|name| {
+                .filter_map(|name| {
                     // Remove from latest_files, learning the file's remote generation in the process
                     let meta = upload_queue.latest_files.remove(name);
 
@@ -672,11 +672,10 @@ impl RemoteTimelineClient {
                         None
                     } else {
                         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                        let generation = meta.map(|m| m.generation).flatten();
+                        let generation = meta.and_then(|m| m.generation);
                         Some((name, generation))
                     }
                 })
-                .filter_map(|i| i)
                 .collect();
 
             if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
@@ -689,7 +688,7 @@ impl RemoteTimelineClient {
                     file_kind: RemoteOpFileKind::Layer,
                     layer_file_name: name.clone(),
                     scheduled_from_timeline_delete: false,
-                    generation: generation,
+                    generation,
                 });
                 self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
@@ -1577,7 +1576,7 @@ mod tests {
                 runtime: tokio::runtime::Handle::current(),
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
-                generation: generation,
+                generation,
                 storage_impl: storage,
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
                 metrics: Arc::new(RemoteTimelineClientMetrics::new(
