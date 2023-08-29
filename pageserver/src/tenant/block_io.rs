@@ -171,7 +171,6 @@ where
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        // Look up the right page
         let cache = page_cache::get();
         loop {
             match cache
