@@ -4065,7 +4065,6 @@ impl Timeline {
             });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
-                // we explicitly don't want to keep this layer downloaded
                 layer: l.drop_eviction_guard(),
                 last_activity_ts,
             });
