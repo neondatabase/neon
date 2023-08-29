@@ -720,9 +720,7 @@ impl LayerInner {
                 );
                 let backoff = std::time::Duration::from_secs_f64(backoff);
 
-                // unless we get cancelled, we will hold off the init semaphore
                 tokio::time::sleep(backoff).await;
-
                 Err(DownloadError::DownloadFailed)
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
