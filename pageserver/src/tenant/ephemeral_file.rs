@@ -2,7 +2,7 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
-use crate::page_cache::{self, PAGE_SZ};
+use crate::page_cache::{self, PAGE_SZ, PageWriteGuard};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
@@ -83,11 +83,12 @@ impl EphemeralFile {
                     page_cache::ReadBufResult::Found(guard) => {
                         return Ok(BlockLease::PageReadGuard(guard))
                     }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                    page_cache::ReadBufResult::NotFound(write_guard) => {
+                        let mut write_guard: PageWriteGuard<'static> = write_guard;
                         let buf: &mut [u8] = write_guard.deref_mut();
                         debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
+                        let mut write_guard = self.file
+                            .read_exact_at_async(write_guard, blknum as u64 * PAGE_SZ as u64).await?;
                         write_guard.mark_valid();
 
                         // Swap for read lock

@@ -11,13 +11,14 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::page_cache::PageWriteGuard;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 ///
@@ -215,23 +216,27 @@ impl VirtualFile {
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
     pub async fn read_exact_at_async(
         &self,
-        mut buf: &mut [u8],
-        mut offset: u64,
-    ) -> Result<(), Error> {
+        mut write_guard: PageWriteGuard<'static>,
+        offset: u64,
+    ) -> Result<PageWriteGuard<'static>, Error> {
         let file = self.handle.lock().unwrap().take().unwrap();
-        let mut put_back = false;
+        let put_back = AtomicBool::new(false);
+        let put_back_ref = &put_back;
         scopeguard::defer! {
-            if !put_back {
+            if !put_back_ref.load(std::sync::atomic::Ordering::Relaxed) {
                 panic!("mut put self.handle back")
             }
         };
-        let res = tokio::task::spawn_blocking(|| file.read_exact_at(buf, offset))
-            .await
-            .expect("spawn_blocking");
+        let ((file, write_guard), res) = tokio::task::spawn_blocking(move || {
+            let res = file.read_exact_at(write_guard.as_mut(), offset);
+            ((file, write_guard), res)
+        })
+        .await
+        .expect("spawn_blocking");
         let replaced = self.handle.lock().unwrap().replace(file);
         assert!(replaced.is_none());
-        put_back = true;
-        res
+        put_back.store(true, std::sync::atomic::Ordering::Relaxed);
+        res.map(|()| write_guard)
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
