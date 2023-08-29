@@ -976,85 +976,7 @@ impl std::fmt::Display for NeedsDownload {
     }
 }
 
-/// Holds both Arc requriring that both components stay resident while holding this alive and no evictions
-/// nor garbage collection happens.
-#[derive(Clone)]
-pub(crate) struct ResidentLayer {
-    owner: Layer,
-    downloaded: Arc<DownloadedLayer>,
-}
-
-impl std::fmt::Display for ResidentLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.owner)
-    }
-}
-
-impl std::fmt::Debug for ResidentLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.owner)
-    }
-}
-
-impl ResidentLayer {
-    /// Release the eviction guard, making this back into a plain [`Layer`].
-    pub(crate) fn drop_eviction_guard(self) -> Layer {
-        self.into()
-    }
-
-    /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    pub(crate) async fn load_keys(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
-        use LayerKind::*;
-
-        let owner = &self.owner.0;
-
-        match self.downloaded.get(owner).await? {
-            Delta(d) => {
-                owner
-                    .access_stats
-                    .record_access(LayerAccessKind::KeyIter, ctx);
-
-                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
-                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
-                // while it's being held.
-                d.load_keys().await.context("Layer index is corrupted")
-            }
-            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
-        }
-    }
-
-    pub(crate) fn local_path(&self) -> &Path {
-        &self.owner.0.path
-    }
-
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        self.owner.access_stats()
-    }
-}
-
-impl AsLayerDesc for ResidentLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        self.owner.layer_desc()
-    }
-}
-
-impl AsRef<Layer> for ResidentLayer {
-    fn as_ref(&self) -> &Layer {
-        &self.owner
-    }
-}
-
-/// Allow slimming down if we don't want the `2*usize` with eviction candidates?
-impl From<ResidentLayer> for Layer {
-    fn from(value: ResidentLayer) -> Self {
-        value.owner
-    }
-}
-
-/// Holds the actual downloaded layer, and handles evicting the file on drop.
+/// Existence of `DownloadedLayer` means that we have the file locally, and can later evict it.
 pub(crate) struct DownloadedLayer {
     owner: Weak<LayerInner>,
     kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
@@ -1149,4 +1071,81 @@ impl DownloadedLayer {
 enum LayerKind {
     Delta(delta_layer::DeltaLayerInner),
     Image(image_layer::ImageLayerInner),
+}
+
+/// Guard value for forcing a layer be resident while it exists.
+#[derive(Clone)]
+pub(crate) struct ResidentLayer {
+    owner: Layer,
+    downloaded: Arc<DownloadedLayer>,
+}
+
+impl std::fmt::Display for ResidentLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.owner)
+    }
+}
+
+impl std::fmt::Debug for ResidentLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.owner)
+    }
+}
+
+impl ResidentLayer {
+    /// Release the eviction guard, converting back into a plain [`Layer`].
+    pub(crate) fn drop_eviction_guard(self) -> Layer {
+        self.into()
+    }
+
+    /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    pub(crate) async fn load_keys(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+
+        match self.downloaded.get(owner).await? {
+            Delta(d) => {
+                owner
+                    .access_stats
+                    .record_access(LayerAccessKind::KeyIter, ctx);
+
+                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+                // while it's being held.
+                d.load_keys().await.context("Layer index is corrupted")
+            }
+            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
+        }
+    }
+
+    pub(crate) fn local_path(&self) -> &Path {
+        &self.owner.0.path
+    }
+
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
+        self.owner.access_stats()
+    }
+}
+
+impl AsLayerDesc for ResidentLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        self.owner.layer_desc()
+    }
+}
+
+impl AsRef<Layer> for ResidentLayer {
+    fn as_ref(&self) -> &Layer {
+        &self.owner
+    }
+}
+
+/// Allow slimming down if we don't want the `2*usize` with eviction candidates?
+impl From<ResidentLayer> for Layer {
+    fn from(value: ResidentLayer) -> Self {
+        value.owner
+    }
 }
