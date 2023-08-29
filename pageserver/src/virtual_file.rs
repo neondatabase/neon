@@ -406,6 +406,27 @@ impl VirtualFile {
         Ok(())
     }
 
+    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
+    pub async fn read_exact_at_async(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.read_at_async(buf, offset).await {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to fill whole buffer",
+                    ))
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
     pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
         while !buf.is_empty() {
@@ -428,6 +449,17 @@ impl VirtualFile {
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+        if let Ok(size) = result {
+            STORAGE_IO_SIZE
+                .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
+                .add(size as i64);
+        }
+        result
+    }
+
+    async fn read_at_async(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+        // TODO: don't block here
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
