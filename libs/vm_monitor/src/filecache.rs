@@ -60,14 +60,7 @@ pub struct FileCacheConfig {
 }
 
 impl FileCacheConfig {
-    pub fn new(in_memory: bool) -> Self {
-        match in_memory {
-            true => Self::default_in_memory(),
-            false => Self::default_on_disk(),
-        }
-    }
-
-    fn default_in_memory() -> Self {
+    pub fn default_in_memory() -> Self {
         Self {
             in_memory: true,
             // 75 %
@@ -79,7 +72,7 @@ impl FileCacheConfig {
         }
     }
 
-    fn default_on_disk() -> Self {
+    pub fn default_on_disk() -> Self {
         Self {
             in_memory: false,
             resource_multiplier: 0.75,

@@ -110,7 +110,10 @@ impl Runner {
         // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
-            let config = FileCacheConfig::new(!args.file_cache_on_disk);
+            let config = match args.file_cache_on_disk {
+                true => FileCacheConfig::default_on_disk(),
+                false => FileCacheConfig::default_in_memory(),
+            };
 
             let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
