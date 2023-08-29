@@ -584,8 +584,8 @@ impl LayerInner {
             );
 
             Ok(if self.wanted_evicted.load(Ordering::Acquire) {
-                // because we reset wanted_evictness earlier, this most likely means when we were downloading someone
-                // wanted to evict this layer.
+                // because we reset wanted_evictness earlier, this most likely means while we were
+                // downloading someone wanted to evict this layer.
                 ResidentOrWantedEvicted::WantedEvicted(Arc::downgrade(&res))
             } else {
                 ResidentOrWantedEvicted::Resident(res.clone())
