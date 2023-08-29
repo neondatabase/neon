@@ -145,7 +145,10 @@ pub async fn init_tenant_mgr(
 
     let tenant_generations = match tenant_generations {
         Some(g) => Some(g.await),
-        None => None,
+        None => {
+            info!("Control plane API not configured, tenant generations are disabled");
+            None
+        }
     };
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
