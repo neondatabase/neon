@@ -200,6 +200,9 @@ impl Timeline {
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
 
+                // guard against eviction while we inspect it; it might be that eviction_task and
+                // disk_usage_eviction_task both select the same layers to be evicted, and
+                // seemingly free up double the space. both succeeding is of no consequence.
                 let guard = match hist_layer.keep_resident().await {
                     Ok(Some(l)) => l,
                     Ok(None) => continue,
