@@ -498,7 +498,7 @@ impl DeltaLayerWriterInner {
         // fsync the file
         file.sync_all()?;
 
-        let layer = Layer::for_written_tempfile(self.conf, timeline, desc, &self.path)?;
+        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
         trace!("created delta layer {}", layer.local_path().display());
 

@@ -133,7 +133,7 @@ impl Layer {
 
     /// Creates a Layer value for freshly written out new layer file by renaming it from a
     /// temporary path.
-    pub(crate) fn for_written_tempfile(
+    pub(crate) fn finish_creating(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         desc: PersistentLayerDesc,
