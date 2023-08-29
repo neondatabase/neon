@@ -57,6 +57,8 @@ void RunClientC(uint32_t serverId) {
     }
 }
 
+bool debug_enabled = false;
+
 bool initializedMemoryContext = false;
 // pthread_mutex_init(&lock, NULL)?
 pthread_mutex_t lock;
@@ -80,8 +82,11 @@ void MyContextInit() {
         if (!SelectConfigFiles(NULL, progname))
             exit(1);
 
-        log_min_messages = FATAL;
-        // log_min_messages = LOG;
+        if (debug_enabled) {
+            log_min_messages = LOG;
+        } else {
+            log_min_messages = FATAL;
+        }
         Log_line_prefix = "[%p] ";
 
         InitializeMaxBackends();

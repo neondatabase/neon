@@ -20,8 +20,8 @@ use crate::{
     simtest::{
         log::{init_logger, SimClock},
         safekeeper::run_server,
-        util::{generate_schedule, TestConfig},
-    },
+        util::{generate_schedule, TestConfig, generate_network_opts},
+    }, enable_debug,
 };
 
 use super::{
@@ -162,8 +162,10 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let mut config = TestConfig::new(Some(clock));
     config.network.keepalive_timeout = Some(100);
 
-    for i in 0..1000 {
+    for i in 0..30000 {
         let seed: u64 = rand::thread_rng().gen();
+        config.network = generate_network_opts(seed);
+
         let test = config.start(seed);
         warn!("Running test with seed {}", seed);
 
@@ -178,6 +180,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
 
 #[test]
 fn test_one_schedule() -> anyhow::Result<()> {
+    enable_debug();
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
     config.network.keepalive_timeout = Some(100);
@@ -191,7 +194,8 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // test.run_schedule(&schedule)?;
     // test.world.stop_all();
 
-    let seed = 9982078935230494862;
+    let seed = 11245530003696902397;
+    config.network = generate_network_opts(seed);
     let test = config.start(seed);
     warn!("Running test with seed {}", seed);
 

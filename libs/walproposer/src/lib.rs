@@ -30,3 +30,7 @@ pub fn c_context() -> Option<Box<dyn Fn(NodeOs) + Send + Sync>> {
         unsafe { bindings::MyContextInit(); }
     }))
 }
+
+pub fn enable_debug() {
+    unsafe { bindings::debug_enabled = true; }
+}

@@ -4,6 +4,8 @@ use safekeeper::simlib::{world::World, sync::Mutex};
 use tracing_subscriber::fmt::{time::FormatTime, format::Writer};
 use utils::logging;
 
+use crate::bindings;
+
 
 #[derive(Clone)]
 pub struct SimClock {
@@ -38,12 +40,17 @@ impl FormatTime for SimClock {
 }
 
 pub fn init_logger() -> SimClock {
+    let debug_enabled = unsafe { bindings::debug_enabled };
+
     let clock = SimClock::default();
     let base_logger = tracing_subscriber::fmt()
         .with_target(false)
         .with_timer(clock.clone())
         .with_ansi(true)
-        // .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(match debug_enabled {
+            true => tracing::Level::DEBUG,
+            false => tracing::Level::INFO,
+        })
         .with_writer(std::io::stdout);
     base_logger.init();
 
