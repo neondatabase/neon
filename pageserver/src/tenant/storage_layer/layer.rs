@@ -62,7 +62,7 @@ impl AsLayerDesc for Layer {
 }
 
 impl Layer {
-    /// Creates a layer value for a file we know not to be downloaded or resident.
+    /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
