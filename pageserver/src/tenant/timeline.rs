@@ -2445,15 +2445,7 @@ impl Timeline {
     }
 
     async fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-
-        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
-        // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)
-            .await?;
-        let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
+        None
     }
 
     fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
@@ -4191,23 +4183,6 @@ impl Timeline {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
-
-                if img.len() == PAGE_SZ {
-                    let cache = page_cache::get();
-                    if let Err(e) = cache
-                        .memorize_materialized_page(
-                            self.tenant_id,
-                            self.timeline_id,
-                            key,
-                            last_rec_lsn,
-                            &img,
-                        )
-                        .await
-                        .context("Materialized page memoization failed")
-                    {
-                        return Err(PageReconstructError::from(e));
-                    }
-                }
 
                 Ok(img)
             }

@@ -12,8 +12,7 @@ use clap::{Parser, Subcommand};
 use layers::LayerCmd;
 use pageserver::{
     context::{DownloadBehavior, RequestContext},
-    page_cache,
-    task_mgr::TaskKind,
+   task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
 };
 use postgres_ffi::ControlFileData;
@@ -114,8 +113,6 @@ fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
 }
 
 async fn print_layerfile(path: &Path) -> anyhow::Result<()> {
-    // Basic initialization of things that don't change after startup
-    page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
     dump_layerfile_from_path(path, true, &ctx).await
 }

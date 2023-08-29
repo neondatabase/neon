@@ -145,19 +145,13 @@ impl<'a> BlockCursor<'a> {
 /// for modifying the file, nor for invalidating the cache if it is modified.
 pub struct FileBlockReader<F> {
     pub file: F,
-
-    /// Unique ID of this file, used as key in the page cache.
-    file_id: page_cache::FileId,
 }
 
 impl<F> FileBlockReader<F> {
     pub fn new(file: F) -> Self {
-        let file_id = page_cache::next_file_id();
-
-        FileBlockReader { file_id, file }
+        FileBlockReader { file }
     }
 }
-
 
 macro_rules! impls {
     (FileBlockReader<$ty:ty>) => {
@@ -182,7 +176,7 @@ macro_rules! impls {
                 let buf = crate::buffer_pool::get();
                 // Read the page from disk into the buffer
                 let mut write_guard = self.fill_buffer(buf, blknum).await?;
-                todo!()
+                Ok(BlockLease::PageReadGuard(write_guard))
             }
         }
     };

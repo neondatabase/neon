@@ -20,7 +20,7 @@ use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
     context::{DownloadBehavior, RequestContext},
-    http, page_cache, page_service, task_mgr,
+    http, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
@@ -122,9 +122,6 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize up failpoints support
     let scenario = pageserver::failpoint_support::init();
-
-    // Basic initialization of things that don't change after startup
-    page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
 

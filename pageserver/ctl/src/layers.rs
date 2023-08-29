@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Subcommand;
-use pageserver::page_cache;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
 use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
@@ -45,7 +44,6 @@ pub(crate) enum LayerCmd {
 
 async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
-    page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;

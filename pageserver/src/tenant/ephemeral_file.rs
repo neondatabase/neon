@@ -15,8 +15,6 @@ use tracing::*;
 use utils::id::{TenantId, TimelineId};
 
 pub struct EphemeralFile {
-    page_cache_file_id: page_cache::FileId,
-
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
     file: VirtualFile,
@@ -47,7 +45,6 @@ impl EphemeralFile {
         )?;
 
         Ok(EphemeralFile {
-            page_cache_file_id: page_cache::next_file_id(),
             _tenant_id: tenant_id,
             _timeline_id: timeline_id,
             file,
