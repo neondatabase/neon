@@ -59,8 +59,8 @@ pub struct FileCacheConfig {
     spread_factor: f64,
 }
 
-impl Default for FileCacheConfig {
-    fn default() -> Self {
+impl FileCacheConfig {
+    pub fn default_in_memory() -> Self {
         Self {
             in_memory: true,
             // 75 %
@@ -71,9 +71,19 @@ impl Default for FileCacheConfig {
             spread_factor: 0.1,
         }
     }
-}
 
-impl FileCacheConfig {
+    pub fn default_on_disk() -> Self {
+        Self {
+            in_memory: false,
+            resource_multiplier: 0.75,
+            // 256 MiB - lower than when in memory because overcommitting is safe; if we don't have
+            // memory, the kernel will just evict from its page cache, rather than e.g. killing
+            // everything.
+            min_remaining_after_cache: NonZeroU64::new(256 * MiB).unwrap(),
+            spread_factor: 0.1,
+        }
+    }
+
     /// Make sure fields of the config are consistent.
     pub fn validate(&self) -> anyhow::Result<()> {
         // Single field validity
