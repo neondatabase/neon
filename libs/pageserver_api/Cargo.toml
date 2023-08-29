@@ -12,6 +12,7 @@ const_format.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 byteorder.workspace = true
+hex.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
 enum-map.workspace = true
