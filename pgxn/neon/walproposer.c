@@ -1455,6 +1455,7 @@ static void
 DetermineEpochStartLsn(void)
 {
 	TermHistory *dth;
+	int          n_ready = 0;
 
 	propEpochStartLsn = InvalidXLogRecPtr;
 	donorEpoch = 0;
@@ -1465,6 +1466,8 @@ DetermineEpochStartLsn(void)
 	{
 		if (safekeeper[i].state == SS_IDLE)
 		{
+			n_ready++;
+
 			if (GetEpoch(&safekeeper[i]) > donorEpoch ||
 				(GetEpoch(&safekeeper[i]) == donorEpoch &&
 				 safekeeper[i].voteResponse.flushLsn > propEpochStartLsn))
@@ -1490,6 +1493,9 @@ DetermineEpochStartLsn(void)
 			}
 		}
 	}
+
+	if (n_ready < quorum)
+		walprop_log(FATAL, "missing majority of votes, expected %d, got %d", n_votes, n_ready);
 
 	/*
 	 * If propEpochStartLsn is 0 everywhere, we are bootstrapping -- nothing
