@@ -570,7 +570,7 @@ impl LayerInner {
                 self.spawn_download_and_wait(timeline).await?;
             } else {
                 // the file is present locally, probably by a previous but cancelled call to
-                // get_or_maybe_download.
+                // get_or_maybe_download. alternatively we might be running without remote storage.
             }
 
             let res = Arc::new(DownloadedLayer {
