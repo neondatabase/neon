@@ -349,8 +349,8 @@ struct LayerInner {
     /// [`LayerInner::on_drop`].
     wanted_evicted: AtomicBool,
 
-    /// Version is to make sure we will in fact only evict a file if no new guard has been created
-    /// for it.
+    /// Version is to make sure we will in fact only evict a file if no new download has been
+    /// started.
     version: AtomicUsize,
 
     /// Allow subscribing to when the layer actually gets evicted.
