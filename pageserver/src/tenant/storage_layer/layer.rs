@@ -119,9 +119,14 @@ impl Layer {
             LayerInner::new(conf, timeline, access_stats, desc, Some(inner))
         }));
 
+        let downloaded = resident.expect("just initialized");
+
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_none());
 
-        let downloaded = resident.expect("just initialized");
+        timeline
+            .metrics
+            .resident_physical_size_gauge
+            .add(metadata.file_size());
 
         ResidentLayer { downloaded, owner }
     }
@@ -155,6 +160,15 @@ impl Layer {
         // if the rename works, the path is as expected
         std::fs::rename(temp_path, owner.local_path())
             .context("rename temporary file as correct path for {owner}")?;
+
+        {
+            let metrics = &timeline.metrics;
+            let file_size = owner.layer_desc().file_size;
+
+            metrics.resident_physical_size_gauge.add(file_size);
+            metrics.num_persistent_files_created.inc_by(1);
+            metrics.persistent_bytes_written.inc_by(file_size);
+        }
 
         Ok(ResidentLayer { downloaded, owner })
     }

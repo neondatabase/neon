@@ -1,5 +1,4 @@
 use anyhow::{bail, ensure, Context, Result};
-use pageserver_api::models::{LayerResidenceEventReason, LayerResidenceStatus};
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
@@ -154,20 +153,9 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub(crate) fn track_new_image_layers(
-        &mut self,
-        image_layers: &[ResidentLayer],
-        metrics: &crate::metrics::TimelineMetrics,
-    ) {
+    pub(crate) fn track_new_image_layers(&mut self, image_layers: &[ResidentLayer]) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
-            metrics
-                .resident_physical_size_gauge
-                .add(layer.layer_desc().file_size);
-            layer.access_stats().record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
             Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
@@ -178,7 +166,6 @@ impl LayerManager {
         &mut self,
         delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
-        metrics: &crate::metrics::TimelineMetrics,
     ) {
         let inmem = self
             .layer_map
@@ -193,15 +180,6 @@ impl LayerManager {
 
         if let Some(l) = delta_layer {
             let mut updates = self.layer_map.batch_update();
-            l.access_stats().record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
-            let sz = l.layer_desc().file_size;
-            metrics.resident_physical_size_gauge.add(sz);
-            metrics.num_persistent_files_created.inc_by(1);
-            metrics.persistent_bytes_written.inc_by(sz);
-
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
             updates.flush();
         }
@@ -213,18 +191,9 @@ impl LayerManager {
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Layer>,
         compact_to: &[ResidentLayer],
-        metrics: &crate::metrics::TimelineMetrics,
     ) -> Result<()> {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
-            l.access_stats().record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
-            metrics
-                .resident_physical_size_gauge
-                .add(l.layer_desc().file_size);
-
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
         }
         for l in compact_from {

@@ -1544,9 +1544,6 @@ impl Timeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.metrics
-            .resident_physical_size_gauge
-            .set(total_physical_size);
 
         timer.stop_and_record();
         Ok(())
@@ -2372,7 +2369,7 @@ impl Timeline {
         // the mapping in `create_delta_layer`.
         {
             let mut guard = self.layers.write().await;
-            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
+            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer);
         }
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
@@ -2735,7 +2732,7 @@ impl Timeline {
 
         let mut guard = self.layers.write().await;
 
-        guard.track_new_image_layers(&image_layers, &self.metrics);
+        guard.track_new_image_layers(&image_layers);
         drop_wlock(guard);
         timer.stop_and_record();
 
@@ -3399,12 +3396,7 @@ impl Timeline {
 
         // deletion will happen later, the layer file manager sets wanted_garbage_collected
 
-        guard.finish_compact_l0(
-            &layer_removal_cs,
-            remove_layers,
-            &insert_layers,
-            &self.metrics,
-        )?;
+        guard.finish_compact_l0(&layer_removal_cs, remove_layers, &insert_layers)?;
 
         drop_wlock(guard);
 
