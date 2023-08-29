@@ -14,14 +14,14 @@ pub(super) async fn delete_layer<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     local_layer_path: &'a Path,
-    generation: Option<Generation>,
+    generation: Generation,
 ) -> anyhow::Result<()> {
     fail::fail_point!("before-delete-layer", |_| {
         anyhow::bail!("failpoint before-delete-layer")
     });
     debug!("Deleting layer from remote storage: {local_layer_path:?}",);
 
-    let path_to_delete = remote_path(conf, local_layer_path, generation)?;
+    let path_to_delete = remote_path(conf, local_layer_path, Some(generation))?;
 
     // We don't want to print an error if the delete failed if the file has
     // already been deleted. Thankfully, in this situation S3 already

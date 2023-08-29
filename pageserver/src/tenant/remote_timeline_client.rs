@@ -664,16 +664,15 @@ impl RemoteTimelineClient {
                     // Remove from latest_files, learning the file's remote generation in the process
                     let meta = upload_queue.latest_files.remove(name);
 
-                    if meta.is_none() {
+                    if let Some(meta) = meta {
+                        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                        Some((name, meta.generation))
+                    } else {
                         // This is unexpected: latest_files is meant to be kept up to
                         // date.  We can't delete the layer if we have forgotten what
                         // generation it was in.
                         warn!("Deleting layer {name} not found in latest_files list");
                         None
-                    } else {
-                        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                        let generation = meta.and_then(|m| m.generation);
-                        Some((name, generation))
                     }
                 })
                 .collect();
@@ -1401,20 +1400,12 @@ pub fn remote_layer_path(
     layer_file_name: &LayerFileName,
     layer_meta: &LayerFileMetadata,
 ) -> RemotePath {
-    let path = if let Some(generation) = layer_meta.generation {
-        // Generation-aware key format
-        format!(
-            "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
-            layer_file_name.file_name(),
-            generation.get_suffix()
-        )
-    } else {
-        // Pre-generation key format
-        format!(
-            "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}",
-            layer_file_name.file_name(),
-        )
-    };
+    // Generation-aware key format
+    let path = format!(
+        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        layer_file_name.file_name(),
+        layer_meta.generation.get_suffix()
+    );
 
     RemotePath::from_string(&path).expect("Failed to construct path")
 }

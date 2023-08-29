@@ -206,7 +206,7 @@ pub(crate) struct Delete {
     pub(crate) file_kind: RemoteOpFileKind,
     pub(crate) layer_file_name: LayerFileName,
     pub(crate) scheduled_from_timeline_delete: bool,
-    pub(crate) generation: Option<Generation>,
+    pub(crate) generation: Generation,
 }
 
 #[derive(Debug)]
@@ -243,7 +243,7 @@ impl std::fmt::Display for UploadOp {
                 "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {})",
                 delete.layer_file_name.file_name(),
                 delete.scheduled_from_timeline_delete,
-                delete.generation.unwrap_or(Generation::none())
+                delete.generation
             ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
