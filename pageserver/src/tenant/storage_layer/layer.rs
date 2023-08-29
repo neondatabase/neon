@@ -829,8 +829,8 @@ impl LayerInner {
 
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_id, timeline_id = %self.desc.timeline_id, layer=%self);
 
-            // downgrade for the duration of the queue, in case there's a shutdown already ongoing
-            // we should not hold it up.
+            // downgrade for queueing, in case there's a tear down already ongoing we should not
+            // hold it alive.
             let this = Arc::downgrade(&self);
             drop(self);
 
