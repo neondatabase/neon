@@ -1001,6 +1001,7 @@ dependencies = [
  "comfy-table",
  "compute_api",
  "git-version",
+ "hex",
  "hyper",
  "nix 0.26.2",
  "once_cell",

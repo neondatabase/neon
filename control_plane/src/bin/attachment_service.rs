@@ -6,6 +6,7 @@
 ///
 use anyhow::anyhow;
 use clap::Parser;
+use hex::FromHex;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
 use pageserver_api::control_api::*;
@@ -25,6 +26,8 @@ use utils::{
     tcp_listener,
 };
 
+use control_plane::attachment_service::{AttachHookRequest, AttachHookResponse};
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -37,7 +40,7 @@ struct Cli {
 }
 
 // The persistent state of each Tenant
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct TenantState {
     // Currently attached pageserver
     pageserver: Option<NodeId>,
@@ -47,9 +50,71 @@ struct TenantState {
     generation: u32,
 }
 
+fn to_hex_map<S, V>(input: &HashMap<TenantId, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Clone + Serialize,
+{
+    eprintln!("to_hex_map");
+    let transformed = input
+        .iter()
+        .map(|(k, v)| (HexTenantId::new(k.clone()), v.clone()));
+
+    transformed
+        .collect::<HashMap<HexTenantId, V>>()
+        .serialize(serializer)
+}
+
+fn from_hex_map<'de, D, V>(deserializer: D) -> Result<HashMap<TenantId, V>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    eprintln!("from_hex_map");
+    let hex_map = HashMap::<HexTenantId, V>::deserialize(deserializer)?;
+
+    Ok(hex_map.into_iter().map(|(k, v)| (k.take(), v)).collect())
+}
+
+#[derive(Eq, PartialEq, Clone, Hash)]
+struct HexTenantId(TenantId);
+
+impl HexTenantId {
+    fn new(t: TenantId) -> Self {
+        Self(t)
+    }
+
+    fn take(self) -> TenantId {
+        self.0
+    }
+}
+
+impl Serialize for HexTenantId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let hex = self.0.hex_encode();
+        serializer.collect_str(&hex)
+    }
+}
+
+impl<'de> Deserialize<'de> for HexTenantId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let string = String::deserialize(deserializer)?;
+        TenantId::from_hex(string)
+            .map(|t| HexTenantId::new(t))
+            .map_err(|e| serde::de::Error::custom(format!("{e}")))
+    }
+}
+
 // Top level state available to all HTTP handlers
 #[derive(Serialize, Deserialize)]
 struct PersistentState {
+    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     tenants: HashMap<TenantId, TenantState>,
 
     #[serde(skip)]
@@ -162,18 +227,6 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
 
     json_response(StatusCode::OK, response)
 }
-
-#[derive(Serialize, Deserialize)]
-struct AttachHookRequest {
-    tenant_id: TenantId,
-    pageserver_id: Option<NodeId>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct AttachHookResponse {
-    gen: Option<u32>,
-}
-
 /// Call into this before attaching a tenant to a pageserver, to acquire a generation number
 /// (in the real control plane this is unnecessary, because the same program is managing
 ///  generation numbers and doing attachments).

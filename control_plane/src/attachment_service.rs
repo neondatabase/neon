@@ -1,6 +1,8 @@
-use std::{path::PathBuf, process::Child};
-
 use crate::{background_process, local_env::LocalEnv};
+use anyhow::anyhow;
+use serde::{Deserialize, Serialize};
+use std::{path::PathBuf, process::Child};
+use utils::id::{NodeId, TenantId};
 
 pub struct AttachmentService {
     env: LocalEnv,
@@ -9,6 +11,17 @@ pub struct AttachmentService {
 }
 
 const COMMAND: &str = "attachment_service";
+
+#[derive(Serialize, Deserialize)]
+pub struct AttachHookRequest {
+    pub tenant_id: TenantId,
+    pub pageserver_id: Option<NodeId>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AttachHookResponse {
+    pub gen: Option<u32>,
+}
 
 impl AttachmentService {
     pub fn from_env(env: &LocalEnv) -> Self {
@@ -52,5 +65,39 @@ impl AttachmentService {
 
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         background_process::stop_process(immediate, COMMAND, &self.pid_file())
+    }
+
+    /// Call into the attach_hook API, for use before handing out attachments to pageservers
+    pub fn attach_hook(
+        &self,
+        tenant_id: TenantId,
+        pageserver_id: NodeId,
+    ) -> anyhow::Result<Option<u32>> {
+        use hyper::StatusCode;
+
+        let url = self
+            .env
+            .pageserver
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join("attach_hook")
+            .unwrap();
+        let client = reqwest::blocking::ClientBuilder::new()
+            .build()
+            .expect("Failed to construct http client");
+
+        let request = AttachHookRequest {
+            tenant_id,
+            pageserver_id: Some(pageserver_id),
+        };
+
+        let response = client.post(url).json(&request).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {0}", response.status()));
+        }
+
+        let response = response.json::<AttachHookResponse>()?;
+        Ok(response.gen)
     }
 }

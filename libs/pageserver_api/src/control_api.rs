@@ -39,3 +39,16 @@ pub struct ValidateResponseTenant {
     pub id: TenantId,
     pub valid: bool,
 }
+
+#[cfg(testing)]
+#[derive(Serialize, Deserialize)]
+pub struct AttachHookRequest {
+    tenant_id: TenantId,
+    pageserver_id: Option<NodeId>,
+}
+
+#[cfg(testing)]
+#[derive(Serialize, Deserialize)]
+pub struct AttachHookResponse {
+    gen: Option<u32>,
+}

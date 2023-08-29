@@ -284,14 +284,6 @@ fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantId>> {
         .context("Failed to parse tenant id from the argument string")
 }
 
-fn parse_generation(sub_match: &ArgMatches) -> anyhow::Result<Option<u32>> {
-    sub_match
-        .get_one::<String>("generation")
-        .map(|tenant_id| u32::from_str(tenant_id))
-        .transpose()
-        .context("Failed to parse generation rom the argument string")
-}
-
 fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId>> {
     sub_match
         .get_one::<String>("timeline-id")
@@ -356,15 +348,25 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             }
         }
         Some(("create", create_match)) => {
-            let initial_tenant_id = parse_tenant_id(create_match)?;
-            let generation = parse_generation(create_match)?;
             let tenant_conf: HashMap<_, _> = create_match
                 .get_many::<String>("config")
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
-            let new_tenant_id =
-                pageserver.tenant_create(initial_tenant_id, generation, tenant_conf)?;
-            println!("tenant {new_tenant_id} successfully created on the pageserver");
+
+            // If tenant ID was not specified, generate one
+            let tenant_id = parse_tenant_id(create_match)?.unwrap_or(TenantId::generate());
+
+            let generation = if env.pageserver.control_plane_api.is_some() {
+                // We must register the tenant with the attachment service, so
+                // that when the pageserver restarts, it will be re-attached.
+                let attachment_service = AttachmentService::from_env(env);
+                attachment_service.attach_hook(tenant_id, env.pageserver.id)?
+            } else {
+                None
+            };
+
+            pageserver.tenant_create(tenant_id, generation, tenant_conf)?;
+            println!("tenant {tenant_id} successfully created on the pageserver");
 
             // Create an initial timeline for the new tenant
             let new_timeline_id = parse_timeline_id(create_match)?;
@@ -374,7 +376,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .context("Failed to parse postgres version from the argument string")?;
 
             let timeline_info = pageserver.timeline_create(
-                new_tenant_id,
+                tenant_id,
                 new_timeline_id,
                 None,
                 None,
@@ -385,17 +387,17 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
 
             env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_string(),
-                new_tenant_id,
+                tenant_id,
                 new_timeline_id,
             )?;
 
             println!(
-                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {new_tenant_id}",
+                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
             );
 
             if create_match.get_flag("set-default") {
-                println!("Setting tenant {new_tenant_id} as a default one");
-                env.default_tenant_id = Some(new_tenant_id);
+                println!("Setting tenant {tenant_id} as a default one");
+                env.default_tenant_id = Some(tenant_id);
             }
         }
         Some(("set-default", set_default_match)) => {
@@ -940,11 +942,14 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     broker::start_broker_process(env)?;
 
-    let attachment_service = AttachmentService::from_env(env);
-    if let Err(e) = attachment_service.start() {
-        eprintln!("attachment_service start failed: {:#}", e);
-        try_stop_all(env, true);
-        exit(1);
+    // Only start the attachment service if the pageserver is configured to need it
+    if env.pageserver.control_plane_api.is_some() {
+        let attachment_service = AttachmentService::from_env(env);
+        if let Err(e) = attachment_service.start() {
+            eprintln!("attachment_service start failed: {:#}", e);
+            try_stop_all(env, true);
+            exit(1);
+        }
     }
 
     let pageserver = PageServerNode::from_env(env);
@@ -1006,9 +1011,11 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         eprintln!("neon broker stop failed: {e:#}");
     }
 
-    let attachment_service = AttachmentService::from_env(env);
-    if let Err(e) = attachment_service.stop(immediate) {
-        eprintln!("attachment service stop failed: {e:#}");
+    if env.pageserver.control_plane_api.is_some() {
+        let attachment_service = AttachmentService::from_env(env);
+        if let Err(e) = attachment_service.stop(immediate) {
+            eprintln!("attachment service stop failed: {e:#}");
+        }
     }
 }
 
