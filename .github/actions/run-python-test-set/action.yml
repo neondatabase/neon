@@ -145,7 +145,11 @@ runs:
 
         if [ "${RERUN_FLAKY}" == "true" ]; then
           mkdir -p $TEST_OUTPUT
-          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/flaky.json"
+          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" \
+                                              --days 7 \
+                                              --output "$TEST_OUTPUT/flaky.json" \
+                                              --pg-version "${DEFAULT_PG_VERSION}" \
+                                              --build-type "${BUILD_TYPE}"
 
           EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
         fi
