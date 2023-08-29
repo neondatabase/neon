@@ -230,6 +230,23 @@ impl TimelineMetadata {
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
     }
+
+    // Checksums make it awkward to build a valid instance by hand.  This helper
+    // provides a TimelineMetadata with a valid checksum in its header.
+    #[cfg(test)]
+    pub fn example() -> Self {
+        let instance = Self::new(
+            "0/16960E8".parse::<Lsn>().unwrap(),
+            None,
+            None,
+            Lsn::from_hex("00000000").unwrap(),
+            Lsn::from_hex("00000000").unwrap(),
+            Lsn::from_hex("00000000").unwrap(),
+            0,
+        );
+        let bytes = instance.to_bytes().unwrap();
+        Self::from_bytes(&bytes).unwrap()
+    }
 }
 
 impl<'de> Deserialize<'de> for TimelineMetadata {
