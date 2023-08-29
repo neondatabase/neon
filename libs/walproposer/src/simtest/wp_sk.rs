@@ -196,6 +196,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
 
     let seed = 11245530003696902397;
     config.network = generate_network_opts(seed);
+    info!("network: {:?}", config.network);
     let test = config.start(seed);
     warn!("Running test with seed {}", seed);
 

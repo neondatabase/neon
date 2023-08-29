@@ -16,7 +16,7 @@ use super::{
     world::{Node, NodeEvent, World},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Delay {
     pub min: u64,
     pub max: u64,
@@ -52,7 +52,7 @@ impl Delay {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NetworkOptions {
     /// Connection will be automatically closed after this timeout.
     pub keepalive_timeout: Option<u64>,
