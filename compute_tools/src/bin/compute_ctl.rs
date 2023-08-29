@@ -280,6 +280,7 @@ fn main() -> Result<()> {
             let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
             let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
             let cgroup = matches.get_one::<String>("cgroup");
+            let file_cache_not_in_memory = matches.get_flag("file-cache-not-in-memory");
 
             // Only make a runtime if we need to.
             // Note: it seems like you can make a runtime in an inner scope and
@@ -312,6 +313,7 @@ fn main() -> Result<()> {
                         cgroup: cgroup.cloned(),
                         pgconnstr: file_cache_connstr.cloned(),
                         addr: vm_monitor_addr.cloned().unwrap(),
+                        file_cache_not_in_memory: file_cache_not_in_memory,
                     })),
                     token.clone(),
                 ))
@@ -481,6 +483,11 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("file-cache-not-in-memory")
+                .long("file-cache-not-in-memory")
+                .action(clap::ArgAction::SetTrue),
         )
 }
 
