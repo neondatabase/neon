@@ -1004,11 +1004,17 @@ impl DownloadedLayer {
     /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
     /// initialize it permanently.
     ///
-    /// `owner` parameter is a borrow pointing at the same `LayerInner` as the
-    /// `DownloadedLayer::owner` would point when upgraded. Given how this method ends up called,
-    /// we will however always have the LayerInner on the callstack, so we can just use it.
-    async fn get(&self, owner: &LayerInner) -> anyhow::Result<&LayerKind> {
+    /// `owner` parameter is a strong reference at the same `LayerInner` as the
+    /// `DownloadedLayer::owner` would be when upgraded. Given how this method ends up called,
+    /// we will always have the LayerInner on the callstack, so we can just use it.
+    async fn get(&self, owner: &Arc<LayerInner>) -> anyhow::Result<&LayerKind> {
         let init = || async {
+            assert_eq!(
+                Weak::as_ptr(&self.owner),
+                Arc::as_ptr(owner),
+                "these are the same, just avoiding the upgrade"
+            );
+
             // there is nothing async here, but it should be async
             if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
@@ -1043,7 +1049,7 @@ impl DownloadedLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-        owner: &LayerInner,
+        owner: &Arc<LayerInner>,
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 
@@ -1056,7 +1062,7 @@ impl DownloadedLayer {
         }
     }
 
-    async fn dump(&self, owner: &LayerInner) -> anyhow::Result<()> {
+    async fn dump(&self, owner: &Arc<LayerInner>) -> anyhow::Result<()> {
         use LayerKind::*;
         match self.get(owner).await? {
             Delta(d) => d.dump().await?,
