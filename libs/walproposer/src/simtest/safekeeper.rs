@@ -16,7 +16,7 @@ use safekeeper::{
     timeline::TimelineError,
     SafeKeeperConf,
 };
-use tracing::debug;
+use tracing::{debug, info_span};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -147,7 +147,8 @@ impl GlobalMap {
 }
 
 pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
-    debug!("started server {}", os.id());
+    let _enter = info_span!("safekeeper", id = os.id()).entered();
+    debug!("started server");
     let conf = SafeKeeperConf {
         workdir: PathBuf::from("."),
         my_id: NodeId(os.id() as u64),

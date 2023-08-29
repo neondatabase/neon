@@ -191,7 +191,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // test.run_schedule(&schedule)?;
     // test.world.stop_all();
 
-    let seed = 14035854184686918762;
+    let seed = 16600359418126807633;
     let test = config.start(seed);
     warn!("Running test with seed {}", seed);
 

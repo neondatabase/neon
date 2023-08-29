@@ -81,6 +81,7 @@ void MyContextInit() {
             exit(1);
 
         log_min_messages = FATAL;
+        // log_min_messages = LOG;
         Log_line_prefix = "[%p] ";
 
         InitializeMaxBackends();

@@ -1505,6 +1505,17 @@ DetermineEpochStartLsn(void)
 		walprop_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
 	}
 
+	if (truncateLsn == InvalidXLogRecPtr && timelineStartLsn == propEpochStartLsn)
+	{
+		/*
+		 * If truncateLsn is 0 everywhere, we are bootstrapping -- nothing was
+		 * committed yet. But if timelineStartLsn is not 0, we already know
+		 * the first record location, so we can bump truncateLsn to it.
+		 */
+		truncateLsn = timelineStartLsn;
+		walprop_log(LOG, "bumped truncateLsn to timelineStartLsn %X/%X", LSN_FORMAT_ARGS(truncateLsn));
+	}
+
 	/*
 	 * If propEpochStartLsn is not 0, at least one msg with WAL was sent to
 	 * some connected safekeeper; it must have carried truncateLsn pointing to
