@@ -497,7 +497,7 @@ async fn tenant_attach_handler(
                 "generation attribute missing"
             )))?
     } else {
-        Generation::placeholder()
+        Generation::none()
     };
 
     if let Some(remote_storage) = &state.remote_storage {

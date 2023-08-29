@@ -88,6 +88,11 @@ impl RemotePath {
     pub fn extension(&self) -> Option<&str> {
         self.0.extension()?.to_str()
     }
+
+    /// Unwrap the PathBuf that RemotePath wraps
+    pub fn take(self) -> PathBuf {
+        self.0
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.

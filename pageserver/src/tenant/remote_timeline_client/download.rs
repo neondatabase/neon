@@ -19,7 +19,7 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
@@ -219,18 +219,14 @@ pub async fn list_remote_timelines(
     Ok(timeline_ids)
 }
 
-pub(super) async fn download_index_part(
-    conf: &'static PageServerConf,
+async fn do_download_index_part(
+    local_path: &Path,
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-    generation: Generation,
+    index_generation: Generation,
 ) -> Result<IndexPart, DownloadError> {
-    let local_path = conf
-        .metadata_path(tenant_id, timeline_id)
-        .with_file_name(IndexPart::FILE_NAME);
-
-    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
+    let remote_path = remote_index_path(tenant_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry(
         || async {
@@ -255,6 +251,120 @@ pub(super) async fn download_index_part(
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
+}
+
+pub(super) async fn download_index_part(
+    conf: &'static PageServerConf,
+    storage: &GenericRemoteStorage,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    my_generation: Generation,
+) -> Result<IndexPart, DownloadError> {
+    let local_path = conf
+        .metadata_path(tenant_id, timeline_id)
+        .with_file_name(IndexPart::FILE_NAME);
+
+    if my_generation.is_none() {
+        // Operating without generations: just fetch the generation-less path
+        return do_download_index_part(&local_path, storage, tenant_id, timeline_id, my_generation)
+            .await;
+    }
+
+    let previous_gen = my_generation.previous();
+    let r_previous =
+        do_download_index_part(&local_path, storage, tenant_id, timeline_id, previous_gen).await;
+
+    match r_previous {
+        Ok(index_part) => {
+            tracing::debug!("Found index_part from previous generation {previous_gen}");
+            return Ok(index_part);
+        }
+        Err(e) => {
+            if matches!(e, DownloadError::NotFound) {
+                tracing::debug!("No index_part found from previous generation {previous_gen}, falling back to listing");
+            } else {
+                return Err(e);
+            }
+        }
+    };
+
+    /// Given the key of an index, parse out the generation part of the name
+    fn parse_generation(path: RemotePath) -> Option<Generation> {
+        let path = path.take();
+        let file_name = match path.file_name() {
+            Some(f) => f,
+            None => {
+                // Unexpected: we should be seeing index_part.json paths only
+                tracing::warn!("Malformed index key {0}", path.display());
+                return None;
+            }
+        };
+
+        let file_name_str = match file_name.to_str() {
+            Some(s) => s,
+            None => {
+                tracing::warn!("Malformed index key {0}", path.display());
+                return None;
+            }
+        };
+
+        match file_name_str.split_once("-") {
+            Some((_, gen_suffix)) => u32::from_str_radix(gen_suffix, 16)
+                .map(|g| Generation::new(g))
+                .ok(),
+            None => None,
+        }
+    }
+
+    // Fallback: we did not find an index_part.json from the previous generation, so
+    // we will list all the index_part objects and pick the most recent.
+    let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
+    let indices = backoff::retry(
+        || async { storage.list_files(Some(&index_prefix)).await },
+        |_| false,
+        FAILED_DOWNLOAD_WARN_THRESHOLD,
+        FAILED_REMOTE_OP_RETRIES,
+        "listing index_part files",
+        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+        backoff::Cancel::new(CancellationToken::new(), || -> anyhow::Error {
+            unreachable!()
+        }),
+    )
+    .await
+    .map_err(|e| DownloadError::Other(e))?;
+
+    let mut generations: Vec<_> = indices
+        .into_iter()
+        .filter_map(|k| parse_generation(k))
+        .filter(|g| g <= &my_generation)
+        .collect();
+
+    generations.sort();
+    match generations.last() {
+        Some(g) => {
+            tracing::debug!("Found index_part in generation {g} (my generation {my_generation})");
+            do_download_index_part(&local_path, storage, tenant_id, timeline_id, *g).await
+        }
+        None => {
+            // This is not an error: the timeline may be newly created, or we may be
+            // upgrading and have no historical index_part with a generation suffix.
+            // Fall back to trying to load the un-suffixed index_part.json.
+            tracing::info!(
+                "No index_part.json-* found when loading {}/{} in generation {}",
+                tenant_id,
+                timeline_id,
+                my_generation
+            );
+            return do_download_index_part(
+                &local_path,
+                storage,
+                tenant_id,
+                timeline_id,
+                Generation::none(),
+            )
+            .await;
+        }
+    }
 }
 
 /// Helper function to handle retries for a download operation.

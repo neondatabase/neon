@@ -59,6 +59,10 @@ impl Generation {
             }
         }
     }
+
+    pub fn previous(&self) -> Generation {
+        Generation::new(self.0 - 1)
+    }
 }
 
 impl Serialize for Generation {
