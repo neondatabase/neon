@@ -39,7 +39,7 @@ use super::{
 ///
 /// This type models the on-disk layers, which can be evicted and on-demand downloaded.
 ///
-/// [`InMemoryLayer`]: inmemory_layer::InMemoryLayer
+/// [`InMemoryLayer`]: super::inmemory_layer::InMemoryLayer
 #[derive(Clone)]
 pub(crate) struct Layer(Arc<LayerInner>);
 
