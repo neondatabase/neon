@@ -55,7 +55,7 @@ pub struct VirtualFile {
     /// opened, in the VirtualFile::create() function, and strip the flag before
     /// storing it here.
     pub path: Utf8PathBuf,
-    open_options: OpenOptions,
+    open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
 
     // These are strings becase we only use them for metrics, and those expect strings.
     // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
@@ -237,17 +237,17 @@ macro_rules! with_file {
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true)).await
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+        options.read(true);
+        Self::open_with_options_async(path, options).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
     pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(
-            path,
-            OpenOptions::new().write(true).create(true).truncate(true),
-        )
-        .await
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        Self::open_with_options_async(path, options).await
     }
 
     /// Open a file with given options.
@@ -255,6 +255,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
+    #[cfg(test)]
     pub async fn open_with_options(
         path: &Utf8Path,
         open_options: &OpenOptions,
@@ -317,16 +318,17 @@ impl VirtualFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
         }
-        let mut file = Self::open_with_options(
-            tmp_path,
-            OpenOptions::new()
+        let mut file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options
                 .write(true)
                 // Use `create_new` so that, if we race with ourselves or something else,
                 // we bail out instead of causing damage.
-                .create_new(true),
-        )
-        .await
-        .map_err(CrashsafeOverwriteError::CreateTempfile)?;
+                .create_new(true);
+            Self::open_with_options_async(tmp_path, options)
+                .await
+                .map_err(CrashsafeOverwriteError::CreateTempfile)?
+        };
         file.write_all(content)
             .await
             .map_err(CrashsafeOverwriteError::WriteContents)?;
@@ -342,15 +344,78 @@ impl VirtualFile {
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
-        let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
+        let final_parent_dirfd = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.read(true);
+            Self::open_with_options_async(final_path_parent, options)
                 .await
-                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
+                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?
+        };
         final_parent_dirfd
             .sync_all()
             .await
             .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
         Ok(())
+    }
+
+    /// Open a file with given options.
+    ///
+    /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
+    /// they will be applied also when the file is subsequently re-opened, not only
+    /// on the first time. Make sure that's sane!
+    pub async fn open_with_options_async(
+        path: &Utf8Path,
+        open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
+    ) -> Result<VirtualFile, std::io::Error> {
+        let path_str = path.to_string();
+        let parts = path_str.split('/').collect::<Vec<&str>>();
+        let tenant_id;
+        let timeline_id;
+        if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
+            tenant_id = parts[parts.len() - 4].to_string();
+            timeline_id = parts[parts.len() - 2].to_string();
+        } else {
+            tenant_id = "*".to_string();
+            timeline_id = "*".to_string();
+        }
+        let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
+
+        let file = {
+            let start = std::time::Instant::now();
+            let system = tokio_epoll_uring::thread_local_system().await;
+            let file: OwnedFd = system
+                .open(path, &open_options)
+                .await
+                .map_err(|e| match e {
+                    tokio_epoll_uring::Error::Op(e) => e,
+                    tokio_epoll_uring::Error::System(system) => {
+                        std::io::Error::new(std::io::ErrorKind::Other, system)
+                    }
+                })?;
+            let file = File::from(file);
+            file
+        };
+
+        // Strip all options other than read and write.
+        //
+        // It would perhaps be nicer to check just for the read and write flags
+        // explicitly, but OpenOptions doesn't contain any functions to read flags,
+        // only to set them.
+        let mut reopen_options = open_options;
+        reopen_options.create(false);
+        reopen_options.create_new(false);
+        reopen_options.truncate(false);
+
+        let vfile = VirtualFile {
+            handle: RwLock::new(handle),
+            pos: 0,
+            path: path.to_path_buf(),
+            open_options: reopen_options,
+            tenant_id,
+            timeline_id,
+        };
+
+        Ok(vfile)
     }
 
     /// Call File::sync_all() on the underlying File.
@@ -415,7 +480,21 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path))?;
+        let file = {
+            let system = tokio_epoll_uring::thread_local_system().await;
+            let file: OwnedFd =
+                system
+                    .open(&self.path, &self.open_options)
+                    .await
+                    .map_err(|e| match e {
+                        tokio_epoll_uring::Error::Op(e) => e,
+                        tokio_epoll_uring::Error::System(system) => {
+                            std::io::Error::new(std::io::ErrorKind::Other, system)
+                        }
+                    })?;
+            let file = File::from(file);
+            file
+        };
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.

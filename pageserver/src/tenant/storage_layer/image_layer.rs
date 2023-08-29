@@ -444,12 +444,11 @@ impl ImageLayer {
         new_timeline: TimelineId,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let file = VirtualFile::open_with_options(
-            path,
-            &*std::fs::OpenOptions::new().read(true).write(true),
-        )
-        .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+        options.read(true).write(true);
+        let file = VirtualFile::open_with_options_async(path, options)
+            .await
+            .with_context(|| format!("Failed to open file '{}'", path))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -601,11 +600,11 @@ impl ImageLayerWriterInner {
             },
         );
         info!("new image layer {path}");
-        let mut file = VirtualFile::open_with_options(
-            &path,
-            std::fs::OpenOptions::new().write(true).create_new(true),
-        )
-        .await?;
+        let mut file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.write(true).create_new(true);
+            VirtualFile::open_with_options_async(&path, options).await?
+        };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);

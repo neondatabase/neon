@@ -44,11 +44,11 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFile::open_with_options(
-            &filename,
-            OpenOptions::new().read(true).write(true).create(true),
-        )
-        .await?;
+        let file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.read(true).write(true).create(true);
+            VirtualFile::open_with_options_async(&filename, options).await?
+        };
 
         Ok(EphemeralFile {
             page_cache_file_id: page_cache::next_file_id(),
@@ -89,7 +89,8 @@ impl EphemeralFile {
                     return Ok(BlockLease::PageReadGuard(guard))
                 }
                 page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                    let write_guard = self.file
+                    let write_guard = self
+                        .file
                         .read_exact_at(write_guard, blknum as u64 * PAGE_SZ as u64)
                         .await?;
                     let read_guard = write_guard.mark_valid();
