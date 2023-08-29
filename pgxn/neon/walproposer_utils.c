@@ -561,11 +561,11 @@ StartProposerReplication(StartReplicationCmd *cmd)
 static void
 WalSndLoop(void)
 {
+	/* Clear any already-pending wakeups */
+	ResetLatch(MyLatch);
+
 	for (;;)
 	{
-		/* Clear any already-pending wakeups */
-		ResetLatch(MyLatch);
-
 		CHECK_FOR_INTERRUPTS();
 
 		XLogBroadcastWalProposer();

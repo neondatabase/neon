@@ -396,37 +396,45 @@ WalProposerPoll(void)
 			ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
 #endif
 
-		rc = WaitEventSetWait(waitEvents, TimeToReconnect(now),
-							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
-		sk = (Safekeeper *) event.user_data;
+		if (WaitEventSetWait(waitEvents, TimeToReconnect(now),
+							 &event, 1, WAIT_EVENT_WAL_SENDER_MAIN) == 1)
+		{
+			/*
+			 * If wait is terminated by latch set (walsenders' latch is set on
+			 * each wal flush), then exit loop. (no need for pm death check due to
+			 * WL_EXIT_ON_PM_DEATH)
+			 */
+			if (event.events & WL_LATCH_SET)
+			{
+				/* Reset our latch */
+				ResetLatch(MyLatch);
 
 #if PG_MAJORVERSION_NUM >= 16
-		if (WalSndCtl != NULL)
-			ConditionVariableCancelSleep();
+				if (WalSndCtl != NULL)
+					ConditionVariableCancelSleep();
 #endif
+				break;
+			}
 
-		/*
-		 * If the event contains something that one of our safekeeper states
-		 * was waiting for, we'll advance its state.
-		 */
-		if (rc != 0 && (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)))
-			AdvancePollState(sk, event.events);
-
-		/*
-		 * If the timeout expired, attempt to reconnect to any safekeepers
-		 * that we dropped
-		 */
-		ReconnectSafekeepers();
-
-		/*
-		 * If wait is terminated by latch set (walsenders' latch is set on
-		 * each wal flush), then exit loop. (no need for pm death check due to
-		 * WL_EXIT_ON_PM_DEATH)
-		 */
-		if (rc != 0 && (event.events & WL_LATCH_SET))
+			/*
+			 * If the event contains something that one of our safekeeper states
+			 * was waiting for, we'll advance its state.
+			 */
+			if (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE))
+			{
+				sk = (Safekeeper *) event.user_data;
+				AdvancePollState(sk, event.events);
+			}
+			else
+				pg_unreachable();
+		}
+		else /* timeout expired */
 		{
-			ResetLatch(MyLatch);
-			break;
+			/*
+			 * If the timeout expired, attempt to reconnect to any safekeepers
+			 * that we dropped
+			 */
+			ReconnectSafekeepers();
 		}
 
 		now = GetCurrentTimestamp();
