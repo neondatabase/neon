@@ -355,6 +355,8 @@ struct LayerInner {
 
     /// Allow subscribing to when the layer actually gets evicted.
     status: tokio::sync::broadcast::Sender<Status>,
+
+    /// Counter for exponential backoff with the download
     consecutive_failures: AtomicUsize,
 }
 
