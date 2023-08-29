@@ -485,9 +485,9 @@ impl LayerInner {
 
         assert!(self.have_remote_client);
 
-        self.wanted_evicted.store(true, Ordering::Release);
-
         let mut rx = self.status.subscribe();
+
+        self.wanted_evicted.store(true, Ordering::Release);
 
         if self.get().is_none() {
             // it was not evictable in the first place
