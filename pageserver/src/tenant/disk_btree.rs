@@ -259,9 +259,10 @@ where
     {
         let mut stack = Vec::new();
         stack.push((self.root_blk, None));
+        let block_cursor = self.reader.block_cursor();
         while let Some((node_blknum, opt_iter)) = stack.pop() {
             // Locate the node.
-            let node_buf = self.reader.read_blk(self.start_blk + node_blknum)?;
+            let node_buf = block_cursor.read_blk(self.start_blk + node_blknum)?;
 
             let node = OnDiskNode::deparse(node_buf.as_ref())?;
             let prefix_len = node.prefix_len as usize;
@@ -353,8 +354,10 @@ where
 
         stack.push((self.root_blk, String::new(), 0, 0, 0));
 
+        let block_cursor = self.reader.block_cursor();
+
         while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
-            let blk = self.reader.read_blk(self.start_blk + blknum)?;
+            let blk = block_cursor.read_blk(self.start_blk + blknum)?;
             let buf: &[u8] = blk.as_ref();
             let node = OnDiskNode::<L>::deparse(buf)?;
 
@@ -683,27 +686,30 @@ impl<const L: usize> BuildNode<L> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::tenant::block_io::BlockLease;
+    use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Default)]
-    struct TestDisk {
+    pub(crate) struct TestDisk {
         blocks: Vec<Bytes>,
     }
     impl TestDisk {
         fn new() -> Self {
             Self::default()
         }
-    }
-    impl BlockReader for TestDisk {
-        fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
+        pub(crate) fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
             Ok(std::rc::Rc::new(buf).into())
+        }
+    }
+    impl BlockReader for TestDisk {
+        fn block_cursor(&self) -> BlockCursor<'_> {
+            BlockCursor::new(BlockReaderRef::TestDisk(self))
         }
     }
     impl BlockWriter for &mut TestDisk {

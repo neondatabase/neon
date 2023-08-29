@@ -203,6 +203,11 @@ impl Slot {
             Err(usage_count) => usage_count,
         }
     }
+
+    /// Sets the usage count to a specific value.
+    fn set_usage_count(&self, count: u8) {
+        self.usage_count.store(count, Ordering::Relaxed);
+    }
 }
 
 pub struct PageCache {
@@ -263,6 +268,7 @@ pub struct PageWriteGuard<'i> {
     inner: RwLockWriteGuard<'i, SlotInner>,
 
     // Are the page contents currently valid?
+    // Used to mark pages as invalid that are assigned but not yet filled with data.
     valid: bool,
 }
 
@@ -425,27 +431,6 @@ impl PageCache {
         self.lock_for_read(&mut cache_key)
     }
 
-    /// Immediately drop all buffers belonging to given file
-    pub fn drop_buffers_for_immutable(&self, drop_file_id: FileId) {
-        for slot_idx in 0..self.slots.len() {
-            let slot = &self.slots[slot_idx];
-
-            let mut inner = slot.inner.write().unwrap();
-            if let Some(key) = &inner.key {
-                match key {
-                    CacheKey::ImmutableFilePage { file_id, blkno: _ }
-                        if *file_id == drop_file_id =>
-                    {
-                        // remove mapping for old buffer
-                        self.remove_mapping(key);
-                        inner.key = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
     //
     // Section 2: Internal interface functions for lookup/update.
     //
@@ -556,7 +541,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
-            slot.usage_count.store(1, Ordering::Relaxed);
+            slot.set_usage_count(1);
 
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
                 inner,
@@ -617,7 +602,7 @@ impl PageCache {
             // Make the slot ready
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
-            slot.usage_count.store(1, Ordering::Relaxed);
+            slot.set_usage_count(1);
 
             return Ok(WriteBufResult::NotFound(PageWriteGuard {
                 inner,
@@ -816,6 +801,8 @@ impl PageCache {
     fn new(num_pages: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
+        // We use Box::leak here and into_boxed_slice to avoid leaking uninitialized
+        // memory that Vec's might contain.
         let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;

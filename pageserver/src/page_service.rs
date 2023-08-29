@@ -50,7 +50,8 @@ use crate::basebackup;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
-use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
+use crate::metrics;
+use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant;
@@ -306,39 +307,6 @@ async fn page_service_conn_main(
     }
 }
 
-struct PageRequestMetrics {
-    get_rel_exists: metrics::Histogram,
-    get_rel_size: metrics::Histogram,
-    get_page_at_lsn: metrics::Histogram,
-    get_db_size: metrics::Histogram,
-}
-
-impl PageRequestMetrics {
-    fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-
-        let get_rel_exists =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_exists", &tenant_id, &timeline_id]);
-
-        let get_rel_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_size", &tenant_id, &timeline_id]);
-
-        let get_page_at_lsn =
-            SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id]);
-
-        let get_db_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
-
-        Self {
-            get_rel_exists,
-            get_rel_size,
-            get_page_at_lsn,
-            get_db_size,
-        }
-    }
-}
-
 struct PageServerHandler {
     _conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
@@ -406,7 +374,7 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+        let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
 
         loop {
             let msg = tokio::select! {
@@ -446,21 +414,21 @@ impl PageServerHandler {
 
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let _timer = metrics.get_rel_exists.start_timer();
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelExists);
                     self.handle_get_rel_exists_request(&timeline, &req, &ctx)
                         .await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let _timer = metrics.get_rel_size.start_timer();
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelSize);
                     self.handle_get_nblocks_request(&timeline, &req, &ctx).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
-                    let _timer = metrics.get_page_at_lsn.start_timer();
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetPageAtLsn);
                     self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
                         .await
                 }
                 PagestreamFeMessage::DbSize(req) => {
-                    let _timer = metrics.get_db_size.start_timer();
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetDbSize);
                     self.handle_db_size_request(&timeline, &req, &ctx).await
                 }
             };
@@ -984,8 +952,8 @@ where
                 false
             };
 
-            metrics::metric_vec_duration::observe_async_block_duration_by_result(
-                &*crate::metrics::BASEBACKUP_QUERY_TIME,
+            ::metrics::metric_vec_duration::observe_async_block_duration_by_result(
+                &*metrics::BASEBACKUP_QUERY_TIME,
                 async move {
                     self.handle_basebackup_request(
                         pgb,

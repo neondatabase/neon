@@ -148,17 +148,16 @@ impl UploadQueue {
             );
         }
 
-        let index_part_metadata = index_part.parse_metadata()?;
         info!(
             "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
-            index_part_metadata.disk_consistent_lsn()
+            index_part.metadata.disk_consistent_lsn()
         );
 
         let state = UploadQueueInitialized {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: index_part_metadata.clone(),
-            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
+            latest_metadata: index_part.metadata.clone(),
+            last_uploaded_consistent_lsn: index_part.metadata.disk_consistent_lsn(),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,

@@ -19,16 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct PersistentLayerDesc {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+    /// Range of keys that this layer covers
     pub key_range: Range<Key>,
-    /// For image layer, this is `[lsn, lsn+1)`.
+    /// Inclusive start, exclusive end of the LSN range that this layer holds.
+    ///
+    /// - For an open in-memory layer, the end bound is MAX_LSN
+    /// - For a frozen in-memory layer or a delta layer, the end bound is a valid lsn after the
+    /// range start
+    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     pub lsn_range: Range<Lsn>,
-    /// Whether this is a delta layer.
+    /// Whether this is a delta layer, and also, is this incremental.
     pub is_delta: bool,
-    /// Whether this layer only contains page images for part of the keys in the range. In the current implementation, this should
-    /// always be equal to `is_delta`. If we land the partial image layer PR someday, image layer could also be
-    /// incremental.
-    pub is_incremental: bool,
-    /// File size
     pub file_size: u64,
 }
 
@@ -61,7 +62,6 @@ impl PersistentLayerDesc {
             key_range,
             lsn_range: Lsn(0)..Lsn(1),
             is_delta: false,
-            is_incremental: false,
             file_size: 0,
         }
     }
@@ -71,7 +71,6 @@ impl PersistentLayerDesc {
         timeline_id: TimelineId,
         key_range: Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
         file_size: u64,
     ) -> Self {
         Self {
@@ -80,7 +79,6 @@ impl PersistentLayerDesc {
             key_range,
             lsn_range: Self::image_layer_lsn_range(lsn),
             is_delta: false,
-            is_incremental,
             file_size,
         }
     }
@@ -98,7 +96,6 @@ impl PersistentLayerDesc {
             key_range,
             lsn_range,
             is_delta: true,
-            is_incremental: true,
             file_size,
         }
     }
@@ -164,8 +161,12 @@ impl PersistentLayerDesc {
         self.tenant_id
     }
 
+    /// Does this layer only contain some data for the key-range (incremental),
+    /// or does it contain a version of every page? This is important to know
+    /// for garbage collecting old layers: an incremental layer depends on
+    /// the previous non-incremental layer.
     pub fn is_incremental(&self) -> bool {
-        self.is_incremental
+        self.is_delta
     }
 
     pub fn is_delta(&self) -> bool {
@@ -182,7 +183,7 @@ impl PersistentLayerDesc {
             self.lsn_range.start,
             self.lsn_range.end,
             self.is_delta,
-            self.is_incremental,
+            self.is_incremental(),
             self.file_size,
         );
 
