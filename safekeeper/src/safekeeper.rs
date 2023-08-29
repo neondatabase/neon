@@ -650,7 +650,7 @@ where
             self.state.persist(&state)?;
         }
 
-        info!(
+        debug!(
             "processed greeting from walproposer {}, sending term {:?}",
             msg.proposer_id.map(|b| format!("{:X}", b)).join(""),
             self.state.acceptor_state.term
@@ -695,7 +695,7 @@ where
             resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
         }
-        info!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
+        debug!("processed VoteRequest for term {}: {:?}", msg.term, &resp);
         Ok(Some(AcceptorProposerMessage::VoteResponse(resp)))
     }
 
@@ -714,7 +714,7 @@ where
     }
 
     fn handle_elected(&mut self, msg: &ProposerElected) -> Result<Option<AcceptorProposerMessage>> {
-        info!("received ProposerElected {:?}", msg);
+        debug!("received ProposerElected {:?}", msg);
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.clone();
             state.acceptor_state.term = msg.term;
@@ -760,14 +760,14 @@ where
             if state.timeline_start_lsn == Lsn(0) {
                 // Remember point where WAL begins globally.
                 state.timeline_start_lsn = msg.timeline_start_lsn;
-                info!(
+                debug!(
                     "setting timeline_start_lsn to {:?}",
                     state.timeline_start_lsn
                 );
             }
             if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
-                info!("setting local_start_lsn to {:?}", state.local_start_lsn);
+                debug!("setting local_start_lsn to {:?}", state.local_start_lsn);
             }
             // Initializing commit_lsn before acking first flushed record is
             // important to let find_end_of_wal skip the hole in the beginning
@@ -789,7 +789,7 @@ where
             self.persist_control_file(state)?;
         }
 
-        info!("start receiving WAL since {:?}", msg.start_streaming_at);
+        debug!("start receiving WAL since {:?}", msg.start_streaming_at);
 
         Ok(None)
     }
