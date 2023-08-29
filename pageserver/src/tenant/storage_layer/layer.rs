@@ -516,33 +516,6 @@ impl LayerInner {
         }
     }
 
-    /// Access the current state without waiting for the file to be downloaded.
-    ///
-    /// Used by eviction only. Requires that we've initialized to state which is respective to the
-    /// actual residency state.
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
-        let locked = self.inner.get();
-        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
-    }
-
-    fn get_or_apply_evictedness(
-        guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
-        wanted_evicted: &AtomicBool,
-    ) -> Option<Arc<DownloadedLayer>> {
-        if let Some(mut x) = guard {
-            if let Some(won) = x.get() {
-                // there are no guarantees that we will always get to observe a concurrent call
-                // to evict
-                if wanted_evicted.load(Ordering::Acquire) {
-                    x.downgrade();
-                }
-                return Some(won);
-            }
-        }
-
-        None
-    }
-
     /// Should be cancellation safe, but cancellation is troublesome together with the spawned
     /// download.
     async fn get_or_maybe_download(
@@ -752,6 +725,33 @@ impl LayerInner {
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
+    }
+
+    /// Access the current state without waiting for the file to be downloaded.
+    ///
+    /// Requires that we've initialized to state which is respective to the
+    /// actual residency state.
+    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+        let locked = self.inner.get();
+        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
+    }
+
+    fn get_or_apply_evictedness(
+        guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
+        wanted_evicted: &AtomicBool,
+    ) -> Option<Arc<DownloadedLayer>> {
+        if let Some(mut x) = guard {
+            if let Some(won) = x.get() {
+                // there are no guarantees that we will always get to observe a concurrent call
+                // to evict
+                if wanted_evicted.load(Ordering::Acquire) {
+                    x.downgrade();
+                }
+                return Some(won);
+            }
+        }
+
+        None
     }
 
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
