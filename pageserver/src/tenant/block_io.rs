@@ -74,7 +74,7 @@ impl<'a> Deref for BlockLease<'a> {
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
     FileBlockReaderVirtual(&'a FileBlockReader<VirtualFile>),
-    FileBlockReaderFile(&'a FileBlockReader<std::fs::File>),
+    // FileBlockReaderFile(&'a FileBlockReader<std::fs::File>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -87,7 +87,7 @@ impl<'a> BlockReaderRef<'a> {
         use BlockReaderRef::*;
         match self {
             FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
-            FileBlockReaderFile(r) => r.read_blk(blknum).await,
+            // FileBlockReaderFile(r) => r.read_blk(blknum).await,
             EphemeralFile(r) => r.read_blk(blknum).await,
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
@@ -158,13 +158,15 @@ impl<F> FileBlockReader<F> {
     }
 }
 
+use crate::page_cache::PageWriteGuard;
+
 macro_rules! impls {
     (FileBlockReader<$ty:ty>) => {
         impl FileBlockReader<$ty> {
             /// Read a page from the underlying file into given buffer.
-            fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
+            async fn fill_buffer(&self, buf: PageWriteGuard<'static>, blkno: u32) -> Result<PageWriteGuard<'static>, std::io::Error> {
                 assert!(buf.len() == PAGE_SZ);
-                self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+                self.file.read_exact_at_async(buf, blkno as u64 * PAGE_SZ as u64).await
             }
             /// Read a block.
             ///
@@ -187,7 +189,7 @@ macro_rules! impls {
                         ReadBufResult::Found(guard) => break Ok(guard.into()),
                         ReadBufResult::NotFound(mut write_guard) => {
                             // Read the page from disk into the buffer
-                            self.fill_buffer(write_guard.deref_mut(), blknum)?;
+                            let mut write_guard = self.fill_buffer(write_guard, blknum).await?;
                             write_guard.mark_valid();
 
                             // Swap for read lock
@@ -200,14 +202,14 @@ macro_rules! impls {
     };
 }
 
-impls!(FileBlockReader<File>);
+// impls!(FileBlockReader<File>);
 impls!(FileBlockReader<VirtualFile>);
 
-impl BlockReader for FileBlockReader<File> {
-    fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReaderFile(self))
-    }
-}
+// impl BlockReader for FileBlockReader<File> {
+//     fn block_cursor(&self) -> BlockCursor<'_> {
+//         BlockCursor::new(BlockReaderRef::FileBlockReaderFile(self))
+//     }
+// }
 
 impl BlockReader for FileBlockReader<VirtualFile> {
     fn block_cursor(&self) -> BlockCursor<'_> {

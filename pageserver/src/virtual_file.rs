@@ -261,7 +261,10 @@ impl VirtualFile {
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+        let result = self.with_file("read", |file| {
+            tracing::info!("sync read\n{}", std::backtrace::Backtrace::force_capture());
+            file.read_at(buf, offset)
+        })?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
