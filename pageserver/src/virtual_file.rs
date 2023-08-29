@@ -427,7 +427,7 @@ impl VirtualFile {
         Ok(())
     }
 
-    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
