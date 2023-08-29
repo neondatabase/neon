@@ -445,7 +445,7 @@ impl PageCache {
     ///
     async fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
         let cache_key_orig = cache_key.clone();
-        if let Some(slot_idx) = self.search_mapping(cache_key).await {
+        if let Some(slot_idx) = self.search_mapping(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we released the mapping
             // lock already, another thread could have evicted the page)
@@ -515,10 +515,8 @@ impl PageCache {
             is_first_iteration = false;
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self
-                .find_victim()
-                .await
-                .context("Failed to find evict victim")?;
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -578,10 +576,8 @@ impl PageCache {
             }
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) = self
-                .find_victim()
-                .await
-                .context("Failed to find evict victim")?;
+            let (slot_idx, mut inner) =
+                self.find_victim().context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -624,7 +620,7 @@ impl PageCache {
     /// returns.  The caller is responsible for re-checking that the slot still
     /// contains the page with the same key before using it.
     ///
-    async fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
+    fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
@@ -756,9 +752,7 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    async fn find_victim(
-        &self,
-    ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
+    fn find_victim(&self) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
