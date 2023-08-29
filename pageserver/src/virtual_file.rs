@@ -15,6 +15,7 @@ use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -122,16 +123,8 @@ impl VirtualFile {
 
     /// Open a file in read-only mode. Like File::open.
     pub async fn open_async(path: &Path) -> Result<VirtualFile, std::io::Error> {
-        let mut options = OpenOptions::new();
+        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
         options.read(true);
-        Self::open_with_options_async(path, options).await
-    }
-
-    /// Create a new file for writing. If the file exists, it will be truncated.
-    /// Like File::create.
-    pub async fn create_async(path: &Path) -> Result<VirtualFile, std::io::Error> {
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
         Self::open_with_options_async(path, options).await
     }
 
@@ -142,7 +135,7 @@ impl VirtualFile {
     /// on the first time. Make sure that's sane!
     pub async fn open_with_options_async(
         path: &Path,
-        open_options: OpenOptions,
+        open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string_lossy();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -156,13 +149,17 @@ impl VirtualFile {
             timeline_id = "*".to_string();
         }
         let start = std::time::Instant::now();
-        let file = tokio::task::spawn_blocking({
-            let path = path.to_owned();
-            let open_options = open_options.clone();
-            move || open_options.open(path)
-        })
-        .await
-        .expect("spawn_blocking")?;
+        let system = tokio_epoll_uring::thread_local_system().await;
+        let file: OwnedFd = system
+            .open(path, &open_options)
+            .await
+            .map_err(|e| match e {
+                tokio_epoll_uring::Error::Op(e) => e,
+                tokio_epoll_uring::Error::System(system) => {
+                    std::io::Error::new(std::io::ErrorKind::Other, system)
+                }
+            })?;
+        let file = File::from(file);
         STORAGE_IO_TIME
             .with_label_values(&["open"])
             .observe(start.elapsed().as_secs_f64());

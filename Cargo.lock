@@ -4439,9 +4439,11 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/hacky-openat#96e5a1f3a3d6921438002807475d01540e1211b2"
 dependencies = [
  "futures",
  "io-uring 0.6.1",
+ "libc",
  "once_cell",
  "scopeguard",
  "thiserror",
