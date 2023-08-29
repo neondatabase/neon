@@ -822,8 +822,7 @@ impl LayerInner {
         let can_evict = self.have_remote_client;
 
         if gc {
-            // do nothing now, only when the whole layer is dropped. gc will end up deleting the
-            // whole layer, in case there is no reference cycle.
+            // do nothing now, only in LayerInner::drop
         } else if can_evict && evict {
             let version = self.version.load(Ordering::Relaxed);
 
