@@ -1080,7 +1080,7 @@ enum LayerKind {
     Image(image_layer::ImageLayerInner),
 }
 
-/// Guard value for forcing a layer be resident while it exists.
+/// Guard for forcing a layer be resident while it exists.
 #[derive(Clone)]
 pub(crate) struct ResidentLayer {
     owner: Layer,
