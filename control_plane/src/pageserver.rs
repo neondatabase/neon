@@ -323,7 +323,7 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<TenantId>,
+        new_tenant_id: TenantId,
         generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
@@ -389,9 +389,6 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
         };
-
-        // If tenant ID was not specified, generate one
-        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
 
         let request = models::TenantCreateRequest {
             new_tenant_id,
