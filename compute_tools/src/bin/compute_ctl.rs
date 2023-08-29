@@ -313,7 +313,7 @@ fn main() -> Result<()> {
                         cgroup: cgroup.cloned(),
                         pgconnstr: file_cache_connstr.cloned(),
                         addr: vm_monitor_addr.cloned().unwrap(),
-                        file_cache_not_in_memory: file_cache_not_in_memory,
+                        file_cache_not_in_memory,
                     })),
                     token.clone(),
                 ))
