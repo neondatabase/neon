@@ -11,11 +11,13 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+use crate::page_cache::PageWriteGuard;
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -370,7 +372,7 @@ impl VirtualFile {
     ///
     /// We are doing it via a macro as Rust doesn't support async closures that
     /// take on parameters with lifetimes.
-    async fn lock_file(&self) -> Result<FileGuard<'_>, Error> {
+    async fn lock_file(&self) -> Result<FileGuard<'static>, Error> {
         let open_files = get_open_files();
 
         let mut handle_guard = {
@@ -460,24 +462,59 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
-        while !buf.is_empty() {
-            match self.read_at(buf, offset).await {
-                Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "failed to fill whole buffer",
-                    ))
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                    offset += n as u64;
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+    pub async fn read_exact_at(
+        &self,
+        mut write_guard: PageWriteGuard<'static>,
+        mut offset: u64,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        let file_guard: FileGuard<'static> = self.lock_file().await?;
+
+        let system = tokio_epoll_uring::thread_local_system().await;
+        struct PageWriteGuardBuf {
+            buf: PageWriteGuard<'static>,
+            init_up_to: usize,
+        }
+        unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
+            fn stable_ptr(&self) -> *const u8 {
+                self.buf.as_ptr()
+            }
+            fn bytes_init(&self) -> usize {
+                self.init_up_to
+            }
+            fn bytes_total(&self) -> usize {
+                self.buf.len()
             }
         }
-        Ok(())
+        unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
+            fn stable_mut_ptr(&mut self) -> *mut u8 {
+                self.buf.as_mut_ptr()
+            }
+
+            unsafe fn set_init(&mut self, pos: usize) {
+                assert!(pos <= self.buf.len());
+                self.init_up_to = pos;
+            }
+        }
+        let buf = PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to: 0,
+        };
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(file_guard.as_ref().as_raw_fd()) };
+        let guard = scopeguard::guard(file_guard, |_| {
+            panic!("must not drop future while operation is ongoing (todo: pass file_guard to tokio_epoll_uring to aovid this)")
+        });
+        let ((owned_fd, buf), res) = system.read(owned_fd, offset, buf).await;
+        let _ = OwnedFd::into_raw_fd(owned_fd);
+        let _ = scopeguard::ScopeGuard::into_inner(guard);
+        let PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to,
+        } = buf;
+        if let Ok(num_read) = res {
+            assert!(init_up_to == num_read); // TODO need to deal with short reads here
+        }
+        res.map(|_| write_guard)
+            .map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -525,18 +562,6 @@ impl VirtualFile {
         let n = self.write_at(buf, pos).await?;
         self.pos += n as u64;
         Ok(n)
-    }
-
-    pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Read, |file| file
-            .as_ref()
-            .read_at(buf, offset));
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
-                .add(size as i64);
-        }
-        result
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
