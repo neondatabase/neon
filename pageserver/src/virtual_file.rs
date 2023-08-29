@@ -12,7 +12,6 @@
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
-use crate::page_cache::PageWriteGuard;
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
@@ -117,37 +116,6 @@ struct SlotInner {
 
     /// the underlying file
     file: Option<OwnedFd>,
-}
-
-/// Impl of [`tokio_epoll_uring::IoBuf`] and [`tokio_epoll_uring::IoBufMut`] for [`PageWriteGuard`].
-struct PageWriteGuardBuf {
-    page: PageWriteGuard<'static>,
-    init_up_to: usize,
-}
-// Safety: the [`PageWriteGuard`] gives us exclusive ownership of the page cache slot,
-// and the location remains stable even if [`Self`] or the [`PageWriteGuard`] is moved.
-unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
-    fn stable_ptr(&self) -> *const u8 {
-        self.page.as_ptr()
-    }
-    fn bytes_init(&self) -> usize {
-        self.init_up_to
-    }
-    fn bytes_total(&self) -> usize {
-        self.page.len()
-    }
-}
-// Safety: see above, plus: the ownership of [`PageWriteGuard`] means exclusive access,
-// hence it's safe to hand out the `stable_mut_ptr()`.
-unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
-    fn stable_mut_ptr(&mut self) -> *mut u8 {
-        self.page.as_mut_ptr()
-    }
-
-    unsafe fn set_init(&mut self, pos: usize) {
-        assert!(pos <= self.page.len());
-        self.init_up_to = pos;
-    }
 }
 
 impl OpenFiles {
@@ -557,21 +525,6 @@ impl VirtualFile {
         let (buf, res) =
             read_exact_at_impl(buf, offset, |buf, offset| self.read_at(buf, offset)).await;
         res.map(|()| buf)
-    }
-
-    /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
-    pub async fn read_exact_at_page(
-        &self,
-        page: PageWriteGuard<'static>,
-        offset: u64,
-    ) -> Result<PageWriteGuard<'static>, Error> {
-        let buf = PageWriteGuardBuf {
-            page,
-            init_up_to: 0,
-        };
-        let res = self.read_exact_at(buf, offset).await;
-        res.map(|PageWriteGuardBuf { page, .. }| page)
-            .map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235

@@ -13,7 +13,6 @@ pub mod http;
 pub mod import_datadir;
 pub use pageserver_api::keyspace;
 pub mod metrics;
-pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
@@ -30,6 +29,8 @@ use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
 use tracing::info;
+
+pub mod buffer_pool;
 
 /// Current storage format version
 ///
