@@ -5,7 +5,10 @@ use tracing::debug;
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::config::PageServerConf;
+use crate::{
+    config::PageServerConf,
+    tenant::{remote_timeline_client::remote_path, Generation},
+};
 
 pub(super) async fn delete_layer<'a>(
     conf: &'static PageServerConf,
@@ -17,7 +20,9 @@ pub(super) async fn delete_layer<'a>(
     });
     debug!("Deleting layer from remote storage: {local_layer_path:?}",);
 
-    let path_to_delete = conf.remote_path(local_layer_path)?;
+    // FIXME: once we start writing out keys with generations, this will
+    // need updating (or, in the deletion queue branch, it is already gone)
+    let path_to_delete = remote_path(conf, local_layer_path, Generation::placeholder())?;
 
     // We don't want to print an error if the delete failed if the file has
     // already been deleted. Thankfully, in this situation S3 already

@@ -216,7 +216,7 @@ use utils::backoff::{
 };
 
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -235,6 +235,7 @@ use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::upload_queue::Delete;
+use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::{
     config::PageServerConf,
     task_mgr,
@@ -252,6 +253,7 @@ use self::index::IndexPart;
 
 use super::storage_layer::LayerFileName;
 use super::upload_queue::SetDeletedFlagProgress;
+use super::Generation;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -315,6 +317,7 @@ pub struct RemoteTimelineClient {
 
     tenant_id: TenantId,
     timeline_id: TimelineId,
+    generation: Generation,
 
     upload_queue: Mutex<UploadQueue>,
 
@@ -335,12 +338,14 @@ impl RemoteTimelineClient {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        generation: Generation,
     ) -> RemoteTimelineClient {
         RemoteTimelineClient {
             conf,
             runtime: BACKGROUND_RUNTIME.handle().to_owned(),
             tenant_id,
             timeline_id,
+            generation,
             storage_impl: remote_storage,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
             metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
@@ -453,6 +458,7 @@ impl RemoteTimelineClient {
             &self.storage_impl,
             &self.tenant_id,
             &self.timeline_id,
+            self.generation,
         )
         .measure_remote_op(
             self.tenant_id,
@@ -761,10 +767,10 @@ impl RemoteTimelineClient {
         backoff::retry(
             || {
                 upload::upload_index_part(
-                    self.conf,
                     &self.storage_impl,
                     &self.tenant_id,
                     &self.timeline_id,
+                    self.generation,
                     &index_part_with_deleted_at,
                 )
             },
@@ -850,8 +856,7 @@ impl RemoteTimelineClient {
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
-        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
-        let timeline_storage_path = self.conf.remote_path(&timeline_path)?;
+        let timeline_storage_path = remote_timeline_path(&self.tenant_id, &self.timeline_id);
 
         let remaining = backoff::retry(
             || async {
@@ -1055,15 +1060,17 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer_file_name, ref layer_metadata) => {
-                    let path = &self
+                    let mut path = self
                         .conf
                         .timeline_path(&self.tenant_id, &self.timeline_id)
                         .join(layer_file_name.file_name());
+
                     upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
-                        path,
+                        &path,
                         layer_metadata,
+                        self.generation,
                     )
                     .measure_remote_op(
                         self.tenant_id,
@@ -1085,10 +1092,10 @@ impl RemoteTimelineClient {
                     };
 
                     let res = upload::upload_index_part(
-                        self.conf,
                         &self.storage_impl,
                         &self.tenant_id,
                         &self.timeline_id,
+                        self.generation,
                         index_part,
                     )
                     .measure_remote_op(
@@ -1360,6 +1367,79 @@ impl RemoteTimelineClient {
     }
 }
 
+pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {
+    let path = format!("tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_timeline_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
+    remote_timelines_path(tenant_id).join(&PathBuf::from(timeline_id.to_string()))
+}
+
+pub fn remote_layer_path(
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerFileName,
+    layer_meta: &LayerFileMetadata,
+) -> RemotePath {
+    let path = if let Some(generation) = layer_meta.generation {
+        // Generation-aware key format
+        format!(
+            "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+            layer_file_name.file_name(),
+            generation.get_suffix()
+        )
+    } else {
+        // Pre-generation key format
+        format!(
+            "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}",
+            layer_file_name.file_name(),
+        )
+    };
+
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_index_path(
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    generation: Generation,
+) -> RemotePath {
+    RemotePath::from_string(&format!(
+        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        IndexPart::FILE_NAME,
+        generation.get_suffix()
+    ))
+    .expect("Failed to construct path")
+}
+
+/// Files on the remote storage are stored with paths, relative to the workdir.
+/// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
+///
+/// Errors if the path provided does not start from pageserver's workdir.
+pub fn remote_path(
+    conf: &PageServerConf,
+    local_path: &Path,
+    generation: Generation,
+) -> anyhow::Result<RemotePath> {
+    let stripped = local_path
+        .strip_prefix(&conf.workdir)
+        .context("Failed to strip workdir prefix")?;
+
+    let suffixed = format!(
+        "{0}{1}",
+        stripped.to_string_lossy(),
+        generation.get_suffix()
+    );
+
+    RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
+        format!(
+            "Failed to resolve remote part of path {:?} for base {:?}",
+            local_path, conf.workdir
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,8 +1489,11 @@ mod tests {
         assert_eq!(avec, bvec);
     }
 
-    fn assert_remote_files(expected: &[&str], remote_path: &Path) {
-        let mut expected: Vec<String> = expected.iter().map(|x| String::from(*x)).collect();
+    fn assert_remote_files(expected: &[&str], remote_path: &Path, generation: Generation) {
+        let mut expected: Vec<String> = expected
+            .iter()
+            .map(|x| format!("{}{}", x, generation.get_suffix()))
+            .collect();
         expected.sort();
 
         let mut found: Vec<String> = Vec::new();
@@ -1461,6 +1544,8 @@ mod tests {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
 
+            let generation = Generation::new(0xdeadbeef);
+
             let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
 
             let client = Arc::new(RemoteTimelineClient {
@@ -1468,6 +1553,7 @@ mod tests {
                 runtime: tokio::runtime::Handle::current(),
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
+                generation: generation,
                 storage_impl: storage,
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
                 metrics: Arc::new(RemoteTimelineClientMetrics::new(
@@ -1526,6 +1612,8 @@ mod tests {
             .init_upload_queue_for_empty_remote(&metadata)
             .unwrap();
 
+        let generation = Generation::new(0xdeadbeef);
+
         // Create a couple of dummy files,  schedule upload for them
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let layer_file_name_2: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D9-00000000016B5A52".parse().unwrap();
@@ -1541,8 +1629,6 @@ mod tests {
         ] {
             std::fs::write(timeline_path.join(filename.file_name()), content).unwrap();
         }
-
-        let generation = Generation::new(0xdeadbeef);
 
         client
             .schedule_layer_file_upload(
@@ -1641,6 +1727,7 @@ mod tests {
                 "index_part.json",
             ],
             &remote_timeline_dir,
+            generation,
         );
 
         // Finish them
@@ -1653,6 +1740,7 @@ mod tests {
                 "index_part.json",
             ],
             &remote_timeline_dir,
+            generation,
         );
     }
 

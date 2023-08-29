@@ -15,14 +15,16 @@ use tokio_util::sync::CancellationToken;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
+use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::Generation;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
-use super::{FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES};
+use super::{remote_index_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES};
 
 static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
@@ -41,13 +43,11 @@ pub async fn download_layer_file<'a>(
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let timeline_path = conf.timeline_path(&tenant_id, &timeline_id);
+    let local_path = conf
+        .timeline_path(&tenant_id, &timeline_id)
+        .join(layer_file_name.file_name());
 
-    let local_path = timeline_path.join(layer_file_name.file_name());
-
-    let remote_path = conf
-        .remote_path(&local_path)
-        .map_err(DownloadError::Other)?;
+    let remote_path = remote_layer_path(&tenant_id, &timeline_id, layer_file_name, layer_metadata);
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
@@ -175,19 +175,17 @@ pub fn is_temp_download_file(path: &Path) -> bool {
 /// List timelines of given tenant in remote storage
 pub async fn list_remote_timelines<'a>(
     storage: &'a GenericRemoteStorage,
-    conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<HashSet<TimelineId>> {
-    let tenant_path = conf.timelines_path(&tenant_id);
-    let tenant_storage_path = conf.remote_path(&tenant_path)?;
+    let remote_path = remote_timelines_path(&tenant_id);
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
     let timelines = download_retry(
-        || storage.list_prefixes(Some(&tenant_storage_path)),
-        &format!("list prefixes for {tenant_path:?}"),
+        || storage.list_prefixes(Some(&remote_path)),
+        &format!("list prefixes for {tenant_id}"),
     )
     .await?;
 
@@ -226,17 +224,17 @@ pub(super) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    generation: Generation,
 ) -> Result<IndexPart, DownloadError> {
-    let index_part_path = conf
+    let local_path = conf
         .metadata_path(tenant_id, timeline_id)
         .with_file_name(IndexPart::FILE_NAME);
-    let part_storage_path = conf
-        .remote_path(&index_part_path)
-        .map_err(DownloadError::BadInput)?;
+
+    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
 
     let index_part_bytes = download_retry(
         || async {
-            let mut index_part_download = storage.download(&part_storage_path).await?;
+            let mut index_part_download = storage.download(&remote_path).await?;
 
             let mut index_part_bytes = Vec::new();
             tokio::io::copy(
@@ -244,20 +242,16 @@ pub(super) async fn download_index_part(
                 &mut index_part_bytes,
             )
             .await
-            .with_context(|| {
-                format!("Failed to download an index part into file {index_part_path:?}")
-            })
+            .with_context(|| format!("Failed to download an index part into file {local_path:?}"))
             .map_err(DownloadError::Other)?;
             Ok(index_part_bytes)
         },
-        &format!("download {part_storage_path:?}"),
+        &format!("download {remote_path:?}"),
     )
     .await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-        .with_context(|| {
-            format!("Failed to deserialize index part file into file {index_part_path:?}")
-        })
+        .with_context(|| format!("Failed to deserialize index part file into file {local_path:?}"))
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)

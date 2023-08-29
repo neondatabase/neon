@@ -233,7 +233,9 @@ impl std::fmt::Display for UploadOp {
                     metadata.file_size()
                 )
             }
-            UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
+            UploadOp::UploadMetadata(_, lsn) => {
+                write!(f, "UploadMetadata(lsn: {})", lsn)
+            }
             UploadOp::Delete(delete) => write!(
                 f,
                 "Delete(path: {}, scheduled_from_timeline_delete: {})",

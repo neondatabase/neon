@@ -655,12 +655,8 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
-            remote_storage,
-            self.conf,
-            self.tenant_id,
-        )
-        .await?;
+        let remote_timeline_ids =
+            remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
 
         info!("found {} timelines", remote_timeline_ids.len());
 
@@ -672,6 +668,7 @@ impl Tenant {
                 self.conf,
                 self.tenant_id,
                 timeline_id,
+                self.generation,
             );
             part_downloads.spawn(
                 async move {
@@ -2944,6 +2941,7 @@ impl Tenant {
                 self.conf,
                 self.tenant_id,
                 timeline_id,
+                self.generation,
             );
             Some(remote_client)
         } else {

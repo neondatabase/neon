@@ -5,7 +5,11 @@ use fail::fail_point;
 use std::{io::ErrorKind, path::Path};
 use tokio::fs;
 
-use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
+use super::Generation;
+use crate::{
+    config::PageServerConf,
+    tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
+};
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 
@@ -15,10 +19,10 @@ use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
-    conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    generation: Generation,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
@@ -32,13 +36,9 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let index_part_path = conf
-        .metadata_path(tenant_id, timeline_id)
-        .with_file_name(IndexPart::FILE_NAME);
-    let storage_path = conf.remote_path(&index_part_path)?;
-
+    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
     storage
-        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
+        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
         .with_context(|| format!("Failed to upload index part for '{tenant_id} / {timeline_id}'"))
 }
@@ -52,12 +52,13 @@ pub(super) async fn upload_timeline_layer<'a>(
     storage: &'a GenericRemoteStorage,
     source_path: &'a Path,
     known_metadata: &'a LayerFileMetadata,
+    generation: Generation,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
-    let storage_path = conf.remote_path(source_path)?;
 
+    let storage_path = remote_path(conf, source_path, generation)?;
     let source_file_res = fs::File::open(&source_path).await;
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
