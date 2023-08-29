@@ -25,7 +25,7 @@
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::page_cache::PAGE_SZ;
+use crate::tenant::disk_btree::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};

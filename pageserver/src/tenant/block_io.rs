@@ -4,7 +4,7 @@
 
 use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
-use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
+use crate::tenant::disk_btree::PAGE_SZ;
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::fs::File;
@@ -36,14 +36,14 @@ where
 
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
-    PageReadGuard(PageReadGuard<'static>),
+    PageReadGuard(crate::buffer_pool::Buffer),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
 }
 
-impl From<PageReadGuard<'static>> for BlockLease<'static> {
-    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
+impl From<crate::buffer_pool::Buffer> for BlockLease<'static> {
+    fn from(value: crate::buffer_pool::Buffer) -> BlockLease<'static> {
         BlockLease::PageReadGuard(value)
     }
 }
@@ -158,15 +158,20 @@ impl<F> FileBlockReader<F> {
     }
 }
 
-use crate::page_cache::PageWriteGuard;
 
 macro_rules! impls {
     (FileBlockReader<$ty:ty>) => {
         impl FileBlockReader<$ty> {
             /// Read a page from the underlying file into given buffer.
-            async fn fill_buffer(&self, buf: PageWriteGuard<'static>, blkno: u32) -> Result<PageWriteGuard<'static>, std::io::Error> {
+            async fn fill_buffer(
+                &self,
+                buf: crate::buffer_pool::Buffer,
+                blkno: u32,
+            ) -> Result<crate::buffer_pool::Buffer, std::io::Error> {
                 assert!(buf.len() == PAGE_SZ);
-                self.file.read_exact_at_async(buf, blkno as u64 * PAGE_SZ as u64).await
+                self.file
+                    .read_exact_at_async(buf, blkno as u64 * PAGE_SZ as u64)
+                    .await
             }
             /// Read a block.
             ///
@@ -174,29 +179,10 @@ macro_rules! impls {
             /// access to the contents of the page. (For the page cache, the
             /// lease object represents a lock on the buffer.)
             pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-                // Look up the right page
-                let cache = page_cache::get();
-                loop {
-                    match cache
-                        .read_immutable_buf(self.file_id, blknum)
-                        .await
-                        .map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("Failed to read immutable buf: {e:#}"),
-                            )
-                        })? {
-                        ReadBufResult::Found(guard) => break Ok(guard.into()),
-                        ReadBufResult::NotFound(mut write_guard) => {
-                            // Read the page from disk into the buffer
-                            let mut write_guard = self.fill_buffer(write_guard, blknum).await?;
-                            write_guard.mark_valid();
-
-                            // Swap for read lock
-                            continue;
-                        }
-                    };
-                }
+                let buf = crate::buffer_pool::get();
+                // Read the page from disk into the buffer
+                let mut write_guard = self.fill_buffer(buf, blknum).await?;
+                todo!()
             }
         }
     };

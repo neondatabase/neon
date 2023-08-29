@@ -11,7 +11,6 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
-use crate::page_cache::PageWriteGuard;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
@@ -284,9 +283,9 @@ impl VirtualFile {
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
     pub async fn read_exact_at_async(
         &self,
-        mut write_guard: PageWriteGuard<'static>,
+        mut write_guard: crate::buffer_pool::Buffer,
         offset: u64,
-    ) -> Result<PageWriteGuard<'static>, Error> {
+    ) -> Result<crate::buffer_pool::Buffer, Error> {
         let file = self.handle.lock().unwrap().take().unwrap();
         let put_back = AtomicBool::new(false);
         let put_back_ref = &put_back;
@@ -297,7 +296,7 @@ impl VirtualFile {
         };
         let system = tokio_epoll_uring::thread_local_system().await;
         struct PageWriteGuardBuf {
-            buf: PageWriteGuard<'static>,
+            buf: crate::buffer_pool::Buffer,
             init_up_to: usize,
         }
         unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {

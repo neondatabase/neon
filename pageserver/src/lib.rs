@@ -8,7 +8,6 @@ pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
 pub mod metrics;
-pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
@@ -27,6 +26,8 @@ use std::path::Path;
 
 use crate::task_mgr::TaskKind;
 use tracing::info;
+
+pub mod buffer_pool;
 
 /// Current storage format version
 ///

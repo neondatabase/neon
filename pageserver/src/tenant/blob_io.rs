@@ -11,10 +11,11 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
-use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
+
+use super::disk_btree::PAGE_SZ;
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.

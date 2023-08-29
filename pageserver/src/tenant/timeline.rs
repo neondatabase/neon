@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
+use crate::tenant::disk_btree::PAGE_SZ;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
@@ -73,7 +74,6 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
@@ -3368,7 +3368,7 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
+        let min_hole_range = (target_file_size / PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
         // min-heap (reserve space for one more element added before eviction)
@@ -3604,7 +3604,7 @@ impl Timeline {
             // Add two pages for potential overhead. This should in theory be already
             // accounted for in the target calculation, but for very small targets,
             // we still might easily hit the limit otherwise.
-            let warn_limit = target_file_size * 2 + page_cache::PAGE_SZ as u64 * 2;
+            let warn_limit = target_file_size * 2 + PAGE_SZ as u64 * 2;
             for layer in new_layers.iter() {
                 if layer.layer_desc().file_size > warn_limit {
                     warn!(
@@ -4192,7 +4192,7 @@ impl Timeline {
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
 
-                if img.len() == page_cache::PAGE_SZ {
+                if img.len() == PAGE_SZ {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(

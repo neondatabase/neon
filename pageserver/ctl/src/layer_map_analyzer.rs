@@ -8,7 +8,7 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::{fs, path::Path, str};
 
-use pageserver::page_cache::PAGE_SZ;
+use crate::tenant::disk_btree::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
 use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
