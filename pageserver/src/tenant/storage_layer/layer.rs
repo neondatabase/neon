@@ -816,7 +816,7 @@ impl LayerInner {
         }
     }
 
-    /// Our resident layer has been dropped, we might hold the lock elsewhere.
+    /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_drop(self: Arc<LayerInner>) {
         let gc = self.wanted_garbage_collected.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
@@ -830,14 +830,16 @@ impl LayerInner {
 
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_id, timeline_id = %self.desc.timeline_id, layer=%self);
 
-            // downgrade in case there's a queue backing up, or we are just tearing stuff down, and
-            // would soon delete anyways.
+            // downgrade for the duration of the queue, in case there's a shutdown already ongoing
+            // we should not hold it up.
             let this = Arc::downgrade(&self);
             drop(self);
 
             crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
                 let _g = span.entered();
 
+                // if LayerInner is already dropped here, do nothing for the garbage collection has
+                // already ran while we were in queue
                 let Some(this) = this.upgrade() else { return; };
                 this.evict_blocking(version);
             });
@@ -849,8 +851,7 @@ impl LayerInner {
         let Some(timeline) = self.timeline.upgrade() else { return; };
 
         // to avoid starting a new download while we evict, keep holding on to the
-        // permit. note that we will not close the semaphore when done, because it will
-        // be used by the re-download.
+        // permit.
         let _permit = {
             let maybe_downloaded = self.inner.get();
 
@@ -910,6 +911,7 @@ impl LayerInner {
             }
         }
 
+        // we are still holding the permit, so no new spawn_download_and_wait can happen
         drop(self.status.send(Status::Evicted));
     }
 }
