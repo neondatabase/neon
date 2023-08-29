@@ -13,7 +13,7 @@ use crate::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
             AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, PersistentLayer,
-            PersistentLayerDesc, PersistentLayerKey, RemoteLayer,
+            PersistentLayerDesc, PersistentLayerKey,
         },
         timeline::compare_arced_layers,
     },
@@ -83,21 +83,6 @@ impl LayerManager {
     /// Initialize when creating a new timeline, called in `init_empty_layer_map`.
     pub(crate) fn initialize_empty(&mut self, next_open_layer_at: Lsn) {
         self.layer_map.next_open_layer_at = Some(next_open_layer_at);
-    }
-
-    pub(crate) fn initialize_remote_layers(
-        &mut self,
-        corrupted_local_layers: Vec<Arc<dyn PersistentLayer>>,
-        remote_layers: Vec<Arc<RemoteLayer>>,
-    ) {
-        let mut updates = self.layer_map.batch_update();
-        for layer in corrupted_local_layers {
-            Self::remove_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
-        }
-        for layer in remote_layers {
-            Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
-        }
-        updates.flush();
     }
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
@@ -263,16 +248,6 @@ impl LayerManager {
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
-    }
-
-    /// Helper function to remove a layer into the layer map and file manager
-    fn remove_historic_layer(
-        layer: Arc<dyn PersistentLayer>,
-        updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
-    ) {
-        updates.remove_historic(layer.layer_desc());
-        mapping.remove(layer);
     }
 
     /// Removes the layer from local FS (if present) and from memory.

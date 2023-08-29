@@ -44,8 +44,6 @@ pub(crate) enum LayerCmd {
 }
 
 async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    use pageserver::tenant::block_io::BlockReader;
-
     let path = path.as_ref();
     virtual_file::init(10);
     page_cache::init(100);
@@ -70,7 +68,7 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
             },
         )
         .await?;
-    let cursor = BlockCursor::new(&file);
+    let cursor = BlockCursor::new_fileblockreader_virtual(&file);
     for (k, v) in all {
         let value = cursor.read_blob(v.pos()).await?;
         println!("key:{} value_len:{}", k, value.len());
