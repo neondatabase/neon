@@ -1333,13 +1333,13 @@ pub fn remote_layer_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     layer_file_name: &LayerFileName,
-    layer_meta: &LayerFileMetadata,
+    generation: Generation,
 ) -> RemotePath {
     // Generation-aware key format
     let path = format!(
         "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
         layer_file_name.file_name(),
-        layer_meta.generation.get_suffix()
+        generation.get_suffix()
     );
 
     RemotePath::from_string(&path).expect("Failed to construct path")
