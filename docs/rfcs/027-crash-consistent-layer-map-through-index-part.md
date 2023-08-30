@@ -53,7 +53,7 @@ If the compaction algorithm doesn't change between the two compaction runs, is d
 
 *However*:
 1. the file size of the overwritten L1s may not be identical, and
-2. the bit pattern of the overwritten L1s may not be identical, and, and, and, and
+2. the bit pattern of the overwritten L1s may not be identical, and,
 3. in the future, we may want to make the compaction code non-determinstic, influenced by past access patterns, or otherwise change it, resulting in L1 overwrites with a different set of delta records than before the overwrite
 
 The items above are a problem for the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919) because it assumes that layer files in S3 are only ever deleted, but never replaced (overPUTted).
