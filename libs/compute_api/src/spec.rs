@@ -106,6 +106,18 @@ impl RemoteExtSpec {
                 .ok_or(anyhow::anyhow!("library {} is not found", lib_raw_name))?;
         }
 
+        // Check if extension is present in public or custom.
+        // If not, then it is not allowed to be used by this compute.
+        if let Some(public_extensions) = &self.public_extensions {
+            if !public_extensions.contains(&real_ext_name.to_string()) {
+                if let Some(custom_extensions) = &self.custom_extensions {
+                    if !custom_extensions.contains(&real_ext_name.to_string()) {
+                        return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
+                    }
+                }
+            }
+        }
+
         match self.extension_data.get(real_ext_name) {
             Some(_ext_data) => {
                 // Construct the path to the extension archive
