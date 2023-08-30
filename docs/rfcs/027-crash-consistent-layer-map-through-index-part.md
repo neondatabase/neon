@@ -128,7 +128,7 @@ Multi-object changes that previously created and removed files in timeline dir a
 
 ### Fundamental
 
-If we crash before finishing the index part PUT, we inevitably lose some work:
+If we crash before finishing the index part PUT, we lose all the work that hasn't reached the S3 `index_part.json`:
 * wal ingest: we lose not-yet-uploaded L0s; load on the **safekeepers** + work for pageserver
 * compaction: we lose the entire compaction iteration work; need to re-do it again
 * gc: no change to what we have today
@@ -137,17 +137,18 @@ If the work is still deemed necessary after restart, the restarted restarted pag
 The amount of work to be re-do is capped to the lag of S3 changes to the local changes.
 Assuming upload queue allows for unlimited queue depth (that's what it does today), this means:
 * on-demand downloads that were needed to do the work: are likely still present, not lost
-* L0 => L1 compaction: bounded to `O(sum(L0 size))`
-* image layer generation: bounded by `O(sum(image layer size))`;
-* gc: `update_gc_info`` work (not substantial)
+* wal ingest: currently unbounded
+* L0 => L1 compaction: CPU time proportional to `O(sum(L0 size))` and upload work proportional to `O()`
+  * Compaction threshold is 10 L0s and each L0 can be up to 256M in size. Target size for L1 is 128M.
+  * In practive, most L0s are tiny due to 10minute `DEFAULT_CHECKPOINT_TIMEOUT`.
+* image layer generation: CPU time `O(sum(input data))` + upload work `O(sum(new image layer size))`
+  * I have no intuition how expensive / long-running it is in reality.
+* gc: `update_gc_info`` work (not substantial, AFAIK)
 
-It would be an oversimplification to say that the work lost is proportional to the amount of data generated.
-The reason is that image layer generation can be much more CPU-expensive per produced byte than L0=>L1 compaction.
-
-Note that the gain in exchange for the lost work is that we eliminate the implicit requirement
-for the restarted pageserver process to come to the same conclusions as the earlier pageserver process;
-neither in terms of _what_ work needs to be done or or that the work produce the exact same output.
-The new process starts off from a consistent layer map and only needs to make decisions based on that.
+To limit the amount of lost upload work, and ingest work, we can limit the upload queue depth (see suggestions in the next sub-section).
+However, to limit the amount of lost CPU work, we would need a way to make make the compaction/image-layer-generation algorithms interruptible & resumable.
+We aren't there yet, the need for it is tracked by ([#4580](https://github.com/neondatabase/neon/issues/4580)).
+However, this RFC is not constraining the design space either.
 
 ### Practical
 
@@ -156,7 +157,7 @@ The new process starts off from a consistent layer map and only needs to make de
 Pageserver crashes are very rare ; it would likely be acceptable to re-do the lost work in that case.
 However, regular pageserver restart happen frequently, e.g., during weekly deploys.
 
-In general, restart faces the problem of tenants that "take too long" to shut down.
+In general, pageserver restart faces the problem of tenants that "take too long" to shut down.
 They are a problem because other tenants that shut down quickly are unavailble while we wait for the slow tenants to shut down.
 We currently allot 10 seconds for graceful shutdown until we SIGKILL the pageserver process (as per `pageserver.service` unit file).
 A longer budget would expose tenants that are done early to a longer downtime.
