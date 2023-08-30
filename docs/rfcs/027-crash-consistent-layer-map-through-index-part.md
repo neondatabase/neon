@@ -61,7 +61,7 @@ The items above are a problem for the [split-brain protection RFC](https://githu
 For example, if an unresponsive node A becomes active again after control plane has relocated the tenant to a new node B, the node A may overwrite some L1s.
 But node B based its world view on the version of node A's `index_part.json` from _before_ the overwrite.
 That earlier `index_part.json`` contained the file size of the pre-overwrite L1.
-Pageserver currently treat file size as a checksum, and because it mismatches, the node B will refuse to read data from the L1.
+If the overwritten L1 has a different file size, node B will refuse to read data from the overwritten L1.
 Effectively, the data in the L1 has become inaccessible to node B.
 If node B already uploaded an index part itself, all subsequent attachments will use node B's index part, and run into the same probem.
 
@@ -79,7 +79,7 @@ Given the above considerations, we should avoid making correctness of split-brai
 Instead of reconciling a layer map from local timeline directory contents and remote index part, this RFC proposes to view the remote index part as authoritative during timeline load.
 Local layer files will be recognized if they match what's listed in remote index part, and removed otherwise.
 
-During **timeline load**, the only thing that matter is the remote index part content.
+During **timeline load**, the only thing that matters is the remote index part content.
 Essentially, timeline load becomes much like attach, except we don't need to prefix-list the remote timelines.
 The local timeline dir's `metadata` file does not matter.
 The layer files in the local timeline dir are seen as a nice-to-have cache of layer files that are in the remote index part.
