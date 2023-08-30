@@ -36,10 +36,10 @@ We will reconstruct the layer map according to the reconciliation process, takin
 
 We cannot roll back or complete the timeline directory update during which we crashed, because we keep no record of the changes we plan to make.
 
-### Problem's Implications For Comapction
+### Problem's Implications For Compaction
 
 The implications of the above are primarily problematic for compaction.
-Specifically, the part of it that compats L0 layers into L1 layers.
+Specifically, the part of it that compacts L0 layers into L1 layers.
 
 Remember that compaction takes a set of L0 layers and reshuffles the delta records in them into L1 layer files.
 Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
@@ -76,7 +76,7 @@ Given the above considerations, we should avoid making correctness of split-brai
 
 ## Design
 
-Instead of reonciling a layer map from local timeline directory contents and remote index part, this RFC proposes to view the remote index part as authoritative during timeline load.
+Instead of reconciling a layer map from local timeline directory contents and remote index part, this RFC proposes to view the remote index part as authoritative during timeline load.
 Local layer files will be recognized if they match what's listed in remote index part, and removed otherwise.
 
 During **timeline load**, the only thing that matter is the remote index part content.
@@ -84,7 +84,7 @@ Essentially, timeline load becomes much like attach, except we don't need to pre
 The local timeline dir's `metadata` file does not matter.
 The layer files in the local timeline dir are seen as a nice-to-have cache of layer files that are in the remote index part.
 Any layer files in the local timeline dir that aren't in the remote index part are removed during startup.
-The `reconcile_with_remote()` no longer "merges" local timeline dir contents with the remote index part.
+The `Timeline::load_layer_map()` no longer "merges" local timeline dir contents with the remote index part.
 Instead, it treats the remote index part as the authoritative layer map.
 If the local timeline dir contains a layer that is in the remote index part, that's nice, and we'll re-use it if file size (and in the future, check sum) match what's stated in the index part.
 If it doesn't match, we remove the file from the local timeline dir.
