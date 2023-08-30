@@ -5567,6 +5567,10 @@ name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-sig-auth",
+ "aws-sigv4",
+ "aws-smithy-http",
  "axum",
  "bytes",
  "cc",
@@ -5574,7 +5578,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
- "digest",
  "either",
  "fail",
  "futures",
