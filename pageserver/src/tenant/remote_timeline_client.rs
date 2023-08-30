@@ -667,8 +667,8 @@ impl RemoteTimelineClient {
                         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
                         Some((name, meta.generation))
                     } else {
-                        // This can happen if we are deleting a file that we never
-                        // successfully uploaded.  We log it because it is a rare/strange
+                        // This can only happen if we forgot to to schedule the file upload
+                        // before scheduling the delete. Log it because it is a rare/strange
                         // situation, and in case something is misbehaving, we'd like to know which
                         // layers experienced this.
                         info!(
