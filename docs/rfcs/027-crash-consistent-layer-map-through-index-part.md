@@ -160,10 +160,9 @@ We can mitigate this problem as follows:
 
 ## Limitations
 
-Multi-object changes that span multiple timelines aren't covered.
-We currently have:
-1. GC (but, it doesn't require atomicity across timelines, so, it doesn't really count)
-2. Timeline deletion (covered by `deleted_at` marker)
+Multi-object changes that span multiple timelines aren't covered by this RFC.
+That's fine because we currently don't need them, as evidenced by the absence
+of a Pageserver operation that holds multiple timelines' layer map lock at a time.
 
 ## Impacted components
 
