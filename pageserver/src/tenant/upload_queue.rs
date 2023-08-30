@@ -230,7 +230,7 @@ impl std::fmt::Display for UploadOp {
             UploadOp::UploadLayer(path, metadata) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?}, gen={})",
+                    "UploadLayer({}, size={:?}, gen={:?})",
                     path.file_name(),
                     metadata.file_size(),
                     metadata.generation,
@@ -241,7 +241,7 @@ impl std::fmt::Display for UploadOp {
             }
             UploadOp::Delete(delete) => write!(
                 f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {})",
+                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {:?})",
                 delete.layer_file_name.file_name(),
                 delete.scheduled_from_timeline_delete,
                 delete.generation

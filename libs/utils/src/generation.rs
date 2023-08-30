@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// See docs/rfcs/025-generation-numbers.md for detail on how generation
 /// numbers are used.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Generation {
     // Generations with this magic value will not add a suffix to S3 keys, and will not
     // be included in persisted index_part.json.  This value is only to be used
@@ -93,7 +93,10 @@ impl<'de> Deserialize<'de> for Generation {
     }
 }
 
-impl Display for Generation {
+// We intentionally do not implement Display for Generation, to reduce the
+// risk of a bug where the generation is used in a format!() string directly
+// instead of using get_suffix().
+impl Debug for Generation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Valid(v) => {
