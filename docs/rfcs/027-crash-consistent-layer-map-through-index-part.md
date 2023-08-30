@@ -18,7 +18,7 @@ If we crash or restart pageserver, we reconstruct the layer map from:
 1. local timeline directory contents
 2. remote `index_part.json` contents.
 
-The function that is responsible for this is called `reconcile_with_remote()`.
+The function that is responsible for this is called `Timeline::load_layer_map()`.
 The reconciliation process's behavior is the following:
 * local-only files will become part of the layer map as local-only layers and rescheduled for upload
 * For a file name that, by its name, is present locally and in the remote `index_part.json`, but where the local file has a different size (future: checksum) than the remote file, we will delete the local file and leave the remote file as a `RemoteLayer` in the layer map.
