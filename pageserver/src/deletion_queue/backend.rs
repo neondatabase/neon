@@ -1,8 +1,15 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
+use futures::future::TryFutureExt;
+use pageserver_api::control_api::HexTenantId;
+use pageserver_api::control_api::{ValidateRequest, ValidateRequestTenant, ValidateResponse};
+use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
+use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::metrics::DELETION_QUEUE_ERRORS;
@@ -10,6 +17,7 @@ use crate::metrics::DELETION_QUEUE_ERRORS;
 use super::executor::ExecutorMessage;
 use super::DeletionHeader;
 use super::DeletionList;
+use super::DeletionQueueError;
 use super::FlushOp;
 
 // After this length of time, execute deletions which are elegible to run,
@@ -41,6 +49,58 @@ pub struct BackendQueueWorker {
     // DeletionLists we have fully executed, which may be deleted
     // from remote storage.
     executed_lists: Vec<DeletionList>,
+
+    cancel: CancellationToken,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum ValidateCallError {
+    #[error("shutdown")]
+    Shutdown,
+    #[error("remote: {0}")]
+    Remote(reqwest::Error),
+}
+
+async fn retry_http_forever<T>(
+    url: &url::Url,
+    request: ValidateRequest,
+    cancel: CancellationToken,
+) -> Result<T, DeletionQueueError>
+where
+    T: DeserializeOwned,
+{
+    let client = reqwest::ClientBuilder::new()
+        .build()
+        .expect("Failed to construct http client");
+
+    let response = match backoff::retry(
+        || {
+            client
+                .post(url.clone())
+                .json(&request)
+                .send()
+                .map_err(|e| ValidateCallError::Remote(e))
+        },
+        |_| false,
+        3,
+        u32::MAX,
+        "calling control plane generation validation API",
+        backoff::Cancel::new(cancel.clone(), || ValidateCallError::Shutdown),
+    )
+    .await
+    {
+        Err(ValidateCallError::Shutdown) => {
+            return Err(DeletionQueueError::ShuttingDown);
+        }
+        Err(ValidateCallError::Remote(_)) => {
+            panic!("We retry forever");
+        }
+        Ok(r) => r,
+    };
+
+    // TODO: handle non-200 response
+    // TODO: handle decode error
+    Ok(response.json::<T>().await.unwrap())
 }
 
 impl BackendQueueWorker {
@@ -48,6 +108,7 @@ impl BackendQueueWorker {
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             conf,
@@ -56,6 +117,7 @@ impl BackendQueueWorker {
             pending_lists: Vec::new(),
             pending_key_count: 0,
             executed_lists: Vec::new(),
+            cancel,
         }
     }
 
@@ -106,11 +168,67 @@ impl BackendQueueWorker {
         }
     }
 
+    pub async fn validate_lists(&mut self) -> Result<(), DeletionQueueError> {
+        let control_plane_api = match &self.conf.control_plane_api {
+            None => {
+                // Generations are not switched on yet.
+                return Ok(());
+            }
+            Some(api) => api,
+        };
+
+        let validate_path = control_plane_api
+            .join("validate")
+            .expect("Failed to build validate path");
+
+        for list in &mut self.pending_lists {
+            let request = ValidateRequest {
+                tenants: list
+                    .tenants
+                    .iter()
+                    .map(|(tid, tdl)| ValidateRequestTenant {
+                        id: HexTenantId::new(*tid),
+                        gen: tdl.generation.into().expect(
+                            "Generation should always be valid for a Tenant doing deletions",
+                        ),
+                    })
+                    .collect(),
+            };
+
+            // Retry forever, we cannot make progress until we get a response
+            let response: ValidateResponse =
+                retry_http_forever(&validate_path, request, self.cancel.clone()).await?;
+
+            let tenants_valid: HashMap<_, _> = response
+                .tenants
+                .into_iter()
+                .map(|t| (t.id.take(), t.valid))
+                .collect();
+
+            // Filter the list based on whether the server responded valid: true.
+            // If a tenant is omitted in the response, it has been deleted, and we should
+            // proceed with deletion.
+            list.tenants.retain(|tenant_id, _tenant| {
+                let r = tenants_valid.get(tenant_id).map(|v| *v).unwrap_or(true);
+                if !r {
+                    warn!("Dropping stale deletions for tenant {tenant_id}, objects may be leaked");
+                }
+                r
+            });
+        }
+
+        Ok(())
+    }
+
     pub async fn flush(&mut self) {
-        self.pending_key_count = 0;
+        // Issue any required generation validation calls to the control plane
+        if let Err(DeletionQueueError::ShuttingDown) = self.validate_lists().await {
+            warn!("Shutting down");
+            return;
+        }
 
         // Submit all keys from pending DeletionLists into the executor
-        for list in &mut self.pending_lists {
+        for list in self.pending_lists.drain(..) {
             let objects = list.take_paths();
             if let Err(_e) = self.tx.send(ExecutorMessage::Delete(objects)).await {
                 warn!("Shutting down");
@@ -132,6 +250,7 @@ impl BackendQueueWorker {
 
         // After flush, we are assured that all contents of the pending lists
         // are executed
+        self.pending_key_count = 0;
         self.executed_lists.append(&mut self.pending_lists);
 
         // Erase the lists we executed
@@ -164,7 +283,7 @@ impl BackendQueueWorker {
 
             match msg {
                 BackendQueueMessage::Delete(list) => {
-                    self.pending_key_count += list.objects.len();
+                    self.pending_key_count += list.len();
                     self.pending_lists.push(list);
 
                     if self.pending_key_count > AUTOFLUSH_KEY_COUNT {

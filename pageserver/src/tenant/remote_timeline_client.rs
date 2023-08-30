@@ -693,7 +693,12 @@ impl RemoteTimelineClient {
 
         // Enqueue deletions
         deletion_queue_client
-            .push_layers(self.tenant_id, self.timeline_id, with_generations)
+            .push_layers(
+                self.tenant_id,
+                self.timeline_id,
+                self.generation,
+                with_generations,
+            )
             .await?;
         Ok(())
     }
@@ -1509,7 +1514,7 @@ mod tests {
                 )),
             });
 
-            let deletion_queue = MockDeletionQueue::new(Some(storage), harness.conf);
+            let deletion_queue = MockDeletionQueue::new(Some(storage));
 
             Ok(Self {
                 harness,

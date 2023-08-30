@@ -3,8 +3,10 @@ mod executor;
 mod frontend;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
+use crate::tenant::remote_timeline_client::remote_timeline_path;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -14,7 +16,7 @@ use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error};
 use utils::generation::Generation;
-use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::id::{TenantId, TimelineId};
 
 pub(crate) use self::backend::BackendQueueWorker;
 use self::executor::ExecutorWorker;
@@ -84,11 +86,15 @@ pub struct DeletionQueueClient {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TimelineDeletionList {
-    objects: Vec<RemotePath>,
-    // TODO: Tenant attachment generation will go here
-    // (see https://github.com/neondatabase/neon/pull/4919)
-    // attach_gen: u32,
+struct TenantDeletionList {
+    /// For each Timeline, a list of key fragments to append to the timeline remote path
+    /// when reconstructing a full key
+    timelines: HashMap<TimelineId, Vec<String>>,
+
+    /// The generation in which this deletion was emitted: note that this may not be the
+    /// same as the generation of any layers being deleted.  The generation of the layer
+    /// has already been absorbed into the keys in `objects`
+    generation: Generation,
 }
 
 #[serde_as]
@@ -101,11 +107,13 @@ struct DeletionList {
     sequence: u64,
 
     /// To avoid repeating tenant/timeline IDs in every key, we store keys in
-    /// nested HashMaps by TenantTimelineID
-    objects: HashMap<TenantTimelineId, TimelineDeletionList>,
-    // TODO: Node generation will go here
-    // (see https://github.com/neondatabase/neon/pull/4919)
-    // node_gen: u32,
+    /// nested HashMaps by TenantTimelineID.  Each Tenant only appears once
+    /// with one unique generation ID: if someone tries to push a second generation
+    /// ID for the same tenant, we will start a new DeletionList.
+    tenants: HashMap<TenantId, TenantDeletionList>,
+
+    /// Avoid having to walk `tenants` to calculate size
+    size: usize,
 }
 
 #[serde_as]
@@ -140,40 +148,92 @@ impl DeletionList {
         Self {
             version: Self::VERSION_LATEST,
             sequence,
-            objects: HashMap::new(),
+            tenants: HashMap::new(),
+            size: 0,
         }
+    }
+
+    fn drain(&mut self) -> Self {
+        let mut tenants = HashMap::new();
+        std::mem::swap(&mut self.tenants, &mut tenants);
+        let other = Self {
+            version: Self::VERSION_LATEST,
+            sequence: self.sequence,
+            tenants,
+            size: self.size,
+        };
+        self.size = 0;
+        other
     }
 
     fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.tenants.is_empty()
     }
 
     fn len(&self) -> usize {
-        self.objects.values().map(|v| v.objects.len()).sum()
+        self.size
     }
 
-    fn push(&mut self, tenant: &TenantId, timeline: &TimelineId, mut objects: Vec<RemotePath>) {
+    /// Returns true if the push was accepted, false if the caller must start a new
+    /// deletion list.
+    fn push(
+        &mut self,
+        tenant: &TenantId,
+        timeline: &TimelineId,
+        generation: Generation,
+        objects: &mut Vec<RemotePath>,
+    ) -> bool {
         if objects.is_empty() {
             // Avoid inserting an empty TimelineDeletionList: this preserves the property
             // that if we have no keys, then self.objects is empty (used in Self::is_empty)
-            return;
+            return true;
         }
 
-        let key = TenantTimelineId::new(*tenant, *timeline);
-        let entry = self
-            .objects
-            .entry(key)
-            .or_insert_with(|| TimelineDeletionList {
-                objects: Vec::new(),
+        let tenant_entry = self
+            .tenants
+            .entry(*tenant)
+            .or_insert_with(|| TenantDeletionList {
+                timelines: HashMap::new(),
+                generation: generation,
             });
-        entry.objects.append(&mut objects)
+
+        if tenant_entry.generation != generation {
+            // Only one generation per tenant per list: signal to
+            // caller to start a new list.
+            return false;
+        }
+
+        let timeline_entry = tenant_entry
+            .timelines
+            .entry(*timeline)
+            .or_insert_with(|| Vec::new());
+
+        let timeline_remote_path = remote_timeline_path(tenant, timeline);
+
+        self.size += objects.len();
+        timeline_entry.extend(objects.drain(..).map(|p| {
+            p.strip_prefix(&timeline_remote_path)
+                .expect("Timeline paths always start with the timeline prefix")
+                .to_string_lossy()
+                .to_string()
+        }));
+        true
     }
 
-    fn take_paths(&mut self) -> Vec<RemotePath> {
-        self.objects
-            .drain()
-            .flat_map(|(_k, v)| v.objects.into_iter())
-            .collect()
+    fn take_paths(self) -> Vec<RemotePath> {
+        let mut result = Vec::new();
+        for (tenant, tenant_deletions) in self.tenants.into_iter() {
+            for (timeline, timeline_layers) in tenant_deletions.timelines.into_iter() {
+                let timeline_remote_path = remote_timeline_path(&tenant, &timeline);
+                result.extend(
+                    timeline_layers
+                        .into_iter()
+                        .map(|l| timeline_remote_path.join(&PathBuf::from(l))),
+                );
+            }
+        }
+
+        result
     }
 }
 
@@ -205,6 +265,7 @@ impl DeletionQueueClient {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        generation: Generation,
         layers: Vec<(LayerFileName, Generation)>,
     ) -> Result<(), DeletionQueueError> {
         DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
@@ -212,6 +273,7 @@ impl DeletionQueueClient {
             tenant_id,
             timeline_id,
             layers,
+            generation,
             objects: Vec::new(),
         }))
         .await
@@ -342,7 +404,12 @@ impl DeletionQueue {
                 backend_tx,
                 cancel.clone(),
             )),
-            Some(BackendQueueWorker::new(conf, backend_rx, executor_tx)),
+            Some(BackendQueueWorker::new(
+                conf,
+                backend_rx,
+                executor_tx,
+                cancel.clone(),
+            )),
             Some(ExecutorWorker::new(
                 remote_storage,
                 executor_rx,
@@ -543,8 +610,13 @@ mod test {
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
-        let generation = Generation::new(0xdeadbeef);
-        let remote_layer_file_name_1 = format!("{}{}", layer_file_name_1, generation.get_suffix());
+        // Exercise the distinction between the generation of the layers
+        // we delete, and the generation of the running Tenant.
+        let layer_generation = Generation::new(0xdeadbeef);
+        let now_generation = Generation::new(0xfeedbeef);
+
+        let remote_layer_file_name_1 =
+            format!("{}{}", layer_file_name_1, layer_generation.get_suffix());
 
         // Inject a victim file to remote storage
         info!("Writing");
@@ -560,7 +632,8 @@ mod test {
         ctx.runtime.block_on(client.push_layers(
             tenant_id,
             TIMELINE_ID,
-            [(layer_file_name_1.clone(), generation)].to_vec(),
+            now_generation,
+            [(layer_file_name_1.clone(), layer_generation)].to_vec(),
         ))?;
         assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
 
@@ -599,8 +672,10 @@ mod test {
         let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
-        let generation = Generation::new(0xdeadbeef);
-        let remote_layer_file_name_1 = format!("{}{}", layer_file_name_1, generation.get_suffix());
+        let layer_generation = Generation::new(0xdeadbeef);
+        let now_generation = Generation::new(0xfeedbeef);
+        let remote_layer_file_name_1 =
+            format!("{}{}", layer_file_name_1, layer_generation.get_suffix());
 
         // Inject a file, delete it, and flush to a deletion list
         std::fs::create_dir_all(&remote_timeline_path)?;
@@ -611,7 +686,8 @@ mod test {
         ctx.runtime.block_on(client.push_layers(
             tenant_id,
             TIMELINE_ID,
-            [(layer_file_name_1.clone(), generation)].to_vec(),
+            now_generation,
+            [(layer_file_name_1.clone(), layer_generation)].to_vec(),
         ))?;
         ctx.runtime.block_on(client.flush())?;
         assert_local_files(&["0000000000000001-01.list"], &deletion_prefix);

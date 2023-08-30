@@ -45,6 +45,10 @@ pub(super) struct DeletionOp {
     // to do it for you.
     pub(super) layers: Vec<(LayerFileName, Generation)>,
     pub(super) objects: Vec<RemotePath>,
+
+    /// The _current_ generation of the Tenant attachment in which we are enqueuing
+    /// this deletion.
+    pub(super) generation: Generation,
 }
 
 #[derive(Debug)]
@@ -121,8 +125,7 @@ impl FrontendQueueWorker {
                     f.fire();
                 }
 
-                let mut onward_list = DeletionList::new(self.pending.sequence);
-                std::mem::swap(&mut onward_list.objects, &mut self.pending.objects);
+                let onward_list = self.pending.drain();
 
                 // We have consumed out of pending: reset it for the next incoming deletions to accumulate there
                 self.pending = DeletionList::new(self.pending.sequence + 1);
@@ -317,14 +320,34 @@ impl FrontendQueueWorker {
                             generation,
                         ));
                     }
+                    layer_paths.extend(op.objects);
 
-                    self.pending
-                        .push(&op.tenant_id, &op.timeline_id, layer_paths);
-                    self.pending
-                        .push(&op.tenant_id, &op.timeline_id, op.objects);
+                    if self.pending.push(
+                        &op.tenant_id,
+                        &op.timeline_id,
+                        op.generation,
+                        &mut layer_paths,
+                    ) == false
+                    {
+                        self.flush().await;
+                        let retry = self.pending.push(
+                            &op.tenant_id,
+                            &op.timeline_id,
+                            op.generation,
+                            &mut layer_paths,
+                        );
+                        if retry != true {
+                            // Unexpeted: after we flush, we should have
+                            // drained self.pending, so a conflict on
+                            // generation numbers should be impossible.
+                            tracing::error!(
+                                "Failed to enqueue deletions, leaking objects.  This is a bug."
+                            );
+                        }
+                    }
                 }
                 FrontendQueueMessage::Flush(op) => {
-                    if self.pending.objects.is_empty() {
+                    if self.pending.is_empty() {
                         // Execute immediately
                         debug!("Flush: No pending objects, flushing immediately");
                         op.fire()
@@ -344,9 +367,7 @@ impl FrontendQueueWorker {
                 }
             }
 
-            if self.pending.objects.len() > DELETION_LIST_TARGET_SIZE
-                || !self.pending_flushes.is_empty()
-            {
+            if self.pending.len() > DELETION_LIST_TARGET_SIZE || !self.pending_flushes.is_empty() {
                 self.flush().await;
             }
         }

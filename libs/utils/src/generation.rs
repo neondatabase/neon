@@ -67,6 +67,14 @@ impl Generation {
             Self::none()
         }
     }
+
+    pub fn into(self) -> Option<u32> {
+        if let Self::Valid(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 }
 
 impl Serialize for Generation {
