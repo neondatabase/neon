@@ -52,7 +52,7 @@ impl ExecutorWorker {
             DELETION_QUEUE_ERRORS
                 .with_label_values(&["failpoint"])
                 .inc();
-            return Err(anyhow::anyhow!("failpoint hit"));
+            Err(anyhow::anyhow!("failpoint hit"))
         });
 
         self.remote_storage.delete_objects(&self.accumulator).await

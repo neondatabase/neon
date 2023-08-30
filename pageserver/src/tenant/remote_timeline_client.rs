@@ -830,11 +830,9 @@ impl RemoteTimelineClient {
             .into_iter()
             .map(|l| {
                 let local_path = timeline_path.join(l.file_name());
-                let remote_path = self
-                    .conf
+                self.conf
                     .remote_path(&local_path)
-                    .expect("Timeline path should always convert to remote");
-                remote_path
+                    .expect("Timeline path should always convert to remote")
             })
             .collect();
         deletion_queue.push_immediate(layer_paths).await?;

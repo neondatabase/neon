@@ -166,7 +166,7 @@ impl DeletionList {
             return;
         }
 
-        let key = TenantTimelineId::new(tenant.clone(), timeline.clone());
+        let key = TenantTimelineId::new(*tenant, *timeline);
         let entry = self
             .objects
             .entry(key)
@@ -179,8 +179,7 @@ impl DeletionList {
     fn take_paths(&mut self) -> Vec<RemotePath> {
         self.objects
             .drain()
-            .map(|(_k, v)| v.objects.into_iter())
-            .flatten()
+            .flat_map(|(_k, v)| v.objects.into_iter())
             .collect()
     }
 }

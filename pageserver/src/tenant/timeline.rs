@@ -1775,7 +1775,7 @@ impl Timeline {
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
-            rtc.schedule_layer_file_deletion(&needs_cleanup, &deletion_queue_client)
+            rtc.schedule_layer_file_deletion(&needs_cleanup, deletion_queue_client)
                 .await?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or

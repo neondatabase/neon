@@ -288,7 +288,7 @@ impl<'de> Deserialize<'de> for TenantTimelineId {
         D: serde::Deserializer<'de>,
     {
         let str = String::deserialize(deserializer)?;
-        if let Some((tenant_part, timeline_part)) = str.split_once("/") {
+        if let Some((tenant_part, timeline_part)) = str.split_once('/') {
             Ok(Self {
                 tenant_id: TenantId(Id::from_hex(tenant_part).map_err(|e| {
                     serde::de::Error::custom(format!("Malformed tenant in TenantTimelineId: {e}"))
