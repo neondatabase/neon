@@ -2,20 +2,16 @@ use super::BackendQueueMessage;
 use super::DeletionHeader;
 use super::DeletionList;
 use super::FlushOp;
-use super::FAILED_REMOTE_OP_RETRIES;
-use super::FAILED_REMOTE_OP_WARN_THRESHOLD;
 
+use std::fs::create_dir_all;
 use std::time::Duration;
 
 use regex::Regex;
-use remote_storage::DownloadError;
-use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
-use utils::backoff;
 use utils::id::TenantId;
 use utils::id::TimelineId;
 
@@ -59,7 +55,6 @@ pub(super) enum FrontendQueueMessage {
 }
 
 pub struct FrontendQueueWorker {
-    remote_storage: GenericRemoteStorage,
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
@@ -81,7 +76,6 @@ pub struct FrontendQueueWorker {
 
 impl FrontendQueueWorker {
     pub(super) fn new(
-        remote_storage: GenericRemoteStorage,
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<FrontendQueueMessage>,
         tx: tokio::sync::mpsc::Sender<BackendQueueMessage>,
@@ -89,7 +83,6 @@ impl FrontendQueueWorker {
     ) -> Self {
         Self {
             pending: DeletionList::new(1),
-            remote_storage,
             conf,
             rx,
             tx,
@@ -98,23 +91,12 @@ impl FrontendQueueWorker {
         }
     }
     async fn upload_pending_list(&mut self) -> anyhow::Result<()> {
-        let key = &self.conf.remote_deletion_list_path(self.pending.sequence);
+        let path = self.conf.deletion_list_path(self.pending.sequence);
 
-        backoff::retry(
-            || {
-                let bytes =
-                    serde_json::to_vec(&self.pending).expect("Failed to serialize deletion list");
-                let size = bytes.len();
-                let source = tokio::io::BufReader::new(std::io::Cursor::new(bytes));
-                self.remote_storage.upload(source, size, key, None)
-            },
-            |_| false,
-            FAILED_REMOTE_OP_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-            "upload deletion list",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
-        )
-        .await
+        let bytes = serde_json::to_vec(&self.pending).expect("Failed to serialize deletion list");
+        tokio::fs::write(&path, &bytes).await?;
+        tokio::fs::File::open(&path).await?.sync_all().await?;
+        Ok(())
     }
 
     /// Try to flush `list` to persistent storage
@@ -161,21 +143,19 @@ impl FrontendQueueWorker {
 
     async fn recover(&mut self) -> Result<(), anyhow::Error> {
         // Load header: this is not required to be present, e.g. when a pageserver first runs
-        let header_path = self.conf.remote_deletion_header_path();
-        let header_bytes = match backoff::retry(
-            || self.remote_storage.download_all(&header_path),
-            |e| matches!(e, DownloadError::NotFound),
-            FAILED_REMOTE_OP_WARN_THRESHOLD,
-            u32::MAX,
-            "Reading deletion queue header",
-            backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
-        )
-        .await
-        {
+        let header_path = self.conf.deletion_header_path();
+
+        // Synchronous, but we only do it once per process lifetime so it's tolerable
+        create_dir_all(&self.conf.deletion_prefix())?;
+
+        let header_bytes = match tokio::fs::read(&header_path).await {
             Ok(h) => Ok(Some(h)),
             Err(e) => {
-                if let DownloadError::NotFound = e {
-                    debug!("Deletion header {header_path} not found, first start?");
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    debug!(
+                        "Deletion header {0} not found, first start?",
+                        header_path.display()
+                    );
                     Ok(None)
                 } else {
                     Err(e)
@@ -187,7 +167,10 @@ impl FrontendQueueWorker {
             if let Some(header) = match serde_json::from_slice::<DeletionHeader>(&header_bytes) {
                 Ok(h) => Some(h),
                 Err(e) => {
-                    warn!("Failed to deserialize deletion header, ignoring {header_path}: {e:#}");
+                    warn!(
+                        "Failed to deserialize deletion header, ignoring {0}: {e:#}",
+                        header_path.display()
+                    );
                     // This should never happen unless we make a mistake with our serialization.
                     // Ignoring a deletion header is not consequential for correctnes because all deletions
                     // are ultimately allowed to fail: worst case we leak some objects for the scrubber to clean up.
@@ -199,42 +182,27 @@ impl FrontendQueueWorker {
             };
         };
 
-        let prefix = RemotePath::new(&self.conf.remote_deletion_node_prefix())
-            .expect("Failed to compose path");
-        let lists = backoff::retry(
-            || async { self.remote_storage.list_prefixes(Some(&prefix)).await },
-            |_| false,
-            FAILED_REMOTE_OP_WARN_THRESHOLD,
-            u32::MAX, // There's no point giving up, since once we do that the deletion queue is stuck
-            "Recovering deletion lists",
-            backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
-        )
-        .await?;
+        let mut dir = match tokio::fs::read_dir(&self.conf.deletion_prefix()).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    "Failed to open deletion list directory {0}: {e:#}",
+                    header_path.display()
+                );
 
-        debug!("Loaded {} keys in deletion prefix {}", lists.len(), prefix);
-        let list_name_pattern =
-            Regex::new("([a-zA-Z0-9]{16})-([a-zA-Z0-9]{8})-([a-zA-Z0-9]{2}).list").unwrap();
+                // Give up: if we can't read the deletion list directory, we probably can't
+                // write lists into it later, so the queue won't work.
+                return Err(e.into());
+            }
+        };
+
+        let list_name_pattern = Regex::new("([a-zA-Z0-9]{16})-([a-zA-Z0-9]{2}).list").unwrap();
 
         let mut seqs: Vec<u64> = Vec::new();
-        for l in &lists {
-            if l == &header_path {
-                // Don't try and parse the header key as a list key
-                continue;
-            }
-
-            let basename = l
-                .strip_prefix(&prefix)
-                .expect("Stripping prefix frrom a prefix listobjects should always work");
-            let basename = match basename.to_str() {
-                Some(s) => s,
-                None => {
-                    // Should never happen, we are the only ones writing objects here
-                    warn!("Unexpected key encoding in deletion queue object");
-                    continue;
-                }
-            };
-
-            let seq_part = if let Some(m) = list_name_pattern.captures(basename) {
+        while let Some(dentry) = dir.next_entry().await? {
+            let file_name = dentry.file_name().to_owned();
+            let basename = file_name.to_string_lossy();
+            let seq_part = if let Some(m) = list_name_pattern.captures(&basename) {
                 m.get(1)
                     .expect("Non optional group should be present")
                     .as_str()
@@ -252,7 +220,6 @@ impl FrontendQueueWorker {
             };
             seqs.push(seq);
         }
-
         seqs.sort();
 
         // Initialize the next sequence number in the frontend based on the maximum of the highest list we see,
@@ -263,19 +230,10 @@ impl FrontendQueueWorker {
         }
 
         for s in seqs {
-            let list_path = self.conf.remote_deletion_list_path(s);
-            let lists_body = backoff::retry(
-                || self.remote_storage.download_all(&list_path),
-                |_| false,
-                FAILED_REMOTE_OP_WARN_THRESHOLD,
-                u32::MAX,
-                "Reading a deletion list",
-                backoff::Cancel::new(self.cancel.clone(), || DownloadError::Shutdown),
-            )
-            .await?;
+            let list_path = self.conf.deletion_list_path(s);
+            let list_bytes = tokio::fs::read(&list_path).await?;
 
-            let deletion_list = match serde_json::from_slice::<DeletionList>(lists_body.as_slice())
-            {
+            let deletion_list = match serde_json::from_slice::<DeletionList>(&list_bytes) {
                 Ok(l) => l,
                 Err(e) => {
                     // Drop the list on the floor: any objects it referenced will be left behind
@@ -305,7 +263,7 @@ impl FrontendQueueWorker {
 
         let mut recovered: bool = false;
 
-        loop {
+        while !self.cancel.is_cancelled() {
             let timeout = if self.pending_flushes.is_empty() {
                 FRONTEND_DEFAULT_TIMEOUT
             } else {
@@ -333,9 +291,7 @@ impl FrontendQueueWorker {
                 if let Err(e) = self.recover().await {
                     // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
                     // queue receiver has been dropped.
-                    info!(
-                        "Deletion queue recover aborted, deletion queue will not proceed ({e:#})"
-                    );
+                    info!("Deletion queue recover aborted, deletion queue will not proceed ({e})");
                     return;
                 } else {
                     recovered = true;

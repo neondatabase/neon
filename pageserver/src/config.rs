@@ -566,40 +566,25 @@ impl PageServerConf {
         self.workdir.join("tenants")
     }
 
-    pub fn remote_deletion_node_prefix(&self) -> PathBuf {
-        PathBuf::from_str("deletion")
-            .unwrap()
-            .join(self.id.to_string())
+    pub fn deletion_prefix(&self) -> PathBuf {
+        self.workdir.join("deletion")
     }
 
-    pub fn remote_deletion_list_path(&self, sequence: u64) -> RemotePath {
-        // Encode a version in the key, so that if we ever switch away from JSON we can
+    pub fn deletion_list_path(&self, sequence: u64) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;
 
-        // Placeholder, pending implementation of generation numbers
-        const GENERATION: u32 = 0;
-
-        RemotePath::new(&self.remote_deletion_node_prefix().join(format!(
-            "{sequence:016x}-{GENERATION:08x}-{VERSION:02x}.list"
-        )))
-        .expect("This should always be convertible, it is relative")
+        self.deletion_prefix()
+            .join(format!("{sequence:016x}-{VERSION:02x}.list"))
     }
 
-    pub fn remote_deletion_header_path(&self) -> RemotePath {
-        // Encode a version in the key, so that if we ever switch away from JSON we can
+    pub fn deletion_header_path(&self) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;
 
-        // Placeholder, pending implementation of generation numbers
-        const GENERATION: u32 = 0;
-
-        RemotePath::new(
-            &self
-                .remote_deletion_node_prefix()
-                .join(format!("header-{GENERATION:08x}-{VERSION:02x}")),
-        )
-        .expect("This should always be convertible, it is relative")
+        self.deletion_prefix().join(format!("header-{VERSION:02x}"))
     }
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {

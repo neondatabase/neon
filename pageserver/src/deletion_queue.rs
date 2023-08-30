@@ -25,14 +25,6 @@ use frontend::FrontendQueueMessage;
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 
-// Arbitrary thresholds for retries: we do not depend on success
-// within OP_RETRIES, as workers will just go around their consume loop:
-// the purpose of the backoff::retries with these constants are to
-// retry _sooner_ than we would if going around the whole loop.
-const FAILED_REMOTE_OP_WARN_THRESHOLD: u32 = 3;
-
-const FAILED_REMOTE_OP_RETRIES: u32 = 10;
-
 // TODO: adminstrative "panic button" config property to disable all deletions
 // TODO: configurable for how long to wait before executing deletions
 
@@ -344,18 +336,12 @@ impl DeletionQueue {
                 },
             },
             Some(FrontendQueueWorker::new(
-                remote_storage.clone(),
                 conf,
                 rx,
                 backend_tx,
                 cancel.clone(),
             )),
-            Some(BackendQueueWorker::new(
-                remote_storage.clone(),
-                conf,
-                backend_rx,
-                executor_tx,
-            )),
+            Some(BackendQueueWorker::new(conf, backend_rx, executor_tx)),
             Some(ExecutorWorker::new(
                 remote_storage,
                 executor_rx,
@@ -523,6 +509,25 @@ mod test {
         assert_eq!(expected, found);
     }
 
+    fn assert_local_files(expected: &[&str], directory: &Path) {
+        let mut dir = match std::fs::read_dir(directory) {
+            Ok(d) => d,
+            Err(_) => {
+                assert_eq!(expected, &Vec::<String>::new());
+                return;
+            }
+        };
+        let mut found = Vec::new();
+        while let Some(dentry) = dir.next() {
+            let dentry = dentry.unwrap();
+            let file_name = dentry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            found.push(file_name_str.to_string());
+        }
+        found.sort();
+        assert_eq!(expected, found);
+    }
+
     #[test]
     fn deletion_queue_smoke() -> anyhow::Result<()> {
         // Basic test that the deletion queue processes the deletions we pass into it
@@ -539,9 +544,7 @@ mod test {
             .remote_path(&ctx.harness.timeline_path(&TIMELINE_ID))
             .expect("Failed to construct remote path");
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
-        let remote_deletion_prefix = ctx
-            .remote_fs_dir
-            .join(ctx.harness.conf.remote_deletion_node_prefix());
+        let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
         // Inject a victim file to remote storage
         info!("Writing");
@@ -560,27 +563,25 @@ mod test {
             [layer_file_name_1.clone()].to_vec(),
         ))?;
         assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
-        assert_remote_files(&[], &remote_deletion_prefix);
+
+        assert_local_files(&[], &deletion_prefix);
 
         // File should still be there after we write a deletion list (we haven't pushed enough to execute anything)
         info!("Flushing");
         ctx.runtime.block_on(client.flush())?;
         assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
-        assert_remote_files(
-            &["0000000000000001-00000000-01.list"],
-            &remote_deletion_prefix,
-        );
+        assert_local_files(&["0000000000000001-01.list"], &deletion_prefix);
 
         // File should go away when we execute
         info!("Flush-executing");
         ctx.runtime.block_on(client.flush_execute())?;
         assert_remote_files(&[], &remote_timeline_path);
-        assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
+        assert_local_files(&["header-01"], &deletion_prefix);
 
         // Flushing on an empty queue should succeed immediately, and not write any lists
         info!("Flush-executing on empty");
         ctx.runtime.block_on(client.flush_execute())?;
-        assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
+        assert_local_files(&["header-01"], &deletion_prefix);
 
         Ok(())
     }
@@ -601,9 +602,7 @@ mod test {
             .remote_path(&ctx.harness.timeline_path(&TIMELINE_ID))
             .expect("Failed to construct remote path");
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
-        let remote_deletion_prefix = ctx
-            .remote_fs_dir
-            .join(ctx.harness.conf.remote_deletion_node_prefix());
+        let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
         // Inject a file, delete it, and flush to a deletion list
         std::fs::create_dir_all(&remote_timeline_path)?;
@@ -617,10 +616,7 @@ mod test {
             [layer_file_name_1.clone()].to_vec(),
         ))?;
         ctx.runtime.block_on(client.flush())?;
-        assert_remote_files(
-            &["0000000000000001-00000000-01.list"],
-            &remote_deletion_prefix,
-        );
+        assert_local_files(&["0000000000000001-01.list"], &deletion_prefix);
 
         // Restart the deletion queue
         drop(client);
@@ -631,7 +627,7 @@ mod test {
         info!("Flush-executing");
         ctx.runtime.block_on(client.flush_execute())?;
         assert_remote_files(&[], &remote_timeline_path);
-        assert_remote_files(&["header-00000000-01"], &remote_deletion_prefix);
+        assert_local_files(&["header-01"], &deletion_prefix);
         Ok(())
     }
 }

@@ -1,8 +1,5 @@
 use std::time::Duration;
 
-use remote_storage::GenericRemoteStorage;
-use remote_storage::RemotePath;
-use remote_storage::MAX_KEYS_PER_DELETE;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -28,7 +25,6 @@ pub(super) enum BackendQueueMessage {
     Flush(FlushOp),
 }
 pub struct BackendQueueWorker {
-    remote_storage: GenericRemoteStorage,
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
     tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
@@ -49,13 +45,11 @@ pub struct BackendQueueWorker {
 
 impl BackendQueueWorker {
     pub(super) fn new(
-        remote_storage: GenericRemoteStorage,
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
     ) -> Self {
         Self {
-            remote_storage,
             conf,
             rx,
             tx,
@@ -88,16 +82,11 @@ impl BackendQueueWorker {
         // if there are no lists)
         let header = DeletionHeader::new(max_executed_seq);
         debug!("Writing header {:?}", header);
-        let bytes = serde_json::to_vec(&header).expect("Failed to serialize deletion header");
-        let size = bytes.len();
-        let source = tokio::io::BufReader::new(std::io::Cursor::new(bytes));
-        let header_key = self.conf.remote_deletion_header_path();
+        let header_bytes =
+            serde_json::to_vec(&header).expect("Failed to serialize deletion header");
+        let header_path = self.conf.deletion_header_path();
 
-        if let Err(e) = self
-            .remote_storage
-            .upload(source, size, &header_key, None)
-            .await
-        {
+        if let Err(e) = tokio::fs::write(&header_path, header_bytes).await {
             warn!("Failed to upload deletion queue header: {e:#}");
             DELETION_QUEUE_ERRORS
                 .with_label_values(&["put_header"])
@@ -105,27 +94,14 @@ impl BackendQueueWorker {
             return;
         }
 
-        let executed_keys: Vec<RemotePath> = self
-            .executed_lists
-            .iter()
-            .rev()
-            .take(MAX_KEYS_PER_DELETE)
-            .map(|l| self.conf.remote_deletion_list_path(l.sequence))
-            .collect();
-
-        match self.remote_storage.delete_objects(&executed_keys).await {
-            Ok(()) => {
-                // Retain any lists that couldn't be deleted in that request
-                self.executed_lists
-                    .truncate(self.executed_lists.len() - executed_keys.len());
-            }
-            Err(e) => {
-                warn!("Failed to delete deletion list(s): {e:#}");
-                // Do nothing: the elements remain in executed_lists, and purge will be retried
-                // next time we process some deletions and go around the loop.
-                DELETION_QUEUE_ERRORS
-                    .with_label_values(&["delete_list"])
-                    .inc();
+        while let Some(list) = self.executed_lists.pop() {
+            let list_path = self.conf.deletion_list_path(list.sequence);
+            if let Err(e) = tokio::fs::remove_file(&list_path).await {
+                // Unexpected: we should have permissions and nothing else should
+                // be touching these files
+                tracing::error!("Failed to delete {0}: {e:#}", list_path.display());
+                self.executed_lists.push(list);
+                break;
             }
         }
     }
