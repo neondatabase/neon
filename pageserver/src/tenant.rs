@@ -180,7 +180,8 @@ pub struct Tenant {
 
     tenant_id: TenantId,
 
-    /// The remote storage generation, used to protect S3 objects from split-brain
+    /// The remote storage generation, used to protect S3 objects from split-brain.
+    /// Does not change over the lifetime of the [`Tenant`] object.
     generation: Generation,
 
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
