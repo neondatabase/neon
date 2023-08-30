@@ -153,7 +153,8 @@ pub struct Timeline {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
 
-    // The generation of the tenant that instantiated us: this is used for safety when writing remote objects
+    /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
+    /// Never changes for the lifetime of this [`Timeline`] object.
     generation: Generation,
 
     pub pg_version: u32,
