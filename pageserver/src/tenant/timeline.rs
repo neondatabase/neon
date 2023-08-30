@@ -3696,6 +3696,11 @@ impl Timeline {
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+
+            if new_layers.len() > 0 {
+                fail_point!("after-timeline-compacted-first-L1");
+            }
+
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
@@ -3853,6 +3858,7 @@ impl Timeline {
             );
             let l = l as Arc<dyn PersistentLayer>;
             if guard.contains(&l) {
+                tracing::warn!(layer=%l, "duplicated L1 layer");
                 duplicated_layers.insert(l.layer_desc().key());
             } else {
                 if LayerMap::is_l0(l.layer_desc()) {
