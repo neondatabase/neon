@@ -1447,7 +1447,7 @@ pub fn remote_path(
 
     RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
         format!(
-            "Failed to resolve remote part of path {:?} for base {:?}",
+            "resolve remote part of path {:?} for base {:?}",
             local_path, conf.workdir
         )
     })
