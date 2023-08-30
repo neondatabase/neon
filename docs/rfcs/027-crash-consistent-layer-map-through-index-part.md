@@ -126,33 +126,60 @@ Multi-object changes that previously created and removed files in timeline dir a
 
 ## Trade-Offs
 
-`disk_consistent_lsn` can go backwards across restarts if we crash before we've finished the index part PUT.
-Nobody should care about it, because the only thing that matters is `remote_consistent_lsn`.
-Compute certainly doesn't care about `disk_consistent_lsn`.
+### Fundamental
 
-If we crash before finishing the index part PUT, we have to re-do the work during restart:
-* wal ingest: losing not-yet-uploaded L0s; load on the **safekeepers** + work for pageserver
+If we crash before finishing the index part PUT, we inevitably lose some work:
+* wal ingest: we lose not-yet-uploaded L0s; load on the **safekeepers** + work for pageserver
 * compaction: we lose the entire compaction iteration work; need to re-do it again
 * gc: no change to what we have today
 
-In comparison to the current reconciliation process, this means we will sometimes throw away needless work that was previously conserved.
-For example, if we crash after doing all the local changes but before _any_ remote S3 changes.
-Note however that the amount of work to be re-done after restart is capped to the lag of S3 changes to the local changes.
-That is something we can control and monitor for.
+If the work is still deemed necessary after restart, the restarted restarted pageserver will re-do this work.
+The amount of work to be re-do is capped to the lag of S3 changes to the local changes.
+Assuming upload queue allows for unlimited queue depth (that's what it does today), this means:
+* on-demand downloads that were needed to do the work: are likely still present, not lost
+* L0 => L1 compaction: bounded to `O(sum(L0 size))`
+* image layer generation: bounded by `O(sum(image layer size))`;
+* gc: `update_gc_info`` work (not substantial)
 
-Related, if the upload queue is clogged, _and_ we restart, we'll throw away the work that was stuck in the queue.
+It would be an oversimplification to say that the work lost is proportional to the amount of data generated.
+The reason is that image layer generation can be much more CPU-expensive per produced byte than L0=>L1 compaction.
 
-What's probably most important though is the impact of this RFC on regular pageserver restart, e.g., during weekly deploys.
+Note that the gain in exchange for the lost work is that we eliminate the implicit requirement
+for the restarted pageserver process to come to the same conclusions as the earlier pageserver process;
+neither in terms of _what_ work needs to be done or or that the work produce the exact same output.
+The new process starts off from a consistent layer map and only needs to make decisions based on that.
+
+### Practical
+
+#### Pageserver Restarts
+
+Pageserver crashes are very rare ; it would likely be acceptable to re-do the lost work in that case.
+However, regular pageserver restart happen frequently, e.g., during weekly deploys.
+
 In general, restart faces the problem of tenants that "take too long" to shut down.
 They are a problem because other tenants that shut down quickly are unavailble while we wait for the slow tenants to shut down.
 We currently allot 10 seconds for graceful shutdown until we SIGKILL the pageserver process (as per `pageserver.service` unit file).
 A longer budget would expose tenants that are done early to a longer downtime.
 A short budget would risk throwing away more work that'd have to be re-done after restart.
+
 In the context of this RFC, killing the process would mean losing the work that hasn't made it to S3.
 We can mitigate this problem as follows:
 0. initially, by accepting that we need to do the work again
-1. short-term, by introducing a read-only shutdown state for tenants that are fast to shut down; that state would be equivalent to the state of a tenant in hot standby / readonly mode.
+1. short-term, introducing measures to cap the amount of in-flight work:
+
+   - cap upload queue length, use backpressure to slow down compaction
+   - disabling compaction/image-layer-generation X minutes before `systemctl restart pageserver`
+   - introducing a read-only shutdown state for tenants that are fast to shut down;
+     that state would be equivalent to the state of a tenant in hot standby / readonly mode.
+
 2. mid term, by not restarting pageserver in place, but using [*seamless tenant migration*](https://github.com/neondatabase/neon/pull/5029) to drain a pageserver's tenants before we restart it.
+
+#### `disk_consistent_lsn` can go backwards
+
+`disk_consistent_lsn` can go backwards across restarts if we crash before we've finished the index part PUT.
+Nobody should care about it, because the only thing that matters is `remote_consistent_lsn`.
+Compute certainly doesn't care about `disk_consistent_lsn`.
+
 
 ## Side-Effects Of This Design
 
