@@ -52,6 +52,29 @@ paths:
               schema:
                 type: object
 
+  /v1/deletion_queue/flush:
+    parameters:
+      - name: execute
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description:
+          If true, attempt to execute deletions.  If false, just flush deletions to persistent deletion lists.
+    put:
+      description: Execute any deletions currently enqueued
+      security: []
+      responses:
+        "200":
+          description: |
+            Flush completed: if execute was true, then enqueued deletions have been completed.  If execute was false,
+            then enqueued deletions have been persisted to deletion lists, and may have been completed.
+          content:
+            application/json:
+              schema:
+                type: object
+
+
   /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id

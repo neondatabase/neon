@@ -97,7 +97,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+    let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,

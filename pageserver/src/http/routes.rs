@@ -23,6 +23,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::{DeletionQueue, DeletionQueueError};
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -58,6 +59,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: DeletionQueue,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
@@ -67,6 +69,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue: DeletionQueue,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
@@ -80,6 +83,7 @@ impl State {
             allowlist_routes,
             remote_storage,
             broker_client,
+            deletion_queue,
             disk_usage_eviction_state,
         })
     }
@@ -508,6 +512,7 @@ async fn tenant_attach_handler(
             tenant_conf,
             state.broker_client.clone(),
             remote_storage.clone(),
+            &state.deletion_queue,
             &ctx,
         )
         .instrument(info_span!("tenant_attach", %tenant_id))
@@ -570,6 +575,7 @@ async fn tenant_load_handler(
         tenant_id,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        &state.deletion_queue,
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))
@@ -902,6 +908,7 @@ async fn tenant_create_handler(
         generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        &state.deletion_queue,
         &ctx,
     )
     .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
@@ -1142,6 +1149,48 @@ async fn always_panic_handler(
     json_response(StatusCode::NO_CONTENT, ())
 }
 
+async fn deletion_queue_flush(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if state.remote_storage.is_none() {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
+    let queue_client = state.deletion_queue.new_client();
+
+    tokio::select! {
+        flush_result = async {
+            if execute {
+                queue_client.flush_execute().await
+            } else {
+                queue_client.flush().await
+            }
+        } => {
+            match flush_result {
+                Ok(())=> {
+                    json_response(StatusCode::OK, ())
+                },
+                Err(e) => {
+                    match e {
+                        DeletionQueueError::ShuttingDown => {
+            Err(ApiError::ShuttingDown)
+                        }
+                    }
+                }
+            }
+        },
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
+}
+
 async fn disk_usage_eviction_run(
     mut r: Request<Body>,
     _cancel: CancellationToken,
@@ -1351,6 +1400,7 @@ pub fn make_router(
     auth: Option<Arc<JwtAuth>>,
     broker_client: BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: DeletionQueue,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
@@ -1380,6 +1430,7 @@ pub fn make_router(
                 conf,
                 auth,
                 remote_storage,
+                deletion_queue,
                 broker_client,
                 disk_usage_eviction_state,
             )
@@ -1463,6 +1514,9 @@ pub fn make_router(
         )
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
+        })
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

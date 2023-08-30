@@ -2,12 +2,14 @@
 
 use std::env::{var, VarError};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::deletion_queue::{DeletionQueue, DeletionQueueError};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -349,6 +351,35 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // Set up deletion queue
+    let deletion_queue_cancel = tokio_util::sync::CancellationToken::new();
+    let (deletion_queue, deletion_frontend, deletion_backend, deletion_executor) =
+        DeletionQueue::new(remote_storage.clone(), conf, deletion_queue_cancel.clone());
+    if let Some(mut deletion_frontend) = deletion_frontend {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_frontend
+                .background()
+                .instrument(info_span!(parent:None, "deletion frontend"))
+                .await
+        });
+    }
+    if let Some(mut deletion_backend) = deletion_backend {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_backend
+                .background()
+                .instrument(info_span!(parent: None, "deletion backend"))
+                .await
+        });
+    }
+    if let Some(mut deletion_executor) = deletion_executor {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_executor
+                .background()
+                .instrument(info_span!(parent: None, "deletion executor"))
+                .await
+        });
+    }
+
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
     startup_checkpoint("initial", "Starting loading tenants");
@@ -386,6 +417,7 @@ fn start_pageserver(
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
+            deletion_queue_client: deletion_queue.new_client(),
         },
         order,
     ))?;
@@ -482,6 +514,7 @@ fn start_pageserver(
             http_auth,
             broker_client.clone(),
             remote_storage,
+            deletion_queue.clone(),
             disk_usage_eviction_state,
         )?
         .build()
@@ -604,6 +637,36 @@ fn start_pageserver(
             // The plan is to change that over time.
             shutdown_pageserver.take();
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+
+            // Best effort to persist any outstanding deletions, to avoid leaking objects
+            let dq = deletion_queue.clone();
+            BACKGROUND_RUNTIME.block_on(async move {
+                match tokio::time::timeout(Duration::from_secs(5), dq.new_client().flush()).await {
+                    Ok(flush_r) => {
+                        match flush_r {
+                            Ok(()) => {
+                                info!("Deletion queue flushed successfully on shutdown")
+                            }
+                            Err(e) => {
+                                match e {
+                                    DeletionQueueError::ShuttingDown => {
+                                        // This is not harmful for correctness, but is unexpected: the deletion
+                                        // queue's workers should stay alive as long as there are any client handles instantiated.
+                                        warn!("Deletion queue stopped prematurely");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Timed out flushing deletion queue on shutdown ({e})")
+                    }
+                }
+            });
+
+            // Clean shutdown of deletion queue workers
+            deletion_queue_cancel.cancel();
+
             unreachable!()
         }
     })

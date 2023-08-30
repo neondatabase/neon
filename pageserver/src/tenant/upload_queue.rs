@@ -1,7 +1,4 @@
-use crate::metrics::RemoteOpFileKind;
-
 use super::storage_layer::LayerFileName;
-use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -63,7 +60,6 @@ pub(crate) struct UploadQueueInitialized {
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
     pub(crate) num_inprogress_metadata_uploads: usize,
-    pub(crate) num_inprogress_deletions: usize,
 
     /// Tasks that are currently in-progress. In-progress means that a tokio Task
     /// has been launched for it. An in-progress task can be busy uploading, but it can
@@ -121,7 +117,6 @@ impl UploadQueue {
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
         };
@@ -163,7 +158,6 @@ impl UploadQueue {
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
             num_inprogress_metadata_uploads: 0,
-            num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
         };
@@ -202,23 +196,12 @@ pub(crate) struct UploadTask {
 }
 
 #[derive(Debug)]
-pub(crate) struct Delete {
-    pub(crate) file_kind: RemoteOpFileKind,
-    pub(crate) layer_file_name: LayerFileName,
-    pub(crate) scheduled_from_timeline_delete: bool,
-    pub(crate) generation: Generation,
-}
-
-#[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(LayerFileName, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
-
-    /// Delete a layer file
-    Delete(Delete),
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
@@ -238,13 +221,6 @@ impl std::fmt::Display for UploadOp {
             UploadOp::UploadMetadata(_, lsn) => {
                 write!(f, "UploadMetadata(lsn: {})", lsn)
             }
-            UploadOp::Delete(delete) => write!(
-                f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {})",
-                delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete,
-                delete.generation
-            ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

@@ -21,6 +21,7 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueue;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -319,6 +320,7 @@ pub(crate) fn schedule_local_tenant_processing(
                 resources.broker_client,
                 tenants,
                 remote_storage,
+                resources.deletion_queue_client,
                 ctx,
             ) {
                 Ok(tenant) => tenant,
@@ -466,6 +468,7 @@ pub async fn create_tenant(
     generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
@@ -479,6 +482,7 @@ pub async fn create_tenant(
         let tenant_resources = TenantSharedResources {
             broker_client,
             remote_storage,
+            deletion_queue_client: deletion_queue.new_client(),
         };
         let created_tenant =
             schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
@@ -631,6 +635,7 @@ pub async fn load_tenant(
     tenant_id: TenantId,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
@@ -644,6 +649,7 @@ pub async fn load_tenant(
         let resources = TenantSharedResources {
             broker_client,
             remote_storage,
+            deletion_queue_client: deletion_queue.new_client(),
         };
         // TODO: remove the `/load` API once generation support is complete:
         // it becomes equivalent to attaching.
@@ -715,6 +721,7 @@ pub async fn attach_tenant(
     tenant_conf: TenantConfOpt,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
+    deletion_queue: &DeletionQueue,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || {
@@ -732,6 +739,7 @@ pub async fn attach_tenant(
         let resources = TenantSharedResources {
             broker_client,
             remote_storage: Some(remote_storage),
+            deletion_queue_client: deletion_queue.new_client(),
         };
         let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.

@@ -488,7 +488,14 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
-    wait_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id, iterations=4)
+    # Timeline deletion takes some finite time after startup
+    wait_timeline_detail_404(
+        ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=leaf_timeline_id,
+        iterations=20,
+        interval=0.5,
+    )
 
     assert (
         not leaf_timeline_path.exists()
@@ -534,7 +541,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+        lambda: assert_prefix_empty(neon_env_builder, prefix="/tenants"),
     )
 
 
@@ -688,7 +695,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=4)
 
 
 @pytest.mark.parametrize(
@@ -772,7 +779,11 @@ def test_timeline_delete_works_for_remote_smoke(
 
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
-    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder))
+    wait_until(
+        2,
+        0.5,
+        lambda: assert_prefix_empty(neon_env_builder, "/tenants"),
+    )
 
 
 def test_delete_orphaned_objects(
@@ -826,6 +837,8 @@ def test_delete_orphaned_objects(
 
     reason = timeline_info["state"]["Broken"]["reason"]
     assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    ps_http.deletion_queue_flush(execute=True)
 
     for orphan in orphans:
         assert not orphan.exists()

@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
@@ -142,6 +143,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
+    pub deletion_queue_client: Option<DeletionQueueClient>,
 }
 
 pub struct Timeline {
@@ -198,6 +200,9 @@ pub struct Timeline {
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
+
+    /// Deletion queue: a global queue, separate to the remote storage queue's
+    deletion_queue_client: Option<Arc<DeletionQueueClient>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -469,7 +474,7 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn) {
+        let cached_page_img = match self.lookup_cached_page(&key, lsn).await {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
@@ -498,6 +503,7 @@ impl Timeline {
 
         RECONSTRUCT_TIME
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
+            .await
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1265,6 +1271,18 @@ impl Timeline {
 
         Ok(())
     }
+
+    async fn delete_all_remote(&self) -> anyhow::Result<()> {
+        if let Some(remote_client) = &self.remote_client {
+            if let Some(deletion_queue_client) = &self.deletion_queue_client {
+                remote_client.delete_all(deletion_queue_client).await
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1419,6 +1437,7 @@ impl Timeline {
                 walreceiver: Mutex::new(None),
 
                 remote_client: resources.remote_client.map(Arc::new),
+                deletion_queue_client: resources.deletion_queue_client.map(Arc::new),
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {
@@ -1762,11 +1781,15 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
+            // Deletion queue client is always Some if remote_client is Some
+            let deletion_queue_client = self.deletion_queue_client.as_ref().unwrap();
+
             let (needs_upload, needs_cleanup) = to_sync;
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
+            rtc.schedule_layer_file_deletion(&needs_cleanup, deletion_queue_client)
+                .await?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
@@ -2277,7 +2300,15 @@ impl Timeline {
                         )));
                     }
                 }
-                ancestor.wait_lsn(timeline.ancestor_lsn, ctx).await?;
+                ancestor
+                    .wait_lsn(timeline.ancestor_lsn, ctx)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "wait for lsn {} on ancestor timeline_id={}",
+                            timeline.ancestor_lsn, ancestor.timeline_id
+                        )
+                    })?;
 
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
@@ -2456,13 +2487,14 @@ impl Timeline {
         }
     }
 
-    fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    async fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) =
-            cache.lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)?;
+        let (lsn, read_guard) = cache
+            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)
+            .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
     }
@@ -3798,7 +3830,13 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+            let deletion_queue = self
+                .deletion_queue_client
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Remote storage enabled without deletion queue"))?;
+            remote_client
+                .schedule_layer_file_deletion(&layer_names_to_delete, deletion_queue)
+                .await?;
         }
 
         Ok(())
@@ -4132,7 +4170,15 @@ impl Timeline {
             }
 
             if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+                // Remote metadata upload was scheduled in `update_metadata_file`: wait
+                // for completion before scheduling any deletions.
+                remote_client.wait_completion().await?;
+                let deletion_queue = self.deletion_queue_client.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Remote storage enabled without deletion queue")
+                })?;
+                remote_client
+                    .schedule_layer_file_deletion(&layer_names_to_delete, deletion_queue)
+                    .await?;
             }
 
             apply.flush();
@@ -4150,7 +4196,7 @@ impl Timeline {
     ///
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
     ///
-    fn reconstruct_value(
+    async fn reconstruct_value(
         &self,
         key: Key,
         request_lsn: Lsn,
@@ -4219,6 +4265,7 @@ impl Timeline {
                             last_rec_lsn,
                             &img,
                         )
+                        .await
                         .context("Materialized page memoization failed")
                     {
                         return Err(PageReconstructError::from(e));
@@ -4721,6 +4768,7 @@ mod tests {
 
     use utils::{id::TimelineId, lsn::Lsn};
 
+    use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::tenant::{harness::TenantHarness, storage_layer::PersistentLayer};
 
     use super::{EvictionError, Timeline};
@@ -4743,9 +4791,17 @@ mod tests {
             };
             GenericRemoteStorage::from_config(&config).unwrap()
         };
+        let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()), harness.conf);
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness
+            .try_load(
+                &ctx,
+                Some(remote_storage),
+                Some(deletion_queue.new_client()),
+            )
+            .await
+            .unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
@@ -4808,9 +4864,17 @@ mod tests {
             };
             GenericRemoteStorage::from_config(&config).unwrap()
         };
+        let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()), harness.conf);
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness
+            .try_load(
+                &ctx,
+                Some(remote_storage),
+                Some(deletion_queue.new_client()),
+            )
+            .await
+            .unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await

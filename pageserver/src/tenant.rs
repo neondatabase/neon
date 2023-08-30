@@ -59,6 +59,7 @@ use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -157,6 +158,7 @@ pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: Option<GenericRemoteStorage>,
+    pub deletion_queue_client: DeletionQueueClient,
 }
 
 ///
@@ -195,6 +197,9 @@ pub struct Tenant {
 
     // provides access to timeline data sitting in the remote storage
     remote_storage: Option<GenericRemoteStorage>,
+
+    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    deletion_queue_client: Option<DeletionQueueClient>,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -531,6 +536,7 @@ impl Tenant {
         broker_client: storage_broker::BrokerClientChannel,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         remote_storage: GenericRemoteStorage,
+        deletion_queue_client: DeletionQueueClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
@@ -546,6 +552,7 @@ impl Tenant {
             tenant_id,
             generation,
             Some(remote_storage.clone()),
+            Some(deletion_queue_client),
         ));
 
         // Do all the hard work in the background
@@ -731,6 +738,7 @@ impl Tenant {
                 remote_metadata,
                 TimelineResources {
                     remote_client: Some(remote_client),
+                    deletion_queue_client: self.deletion_queue_client.clone(),
                 },
                 ctx,
             )
@@ -755,6 +763,7 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 Some(remote_timeline_client),
+                self.deletion_queue_client.clone(),
                 None,
             )
             .await
@@ -857,6 +866,7 @@ impl Tenant {
             tenant_id,
             Generation::broken(),
             None,
+            None,
         ))
     }
 
@@ -891,6 +901,7 @@ impl Tenant {
 
         let broker_client = resources.broker_client;
         let remote_storage = resources.remote_storage;
+        let deletion_queue_client = resources.deletion_queue_client;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Tenant::new(
@@ -901,6 +912,7 @@ impl Tenant {
             tenant_id,
             generation,
             remote_storage.clone(),
+            Some(deletion_queue_client),
         );
         let tenant = Arc::new(tenant);
 
@@ -1308,6 +1320,7 @@ impl Tenant {
                                 timeline_id,
                                 &local_metadata,
                                 Some(remote_client),
+                                self.deletion_queue_client.clone(),
                                 init_order,
                             )
                             .await
@@ -1356,6 +1369,7 @@ impl Tenant {
                         Arc::clone(self),
                         timeline_id,
                         &local_metadata,
+                        None,
                         None,
                         init_order,
                     )
@@ -2301,7 +2315,16 @@ impl Tenant {
         tenant_id: TenantId,
         generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue_client: Option<DeletionQueueClient>,
     ) -> Tenant {
+        #[cfg(not(test))]
+        match state {
+            TenantState::Broken { .. } => {}
+            _ => {
+                // Non-broken tenants must be constructed with a deletion queue
+                assert!(deletion_queue_client.is_some());
+            }
+        }
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
@@ -2368,6 +2391,7 @@ impl Tenant {
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
+            deletion_queue_client,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
@@ -2948,7 +2972,10 @@ impl Tenant {
             None
         };
 
-        TimelineResources { remote_client }
+        TimelineResources {
+            remote_client,
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 
     /// Creates intermediate timeline structure and its files.
@@ -3514,7 +3541,7 @@ pub mod harness {
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
-                self.try_load(&ctx, None)
+                self.try_load(&ctx, None, None)
                     .await
                     .expect("failed to load test tenant"),
                 ctx,
@@ -3525,6 +3552,7 @@ pub mod harness {
             &self,
             ctx: &RequestContext,
             remote_storage: Option<remote_storage::GenericRemoteStorage>,
+            deletion_queue_client: Option<DeletionQueueClient>,
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
@@ -3536,6 +3564,7 @@ pub mod harness {
                 self.tenant_id,
                 self.generation,
                 remote_storage,
+                deletion_queue_client,
             ));
             tenant
                 .load(None, ctx)
@@ -4100,7 +4129,7 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness
-            .try_load(&ctx, None)
+            .try_load(&ctx, None, None)
             .await
             .err()
             .expect("should fail");

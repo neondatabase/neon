@@ -13,13 +13,14 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, StripPrefixError},
     pin::Pin,
     sync::Arc,
 };
 
 use anyhow::{bail, Context};
 
+use serde::{Deserialize, Serialize};
 use tokio::io;
 use toml_edit::Item;
 use tracing::info;
@@ -44,11 +45,33 @@ pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
+// From the S3 spec
+pub const MAX_KEYS_PER_DELETE: usize = 1000;
+
 /// Path on the remote storage, relative to some inner prefix.
 /// The prefix is an implementation detail, that allows representing local paths
 /// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemotePath(PathBuf);
+
+impl Serialize for RemotePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for RemotePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        Ok(Self(PathBuf::from(&str)))
+    }
+}
 
 impl std::fmt::Display for RemotePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,6 +115,10 @@ impl RemotePath {
     /// Unwrap the PathBuf that RemotePath wraps
     pub fn take(self) -> PathBuf {
         self.0
+    }
+
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, StripPrefixError> {
+        self.0.strip_prefix(&p.0)
     }
 }
 
@@ -171,6 +198,8 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// The client was shut down
+    Shutdown,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -182,6 +211,7 @@ impl std::fmt::Display for DownloadError {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Shutdown => write!(f, "Client shutting down"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
@@ -244,6 +274,18 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.download(from).await,
             Self::Unreliable(s) => s.download(from).await,
         }
+    }
+
+    /// For small, simple downloads where caller doesn't want to handle the streaming: return the full body
+    pub async fn download_all(&self, from: &RemotePath) -> Result<Vec<u8>, DownloadError> {
+        let mut download = self.download(from).await?;
+
+        let mut bytes = Vec::new();
+        tokio::io::copy(&mut download.download_stream, &mut bytes)
+            .await
+            .with_context(|| format!("Failed to download body from {from}"))
+            .map_err(DownloadError::Other)?;
+        Ok(bytes)
     }
 
     pub async fn download_byte_range(

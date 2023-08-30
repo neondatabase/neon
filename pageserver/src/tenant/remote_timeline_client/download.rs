@@ -229,19 +229,7 @@ async fn do_download_index_part(
     let remote_path = remote_index_path(tenant_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry(
-        || async {
-            let mut index_part_download = storage.download(&remote_path).await?;
-
-            let mut index_part_bytes = Vec::new();
-            tokio::io::copy(
-                &mut index_part_download.download_stream,
-                &mut index_part_bytes,
-            )
-            .await
-            .with_context(|| format!("Failed to download an index part into file {local_path:?}"))
-            .map_err(DownloadError::Other)?;
-            Ok(index_part_bytes)
-        },
+        || storage.download_all(&remote_path),
         &format!("download {remote_path:?}"),
     )
     .await?;

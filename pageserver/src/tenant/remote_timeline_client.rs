@@ -56,9 +56,11 @@
 //! # Consistency
 //!
 //! To have a consistent remote structure, it's important that uploads and
-//! deletions are performed in the right order. For example, the index file
-//! contains a list of layer files, so it must not be uploaded until all the
-//! layer files that are in its list have been successfully uploaded.
+//! deletions are performed in the right order. For example:
+//! - the index file contains a list of layer files, so it must not be uploaded
+//!    until all the layer files that are in its list have been successfully uploaded.
+//! - objects must be removed from the index before being deleted, and that updated
+//!   index must be written to remote storage before deleting the objects from remote storage.
 //!
 //! The contract between client and its user is that the user is responsible of
 //! scheduling operations in an order that keeps the remote consistent as
@@ -70,10 +72,12 @@
 //! correct order, and the client will parallelize the operations in a way that
 //! is safe.
 //!
-//! The caller should be careful with deletion, though. They should not delete
-//! local files that have been scheduled for upload but not yet finished uploading.
-//! Otherwise the upload will fail. To wait for an upload to finish, use
-//! the 'wait_completion' function (more on that later.)
+//! The caller should be careful with deletion, though:
+//! - they should not delete local files that have been scheduled for upload but
+//!   not yet finished uploading.  Otherwise the upload will fail. To wait for an
+//!   upload to finish, use the 'wait_completion' function (more on that later.)
+//! - they should not to remote deletions via DeletionQueue without waiting for
+//!   the latest metadata to upload via RemoteTimelineClient.
 //!
 //! All of this relies on the following invariants:
 //!
@@ -200,12 +204,11 @@
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
 //! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
-mod delete;
 mod download;
 pub mod index;
 mod upload;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
@@ -226,6 +229,7 @@ use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
+use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
     RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
@@ -234,8 +238,6 @@ use crate::metrics::{
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::upload_queue::Delete;
-use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::{
     config::PageServerConf,
     task_mgr,
@@ -245,6 +247,7 @@ use crate::{
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
+    tenant::TIMELINES_SEGMENT_NAME,
 };
 
 use utils::id::{TenantId, TimelineId};
@@ -637,25 +640,20 @@ impl RemoteTimelineClient {
     /// deletion won't actually be performed, until any previously scheduled
     /// upload operations, and the index file upload, have completed
     /// successfully.
-    pub fn schedule_layer_file_deletion(
+    pub async fn schedule_layer_file_deletion(
         self: &Arc<Self>,
         names: &[LayerFileName],
+        deletion_queue_client: &DeletionQueueClient,
     ) -> anyhow::Result<()> {
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
+        // Synchronous update of upload queues under mutex
+        let _with_generations = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
 
-        // Deleting layers doesn't affect the values stored in TimelineMetadata,
-        // so we don't need update it. Just serialize it.
-        let metadata = upload_queue.latest_metadata.clone();
+            // Deleting layers doesn't affect the values stored in TimelineMetadata,
+            // so we don't need update it. Just serialize it.
+            let metadata = upload_queue.latest_metadata.clone();
 
-        // Update the remote index file, removing the to-be-deleted files from the index,
-        // before deleting the actual files.
-        //
-        // Once we start removing files from upload_queue.latest_files, there's
-        // no going back! Otherwise, some of the files would already be removed
-        // from latest_files, but not yet scheduled for deletion. Use a closure
-        // to syntactically forbid ? or bail! calls here.
-        let no_bail_here = || {
             // Decorate our list of names with each name's generation, dropping
             // makes that are unexpectedly missing from our metadata.
             let with_generations: Vec<_> = names
@@ -681,23 +679,22 @@ impl RemoteTimelineClient {
                 self.schedule_index_upload(upload_queue, metadata);
             }
 
-            // schedule the actual deletions
-            for (name, generation) in with_generations {
-                let op = UploadOp::Delete(Delete {
-                    file_kind: RemoteOpFileKind::Layer,
-                    layer_file_name: name.clone(),
-                    scheduled_from_timeline_delete: false,
-                    generation,
-                });
-                self.calls_unfinished_metric_begin(&op);
-                upload_queue.queued_operations.push_back(op);
-                info!("scheduled layer file deletion {name}");
-            }
-
-            // Launch the tasks immediately, if possible
-            self.launch_queued_tasks(upload_queue);
+            with_generations
         };
-        no_bail_here();
+
+        // Barrier: we must ensure all prior uploads and index writes have landed in S3
+        // before emitting deletions.
+        if let Err(e) = self.wait_completion().await {
+            // This can only fail if upload queue is shut down: if this happens, we do
+            // not emit any deletions.  In this condition (remote client is shut down
+            // during compaction or GC) we may leak some objects.
+            bail!("Cannot complete layer file deletions during shutdown ({e})");
+        }
+
+        // Enqueue deletions
+        deletion_queue_client
+            .push_layers(self.tenant_id, self.timeline_id, names.to_vec())
+            .await?;
         Ok(())
     }
 
@@ -823,12 +820,13 @@ impl RemoteTimelineClient {
     /// Prerequisites: UploadQueue should be in stopped state and deleted_at should be successfuly set.
     /// The function deletes layer files one by one, then lists the prefix to see if we leaked something
     /// deletes leaked files if any and proceeds with deletion of index file at the end.
-    pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn delete_all(
+        self: &Arc<Self>,
+        deletion_queue: &DeletionQueueClient,
+    ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let (mut receiver, deletions_queued) = {
-            let mut deletions_queued = 0;
-
+        let layers: Vec<LayerFileName> = {
             let mut locked = self.upload_queue.lock().unwrap();
             let stopped = locked.stopped_mut()?;
 
@@ -840,41 +838,33 @@ impl RemoteTimelineClient {
 
             stopped
                 .upload_queue_for_deletion
-                .queued_operations
-                .reserve(stopped.upload_queue_for_deletion.latest_files.len());
-
-            // schedule the actual deletions
-            for (name, meta) in &stopped.upload_queue_for_deletion.latest_files {
-                let op = UploadOp::Delete(Delete {
-                    file_kind: RemoteOpFileKind::Layer,
-                    layer_file_name: name.clone(),
-                    scheduled_from_timeline_delete: true,
-                    generation: meta.generation,
-                });
-
-                self.calls_unfinished_metric_begin(&op);
-                stopped
-                    .upload_queue_for_deletion
-                    .queued_operations
-                    .push_back(op);
-
-                info!("scheduled layer file deletion {name}");
-                deletions_queued += 1;
-            }
-
-            self.launch_queued_tasks(&mut stopped.upload_queue_for_deletion);
-
-            (
-                self.schedule_barrier(&mut stopped.upload_queue_for_deletion),
-                deletions_queued,
-            )
+                .latest_files
+                .drain()
+                .map(|kv| kv.0)
+                .collect()
         };
 
-        receiver.changed().await.context("upload queue shut down")?;
+        let layer_deletion_count = layers.len();
+
+        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+        let layer_paths = layers
+            .into_iter()
+            .map(|l| {
+                let local_path = timeline_path.join(l.file_name());
+                self.conf
+                    .remote_path(&local_path)
+                    .expect("Timeline path should always convert to remote")
+            })
+            .collect();
+        deletion_queue.push_immediate(layer_paths).await?;
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
         let timeline_storage_path = remote_timeline_path(&self.tenant_id, &self.timeline_id);
+
+        // Execute all pending deletions, so that when we prroceed to do a list_prefixes below, we aren't
+        // taking the burden of listing all the layers that we already know we should delete.
+        deletion_queue.flush_immediate().await?;
 
         let remaining = backoff::retry(
             || async {
@@ -903,17 +893,9 @@ impl RemoteTimelineClient {
             })
             .collect();
 
+        let not_referenced_count = remaining.len();
         if !remaining.is_empty() {
-            backoff::retry(
-                || async { self.storage_impl.delete_objects(&remaining).await },
-                |_e| false,
-                FAILED_UPLOAD_WARN_THRESHOLD,
-                FAILED_REMOTE_OP_RETRIES,
-                "delete_objects",
-                backoff::Cancel::new(shutdown_token(), || anyhow::anyhow!("Cancelled!")),
-            )
-            .await
-            .context("delete_objects")?;
+            deletion_queue.push_immediate(remaining).await?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
@@ -924,18 +906,14 @@ impl RemoteTimelineClient {
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
 
-        debug!("deleting index part");
+        debug!("enqueuing index part deletion");
+        deletion_queue
+            .push_immediate([index_file_path].to_vec())
+            .await?;
 
-        backoff::retry(
-            || async { self.storage_impl.delete(&index_file_path).await },
-            |_e| false,
-            FAILED_UPLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-            "delete_index",
-            backoff::Cancel::new(shutdown_token(), || anyhow::anyhow!("Cancelled")),
-        )
-        .await
-        .context("delete_index")?;
+        // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
+        // for a flush to a persistent deletion list so that we may be sure deletion will occur.
+        deletion_queue.flush_immediate().await?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
             Err(anyhow::anyhow!(
@@ -943,7 +921,7 @@ impl RemoteTimelineClient {
             ))?
         });
 
-        info!(prefix=%timeline_storage_path, referenced=deletions_queued, not_referenced=%remaining.len(), "done deleting in timeline prefix, including index_part.json");
+        info!(prefix=%timeline_storage_path, referenced=layer_deletion_count, not_referenced=%not_referenced_count, "done deleting in timeline prefix, including index_part.json");
 
         Ok(())
     }
@@ -965,10 +943,6 @@ impl RemoteTimelineClient {
                     // These can only be performed after all the preceding operations
                     // have finished.
                     upload_queue.inprogress_tasks.is_empty()
-                }
-                UploadOp::Delete(_) => {
-                    // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
-                    upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
 
                 UploadOp::Barrier(_) => upload_queue.inprogress_tasks.is_empty(),
@@ -996,9 +970,6 @@ impl RemoteTimelineClient {
                 }
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
-                }
-                UploadOp::Delete(_) => {
-                    upload_queue.num_inprogress_deletions += 1;
                 }
                 UploadOp::Barrier(sender) => {
                     sender.send_replace(());
@@ -1133,21 +1104,6 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(delete) => {
-                    let path = &self
-                        .conf
-                        .timeline_path(&self.tenant_id, &self.timeline_id)
-                        .join(delete.layer_file_name.file_name());
-                    delete::delete_layer(self.conf, &self.storage_impl, path, delete.generation)
-                        .measure_remote_op(
-                            self.tenant_id,
-                            self.timeline_id,
-                            delete.file_kind,
-                            RemoteOpKind::Delete,
-                            Arc::clone(&self.metrics),
-                        )
-                        .await
-                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
@@ -1207,15 +1163,7 @@ impl RemoteTimelineClient {
             let mut upload_queue_guard = self.upload_queue.lock().unwrap();
             let upload_queue = match upload_queue_guard.deref_mut() {
                 UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
-                UploadQueue::Stopped(stopped) => {
-                    // Special care is needed for deletions, if it was an earlier deletion (not scheduled from deletion)
-                    // then stop() took care of it so we just return.
-                    // For deletions that come from delete_all we still want to maintain metrics, launch following tasks, etc.
-                    match &task.op {
-                        UploadOp::Delete(delete) if delete.scheduled_from_timeline_delete => Some(&mut stopped.upload_queue_for_deletion),
-                        _ => None
-                    }
-                },
+                UploadQueue::Stopped(_) => { None }
                 UploadQueue::Initialized(qi) => { Some(qi) }
             };
 
@@ -1236,9 +1184,6 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
-                }
-                UploadOp::Delete(_) => {
-                    upload_queue.num_inprogress_deletions -= 1;
                 }
                 UploadOp::Barrier(_) => unreachable!(),
             };
@@ -1269,13 +1214,6 @@ impl RemoteTimelineClient {
                 RemoteOpKind::Upload,
                 DontTrackSize {
                     reason: "metadata uploads are tiny",
-                },
-            ),
-            UploadOp::Delete(delete) => (
-                delete.file_kind,
-                RemoteOpKind::Delete,
-                DontTrackSize {
-                    reason: "should we track deletes? positive or negative sign?",
                 },
             ),
             UploadOp::Barrier(_) => {
@@ -1337,7 +1275,6 @@ impl RemoteTimelineClient {
                         last_uploaded_consistent_lsn: initialized.last_uploaded_consistent_lsn,
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
-                        num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
                         queued_operations: VecDeque::default(),
                     };
@@ -1358,9 +1295,7 @@ impl RemoteTimelineClient {
 
                 // consistency check
                 assert_eq!(
-                    qi.num_inprogress_layer_uploads
-                        + qi.num_inprogress_metadata_uploads
-                        + qi.num_inprogress_deletions,
+                    qi.num_inprogress_layer_uploads + qi.num_inprogress_metadata_uploads,
                     qi.inprogress_tasks.len()
                 );
 
@@ -1459,6 +1394,7 @@ mod tests {
     use super::*;
     use crate::{
         context::RequestContext,
+        deletion_queue::mock::MockDeletionQueue,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
             Generation, Tenant, Timeline,
@@ -1528,6 +1464,7 @@ mod tests {
         tenant_ctx: RequestContext,
         remote_fs_dir: PathBuf,
         client: Arc<RemoteTimelineClient>,
+        deletion_queue: MockDeletionQueue,
     }
 
     impl TestSetup {
@@ -1568,13 +1505,15 @@ mod tests {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 generation,
-                storage_impl: storage,
+                storage_impl: storage.clone(),
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
                 metrics: Arc::new(RemoteTimelineClientMetrics::new(
                     &harness.tenant_id,
                     &TIMELINE_ID,
                 )),
             });
+
+            let deletion_queue = MockDeletionQueue::new(Some(storage), harness.conf);
 
             Ok(Self {
                 harness,
@@ -1583,6 +1522,7 @@ mod tests {
                 tenant_ctx: ctx,
                 remote_fs_dir,
                 client,
+                deletion_queue,
             })
         }
     }
@@ -1611,6 +1551,7 @@ mod tests {
             tenant_ctx: _tenant_ctx,
             remote_fs_dir,
             client,
+            deletion_queue,
         } = TestSetup::new("upload_scheduling").await.unwrap();
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
@@ -1720,20 +1661,14 @@ mod tests {
                 &LayerFileMetadata::new(content_3.len() as u64, generation),
             )
             .unwrap();
-        client
-            .schedule_layer_file_deletion(&[layer_file_name_1.clone()])
-            .unwrap();
+
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
-
-            // Deletion schedules upload of the index file, and the file deletion itself
-            assert!(upload_queue.queued_operations.len() == 2);
-            assert!(upload_queue.inprogress_tasks.len() == 1);
-            assert!(upload_queue.num_inprogress_layer_uploads == 1);
-            assert!(upload_queue.num_inprogress_deletions == 0);
-            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
+            assert_eq!(upload_queue.queued_operations.len(), 0);
+            assert_eq!(upload_queue.num_inprogress_layer_uploads, 1);
         }
+
         assert_remote_files(
             &[
                 &layer_file_name_1.file_name(),
@@ -1744,8 +1679,46 @@ mod tests {
             generation,
         );
 
-        // Finish them
+        client
+            .schedule_layer_file_deletion(
+                &[layer_file_name_1.clone()],
+                &deletion_queue.new_client(),
+            )
+            .await
+            .unwrap();
+
+        {
+            let mut guard = client.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut().unwrap();
+
+            // Deletion schedules upload of the index file via RemoteTimelineClient, and
+            // deletion of layer files via DeletionQueue.  The uploads have all been flushed
+            // because schedule_layer_file_deletion does a wait_completion before pushing
+            // to the deletion_queue
+            assert_eq!(upload_queue.queued_operations.len(), 0);
+            assert_eq!(upload_queue.inprogress_tasks.len(), 0);
+            assert_eq!(upload_queue.num_inprogress_layer_uploads, 0);
+            assert_eq!(
+                upload_queue.latest_files_changes_since_metadata_upload_scheduled,
+                0
+            );
+        }
+        assert_remote_files(
+            &[
+                &layer_file_name_1.file_name(),
+                &layer_file_name_2.file_name(),
+                &layer_file_name_3.file_name(),
+                "index_part.json",
+            ],
+            &remote_timeline_dir,
+        );
+
+        // Finish uploads and deletions
         client.wait_completion().await.unwrap();
+        deletion_queue.pump().await;
+
+        // 1 layer was deleted
+        assert_eq!(deletion_queue.get_executed(), 1);
 
         assert_remote_files(
             &[

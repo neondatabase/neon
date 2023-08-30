@@ -12,7 +12,10 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    NeonEnv,
     NeonEnvBuilder,
+    PgBin,
+    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -253,35 +256,20 @@ def test_remote_storage_upload_queue_retries(
 
     client = env.pageserver.http_client()
 
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
-
-    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
-
-    def configure_storage_sync_failpoints(action):
+    def configure_storage_write_failpoints(action):
         client.configure_failpoints(
             [
                 ("before-upload-layer", action),
                 ("before-upload-index", action),
-                ("before-delete-layer", action),
             ]
         )
 
-    def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
-        # create initial set of layers & upload them with failpoints configured
-        endpoint.safe_psql_many(
+    def configure_storage_delete_failpoints(action):
+        client.configure_failpoints(
             [
-                f"""
-               INSERT INTO foo (id, val)
-               SELECT g, '{data}'
-               FROM generate_series(1, 20000) g
-               ON CONFLICT (id) DO UPDATE
-               SET val = EXCLUDED.val
-               """,
-                # to ensure that GC can actually remove some layers
-                "VACUUM foo",
+                ("deletion-queue-before-execute", action),
             ]
         )
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
         val = client.get_remote_timeline_client_metric(
@@ -294,23 +282,52 @@ def test_remote_storage_upload_queue_retries(
         assert val is not None, "expecting metric to be present"
         return int(val)
 
-    # create some layers & wait for uploads to finish
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    overwrite_data_and_wait_for_it_to_arrive_at_pageserver("b")
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    client.timeline_compact(tenant_id, timeline_id)
-    gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
-    print_gc_result(gc_result)
-    assert gc_result["layers_removed"] > 0
+    def get_deletions_executed() -> int:
+        executed = client.get_metric_value("pageserver_deletion_queue_executed_total")
+        if executed is None:
+            return 0
+        else:
+            return int(executed)
 
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+    def get_deletion_errors(op_type) -> int:
+        executed = client.get_metric_value(
+            "pageserver_deletion_queue_errors_total", {"op_kind": op_type}
+        )
+        if executed is None:
+            return 0
+        else:
+            return int(executed)
+
+    def assert_queued_count(file_kind: str, op_kind: str, fn):
+        v = get_queued_count(file_kind=file_kind, op_kind=op_kind)
+        log.info(f"queue count: {file_kind} {op_kind} {v}")
+        assert fn(v)
+
+    # Push some uploads into the remote_timeline_client queues, before failpoints
+    # are enabled: these should execute and the queue should revert to zero depth
+    generate_uploads_and_deletions(env, tenant_id=tenant_id, timeline_id=timeline_id)
+
+    wait_until(2, 1, lambda: assert_queued_count("layer", "upload", lambda v: v == 0))
+    wait_until(2, 1, lambda: assert_queued_count("index", "upload", lambda v: v == 0))
+
+    # Wait for some deletions to happen in the above compactions, assert that
+    # our metrics of interest exist
+    wait_until(2, 1, lambda: assert_deletion_queue(client, lambda v: v is not None))
+
+    # Before enabling failpoints, flushing deletions through should work
+    client.deletion_queue_flush(execute=True)
+    executed = client.get_metric_value("pageserver_deletion_queue_executed_total")
+    assert executed is not None
+    assert executed > 0
 
     # let all future operations queue up
-    configure_storage_sync_failpoints("return")
+    configure_storage_write_failpoints("return")
+    configure_storage_delete_failpoints("return")
+
+    # Snapshot of executed deletions: should not increment while failpoint is enabled
+    deletions_executed_pre_failpoint = client.get_metric_value(
+        "pageserver_deletion_queue_executed_total"
+    )
 
     # Create more churn to generate all upload ops.
     # The checkpoint / compact / gc ops will block because they call remote_client.wait_completion().
@@ -318,38 +335,77 @@ def test_remote_storage_upload_queue_retries(
     churn_thread_result = [False]
 
     def churn_while_failpoints_active(result):
-        overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
-        overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
-        gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
-        print_gc_result(gc_result)
-        assert gc_result["layers_removed"] > 0
+        generate_uploads_and_deletions(
+            env, init=False, tenant_id=tenant_id, timeline_id=timeline_id, data="d"
+        )
         result[0] = True
 
     churn_while_failpoints_active_thread = threading.Thread(
         target=churn_while_failpoints_active, args=[churn_thread_result]
     )
+    log.info("Entered churn phase")
     churn_while_failpoints_active_thread.start()
 
-    # wait for churn thread's data to get stuck in the upload queue
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="upload") > 0)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="index", op_kind="upload") >= 2)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="delete") > 0)
+    try:
+        # wait for churn thread's data to get stuck in the upload queue
+        wait_until(10, 0.1, lambda: assert_queued_count("layer", "upload", lambda v: v > 0))
+        wait_until(10, 0.1, lambda: assert_queued_count("index", "upload", lambda v: v >= 2))
 
-    # unblock churn operations
-    configure_storage_sync_failpoints("off")
+        # Deletion queue should not grow, because deletions wait for upload of
+        # metadata, and we blocked that upload.
+        wait_until(10, 0.5, lambda: assert_deletion_queue(client, lambda v: v == 0))
 
-    # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+        # No more deletions should have executed
+        assert get_deletions_executed() == deletions_executed_pre_failpoint
 
-    # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
-    # so, give it some time to wrap up.
-    churn_while_failpoints_active_thread.join(30)
+        # unblock write operations
+        log.info("Unblocking remote writes")
+        configure_storage_write_failpoints("off")
+
+        # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
+        wait_until(30, 1, lambda: assert_queued_count("layer", "upload", lambda v: v == 0))
+        wait_until(30, 1, lambda: assert_queued_count("index", "upload", lambda v: v == 0))
+
+        # Deletions should have been enqueued now that index uploads proceeded
+        log.info("Waiting to see deletions enqueued")
+        wait_until(10, 1, lambda: assert_deletion_queue(client, lambda v: v > 0))
+
+        # Run flush in the backgrorund because it will block on the failpoint
+        class background_flush(threading.Thread):
+            def run(self):
+                client.deletion_queue_flush(execute=True)
+
+        flusher = background_flush()
+        flusher.start()
+
+        def assert_failpoint_hit():
+            assert get_deletion_errors("failpoint") > 0
+
+        # Our background flush thread should induce us to hit the failpoint
+        wait_until(20, 0.25, assert_failpoint_hit)
+
+        # Deletions should not have been executed while failpoint is still active.
+        assert get_deletion_queue_depth(client) is not None
+        assert get_deletion_queue_depth(client) > 0
+        assert get_deletions_executed() == deletions_executed_pre_failpoint
+
+        log.info("Unblocking remote deletes")
+        configure_storage_delete_failpoints("off")
+
+        # An API flush should now complete
+        flusher.join()
+
+        # Queue should drain, which should involve executing some deletions
+        wait_until(2, 1, lambda: assert_deletion_queue(client, lambda v: v == 0))
+        assert get_deletions_executed() > deletions_executed_pre_failpoint
+
+    finally:
+        # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
+        # so, give it some time to wrap up.
+        log.info("Joining churn workload")
+        churn_while_failpoints_active_thread.join(30)
+        log.info("Joined churn workload")
+
     assert not churn_while_failpoints_active_thread.is_alive()
     assert churn_thread_result[0]
 
@@ -435,7 +491,6 @@ def test_remote_timeline_client_calls_started_metric(
     calls_started: Dict[Tuple[str, str], List[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
-        ("layer", "delete"): [0],
     }
 
     def fetch_calls_started():
@@ -933,4 +988,154 @@ def assert_nothing_to_upload(
     assert Lsn(detail["last_record_lsn"]) == Lsn(detail["remote_consistent_lsn"])
 
 
+def get_deletion_queue_depth(ps_http) -> int:
+    """
+    Queue depth if at least one deletion has been submitted, else None
+    """
+    submitted = ps_http.get_metric_value("pageserver_deletion_queue_submitted_total")
+
+    if submitted is None:
+        return 0
+
+    executed = ps_http.get_metric_value("pageserver_deletion_queue_executed_total")
+    executed = 0 if executed is None else executed
+
+    depth = submitted - executed
+    assert depth >= 0
+
+    log.info(f"get_deletion_queue_depth: {depth} ({submitted} - {executed})")
+    return int(depth)
+
+
+def assert_deletion_queue(ps_http, size_fn) -> None:
+    v = get_deletion_queue_depth(ps_http)
+    assert v is not None
+    assert size_fn(v) is True
+
+
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
+
+
+def generate_uploads_and_deletions(
+    env: NeonEnv,
+    *,
+    init: bool = True,
+    tenant_id: Optional[TenantId] = None,
+    timeline_id: Optional[TimelineId] = None,
+    data: Optional[str] = None,
+):
+    """
+    Using the environment's default tenant + timeline, generate a load pattern
+    that results in some uploads and some deletions to remote storage.
+    """
+
+    if tenant_id is None:
+        tenant_id = env.initial_tenant
+    assert tenant_id is not None
+
+    if timeline_id is None:
+        timeline_id = env.initial_timeline
+    assert timeline_id is not None
+
+    ps_http = env.pageserver.http_client()
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        if init:
+            endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+
+        def churn(data):
+            endpoint.safe_psql_many(
+                [
+                    f"""
+                INSERT INTO foo (id, val)
+                SELECT g, '{data}'
+                FROM generate_series(1, 20000) g
+                ON CONFLICT (id) DO UPDATE
+                SET val = EXCLUDED.val
+                """,
+                    # to ensure that GC can actually remove some layers
+                    "VACUUM foo",
+                ]
+            )
+            assert tenant_id is not None
+            assert timeline_id is not None
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+            ps_http.timeline_checkpoint(tenant_id, timeline_id)
+
+        # Compaction should generate some GC-elegible layers
+        for i in range(0, 2):
+            churn(f"{i if data is None else data}")
+
+        gc_result = ps_http.timeline_gc(tenant_id, timeline_id, 0)
+        print_gc_result(gc_result)
+        assert gc_result["layers_removed"] > 0
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_deletion_queue_recovery(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+    pg_bin: PgBin,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_deletion_queue_recovery",
+    )
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # small checkpointing and compaction targets to ensure we generate many upload operations
+            "checkpoint_distance": f"{128 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{128 * 1024}",
+            # no PITR horizon, we specify the horizon when we request on-demand GC
+            "pitr_interval": "0s",
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
+        }
+    )
+
+    ps_http = env.pageserver.http_client()
+
+    # Prevent deletion lists from being executed, to build up some backlog of deletions
+    ps_http.configure_failpoints(
+        [
+            ("deletion-queue-before-execute", "return"),
+        ]
+    )
+
+    generate_uploads_and_deletions(env)
+
+    # There should be entries in the deletion queue
+    assert_deletion_queue(ps_http, lambda n: n > 0)
+    ps_http.deletion_queue_flush()
+    before_restart_depth = get_deletion_queue_depth(ps_http)
+
+    log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
+    env.pageserver.stop(immediate=True)
+    env.pageserver.start()
+
+    def assert_deletions_submitted(n: int):
+        assert ps_http.get_metric_value("pageserver_deletion_queue_submitted_total") == n
+
+    # After restart, issue a flush to kick the deletion frorntend to do recovery.
+    # It should recover all the operations we submitted before the restart.
+    ps_http.deletion_queue_flush(execute=False)
+    wait_until(20, 0.25, lambda: assert_deletions_submitted(before_restart_depth))
+
+    # The queue should drain through completely if we flush it
+    ps_http.deletion_queue_flush(execute=True)
+    wait_until(10, 1, lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
+
+    # Restart again
+    env.pageserver.stop(immediate=True)
+    env.pageserver.start()
+
+    # No deletion lists should be recovered: this demonstrates that deletion lists
+    # were cleaned up after being executed.
+    time.sleep(1)
+    assert_deletion_queue(ps_http, lambda n: n == 0)
