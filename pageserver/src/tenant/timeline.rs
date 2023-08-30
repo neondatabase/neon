@@ -2268,7 +2268,10 @@ impl Timeline {
                     .wait_lsn(timeline.ancestor_lsn, ctx)
                     .await
                     .with_context(|| {
-                        format!("failed to wait for ancestor lsn {}", timeline.ancestor_lsn)
+                        format!(
+                            "failed to wait for lsn {} on ancestor timeline_id={}",
+                            timeline.ancestor_lsn, ancestor.timeline_id
+                        )
                     })?;
 
                 timeline_owned = ancestor;
