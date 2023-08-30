@@ -7,7 +7,6 @@ use anyhow::Context;
 use pageserver_api::models::TenantState;
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn, Instrument, Span};
 
 use utils::{
@@ -83,8 +82,6 @@ async fn create_remote_delete_mark(
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        // TODO: thread a cancellation token into this code path
-        backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
     )
     .await
     .context("mark_upload")?;
@@ -174,8 +171,6 @@ async fn remove_tenant_remote_delete_mark(
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            // TODO: thread a cancellation token into this code path
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
         )
         .await
         .context("remove_tenant_remote_delete_mark")?;
@@ -257,8 +252,6 @@ pub(crate) async fn remote_delete_mark_exists(
         SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
         SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
         "fetch_tenant_deletion_mark",
-        // TODO: thread a cancellation token into this code path
-        backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
     )
     .await;
 
