@@ -61,13 +61,14 @@ impl EphemeralFile {
         self.len
     }
 
-    pub(crate) fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
             loop {
                 match cache
                     .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .await
                     .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -135,10 +136,13 @@ impl EphemeralFile {
                                 // Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.
                                 let cache = page_cache::get();
-                                match cache.read_immutable_buf(
-                                    self.ephemeral_file.page_cache_file_id,
-                                    self.blknum,
-                                ) {
+                                match cache
+                                    .read_immutable_buf(
+                                        self.ephemeral_file.page_cache_file_id,
+                                        self.blknum,
+                                    )
+                                    .await
+                                {
                                     Ok(page_cache::ReadBufResult::Found(_guard)) => {
                                         // This function takes &mut self, so, it shouldn't be possible to reach this point.
                                         unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);

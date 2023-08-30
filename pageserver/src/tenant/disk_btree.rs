@@ -262,7 +262,7 @@ where
         let block_cursor = self.reader.block_cursor();
         while let Some((node_blknum, opt_iter)) = stack.pop() {
             // Locate the node.
-            let node_buf = block_cursor.read_blk(self.start_blk + node_blknum)?;
+            let node_buf = block_cursor.read_blk(self.start_blk + node_blknum).await?;
 
             let node = OnDiskNode::deparse(node_buf.as_ref())?;
             let prefix_len = node.prefix_len as usize;
@@ -357,7 +357,7 @@ where
         let block_cursor = self.reader.block_cursor();
 
         while let Some((blknum, path, depth, child_idx, key_off)) = stack.pop() {
-            let blk = block_cursor.read_blk(self.start_blk + blknum)?;
+            let blk = block_cursor.read_blk(self.start_blk + blknum).await?;
             let buf: &[u8] = blk.as_ref();
             let node = OnDiskNode::<L>::deparse(buf)?;
 
@@ -704,7 +704,7 @@ pub(crate) mod tests {
         pub(crate) fn read_blk(&self, blknum: u32) -> io::Result<BlockLease> {
             let mut buf = [0u8; PAGE_SZ];
             buf.copy_from_slice(&self.blocks[blknum as usize]);
-            Ok(std::rc::Rc::new(buf).into())
+            Ok(std::sync::Arc::new(buf).into())
         }
     }
     impl BlockReader for TestDisk {

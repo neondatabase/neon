@@ -233,10 +233,19 @@ if TYPE_CHECKING:
 
 def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
     response = list_prefix(neon_env_builder, prefix)
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    keys = response["KeyCount"]
+    objects = response.get("Contents", [])
+
+    if keys != 0 and len(objects) == 0:
+        # this has been seen in one case with mock_s3:
+        # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-4938/6000769714/index.html#suites/3556ed71f2d69272a7014df6dcb02317/ca01e4f4d8d9a11f
+        # looking at moto impl, it might be there's a race with common prefix (sub directory) not going away with deletes
+        common_prefixes = response.get("CommonPrefixes", [])
+        log.warn(
+            f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}"
+        )
+
+    assert keys == 0, f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):

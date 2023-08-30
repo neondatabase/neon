@@ -110,10 +110,10 @@ impl Runner {
         // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
-            let config: FileCacheConfig = Default::default();
-            if !config.in_memory {
-                panic!("file cache not in-memory implemented")
-            }
+            let config = match args.file_cache_on_disk {
+                true => FileCacheConfig::default_on_disk(),
+                false => FileCacheConfig::default_in_memory(),
+            };
 
             let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
@@ -140,7 +140,10 @@ impl Runner {
             if actual_size != new_size {
                 info!("file cache size actually got set to {actual_size}")
             }
-            file_cache_reserved_bytes = actual_size;
+            // Mark the resources given to the file cache as reserved, but only if it's in memory.
+            if !args.file_cache_on_disk {
+                file_cache_reserved_bytes = actual_size;
+            }
 
             state.filecache = Some(file_cache);
         }
@@ -227,18 +230,17 @@ impl Runner {
         let mut status = vec![];
         let mut file_cache_mem_usage = 0;
         if let Some(file_cache) = &mut self.filecache {
-            if !file_cache.config.in_memory {
-                panic!("file cache not in-memory unimplemented")
-            }
-
             let actual_usage = file_cache
                 .set_file_cache_size(expected_file_cache_mem_usage)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_mem_usage = actual_usage;
+            if file_cache.config.in_memory {
+                file_cache_mem_usage = actual_usage;
+            }
             let message = format!(
-                "set file cache size to {} MiB",
-                bytes_to_mebibytes(actual_usage)
+                "set file cache size to {} MiB (in memory = {})",
+                bytes_to_mebibytes(actual_usage),
+                file_cache.config.in_memory,
             );
             info!("downscale: {message}");
             status.push(message);
@@ -289,10 +291,6 @@ impl Runner {
         // Get the file cache's expected contribution to the memory usage
         let mut file_cache_mem_usage = 0;
         if let Some(file_cache) = &mut self.filecache {
-            if !file_cache.config.in_memory {
-                panic!("file cache not in-memory unimplemented");
-            }
-
             let expected_usage = file_cache.config.calculate_cache_size(usable_system_memory);
             info!(
                 target = bytes_to_mebibytes(expected_usage),
@@ -304,6 +302,9 @@ impl Runner {
                 .set_file_cache_size(expected_usage)
                 .await
                 .context("failed to set file cache size")?;
+            if file_cache.config.in_memory {
+                file_cache_mem_usage = actual_usage;
+            }
 
             if actual_usage != expected_usage {
                 warn!(
@@ -312,7 +313,6 @@ impl Runner {
                     bytes_to_mebibytes(actual_usage)
                 )
             }
-            file_cache_mem_usage = actual_usage;
         }
 
         if let Some(cgroup) = &self.cgroup {
