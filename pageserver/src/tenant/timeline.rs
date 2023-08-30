@@ -3400,6 +3400,12 @@ impl Timeline {
 
         drop_wlock(guard);
 
+        if let Some(rtc) = self.remote_client.as_ref() {
+            for needs_upload in insert_layers {
+                rtc.schedule_layer_file_upload(needs_upload)?;
+            }
+        }
+
         Ok(())
     }
 
