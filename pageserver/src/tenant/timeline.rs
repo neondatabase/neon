@@ -3273,6 +3273,10 @@ impl Timeline {
                 )))
             });
 
+            if new_layers.len() > 0 {
+                fail_point!("after-timeline-compacted-first-L1");
+            }
+
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
             prev_key = Some(key);
         }
@@ -3417,6 +3421,7 @@ impl Timeline {
                     .context("should not have duplicated a layer we had not made resident first")?;
                 duplicated_layers.insert(key);
                 l.keep_resident_while(&old);
+                tracing::warn!(layer = %l, "duplicated L1 layer");
                 duplicates.push((old, l));
             } else if LayerMap::is_l0(l.layer_desc()) {
                 return Err(CompactionError::Other(anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
