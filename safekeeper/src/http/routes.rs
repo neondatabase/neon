@@ -19,6 +19,7 @@ use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 use crate::send_wal::WalSenderState;
+use crate::timeline::PeerInfo;
 use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
@@ -101,6 +102,7 @@ pub struct TimelineStatus {
     pub peer_horizon_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+    pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,
 }
@@ -140,6 +142,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         term_history,
     };
 
+    let conf = get_conf(&request);
     // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
         tenant_id: ttid.tenant_id,
@@ -153,6 +156,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
+        peers: tli.get_peers(conf).await,
         walsenders: tli.get_walsenders().get_all(),
         walreceivers: tli.get_walreceivers().get_all(),
     };
@@ -282,12 +286,14 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
             tenant_id: ttid.tenant_id.as_ref().to_owned(),
             timeline_id: ttid.timeline_id.as_ref().to_owned(),
         }),
+        term: sk_info.term.unwrap_or(0),
         last_log_term: sk_info.last_log_term.unwrap_or(0),
         flush_lsn: sk_info.flush_lsn.0,
         commit_lsn: sk_info.commit_lsn.0,
         remote_consistent_lsn: sk_info.remote_consistent_lsn.0,
         peer_horizon_lsn: sk_info.peer_horizon_lsn.0,
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
+        http_connstr: sk_info.http_connstr.unwrap_or_else(|| "".to_owned()),
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
