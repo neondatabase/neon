@@ -61,6 +61,12 @@ impl AsLayerDesc for Layer {
     }
 }
 
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+    }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
@@ -372,6 +378,15 @@ struct LayerInner {
 
     /// Counter for exponential backoff with the download
     consecutive_failures: AtomicUsize,
+
+    /// Keep this duplicate layer resident while this value exists.
+    ///
+    /// Having a layer to be kept resident means this value no longer execute file deletions,
+    /// because we might delete a file before it's uploaded.
+    ///
+    /// See: https://github.com/neondatabase/neon/issues/5077
+    /// See: [`ResidentLayer::keep_resident_until`]
+    keep_resident: std::sync::Mutex<Option<ResidentLayer>>,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -398,6 +413,11 @@ impl Drop for LayerInner {
             // should we try to evict if the last wish was for eviction?
             // feels like there's some hazard of overcrowding near shutdown near by, but we don't
             // run drops during shutdown (yet)
+            return;
+        }
+
+        if self.keep_resident.get_mut().unwrap().is_some() {
+            // we are a duplicate layer, we no longer manage the file
             return;
         }
 
@@ -485,6 +505,7 @@ impl LayerInner {
             version: AtomicUsize::new(0),
             status: tokio::sync::broadcast::channel(1).0,
             consecutive_failures: AtomicUsize::new(0),
+            keep_resident: std::sync::Mutex::new(None),
         }
     }
 
@@ -833,7 +854,7 @@ impl LayerInner {
     fn on_downloaded_layer_drop(self: Arc<LayerInner>) {
         let gc = self.wanted_garbage_collected.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
-        let can_evict = self.have_remote_client;
+        let can_evict = self.have_remote_client && self.keep_resident.lock().unwrap().is_none();
 
         if gc {
             // do nothing now, only in LayerInner::drop
@@ -1148,6 +1169,19 @@ impl ResidentLayer {
 
     pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         self.owner.access_stats()
+    }
+
+    /// Ensure that the old version of this layer is dropped before the newer version (self) can be
+    /// evicted.
+    pub(crate) fn keep_resident_while(&self, old: &Layer) {
+        assert_eq!(old.layer_desc(), self.layer_desc());
+        assert_ne!(old, &self.owner);
+        let mut g = old.0.keep_resident.lock().unwrap();
+        assert!(
+            g.is_none(),
+            "cannot have multiple duplicates of the same layer"
+        );
+        *g = Some(self.clone());
     }
 }
 
