@@ -2269,7 +2269,7 @@ impl Timeline {
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to wait for lsn {} on ancestor timeline_id={}",
+                            "wait for lsn {} on ancestor timeline_id={}",
                             timeline.ancestor_lsn, ancestor.timeline_id
                         )
                     })?;
