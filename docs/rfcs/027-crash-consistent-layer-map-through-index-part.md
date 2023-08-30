@@ -102,7 +102,11 @@ The procedure for single- and multi-object changes is reproduced here for refere
     * PUT layer files inserted by the change.
     * PUT an index part that has insertions and deletions of the change.
     * DELETE the layer files that are deleted by the change.
-      * With the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919), the deletions will be written to deletion queue instead of scheduled.
+
+Note that it is safe for the DELETE to be deferred arbitrarily.
+* If it never happens, we leak the object, but, that's not a correctness concern.
+* As of #4938, we don't schedule the remote timeline client operation for deletion immediately, but, only when we drop the `LayerInner`.
+* With the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919), the deletions will be written to deletion queue for processing when it's safe to do so (see the RFC for details).
 
 ## How This Solves The Problem
 
