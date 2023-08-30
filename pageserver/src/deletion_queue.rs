@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error};
+use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 pub(crate) use self::backend::BackendQueueWorker;
@@ -204,7 +205,7 @@ impl DeletionQueueClient {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        layers: Vec<LayerFileName>,
+        layers: Vec<(LayerFileName, Generation)>,
     ) -> Result<(), DeletionQueueError> {
         DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
         self.do_push(FrontendQueueMessage::Delete(DeletionOp {
@@ -363,7 +364,7 @@ mod test {
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
     use tokio::{runtime::EnterGuard, task::JoinHandle};
 
-    use crate::tenant::harness::TenantHarness;
+    use crate::tenant::{harness::TenantHarness, remote_timeline_client::remote_timeline_path};
 
     use super::*;
     pub const TIMELINE_ID: TimelineId =
@@ -538,38 +539,37 @@ mod test {
         let tenant_id = ctx.harness.tenant_id;
 
         let content: Vec<u8> = "victim1 contents".into();
-        let relative_remote_path = ctx
-            .harness
-            .conf
-            .remote_path(&ctx.harness.timeline_path(&TIMELINE_ID))
-            .expect("Failed to construct remote path");
+        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
+
+        let generation = Generation::new(0xdeadbeef);
+        let remote_layer_file_name_1 = format!("{}{}", layer_file_name_1, generation.get_suffix());
 
         // Inject a victim file to remote storage
         info!("Writing");
         std::fs::create_dir_all(&remote_timeline_path)?;
         std::fs::write(
-            remote_timeline_path.join(layer_file_name_1.to_string()),
+            remote_timeline_path.join(remote_layer_file_name_1.clone()),
             content,
         )?;
-        assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
+        assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
 
         // File should still be there after we push it to the queue (we haven't pushed enough to flush anything)
         info!("Pushing");
         ctx.runtime.block_on(client.push_layers(
             tenant_id,
             TIMELINE_ID,
-            [layer_file_name_1.clone()].to_vec(),
+            [(layer_file_name_1.clone(), generation)].to_vec(),
         ))?;
-        assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
+        assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
 
         assert_local_files(&[], &deletion_prefix);
 
         // File should still be there after we write a deletion list (we haven't pushed enough to execute anything)
         info!("Flushing");
         ctx.runtime.block_on(client.flush())?;
-        assert_remote_files(&[&layer_file_name_1.file_name()], &remote_timeline_path);
+        assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
         assert_local_files(&["0000000000000001-01.list"], &deletion_prefix);
 
         // File should go away when we execute
@@ -596,24 +596,22 @@ mod test {
         let tenant_id = ctx.harness.tenant_id;
 
         let content: Vec<u8> = "victim1 contents".into();
-        let relative_remote_path = ctx
-            .harness
-            .conf
-            .remote_path(&ctx.harness.timeline_path(&TIMELINE_ID))
-            .expect("Failed to construct remote path");
+        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
+        let generation = Generation::new(0xdeadbeef);
+        let remote_layer_file_name_1 = format!("{}{}", layer_file_name_1, generation.get_suffix());
 
         // Inject a file, delete it, and flush to a deletion list
         std::fs::create_dir_all(&remote_timeline_path)?;
         std::fs::write(
-            remote_timeline_path.join(layer_file_name_1.to_string()),
+            remote_timeline_path.join(remote_layer_file_name_1.clone()),
             content,
         )?;
         ctx.runtime.block_on(client.push_layers(
             tenant_id,
             TIMELINE_ID,
-            [layer_file_name_1.clone()].to_vec(),
+            [(layer_file_name_1.clone(), generation)].to_vec(),
         ))?;
         ctx.runtime.block_on(client.flush())?;
         assert_local_files(&["0000000000000001-01.list"], &deletion_prefix);
@@ -638,6 +636,8 @@ mod test {
 pub mod mock {
     use tracing::info;
 
+    use crate::tenant::remote_timeline_client::remote_layer_path;
+
     use super::*;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -652,10 +652,7 @@ pub mod mock {
     }
 
     impl MockDeletionQueue {
-        pub fn new(
-            remote_storage: Option<GenericRemoteStorage>,
-            conf: &'static PageServerConf,
-        ) -> Self {
+        pub fn new(remote_storage: Option<GenericRemoteStorage>) -> Self {
             let (tx, mut rx) = tokio::sync::mpsc::channel(16384);
             let (tx_pump, mut rx_pump) = tokio::sync::mpsc::channel::<FlushOp>(1);
             let (executor_tx, mut executor_rx) = tokio::sync::mpsc::channel(16384);
@@ -703,19 +700,14 @@ pub mod mock {
                     while let Ok(msg) = rx.try_recv() {
                         match msg {
                             FrontendQueueMessage::Delete(op) => {
-                                let timeline_path =
-                                    conf.timeline_path(&op.tenant_id, &op.timeline_id);
-
                                 let mut objects = op.objects;
-                                for layer in op.layers {
-                                    let local_path = timeline_path.join(layer.file_name());
-                                    let path = match conf.remote_path(&local_path) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            panic!("Can't make a timeline path! {e}");
-                                        }
-                                    };
-                                    objects.push(path);
+                                for (layer, generation) in op.layers {
+                                    objects.push(remote_layer_path(
+                                        &op.tenant_id,
+                                        &op.timeline_id,
+                                        &layer,
+                                        generation,
+                                    ));
                                 }
 
                                 for path in objects {

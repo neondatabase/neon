@@ -12,12 +12,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
+use utils::generation::Generation;
 use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::metrics::DELETION_QUEUE_ERRORS;
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
+use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
 
 // The number of keys in a DeletionList before we will proactively persist it
@@ -41,7 +43,7 @@ pub(super) struct DeletionOp {
     // `layers` and `objects` are both just lists of objects.  `layers` is used if you do not
     // have a config object handy to project it to a remote key, and need the consuming worker
     // to do it for you.
-    pub(super) layers: Vec<LayerFileName>,
+    pub(super) layers: Vec<(LayerFileName, Generation)>,
     pub(super) objects: Vec<RemotePath>,
 }
 
@@ -306,18 +308,14 @@ impl FrontendQueueWorker {
                         op.objects.len()
                     );
 
-                    let timeline_path = self.conf.timeline_path(&op.tenant_id, &op.timeline_id);
                     let mut layer_paths = Vec::new();
-                    for layer in op.layers {
-                        // TODO go directly to remote path without composing local path
-                        let local_path = timeline_path.join(layer.file_name());
-                        let path = match self.conf.remote_path(&local_path) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                panic!("Can't make a timeline path! {e}");
-                            }
-                        };
-                        layer_paths.push(path);
+                    for (layer, generation) in op.layers {
+                        layer_paths.push(remote_layer_path(
+                            &op.tenant_id,
+                            &op.timeline_id,
+                            &layer,
+                            generation,
+                        ));
                     }
 
                     self.pending

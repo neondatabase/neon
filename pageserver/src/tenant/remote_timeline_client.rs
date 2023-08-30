@@ -646,7 +646,7 @@ impl RemoteTimelineClient {
         deletion_queue_client: &DeletionQueueClient,
     ) -> anyhow::Result<()> {
         // Synchronous update of upload queues under mutex
-        let _with_generations = {
+        let with_generations = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
@@ -657,14 +657,14 @@ impl RemoteTimelineClient {
             // Decorate our list of names with each name's generation, dropping
             // makes that are unexpectedly missing from our metadata.
             let with_generations: Vec<_> = names
-                .iter()
+                .into_iter()
                 .filter_map(|name| {
                     // Remove from latest_files, learning the file's remote generation in the process
                     let meta = upload_queue.latest_files.remove(name);
 
                     if let Some(meta) = meta {
                         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                        Some((name, meta.generation))
+                        Some((name.clone(), meta.generation))
                     } else {
                         // This is unexpected: latest_files is meant to be kept up to
                         // date.  We can't delete the layer if we have forgotten what
@@ -693,7 +693,7 @@ impl RemoteTimelineClient {
 
         // Enqueue deletions
         deletion_queue_client
-            .push_layers(self.tenant_id, self.timeline_id, names.to_vec())
+            .push_layers(self.tenant_id, self.timeline_id, with_generations)
             .await?;
         Ok(())
     }
@@ -826,7 +826,7 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let layers: Vec<LayerFileName> = {
+        let layers: Vec<_> = {
             let mut locked = self.upload_queue.lock().unwrap();
             let stopped = locked.stopped_mut()?;
 
@@ -840,20 +840,16 @@ impl RemoteTimelineClient {
                 .upload_queue_for_deletion
                 .latest_files
                 .drain()
-                .map(|kv| kv.0)
+                .map(|kv| (kv.0, kv.1.generation))
                 .collect()
         };
 
         let layer_deletion_count = layers.len();
 
-        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
         let layer_paths = layers
             .into_iter()
-            .map(|l| {
-                let local_path = timeline_path.join(l.file_name());
-                self.conf
-                    .remote_path(&local_path)
-                    .expect("Timeline path should always convert to remote")
+            .map(|(layer, generation)| {
+                remote_layer_path(&self.tenant_id, &self.timeline_id, &layer, generation)
             })
             .collect();
         deletion_queue.push_immediate(layer_paths).await?;
@@ -1711,6 +1707,7 @@ mod tests {
                 "index_part.json",
             ],
             &remote_timeline_dir,
+            generation,
         );
 
         // Finish uploads and deletions
