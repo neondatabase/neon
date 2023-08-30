@@ -27,6 +27,7 @@ use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 
+use crate::checker::create_availability_check_data;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -696,6 +697,7 @@ impl ComputeNode {
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        create_availability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);

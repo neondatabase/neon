@@ -138,7 +138,13 @@ impl ComputeControlPlane {
             mode,
             tenant_id,
             pg_version,
-            skip_pg_catalog_updates: false,
+            // We don't setup roles and databases in the spec locally, so we don't need to
+            // do catalog updates. Catalog updates also include check availability
+            // data creation. Yet, we have tests that check that size and db dump
+            // before and after start are the same. So, skip catalog updates,
+            // with this we basically test a case of waking up an idle compute, where
+            // we also skip catalog updates in the cloud.
+            skip_pg_catalog_updates: true,
         });
 
         ep.create_endpoint_dir()?;
@@ -152,7 +158,7 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
-                skip_pg_catalog_updates: false,
+                skip_pg_catalog_updates: true,
             })?,
         )?;
         std::fs::write(
