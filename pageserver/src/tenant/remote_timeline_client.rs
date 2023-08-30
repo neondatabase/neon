@@ -1433,21 +1433,17 @@ pub fn remote_index_path(
 pub fn remote_path(
     conf: &PageServerConf,
     local_path: &Path,
-    generation: Option<Generation>,
+    generation: Generation,
 ) -> anyhow::Result<RemotePath> {
     let stripped = local_path
         .strip_prefix(&conf.workdir)
         .context("Failed to strip workdir prefix")?;
 
-    let suffixed = if let Some(generation) = generation {
-        format!(
-            "{0}{1}",
-            stripped.to_string_lossy(),
-            generation.get_suffix()
-        )
-    } else {
-        stripped.to_string_lossy().to_string()
-    };
+    let suffixed = format!(
+        "{0}{1}",
+        stripped.to_string_lossy(),
+        generation.get_suffix()
+    );
 
     RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
         format!(
