@@ -277,6 +277,10 @@ an ordering as follows:
 2. Call out to control plane to validate that the generation which we use for our attachment is still the latest.
 3. advance the `remote_consistent_lsn` that we advertise to the safekeepers to `L0`
 
+If step 2 fails, then the `remote_consistent_lsn` advertised
+to safekeepers will not advance again until a pageserver
+with the latest generation is ready to do so.
+
 **Note:** at step 3 we are not advertising the _latest_ remote_consistent_lsn, we are
 advertising the value in the index_part that we uploaded in step 1. This provides
 a strong ordering guarantee.
@@ -304,41 +308,6 @@ Calls to `/v1/tenant/{tenant_id}/attach` are augmented with an additional
 
 The pageserver does not persist this: a generation is only good for the lifetime
 of a process.
-
-#### Re-attachment on startup
-
-On startup, the pageserver will call out to an new control plane `/re-attach`
-API (see [Generation API](#generation-api)). This returns a list of
-tenants that should be attached to the pageserver, and their generation numbers, which
-the control plane will increment before returning.
-
-The pageserver should still scan its local disk on startup, but should _delete_
-any local content for tenants not indicated in the `/re-attach` response: their
-absence is an implicit detach operation.
-
-#### Reconciliation
-
-On attachment, the `Tenant` may have some local disk content from previous
-activity involving this tenant (e.g. it used to be attached here), and this
-needs reconciling with remote storage. Note that "reconcile" in this context is
-used generically, and does not refer specifically to the logic currently
-in the `reconcile_with_remote` function.
-
-Because pageservers have access to the WAL, they don't strictly have to
-use the latest remote storage contents at all: if the WAL history still contains
-the data required to bring the pageserver's local state up to date with
-the tip of the WAL, the pageserver could recover from the WAL and then
-overwrite whatever is in remote storage.
-
-However, it is preferable to recover from remote storage rather than
-to replay WAL, for the following reasons:
-
-- Simplicity: recovering from remote storage gives identical behavior
-  whether attaching a tenant for the first time or re-attaching later.
-- Efficiency: ingesting the WAL has significant cost beyond the I/O
-  of reading it (compaction, image layer generation). We should avoid
-  doing this work twice if there is already remote content available.
-- Reduced load on safekeepers, which are a less scalable resource than S3.
 
 #### Finding the remote indices for timelines
 
@@ -375,6 +344,22 @@ which generation most recently wrote an index_part.json, if necessary, to increa
 the probability of finding the index_part.json in one GET. One could also improve
 the chances by having pageservers proactively write out index_part.json after they
 get a new generation ID.
+
+#### Re-attachment on startup
+
+On startup, the pageserver will call out to an new control plane `/re-attach`
+API (see [Generation API](#generation-api)). This returns a list of
+tenants that should be attached to the pageserver, and their generation numbers, which
+the control plane will increment before returning.
+
+The pageserver should still scan its local disk on startup, but should _delete_
+any local content for tenants not indicated in the `/re-attach` response: their
+absence is an implicit detach operation.
+
+**Note** if a tenant is omitted from the re-attach response, its local disk content
+will be deleted. This will change in subsequent work, when the control plane gains
+the concept of a secondary/standby location: a node with local content may revert
+to this status and retain some local content.
 
 #### Cleaning up previous generations' remote indices
 
@@ -432,10 +417,6 @@ The endpoints required by pageservers are:
   - for all tenants in the response, activate with the new generation number
   - for any local disk content _not_ referenced in the response, act as if we
     had been asked to detach it (i.e. delete local files)
-
-**Note** this process currently deletes local state and avoids dual-attaching, but
-this will change when the control plane is updated in subsequent work to have
-the concept of multiple locations.
 
 **Note** the `node_id` in this request will change in future if we move to ephemeral
 node IDs, to be replaced with some correlation ID that helps the control plane realize
@@ -552,11 +533,9 @@ in the control plane database.
 #### Examples
 
 - Deletion, node restarts partway through:
-  - By the time we returned 204, we have written a remote delete marker
+  - By the time we returned 202, we have written a remote delete marker
   - Any subsequent incarnation of the same node_id will see the remote
     delete marker and continue to process the deletion
-  - We only require that the control plane does not change the tenant's
-    attachment while waiting for the deletion.
   - If the original pageserver is lost permanently and no replacement
     with the same node_id is available, then the control plane must recover
     by re-attaching the tenant to a different node.
@@ -710,6 +689,12 @@ fresh. This avoids the possibility of a stale pageserver incorrectly
 thinking than an object written by a newer generation is stale, and deleting
 it.
 
+It is not strictly necessary that scrubbing be done by an attached
+pageserver: it could also be done externally. However, an external
+scrubber would still require the same validation procedure that
+a pageserver's deletion queue performs, before actually erasing
+objects.
+
 ## Operational impact
 
 ### Availability
@@ -733,7 +718,9 @@ to the pageserver _machine_ or its _on-disk-state_.
 Item 2. is a non-issue operationally: it's harmless to delay deletions, the only impact of objects pending deletion is
 the S3 capacity cost.
 
-Item 3. is an issue if safekeepers are low on disk space and the control plane is unavailable for a long time.
+Item 3. could be an issue if safekeepers are low on disk space and the control plane is unavailable for a long time. If this became an issue,
+we could adjust the safekeeper to delete segments from local disk sooner, as soon as they're uploaded to S3, rather than waiting for
+remote_consistent_lsn to advance.
 
 For a managed service, the general approach should be to make sure we are monitoring & respond fast enough
 that control plane outages are bounded in time.
@@ -882,10 +869,6 @@ to S3.
    not do any deletions because it can't synchronize with control plane, or if it could,
    its deletion queue processing would get errors for the validation requests.
 
-Node 0 is not "failed" per-se in this situation: if it becomes responsive again,
-then the control plane may detach the tenants that have been re-attached
-elsewhere from node 0.
-
 #### Case B: direct node replacement with same node_id and drive
 
 This is the scenario we would experience if running pageservers in some dynamic
@@ -957,9 +940,18 @@ This RFC intentionally avoids changing anything fundamental about how pageserver
 and registered with the control plane, to avoid coupling the implementation of pageserver split
 brain protection with more fundamental changes in the management of the pageservers.
 
-However, we also accommodate the possibility of a future change to fully ephemeral pageserver IDs,
-where an attachment would implicitly have a lifetime bounded to one pageserver process lifetime,
-as the pageserver ID would change on restart. In this model, separate node and attachment
-generations are unnecessary, but the storage format doesn't change: the [generation suffix](#generation-suffix)
-may simply be the attachment generation, without any per-node component, as the attachment
-generation would change any time an attached node restarted.
+Moving to ephemeral node IDs would provide an extra layer of
+resilience in the system, as it would prevent the control plane
+accidentally attaching to two physical nodes with the same
+generation, if somehow there were two physical nodes with
+the same node IDs (currently we rely on EC2 guarantees to
+eliminate this scenario). With ephemeral node IDs, there would be
+no possibility of that happening, no matter the behavior of
+underlying infrastructure.
+
+Nothing fundamental in the pageserver's handling of generations needs to change to handle ephemeral node IDs, since we hardly use the
+`node_id` anywhere. The `/re-attach` API would be extended
+to enable the pageserver to obtain its ephemeral ID, and provide
+some correlation identifier (e.g. EC instance ID), to help the
+control plane re-attach tenants to the same physical server that
+previously had them attached.
