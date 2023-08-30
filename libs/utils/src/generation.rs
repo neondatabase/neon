@@ -2,6 +2,11 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
+/// Tenant generations are used to provide split-brain safety and allow
+/// multiple pageservers to attach the same tenant concurrently.
+///
+/// See docs/rfcs/025-generation-numbers.md for detail on how generation
+/// numbers are used.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Generation {
     // Generations with this magic value will not add a suffix to S3 keys, and will not
@@ -73,7 +78,7 @@ impl Serialize for Generation {
             // that include an optional generation should convert None to an
             // Option<Generation>::None
             Err(serde::ser::Error::custom(
-                "Tried to serialize invalid generation",
+                "Tried to serialize invalid generation ({self})",
             ))
         }
     }
