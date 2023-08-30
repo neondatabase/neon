@@ -27,7 +27,8 @@ pub(super) async fn delete_layer<'a>(
     // already been deleted. Thankfully, in this situation S3 already
     // does not yield an error. While OS-provided local file system APIs do yield
     // errors, we avoid them in the `LocalFs` wrapper.
-    storage.delete(&path_to_delete).await.with_context(|| {
-        format!("Failed to delete remote layer from storage at {path_to_delete:?}")
-    })
+    storage
+        .delete(&path_to_delete)
+        .await
+        .with_context(|| format!("delete remote layer from storage at {path_to_delete:?}"))
 }

@@ -31,8 +31,8 @@ pub(super) async fn upload_index_part<'a>(
         bail!("failpoint before-upload-index")
     });
 
-    let index_part_bytes = serde_json::to_vec(&index_part)
-        .context("Failed to serialize index part file into bytes")?;
+    let index_part_bytes =
+        serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
@@ -40,7 +40,7 @@ pub(super) async fn upload_index_part<'a>(
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
-        .with_context(|| format!("Failed to upload index part for '{tenant_id} / {timeline_id}'"))
+        .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -71,16 +71,15 @@ pub(super) async fn upload_timeline_layer<'a>(
             info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
-        Err(e) => Err(e)
-            .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?,
+        Err(e) => {
+            Err(e).with_context(|| format!("open a source file for layer {source_path:?}"))?
+        }
     };
 
     let fs_size = source_file
         .metadata()
         .await
-        .with_context(|| {
-            format!("Failed to get the source file metadata for layer {source_path:?}")
-        })?
+        .with_context(|| format!("get the source file metadata for layer {source_path:?}"))?
         .len();
 
     let metadata_size = known_metadata.file_size();
@@ -88,19 +87,13 @@ pub(super) async fn upload_timeline_layer<'a>(
         bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
 
-    let fs_size = usize::try_from(fs_size).with_context(|| {
-        format!("File {source_path:?} size {fs_size} could not be converted to usize")
-    })?;
+    let fs_size = usize::try_from(fs_size)
+        .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
     storage
         .upload(source_file, fs_size, &storage_path, None)
         .await
-        .with_context(|| {
-            format!(
-                "Failed to upload a layer from local path '{}'",
-                source_path.display()
-            )
-        })?;
+        .with_context(|| format!("upload layer from local path '{}'", source_path.display()))?;
 
     Ok(())
 }

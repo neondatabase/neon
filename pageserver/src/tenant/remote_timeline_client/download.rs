@@ -64,33 +64,43 @@ pub async fn download_layer_file<'a>(
     let (mut destination_file, bytes_amount) = download_retry(
         || async {
             // TODO: this doesn't use the cached fd for some reason?
-            let mut destination_file = fs::File::create(&temp_file_path).await.with_context(|| {
-                format!(
-                    "create a destination file for layer '{}'",
-                    temp_file_path.display()
-                )
-            })
-            .map_err(DownloadError::Other)?;
-            let mut download = storage.download(&remote_path).await.with_context(|| {
-                format!(
+            let mut destination_file = fs::File::create(&temp_file_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "create a destination file for layer '{}'",
+                        temp_file_path.display()
+                    )
+                })
+                .map_err(DownloadError::Other)?;
+            let mut download = storage
+                .download(&remote_path)
+                .await
+                .with_context(|| {
+                    format!(
                     "open a download stream for layer with remote storage path '{remote_path:?}'"
                 )
-            })
-            .map_err(DownloadError::Other)?;
-
-            let bytes_amount = tokio::time::timeout(MAX_DOWNLOAD_DURATION, tokio::io::copy(&mut download.download_stream, &mut destination_file))
-                .await
-                .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
-                .with_context(|| {
-                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
                 })
                 .map_err(DownloadError::Other)?;
 
-            Ok((destination_file, bytes_amount))
+            let bytes_amount = tokio::time::timeout(
+                MAX_DOWNLOAD_DURATION,
+                tokio::io::copy(&mut download.download_stream, &mut destination_file),
+            )
+            .await
+            .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
+            .with_context(|| {
+                format!(
+                    "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
+                )
+            })
+            .map_err(DownloadError::Other)?;
 
+            Ok((destination_file, bytes_amount))
         },
         &format!("download {remote_path:?}"),
-    ).await?;
+    )
+    .await?;
 
     // Tokio doc here: https://docs.rs/tokio/1.17.0/tokio/fs/struct.File.html states that:
     // A file will not be closed immediately when it goes out of scope if there are any IO operations
@@ -103,12 +113,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .flush()
         .await
-        .with_context(|| {
-            format!(
-                "failed to flush source file at {}",
-                temp_file_path.display()
-            )
-        })
+        .with_context(|| format!("flush source file at {}", temp_file_path.display()))
         .map_err(DownloadError::Other)?;
 
     let expected = layer_metadata.file_size();
@@ -139,17 +144,12 @@ pub async fn download_layer_file<'a>(
 
     fs::rename(&temp_file_path, &local_path)
         .await
-        .with_context(|| {
-            format!(
-                "Could not rename download layer file to {}",
-                local_path.display(),
-            )
-        })
+        .with_context(|| format!("rename download layer file to {}", local_path.display(),))
         .map_err(DownloadError::Other)?;
 
     crashsafe::fsync_async(&local_path)
         .await
-        .with_context(|| format!("Could not fsync layer file {}", local_path.display(),))
+        .with_context(|| format!("fsync layer file {}", local_path.display(),))
         .map_err(DownloadError::Other)?;
 
     tracing::debug!("download complete: {}", local_path.display());
@@ -200,9 +200,9 @@ pub async fn list_remote_timelines(
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
-        let timeline_id: TimelineId = object_name.parse().with_context(|| {
-            format!("failed to parse object name into timeline id '{object_name}'")
-        })?;
+        let timeline_id: TimelineId = object_name
+            .parse()
+            .with_context(|| format!("parse object name into timeline id '{object_name}'"))?;
 
         // list_prefixes is assumed to return unique names. Ensure this here.
         // NB: it's safer to bail out than warn-log this because the pageserver
@@ -242,7 +242,7 @@ pub(super) async fn download_index_part(
                 &mut index_part_bytes,
             )
             .await
-            .with_context(|| format!("Failed to download an index part into file {local_path:?}"))
+            .with_context(|| format!("download index part into file {local_path:?}"))
             .map_err(DownloadError::Other)?;
             Ok(index_part_bytes)
         },
@@ -251,7 +251,7 @@ pub(super) async fn download_index_part(
     .await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-        .with_context(|| format!("Failed to deserialize index part file into file {local_path:?}"))
+        .with_context(|| format!("download index part file into file {local_path:?}"))
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
