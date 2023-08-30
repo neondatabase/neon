@@ -1173,10 +1173,10 @@ impl ResidentLayer {
 
     /// Ensure that the old version of this layer is dropped before the newer version (self) can be
     /// evicted.
-    pub(crate) fn keep_resident_while(&self, old: &Layer) {
+    pub(crate) fn keep_resident_while(&self, old: &ResidentLayer) {
         assert_eq!(old.layer_desc(), self.layer_desc());
-        assert_ne!(old, &self.owner);
-        let mut g = old.0.keep_resident.lock().unwrap();
+        assert_ne!(&old.owner, &self.owner);
+        let mut g = old.owner.0.keep_resident.lock().unwrap();
         assert!(
             g.is_none(),
             "cannot have multiple duplicates of the same layer"
