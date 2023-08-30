@@ -454,7 +454,6 @@ impl RemoteTimelineClient {
         );
 
         let index_part = download::download_index_part(
-            self.conf,
             &self.storage_impl,
             &self.tenant_id,
             &self.timeline_id,
@@ -1447,7 +1446,7 @@ pub fn remote_path(
 
     RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
         format!(
-            "resolve remote part of path {:?} for base {:?}",
+            "to resolve remote part of path {:?} for base {:?}",
             local_path, conf.workdir
         )
     })

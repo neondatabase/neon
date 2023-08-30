@@ -220,16 +220,11 @@ pub async fn list_remote_timelines(
 }
 
 pub(super) async fn download_index_part(
-    conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     generation: Generation,
 ) -> Result<IndexPart, DownloadError> {
-    let local_path = conf
-        .metadata_path(tenant_id, timeline_id)
-        .with_file_name(IndexPart::FILE_NAME);
-
     let remote_path = remote_index_path(tenant_id, timeline_id, generation);
 
     let index_part_bytes = download_retry(
@@ -242,7 +237,7 @@ pub(super) async fn download_index_part(
                 &mut index_part_bytes,
             )
             .await
-            .with_context(|| format!("download index part into file {local_path:?}"))
+            .with_context(|| format!("download index part at {remote_path:?}"))
             .map_err(DownloadError::Other)?;
             Ok(index_part_bytes)
         },
@@ -251,7 +246,7 @@ pub(super) async fn download_index_part(
     .await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-        .with_context(|| format!("download index part file into file {local_path:?}"))
+        .with_context(|| format!("download index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
