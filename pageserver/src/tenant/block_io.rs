@@ -39,7 +39,7 @@ pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
-    Rc(std::rc::Rc<[u8; PAGE_SZ]>),
+    Arc(std::sync::Arc<[u8; PAGE_SZ]>),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -49,9 +49,9 @@ impl From<PageReadGuard<'static>> for BlockLease<'static> {
 }
 
 #[cfg(test)]
-impl<'a> From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease<'a> {
-    fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
-        BlockLease::Rc(value)
+impl<'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+    fn from(value: std::sync::Arc<[u8; PAGE_SZ]>) -> Self {
+        BlockLease::Arc(value)
     }
 }
 
@@ -63,7 +63,7 @@ impl<'a> Deref for BlockLease<'a> {
             BlockLease::PageReadGuard(v) => v.deref(),
             BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
-            BlockLease::Rc(v) => v.deref(),
+            BlockLease::Arc(v) => v.deref(),
         }
     }
 }
@@ -83,13 +83,13 @@ pub(crate) enum BlockReaderRef<'a> {
 
 impl<'a> BlockReaderRef<'a> {
     #[inline(always)]
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
-            FileBlockReaderVirtual(r) => r.read_blk(blknum),
-            FileBlockReaderFile(r) => r.read_blk(blknum),
-            EphemeralFile(r) => r.read_blk(blknum),
-            Adapter(r) => r.read_blk(blknum),
+            FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
+            FileBlockReaderFile(r) => r.read_blk(blknum).await,
+            EphemeralFile(r) => r.read_blk(blknum).await,
+            Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
         }
@@ -134,8 +134,8 @@ impl<'a> BlockCursor<'a> {
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     #[inline(always)]
-    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum)
+    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum).await
     }
 }
 
@@ -170,11 +170,12 @@ where
     /// Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
-    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache
                 .read_immutable_buf(self.file_id, blknum)
+                .await
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,
