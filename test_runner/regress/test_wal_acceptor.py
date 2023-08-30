@@ -424,6 +424,15 @@ def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: Tim
     return tli_status.flush_lsn >= lsn
 
 
+def assert_commit_lsn_equals_flush_lsn(
+    sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId
+):
+    http_cli = sk.http_client()
+    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(f"sk status is {tli_status}")
+    assert tli_status.flush_lsn == tli_status.commit_lsn
+
+
 def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
     http_cli = sk.http_client()
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
