@@ -8,30 +8,38 @@ from requests.exceptions import ConnectionError
 
 
 @pytest.mark.timeout(600)
-def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
+def test_compaction_duplicates_all(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    """
+    Makes compact_level0_phase1 return input layers as the output layers with a
+    failpoint as if those L0 inputs would had all been recreated when L1s were
+    supposed to be created.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
+        test_name="test_compaction_duplicates_all",
+    )
 
-    # Use aggressive compaction and checkpoint settings
-    tenant_id, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             "checkpoint_distance": f"{1024 ** 2}",
             "compaction_target_size": f"{1024 ** 2}",
-            "compaction_period": "5 s",
+            "compaction_period": "0 s",
             "compaction_threshold": "3",
         }
     )
+    pageserver_http = env.pageserver.http_client()
+
+    tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
 
     pageserver_http.configure_failpoints(("compact-level0-phase1-return-same", "return"))
+    # pageserver_http.configure_failpoints(("after-timeline-compacted-first-L1", "exit"))
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
 
-    time.sleep(10)  # let compaction to be performed
+    pageserver_http.timeline_compact(tenant_id, timeline_id)
     assert env.pageserver.log_contains("compact-level0-phase1-return-same")
-
-    pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T200", "-Mprepared", connstr])
 
 
 def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
