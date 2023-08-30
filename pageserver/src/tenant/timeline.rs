@@ -3414,11 +3414,10 @@ impl Timeline {
 
         for l in new_layers {
             if guard.contains(l.as_ref()) {
-                // here we should find a possibly_overlapping_overwritten
                 let key = l.layer_desc().key();
                 let old = possibly_overlapping_overwritten
                     .remove(&key)
-                    .context("should not have duplicated a layer we had not made resident first")?;
+                    .with_context(|| format!("should not have duplicated a layer we had not made resident first: {l}"))?;
                 duplicated_layers.insert(key);
                 l.keep_resident_while(&old);
                 tracing::warn!(layer = %l, "duplicated L1 layer");
