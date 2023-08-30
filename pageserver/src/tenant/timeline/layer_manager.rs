@@ -191,6 +191,7 @@ impl LayerManager {
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: Vec<Layer>,
         compact_to: &[ResidentLayer],
+        duplicates: &[(ResidentLayer, ResidentLayer)],
     ) -> Result<()> {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
@@ -201,6 +202,9 @@ impl LayerManager {
             // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
             // time, even though we dropped `Timeline::layers` inbetween.
             Self::delete_historic_layer(layer_removal_cs, l, &mut updates, &mut self.layer_fmgr)?;
+        }
+        for (old, new) in duplicates {
+            self.layer_fmgr.replace(old.as_ref(), new.as_ref().clone());
         }
         updates.flush();
         Ok(())
@@ -264,7 +268,7 @@ impl LayerManager {
 
 pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
 
-impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
+impl<T: AsLayerDesc + Clone + PartialEq + std::fmt::Debug> LayerFileManager<T> {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
@@ -297,6 +301,16 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
                 "removing layer that is not present in layer mapping: {:?}",
                 layer.layer_desc()
             )
+        }
+    }
+
+    pub(crate) fn replace(&mut self, old: &T, new: T) {
+        let key = old.layer_desc().key();
+        assert_eq!(key, new.layer_desc().key());
+
+        if let Some(existing) = self.0.get_mut(&key) {
+            assert_eq!(existing, old);
+            *existing = new;
         }
     }
 }
