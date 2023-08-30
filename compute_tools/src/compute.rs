@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
@@ -172,6 +173,27 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             tenant_id,
             timeline_id,
         })
+    }
+}
+
+/// If we are a VM, returns a [`Command`] that will run in the `neon-postgres`
+/// cgroup. Otherwise returns the default `Command::new(cmd)`
+///
+/// This function should be used to start postgres, as it will start it in the
+/// neon-postgres cgroup if we are a VM. This allows autoscaling to control
+/// postgres' resource usage. The cgroup will exist in VMs because vm-builder
+/// creates it during the sysinit phase of its inittab.
+fn maybe_cgexec(cmd: &str) -> Command {
+    // The cplane sets this env var for autoscaling computes.
+    // use `var_os` so we don't have to worry about the variable being valid
+    // unicode. Should never be an concern . . . but just in case
+    if env::var_os("AUTOSCALING").is_some() {
+        let mut command = Command::new("cgexec");
+        command.args(["-g", "memory:neon-postgres"]);
+        command.arg(cmd);
+        command
+    } else {
+        Command::new(cmd)
     }
 }
 
@@ -451,7 +473,7 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let sync_handle = Command::new(&self.pgbin)
+        let sync_handle = maybe_cgexec(&self.pgbin)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
@@ -586,7 +608,7 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = Command::new(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.pgbin)
             .args(["-D", pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -614,7 +636,7 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = Command::new(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.pgbin)
             .args(["-D", &self.pgdata])
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]

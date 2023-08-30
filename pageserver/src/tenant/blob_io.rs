@@ -12,14 +12,11 @@
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use crate::page_cache::PAGE_SZ;
-use crate::tenant::block_io::{BlockCursor, BlockReader};
+use crate::tenant::block_io::BlockCursor;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
-impl<R> BlockCursor<R>
-where
-    R: BlockReader,
-{
+impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
@@ -36,7 +33,7 @@ where
         let mut blknum = (offset / PAGE_SZ as u64) as u32;
         let mut off = (offset % PAGE_SZ as u64) as usize;
 
-        let mut buf = self.read_blk(blknum)?;
+        let mut buf = self.read_blk(blknum).await?;
 
         // peek at the first byte, to determine if it's a 1- or 4-byte length
         let first_len_byte = buf[off];
@@ -52,7 +49,7 @@ where
                 // it is split across two pages
                 len_buf[..thislen].copy_from_slice(&buf[off..PAGE_SZ]);
                 blknum += 1;
-                buf = self.read_blk(blknum)?;
+                buf = self.read_blk(blknum).await?;
                 len_buf[thislen..].copy_from_slice(&buf[0..4 - thislen]);
                 off = 4 - thislen;
             } else {
@@ -73,7 +70,7 @@ where
             if page_remain == 0 {
                 // continue on next page
                 blknum += 1;
-                buf = self.read_blk(blknum)?;
+                buf = self.read_blk(blknum).await?;
                 off = 0;
                 page_remain = PAGE_SZ;
             }

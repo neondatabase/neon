@@ -169,8 +169,52 @@ impl std::fmt::Debug for ImageLayerInner {
 
 #[async_trait::async_trait]
 impl Layer for ImageLayer {
-    /// debugging function to print out the contents of the layer
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    /// Look up given page in the file
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
+            .await
+    }
+}
+
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for ImageLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
+impl PersistentLayer for ImageLayer {
+    fn local_path(&self) -> Option<PathBuf> {
+        self.local_path()
+    }
+
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        self.delete_resident_layer_file()
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.info(reset)
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        self.access_stats()
+    }
+}
+
+impl ImageLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
@@ -178,7 +222,7 @@ impl Layer for ImageLayer {
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.lsn,
-            self.desc.is_incremental,
+            self.desc.is_incremental(),
             self.desc.file_size
         );
 
@@ -203,8 +247,7 @@ impl Layer for ImageLayer {
         Ok(())
     }
 
-    /// Look up given page in the file
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -225,65 +268,33 @@ impl Layer for ImageLayer {
             .with_context(|| format!("read {}", self.path().display()))
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
-}
-
-/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-impl std::fmt::Display for ImageLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
-
-impl AsLayerDesc for ImageLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl PersistentLayer for ImageLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn delete_resident_layer_file(&self) -> Result<()> {
+    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_start = self.layer_desc().image_layer_lsn();
 
         HistoricLayerInfo::Image {
             layer_file_name,
             layer_file_size: self.desc.file_size,
-            lsn_start: lsn_range.start,
+            lsn_start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
         }
     }
 
-    fn access_stats(&self) -> &LayerAccessStats {
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         &self.access_stats
     }
-}
 
-impl ImageLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         timeline_id: TimelineId,
@@ -338,7 +349,8 @@ impl ImageLayer {
             PathOrConf::Path(_) => None,
         };
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary)?;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary).await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
@@ -371,7 +383,6 @@ impl ImageLayer {
                 timeline_id,
                 filename.key_range.clone(),
                 filename.lsn,
-                false,
                 file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
@@ -398,7 +409,6 @@ impl ImageLayer {
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
-                false,
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
@@ -423,7 +433,7 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
-    pub(super) fn load(
+    pub(super) async fn load(
         path: &std::path::Path,
         lsn: Lsn,
         summary: Option<Summary>,
@@ -431,7 +441,7 @@ impl ImageLayerInner {
         let file = VirtualFile::open(path)
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0)?;
+        let summary_blk = file.read_blk(0).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -500,7 +510,6 @@ struct ImageLayerWriterInner {
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
-    is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
@@ -516,7 +525,6 @@ impl ImageLayerWriterInner {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -551,7 +559,6 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
-            is_incremental,
         };
 
         Ok(writer)
@@ -612,7 +619,6 @@ impl ImageLayerWriterInner {
             self.timeline_id,
             self.key_range.clone(),
             self.lsn,
-            self.is_incremental, // for now, image layer ALWAYS covers the full range
             metadata.len(),
         );
 
@@ -687,7 +693,6 @@ impl ImageLayerWriter {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(ImageLayerWriterInner::new(
@@ -696,7 +701,6 @@ impl ImageLayerWriter {
                 tenant_id,
                 key_range,
                 lsn,
-                is_incremental,
             )?),
         })
     }

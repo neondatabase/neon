@@ -125,6 +125,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
                     tenant_id: vec![0xFF; 16],
                     timeline_id: tli_from_u64(counter % n_keys),
                 }),
+                term: 0,
                 last_log_term: 0,
                 flush_lsn: counter,
                 commit_lsn: 2,
@@ -132,6 +133,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
                 remote_consistent_lsn: 4,
                 peer_horizon_lsn: 5,
                 safekeeper_connstr: "zenith-1-sk-1.local:7676".to_owned(),
+                http_connstr: "zenith-1-sk-1.local:7677".to_owned(),
                 local_start_lsn: 0,
                 availability_zone: None,
             };

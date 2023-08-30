@@ -10,7 +10,7 @@ use std::{fs, path::Path, str};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
-use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
+use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
@@ -97,7 +97,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+    let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,

@@ -4,7 +4,12 @@
 # to your expectations and requirements.
 
 # Root options
-targets = []
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
 all-features = false
 no-default-features = false
 feature-depth = 1
@@ -18,7 +23,7 @@ vulnerability = "deny"
 unmaintained = "warn"
 yanked = "warn"
 notice = "warn"
-ignore = []
+ignore = ["RUSTSEC-2023-0052"]
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:

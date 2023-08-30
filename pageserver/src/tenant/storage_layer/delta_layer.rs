@@ -239,8 +239,54 @@ impl std::fmt::Debug for DeltaLayerInner {
 
 #[async_trait::async_trait]
 impl Layer for DeltaLayer {
-    /// debugging function to print out the contents of the layer
-    async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
+            .await
+    }
+}
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for DeltaLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
+impl PersistentLayer for DeltaLayer {
+    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
+        Some(self)
+    }
+
+    fn local_path(&self) -> Option<PathBuf> {
+        self.local_path()
+    }
+
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        self.delete_resident_layer_file()
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.info(reset)
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        self.access_stats()
+    }
+}
+
+impl DeltaLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.desc.tenant_id,
@@ -272,30 +318,28 @@ impl Layer for DeltaLayer {
 
         tree_reader.dump().await?;
 
-        let keys = DeltaLayerInner::load_keys(&Ref(&**inner)).await?;
+        let keys = DeltaLayerInner::load_keys(&inner).await?;
 
         // A subroutine to dump a single blob
-        let dump_blob = |val: ValueRef<_>| -> _ {
-            async move {
-                let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
-                let val = Value::des(&buf)?;
-                let desc = match val {
-                    Value::Image(img) => {
-                        format!(" img {} bytes", img.len())
-                    }
-                    Value::WalRecord(rec) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec)?;
-                        format!(
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )
-                    }
-                };
-                Ok(desc)
-            }
-        };
+        async fn dump_blob(val: ValueRef<'_>) -> Result<String> {
+            let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        }
 
         for entry in keys {
             let DeltaEntry { key, lsn, val, .. } = entry;
@@ -312,7 +356,7 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -331,52 +375,19 @@ impl Layer for DeltaLayer {
             .await
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
-}
-/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-impl std::fmt::Display for DeltaLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
-
-impl AsLayerDesc for DeltaLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl PersistentLayer for DeltaLayer {
-    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
-        Some(self)
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn delete_resident_layer_file(&self) -> Result<()> {
+    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_range = self.layer_desc().lsn_range.clone();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
@@ -390,12 +401,10 @@ impl PersistentLayer for DeltaLayer {
         }
     }
 
-    fn access_stats(&self) -> &LayerAccessStats {
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         &self.access_stats
     }
-}
 
-impl DeltaLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         tenant_id: &TenantId,
@@ -458,7 +467,7 @@ impl DeltaLayer {
             PathOrConf::Path(_) => None,
         };
 
-        let loaded = DeltaLayerInner::load(&path, summary)?;
+        let loaded = DeltaLayerInner::load(&path, summary).await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
@@ -541,17 +550,12 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub(crate) async fn load_keys(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<Vec<DeltaEntry<Ref<&'_ DeltaLayerInner>>>> {
+    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-
-        let inner = Ref(&**inner);
-        DeltaLayerInner::load_keys(&inner)
+        DeltaLayerInner::load_keys(inner)
             .await
             .context("Layer index is corrupted")
     }
@@ -837,12 +841,15 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
-    pub(super) fn load(path: &std::path::Path, summary: Option<Summary>) -> anyhow::Result<Self> {
+    pub(super) async fn load(
+        path: &std::path::Path,
+        summary: Option<Summary>,
+    ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
 
-        let summary_blk = file.read_blk(0)?;
+        let summary_blk = file.read_blk(0).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -947,14 +954,14 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
         this: &T,
-    ) -> Result<Vec<DeltaEntry<T>>> {
+    ) -> Result<Vec<DeltaEntry<'_>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
         let tree_reader =
             DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(dl.index_start_blk, dl.index_root_blk, file);
 
-        let mut all_keys: Vec<DeltaEntry<T>> = Vec::new();
+        let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
 
         tree_reader
             .visit(
@@ -964,7 +971,9 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(Adapter(this.clone())),
+                        reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
+                            Adapter(dl),
+                        )),
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -993,43 +1002,23 @@ impl DeltaLayerInner {
     }
 }
 
-/// Cloneable borrow wrapper to make borrows behave like smart pointers.
-///
-/// Shared references are trivially copyable. This wrapper avoids (confusion) to otherwise attempt
-/// cloning DeltaLayerInner.
-pub(crate) struct Ref<T>(T);
-
-impl<'a, T> AsRef<T> for Ref<&'a T> {
-    fn as_ref(&self) -> &T {
-        self.0
-    }
-}
-
-impl<'a, T> Clone for Ref<&'a T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'a, T> Copy for Ref<&'a T> {}
-
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<T: AsRef<DeltaLayerInner>> {
+pub struct DeltaEntry<'a> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<T>,
+    pub val: ValueRef<'a>,
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef<T: AsRef<DeltaLayerInner>> {
+pub struct ValueRef<'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<Adapter<T>>,
+    reader: BlockCursor<'a>,
 }
 
-impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
+impl<'a> ValueRef<'a> {
     /// Loads the value from disk
     pub async fn load(&self) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
@@ -1039,10 +1028,10 @@ impl<T: AsRef<DeltaLayerInner>> ValueRef<T> {
     }
 }
 
-struct Adapter<T: AsRef<DeltaLayerInner>>(T);
+pub(crate) struct Adapter<T>(T);
 
-impl<T: AsRef<DeltaLayerInner>> BlockReader for Adapter<T> {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum)
+impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.0.as_ref().file.read_blk(blknum).await
     }
 }

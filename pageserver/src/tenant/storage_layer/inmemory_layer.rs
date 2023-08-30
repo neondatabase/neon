@@ -7,14 +7,12 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
-use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::*;
@@ -31,12 +29,6 @@ use std::ops::Range;
 use tokio::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
-
-thread_local! {
-    /// A buffer for serializing object during [`InMemoryLayer::put_value`].
-    /// This buffer is reused for each serialization to avoid additional malloc calls.
-    static SER_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-}
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -85,11 +77,11 @@ impl std::fmt::Debug for InMemoryLayerInner {
 }
 
 impl InMemoryLayer {
-    pub fn get_timeline_id(&self) -> TimelineId {
+    pub(crate) fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
 
-    pub fn info(&self) -> InMemoryLayerInfo {
+    pub(crate) fn info(&self) -> InMemoryLayerInfo {
         let lsn_start = self.start_lsn;
 
         if let Some(&lsn_end) = self.end_lsn.get() {
@@ -99,32 +91,22 @@ impl InMemoryLayer {
         }
     }
 
-    fn assert_writable(&self) {
+    pub(crate) fn assert_writable(&self) {
         assert!(self.end_lsn.get().is_none());
     }
 
-    fn end_lsn_or_max(&self) -> Lsn {
+    pub(crate) fn end_lsn_or_max(&self) -> Lsn {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
-}
 
-#[async_trait::async_trait]
-impl Layer for InMemoryLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        Key::MIN..Key::MAX
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
+    pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
     }
 
-    fn is_incremental(&self) -> bool {
-        // in-memory layer is always considered incremental.
-        true
-    }
-
     /// debugging function to print out the contents of the layer
-    async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    ///
+    /// this is likely completly unused
+    pub async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
@@ -171,7 +153,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given value in the layer.
-    async fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -221,6 +203,20 @@ impl Layer for InMemoryLayer {
     }
 }
 
+#[async_trait::async_trait]
+impl Layer for InMemoryLayer {
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
+            .await
+    }
+}
+
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let end_lsn = self.end_lsn_or_max();
@@ -234,7 +230,7 @@ impl InMemoryLayer {
     ///
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
-        Ok(inner.file.size())
+        Ok(inner.file.len())
     }
 
     ///
@@ -269,17 +265,17 @@ impl InMemoryLayer {
     /// Adds the page version to the in-memory tree
     pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let mut inner = self.inner.write().await;
+        let inner: &mut _ = &mut *self.inner.write().await;
         self.assert_writable();
 
         let off = {
-            SER_BUFFER.with(|x| -> Result<_> {
-                let mut buf = x.borrow_mut();
-                buf.clear();
-                val.ser_into(&mut (*buf))?;
-                let off = inner.file.write_blob(&buf)?;
-                Ok(off)
-            })?
+            // Avoid doing allocations for "small" values.
+            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+            buf.clear();
+            val.ser_into(&mut buf)?;
+            inner.file.write_blob(&buf).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
@@ -317,7 +313,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub async fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub(crate) async fn write_to_disk(&self) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception

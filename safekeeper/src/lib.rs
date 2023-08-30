@@ -19,6 +19,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod pull_timeline;
 pub mod receive_wal;
+pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;

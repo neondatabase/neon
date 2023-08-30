@@ -26,6 +26,7 @@ serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
@@ -37,6 +38,7 @@ url.workspace = true
 uuid.workspace = true
 
 pq_proto.workspace = true
+postgres_connection.workspace = true
 metrics.workspace = true
 workspace_hack.workspace = true
 
