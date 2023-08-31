@@ -4697,7 +4697,7 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
 
         new_path.set_file_name(&file_name);
 
-        // FIXME: this will be std::fs::File::create_new once/if ever stabilized
+        // this will be std::fs::File::create_new once/if ever stabilized
         let res = std::fs::File::options()
             .read(true)
             .write(true)
@@ -4718,7 +4718,7 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // the path to be renamed never existed
                 if let Err(e) = std::fs::remove_file(&new_path) {
-                    // this failure should not happen
+                    // this failure should not happen, but do not hide the original with it
                     tracing::error!(
                         "failed to remove the created backup file at {new_path:?}: {e}"
                     );
