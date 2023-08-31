@@ -7,7 +7,6 @@ use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
-use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
 
@@ -74,7 +73,6 @@ impl<'a> Deref for BlockLease<'a> {
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
     FileBlockReaderVirtual(&'a FileBlockReader<VirtualFile>),
-    FileBlockReaderFile(&'a FileBlockReader<std::fs::File>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -87,7 +85,6 @@ impl<'a> BlockReaderRef<'a> {
         use BlockReaderRef::*;
         match self {
             FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
-            FileBlockReaderFile(r) => r.read_blk(blknum).await,
             EphemeralFile(r) => r.read_blk(blknum).await,
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
@@ -150,11 +147,8 @@ pub struct FileBlockReader<F> {
     file_id: page_cache::FileId,
 }
 
-impl<F> FileBlockReader<F>
-where
-    F: FileExt,
-{
-    pub fn new(file: F) -> Self {
+impl FileBlockReader<VirtualFile> {
+    pub fn new(file: VirtualFile) -> Self {
         let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
@@ -193,12 +187,6 @@ where
                 }
             };
         }
-    }
-}
-
-impl BlockReader for FileBlockReader<File> {
-    fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReaderFile(self))
     }
 }
 
