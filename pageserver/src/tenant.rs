@@ -2366,13 +2366,12 @@ impl Tenant {
         Ok(tenant_conf)
     }
 
-    pub(super) fn persist_tenant_config(
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    pub(super) async fn persist_tenant_config(
         tenant_id: &TenantId,
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("saving tenantconf").entered();
-
         // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
 
@@ -3079,7 +3078,7 @@ pub(crate) enum CreateTenantFilesMode {
     Attach,
 }
 
-pub(crate) fn create_tenant_files(
+pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: &TenantId,
@@ -3115,7 +3114,8 @@ pub(crate) fn create_tenant_files(
         mode,
         &temporary_tenant_dir,
         &target_tenant_directory,
-    );
+    )
+    .await;
 
     if creation_result.is_err() {
         error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
@@ -3133,7 +3133,7 @@ pub(crate) fn create_tenant_files(
     Ok(target_tenant_directory)
 }
 
-fn try_create_target_tenant_dir(
+async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: &TenantId,
@@ -3172,7 +3172,7 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf)?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf).await?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
