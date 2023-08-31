@@ -113,9 +113,12 @@ pub fn get_pg_version(pgbin: &str) -> String {
     // version.
     let human_version = get_pg_config("--version", pgbin);
     macro_rules! match_human {
-        ($($version:literal),+) => {$(if (human_version.contains(concat!($version, "."))) {
-            return concat!("v", $version).to_string();
-        })*}
+        ($($version:literal),+) => {$(
+            if (human_version.contains(concat!($version, ".")) ||
+                human_version.contains(concat!($version, "rc"))) {
+                return concat!("v", $version).to_string();
+            }
+        )*}
     }
 
     match_human!(14, 15, 16);
