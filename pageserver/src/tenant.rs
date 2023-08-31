@@ -1518,7 +1518,13 @@ impl Tenant {
         tline.freeze_and_flush().await.context("freeze_and_flush")?;
 
         // Make sure the freeze_and_flush reaches remote storage.
-        tline.remote_client.as_ref().unwrap().wait_completion().await.unwrap();
+        tline
+            .remote_client
+            .as_ref()
+            .unwrap()
+            .wait_completion()
+            .await
+            .unwrap();
 
         let tl = uninit_tl.finish_creation()?;
         // The non-test code would call tl.activate() here.
