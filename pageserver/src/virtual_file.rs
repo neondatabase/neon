@@ -430,21 +430,6 @@ impl Drop for VirtualFile {
     }
 }
 
-impl Write for VirtualFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // flush is no-op for File (at least on unix), so we don't need to do
-        // anything here either.
-        Ok(())
-    }
-}
-
 impl OpenFiles {
     fn new(num_slots: usize) -> OpenFiles {
         let mut slots = Box::new(Vec::with_capacity(num_slots));
