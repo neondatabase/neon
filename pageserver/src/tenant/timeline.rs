@@ -4681,14 +4681,20 @@ fn is_send() {
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
     let filename = path
         .file_name()
         .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
         .to_string_lossy();
     let mut new_path = path.to_owned();
 
+    let mut file_name = String::new();
+
     for i in 0u32.. {
-        new_path.set_file_name(format!("{filename}.{i}.old"));
+        file_name.clear();
+        write!(file_name, "{filename}.{i}.old").expect("string grows, cannot fail");
+
+        new_path.set_file_name(&file_name);
         if !new_path.exists() {
             std::fs::rename(path, &new_path)
                 .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
