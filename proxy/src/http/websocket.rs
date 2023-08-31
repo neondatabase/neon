@@ -2,6 +2,7 @@ use crate::{
     cancellation::CancelMap,
     config::ProxyConfig,
     error::io_error,
+    protocol2::{ProxyProtocolAccept, WithClientIp},
     proxy::{handle_client, ClientMode},
 };
 use bytes::{Buf, Bytes};
@@ -292,6 +293,9 @@ pub async fn task_main(
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
+    let addr_incoming = ProxyProtocolAccept {
+        incoming: addr_incoming,
+    };
 
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
@@ -302,9 +306,11 @@ pub async fn task_main(
         }
     });
 
-    let make_svc =
-        hyper::service::make_service_fn(|stream: &tokio_rustls::server::TlsStream<AddrStream>| {
-            let sni_name = stream.get_ref().1.server_name().map(|s| s.to_string());
+    let make_svc = hyper::service::make_service_fn(
+        |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
+            let (io, tls) = stream.get_ref();
+            let peer_addr = io.client_addr().unwrap_or(io.inner.remote_addr());
+            let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
 
             async move {
@@ -319,13 +325,15 @@ pub async fn task_main(
                         ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
                             .instrument(info_span!(
                                 "ws-client",
-                                session = %session_id
+                                session = %session_id,
+                                %peer_addr,
                             ))
                             .await
                     }
                 }))
             }
-        });
+        },
+    );
 
     hyper::Server::builder(accept::from_stream(tls_listener))
         .serve(make_svc)

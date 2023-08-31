@@ -604,6 +604,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     checkpoint_allowed_to_fail.set()
     env.pageserver.allowed_errors.append(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
+        ".* ERROR .*[Cc]ould not flush frozen layer.*"
     )
 
     # Generous timeout, because currently deletions can get blocked waiting for compaction

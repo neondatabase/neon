@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    protocol2::WithClientIp,
     stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
@@ -100,7 +101,7 @@ pub async fn task_main(
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+                let (socket, _) = accept_result?;
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
@@ -108,13 +109,19 @@ pub async fn task_main(
                     async move {
                         info!("accepted postgres client connection");
 
+                        let mut socket = WithClientIp::new(socket);
+                        if let Some(ip) = socket.wait_for_addr().await? {
+                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                        }
+
                         socket
+                            .inner
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
                         handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
                     }
-                    .instrument(info_span!("handle_client", ?session_id, %peer_addr))
+                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
                         error!(?session_id, "per-client task finished with an error: {e:#}");

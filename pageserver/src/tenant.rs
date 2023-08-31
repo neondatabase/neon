@@ -85,6 +85,7 @@ pub use pageserver_api::models::TenantState;
 use toml_edit;
 use utils::{
     crashsafe,
+    generation::Generation,
     id::{TenantId, TimelineId},
     lsn::{Lsn, RecordLsn},
 };
@@ -178,6 +179,11 @@ pub struct Tenant {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: TenantId,
+
+    /// The remote storage generation, used to protect S3 objects from split-brain.
+    /// Does not change over the lifetime of the [`Tenant`] object.
+    generation: Generation,
+
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -522,6 +528,7 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        generation: Generation,
         broker_client: storage_broker::BrokerClientChannel,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         remote_storage: GenericRemoteStorage,
@@ -538,6 +545,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
+            generation,
             Some(remote_storage.clone()),
         ));
 
@@ -648,12 +656,8 @@ impl Tenant {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
 
-        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
-            remote_storage,
-            self.conf,
-            self.tenant_id,
-        )
-        .await?;
+        let remote_timeline_ids =
+            remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
 
         info!("found {} timelines", remote_timeline_ids.len());
 
@@ -665,6 +669,7 @@ impl Tenant {
                 self.conf,
                 self.tenant_id,
                 timeline_id,
+                self.generation,
             );
             part_downloads.spawn(
                 async move {
@@ -851,6 +856,7 @@ impl Tenant {
             TenantConfOpt::default(),
             wal_redo_manager,
             tenant_id,
+            Generation::broken(),
             None,
         ))
     }
@@ -868,6 +874,7 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        generation: Generation,
         resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -893,6 +900,7 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
+            generation,
             remote_storage.clone(),
         );
         let tenant = Arc::new(tenant);
@@ -2274,6 +2282,7 @@ impl Tenant {
             ancestor,
             new_timeline_id,
             self.tenant_id,
+            self.generation,
             Arc::clone(&self.walredo_mgr),
             resources,
             pg_version,
@@ -2291,6 +2300,7 @@ impl Tenant {
         tenant_conf: TenantConfOpt,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
+        generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
@@ -2349,6 +2359,7 @@ impl Tenant {
 
         Tenant {
             tenant_id,
+            generation,
             conf,
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
@@ -2931,6 +2942,7 @@ impl Tenant {
                 self.conf,
                 self.tenant_id,
                 timeline_id,
+                self.generation,
             );
             Some(remote_client)
         } else {
@@ -3454,6 +3466,7 @@ pub mod harness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
+        pub generation: Generation,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3495,6 +3508,7 @@ pub mod harness {
                 conf,
                 tenant_conf,
                 tenant_id,
+                generation: Generation::new(0xdeadbeef),
             })
         }
 
@@ -3521,6 +3535,7 @@ pub mod harness {
                 TenantConfOpt::from(self.tenant_conf),
                 walredo_mgr,
                 self.tenant_id,
+                self.generation,
                 remote_storage,
             ));
             tenant

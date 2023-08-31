@@ -27,6 +27,9 @@ pub mod id;
 // http endpoint utils
 pub mod http;
 
+// definition of the Generation type for pageserver attachment APIs
+pub mod generation;
+
 // common log initialisation routine
 pub mod logging;
 
