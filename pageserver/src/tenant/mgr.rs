@@ -278,6 +278,7 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
