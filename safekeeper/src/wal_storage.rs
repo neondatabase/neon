@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
-use postgres_ffi::{XLogSegNo, PG_TLI, dispatch_pgversion};
+use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
 use std::io::{self, SeekFrom};
@@ -142,11 +142,7 @@ impl PhysicalStorage {
 
             dispatch_pgversion!(
                 version,
-                pgv::xlog_utils::find_end_of_wal(
-                    &timeline_dir,
-                    wal_seg_size,
-                    state.commit_lsn,
-                )?,
+                pgv::xlog_utils::find_end_of_wal(&timeline_dir, wal_seg_size, state.commit_lsn,)?,
                 bail!("unsupported postgres version: {}", version)
             )
         };

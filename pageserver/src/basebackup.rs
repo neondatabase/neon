@@ -326,10 +326,11 @@ where
                 .await?;
 
             ensure!(
-                img.len() == dispatch_pgversion!(
-                    self.timeline.pg_version,
-                    pgv::bindings::SIZEOF_RELMAPFILE
-                )
+                img.len()
+                    == dispatch_pgversion!(
+                        self.timeline.pg_version,
+                        pgv::bindings::SIZEOF_RELMAPFILE
+                    )
             );
 
             Some(img)

@@ -116,10 +116,7 @@ pub use v14::xlog_utils::XLogFileName;
 pub use v14::bindings::DBState_DB_SHUTDOWNED;
 
 pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> anyhow::Result<bool> {
-    dispatch_pgversion!(
-        version,
-        Ok(pgv::bindings::bkpimg_is_compressed(bimg_info))
-    )
+    dispatch_pgversion!(version, Ok(pgv::bindings::bkpimg_is_compressed(bimg_info)))
 }
 
 pub fn generate_wal_segment(
