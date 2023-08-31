@@ -212,7 +212,7 @@ pub enum LayerFileName {
 }
 
 impl LayerFileName {
-    pub(crate) fn file_name(&self) -> String {
+    pub fn file_name(&self) -> String {
         self.to_string()
     }
 

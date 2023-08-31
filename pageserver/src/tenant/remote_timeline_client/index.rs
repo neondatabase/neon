@@ -110,6 +110,16 @@ impl IndexPart {
             deleted_at: None,
         }
     }
+
+    pub fn get_version(&self) -> usize {
+        self.version
+    }
+
+    /// If you want this under normal operations, read it from self.metadata:
+    /// this method is just for the scrubber to use when validating an index.
+    pub fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn
+    }
 }
 
 impl TryFrom<&UploadQueueInitialized> for IndexPart {
@@ -130,7 +140,7 @@ impl TryFrom<&UploadQueueInitialized> for IndexPart {
 /// Serialized form of [`LayerFileMetadata`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct IndexLayerMetadata {
-    pub(super) file_size: u64,
+    pub file_size: u64,
 }
 
 impl From<LayerFileMetadata> for IndexLayerMetadata {
