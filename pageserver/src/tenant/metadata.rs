@@ -9,9 +9,9 @@
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{ensure, Context};
 use serde::{de::Error, Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracing::info_span;
@@ -273,10 +273,7 @@ pub async fn save_metadata(
 
     let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
 
-    if file.write(&metadata_bytes)? != metadata_bytes.len() {
-        bail!("Could not write all the metadata bytes in a single call");
-    }
-    file.sync_all()?;
+    file.write_and_fsync(&metadata_bytes)?;
 
     // fsync the parent directory to ensure the directory entry is durable
     if first_save {
