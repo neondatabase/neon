@@ -2,8 +2,7 @@ import time
 from functools import partial
 
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.utils import wait_until
-from regress.test_wal_acceptor import assert_commit_lsn_equals_flush_lsn
+from fixtures.sk_utils import is_commit_lsn_equals_flush_lsn, wait
 
 
 # Test safekeeper sync and pageserver catch up
@@ -57,7 +56,10 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
     # wait until safekeepers catch up. This forces/tests fast path which avoids
     # sync-safekeepers on next compute start.
     for sk in env.safekeepers:
-        wait_until(10, 0.5, partial(assert_commit_lsn_equals_flush_lsn, sk, tenant_id, timeline_id))
+        wait(
+            partial(is_commit_lsn_equals_flush_lsn, sk, tenant_id, timeline_id),
+            "commit_lsn to reach flush_lsn",
+        )
 
     # stop safekeepers gracefully
     env.safekeepers[0].stop()
