@@ -96,18 +96,12 @@ pub trait BlobWriter {
 /// An implementation of BlobWriter to write blobs to anything that
 /// implements std::io::Write.
 ///
-pub struct WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
+pub struct WriteBlobWriter<W> {
     inner: W,
     offset: u64,
 }
 
-impl<W> WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
+impl<W> WriteBlobWriter<W> {
     pub fn new(inner: W, start_offset: u64) -> Self {
         WriteBlobWriter {
             inner,
