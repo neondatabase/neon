@@ -5617,7 +5617,6 @@ dependencies = [
  "futures-core",
  "futures-executor",
  "futures-sink",
- "futures-task",
  "futures-util",
  "hex",
  "hyper",
