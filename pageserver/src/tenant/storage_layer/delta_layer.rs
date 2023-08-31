@@ -632,11 +632,11 @@ impl DeltaLayerWriterInner {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
+    async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init()).await
     }
 
-    fn put_value_bytes(
+    async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -645,7 +645,7 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
-        let off = self.blob_writer.write_blob(val)?;
+        let off = self.blob_writer.write_blob(val)?; // TOOD: do what we discussed
 
         let blob_ref = BlobRef::new(off, will_init);
 
@@ -797,11 +797,11 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_value(key, lsn, val)
+    pub async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_value(key, lsn, val).await
     }
 
-    pub fn put_value_bytes(
+    pub async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -811,7 +811,7 @@ impl DeltaLayerWriter {
         self.inner
             .as_mut()
             .unwrap()
-            .put_value_bytes(key, lsn, val, will_init)
+            .put_value_bytes(key, lsn, val, will_init).await
     }
 
     pub fn size(&self) -> u64 {

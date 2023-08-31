@@ -3599,7 +3599,7 @@ impl Timeline {
                 )))
             });
 
-            writer.as_mut().unwrap().put_value(key, lsn, value)?;
+            writer.as_mut().unwrap().put_value(key, lsn, value).await?;
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
