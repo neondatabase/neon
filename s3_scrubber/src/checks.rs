@@ -9,11 +9,10 @@ use tokio::task::JoinSet;
 use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectId};
-use crate::copied_definitions::filename::LayerFileName;
-use crate::copied_definitions::index::IndexPart;
-use crate::copied_definitions::metadata::TimelineMetadata;
 use crate::delete_batch_producer::DeleteProducerStats;
 use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
+use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::IndexPart;
 use utils::id::TenantTimelineId;
 
 pub async fn validate_pageserver_active_tenant_and_timelines(
@@ -195,57 +194,44 @@ async fn branch_cleanup_and_check_errors(
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
-                    mut index_part,
+                    index_part,
                     mut s3_layers,
                 } => {
-                    if !KNOWN_VERSIONS.contains(&index_part.version) {
-                        branch_check_errors
-                            .push(format!("index_part.json version: {}", index_part.version))
+                    if !KNOWN_VERSIONS.contains(&index_part.get_version()) {
+                        branch_check_errors.push(format!(
+                            "index_part.json version: {}",
+                            index_part.get_version()
+                        ))
                     }
 
-                    match TimelineMetadata::from_bytes(&index_part.metadata_bytes) {
-                        Ok(index_metadata) => {
-                            if index_metadata.disk_consistent_lsn()
-                                != index_part.disk_consistent_lsn
-                            {
-                                branch_check_errors.push(format!(
+                    if index_part.metadata.disk_consistent_lsn()
+                        != index_part.get_disk_consistent_lsn()
+                    {
+                        branch_check_errors.push(format!(
                                     "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
-                                    index_metadata.disk_consistent_lsn(),
-                                    index_part.disk_consistent_lsn,
+                                    index_part.metadata.disk_consistent_lsn(),
+                                    index_part.get_disk_consistent_lsn(),
 
                                 ))
-                            }
-                        }
-                        Err(e) => branch_check_errors.push(format!(
-                            "Could not parse index_part.json metadata_bytes: {e}"
-                        )),
                     }
 
-                    if index_part.timeline_layers.is_empty() {
+                    if index_part.layer_metadata.is_empty() {
                         // not an error, can happen for branches with zero writes, but notice that
                         info!("index_part.json has no layers");
-                    } else {
-                        for index_layer in index_part.timeline_layers {
-                            match index_part.layer_metadata.remove(&index_layer) {
-                                Some(index_layer_metadata) => {
-                                    if index_layer_metadata.file_size == 0 {
-                                        branch_check_errors.push(format!(
-                                            "index_part.json contains a layer {} that has 0 size in its layer metadata", index_layer.file_name(),
-                                        ))
-                                    }
-                                }
-                                None => branch_check_errors.push(format!(
-                                    "index_part.json contains a layer {} that has no layer metadata",
-                                    index_layer.file_name(),
-                                )),
-                            }
+                    }
 
-                            if !s3_layers.remove(&index_layer) {
-                                branch_check_errors.push(format!(
-                                    "index_part.json contains a layer {} that is not present in S3",
-                                    index_layer.file_name(),
-                                ))
-                            }
+                    for (layer, metadata) in index_part.layer_metadata {
+                        if metadata.file_size == 0 {
+                            branch_check_errors.push(format!(
+                                            "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
+                                        ))
+                        }
+
+                        if !s3_layers.remove(&layer) {
+                            branch_check_errors.push(format!(
+                                "index_part.json contains a layer {} that is not present in S3",
+                                layer.file_name(),
+                            ))
                         }
                     }
 

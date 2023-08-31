@@ -1,6 +1,5 @@
 pub mod checks;
 pub mod cloud_admin_api;
-mod copied_definitions;
 pub mod delete_batch_producer;
 mod s3_deletion;
 

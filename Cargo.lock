@@ -3750,6 +3750,7 @@ dependencies = [
  "crc32c",
  "either",
  "hex",
+ "pageserver",
  "rand",
  "reqwest",
  "serde",
