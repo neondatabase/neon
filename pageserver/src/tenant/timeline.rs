@@ -4682,6 +4682,7 @@ fn is_send() {
 /// Uses the first available num (starts at 0)
 fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     use std::fmt::Write as _;
+
     let filename = path
         .file_name()
         .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
@@ -4695,10 +4696,25 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
         write!(file_name, "{filename}.{i}.old").expect("string grows, cannot fail");
 
         new_path.set_file_name(&file_name);
-        if !new_path.exists() {
-            std::fs::rename(path, &new_path)
-                .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
-            return Ok(());
+
+        // FIXME: this will be std::fs::File::create_new once/if ever stabilized
+        let res = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&new_path);
+
+        match res {
+            Ok(_) => {
+                std::fs::rename(path, &new_path)
+                    .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => { /* try next */ }
+            Err(e) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("find backup file for {path:?} in {new_path:?}")))
+            }
         }
     }
 
