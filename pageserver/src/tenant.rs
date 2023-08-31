@@ -448,6 +448,7 @@ impl Tenant {
                 up_to_date_metadata,
                 first_save,
             )
+            .await
             .context("save_metadata")?;
         }
 
@@ -1450,7 +1451,7 @@ impl Tenant {
     /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
-    pub fn create_empty_timeline(
+    pub async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
@@ -1462,10 +1463,10 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timelines = self.timelines.lock().unwrap();
-        let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id, &timelines)?;
-        drop(timelines);
-
+        let timeline_uninit_mark = {
+            let timelines = self.timelines.lock().unwrap();
+            self.create_timeline_uninit_mark(new_timeline_id, &timelines)?
+        };
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
             // make it valid, before calling finish_creation()
@@ -1484,6 +1485,7 @@ impl Tenant {
             initdb_lsn,
             None,
         )
+        .await
     }
 
     /// Helper for unit tests to create an empty timeline.
@@ -1499,7 +1501,9 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_tl = self.create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)?;
+        let uninit_tl = self
+            .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
+            .await?;
         let tline = uninit_tl.raw_timeline().expect("we just created it");
         assert_eq!(tline.get_last_record_lsn(), Lsn(0));
 
@@ -2797,13 +2801,15 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let uninitialized_timeline = self.prepare_new_timeline(
-            dst_id,
-            &metadata,
-            timeline_uninit_mark,
-            start_lsn + 1,
-            Some(Arc::clone(src_timeline)),
-        )?;
+        let uninitialized_timeline = self
+            .prepare_new_timeline(
+                dst_id,
+                &metadata,
+                timeline_uninit_mark,
+                start_lsn + 1,
+                Some(Arc::clone(src_timeline)),
+            )
+            .await?;
 
         let new_timeline = uninitialized_timeline.finish_creation()?;
 
@@ -2881,13 +2887,15 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline = self.prepare_new_timeline(
-            timeline_id,
-            &new_metadata,
-            timeline_uninit_mark,
-            pgdata_lsn,
-            None,
-        )?;
+        let raw_timeline = self
+            .prepare_new_timeline(
+                timeline_id,
+                &new_metadata,
+                timeline_uninit_mark,
+                pgdata_lsn,
+                None,
+            )
+            .await?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2958,7 +2966,7 @@ impl Tenant {
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map and to remove the
     /// uninit mark file.
-    fn prepare_new_timeline(
+    async fn prepare_new_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -2986,8 +2994,9 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) =
-            self.create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
+        if let Err(e) = self
+            .create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
+            .await
         {
             error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
@@ -3003,7 +3012,7 @@ impl Tenant {
         ))
     }
 
-    fn create_timeline_files(
+    async fn create_timeline_files(
         &self,
         timeline_path: &Path,
         new_timeline_id: &TimelineId,
@@ -3022,6 +3031,7 @@ impl Tenant {
             new_metadata,
             true,
         )
+        .await
         .context("Failed to create timeline metadata")?;
         Ok(())
     }
@@ -3649,7 +3659,10 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx) {
+        match tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+        {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -4489,8 +4502,9 @@ mod tests {
             .await;
 
         let initdb_lsn = Lsn(0x20);
-        let utline =
-            tenant.create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)?;
+        let utline = tenant
+            .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let tline = utline.raw_timeline().unwrap();
 
         // Spawn flush loop now so that we can set the `expect_initdb_optimization`
@@ -4555,8 +4569,9 @@ mod tests {
         let harness = TenantHarness::create(name)?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant
+                .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+                .await?;
             // Keeps uninit mark in place
             std::mem::forget(tline);
         }

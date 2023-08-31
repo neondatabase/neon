@@ -2735,6 +2735,7 @@ impl Timeline {
         if disk_consistent_lsn != old_disk_consistent_lsn {
             assert!(disk_consistent_lsn > old_disk_consistent_lsn);
             self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)
+                .await
                 .context("update_metadata_file")?;
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
@@ -2743,7 +2744,7 @@ impl Timeline {
     }
 
     /// Update metadata file
-    fn update_metadata_file(
+    async fn update_metadata_file(
         &self,
         disk_consistent_lsn: Lsn,
         layer_paths_to_upload: HashMap<LayerFileName, LayerFileMetadata>,
@@ -2791,6 +2792,7 @@ impl Timeline {
             &metadata,
             false,
         )
+        .await
         .context("save_metadata")?;
 
         if let Some(remote_client) = &self.remote_client {
@@ -4122,7 +4124,8 @@ impl Timeline {
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value in the metadata file, before
             // we actually remove anything.
-            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())?;
+            self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())
+                .await?;
 
             // Actually delete the layers from disk and remove them from the map.
             // (couldn't do this in the loop above, because you cannot modify a collection
