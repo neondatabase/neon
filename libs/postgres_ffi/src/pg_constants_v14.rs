@@ -6,5 +6,5 @@ pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during rep
 pub const SIZEOF_RELMAPFILE: usize = 512; /* sizeof(RelMapFile) in relmapper.c */
 
 pub fn bkpimg_is_compressed(bimg_info: u8) -> bool {
-    return (bimg_info & BKPIMAGE_IS_COMPRESSED) != 0
+    (bimg_info & BKPIMAGE_IS_COMPRESSED) != 0
 }
