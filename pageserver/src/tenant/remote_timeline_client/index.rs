@@ -335,11 +335,13 @@ mod tests {
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
+                    generation: Generation::none()
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
+                    generation: Generation::none()
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
