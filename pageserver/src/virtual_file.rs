@@ -392,7 +392,7 @@ impl VirtualFile {
     /// Write the given buffer (which has to be below the kernel's internal page size) and fsync
     ///
     /// This ensures some level of atomicity (not a good one, but it's the best we have).
-    pub async fn write_and_fsync(&mut self, buf: &[u8]) -> Result<(), Error> {
+    pub fn write_and_fsync(&mut self, buf: &[u8]) -> Result<(), Error> {
         if self.write(buf)? != buf.len() {
             return Err(Error::new(
                 std::io::ErrorKind::Other,
