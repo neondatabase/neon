@@ -53,9 +53,6 @@
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
-#ifdef GTE_PG16
-#include "utils/elog.h"
-#endif
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -90,7 +87,7 @@ static char *hexdump_page(char *page);
 
 #define IS_LOCAL_REL(reln) (\
 	NInfoGetDbOid(InfoFromSMgrRel(reln)) != 0 && \
-		NInfoGetRelNumber(InfoFromSMgrRel(reln)) \
+		NInfoGetRelNumber(InfoFromSMgrRel(reln)) > FirstNormalObjectId \
 )
 
 const int	SmgrTrace = DEBUG5;

@@ -8,3 +8,11 @@ pub const BKPIMAGE_APPLY: u8 = 0x02; /* page image should be restored during rep
 pub const BKPIMAGE_COMPRESS_PGLZ: u8 = 0x04; /* page image is compressed */
 pub const BKPIMAGE_COMPRESS_LZ4: u8 = 0x08; /* page image is compressed */
 pub const BKPIMAGE_COMPRESS_ZSTD: u8 = 0x10; /* page image is compressed */
+
+pub const SIZEOF_RELMAPFILE: usize = 524; /* sizeof(RelMapFile) in relmapper.c */
+
+pub fn bkpimg_is_compressed(bimg_info: u8) -> bool {
+    const ANY_COMPRESS_FLAG: u8 = BKPIMAGE_COMPRESS_PGLZ | BKPIMAGE_COMPRESS_LZ4 | BKPIMAGE_COMPRESS_ZSTD;
+
+    return (bimg_info & ANY_COMPRESS_FLAG) != 0
+}

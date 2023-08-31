@@ -57,6 +57,31 @@ macro_rules! for_all_postgres_versions {
 
 for_all_postgres_versions! { postgres_ffi }
 
+#[macro_export]
+macro_rules! dispatch_pgversion {
+    ($version:expr, $code:expr) => {
+        dispatch_pgversion!($version, $code, panic!("Unknown PostgreSQL version {}", $version))
+    };
+    ($version:expr, $code:expr, $default:expr) => {
+        dispatch_pgversion!($version => $code,
+                            default = $default,
+                            pgversions = (14 v14, 15 v15, 16 v16))
+    };
+    ($pgversion:expr => $code:expr,
+     default = $default:expr,
+     pgversions = ($($sv:literal $vsv:ident),+)) => {
+        match ($pgversion) {
+            $($sv => {
+                use $crate::$vsv as pgv;
+                $code
+            },)+
+            _ => {
+                $default
+            }
+        }
+    };
+}
+
 pub mod pg_constants;
 pub mod relfile_utils;
 
@@ -91,16 +116,10 @@ pub use v14::xlog_utils::XLogFileName;
 pub use v14::bindings::DBState_DB_SHUTDOWNED;
 
 pub fn bkpimage_is_compressed(bimg_info: u8, version: u32) -> anyhow::Result<bool> {
-    match version {
-        14 => Ok(bimg_info & v14::bindings::BKPIMAGE_IS_COMPRESSED != 0),
-        15 => Ok(bimg_info & v15::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
-            || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_LZ4 != 0
-            || bimg_info & v15::bindings::BKPIMAGE_COMPRESS_ZSTD != 0),
-        16 => Ok(bimg_info & v16::bindings::BKPIMAGE_COMPRESS_PGLZ != 0
-            || bimg_info & v16::bindings::BKPIMAGE_COMPRESS_LZ4 != 0
-            || bimg_info & v16::bindings::BKPIMAGE_COMPRESS_ZSTD != 0),
-        _ => anyhow::bail!("Unknown version {}", version),
-    }
+    dispatch_pgversion!(
+        version,
+        Ok(pgv::bindings::bkpimg_is_compressed(bimg_info))
+    )
 }
 
 pub fn generate_wal_segment(
@@ -111,12 +130,11 @@ pub fn generate_wal_segment(
 ) -> Result<Bytes, SerializeError> {
     assert_eq!(segno, lsn.segment_number(WAL_SEGMENT_SIZE));
 
-    match pg_version {
-        14 => v14::xlog_utils::generate_wal_segment(segno, system_id, lsn),
-        15 => v15::xlog_utils::generate_wal_segment(segno, system_id, lsn),
-        16 => v16::xlog_utils::generate_wal_segment(segno, system_id, lsn),
-        _ => Err(SerializeError::BadInput),
-    }
+    dispatch_pgversion!(
+        pg_version,
+        pgv::xlog_utils::generate_wal_segment(segno, system_id, lsn),
+        Err(SerializeError::BadInput)
+    )
 }
 
 pub fn generate_pg_control(
@@ -125,12 +143,11 @@ pub fn generate_pg_control(
     lsn: Lsn,
     pg_version: u32,
 ) -> anyhow::Result<(Bytes, u64)> {
-    match pg_version {
-        14 => v14::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
-        15 => v15::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
-        16 => v16::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
-        _ => anyhow::bail!("Unknown version {}", pg_version),
-    }
+    dispatch_pgversion!(
+        pg_version,
+        pgv::xlog_utils::generate_pg_control(pg_control_bytes, checkpoint_bytes, lsn),
+        anyhow::bail!("Unknown version {}", pg_version)
+    )
 }
 
 // PG timeline is always 1, changing it doesn't have any useful meaning in Neon.
@@ -202,8 +219,6 @@ pub fn fsm_logical_to_physical(addr: BlockNumber) -> BlockNumber {
 }
 
 pub mod waldecoder {
-
-    use crate::{v14, v15, v16};
     use bytes::{Buf, Bytes, BytesMut};
     use std::num::NonZeroU32;
     use thiserror::Error;
@@ -254,26 +269,17 @@ pub mod waldecoder {
         }
 
         pub fn poll_decode(&mut self) -> Result<Option<(Lsn, Bytes)>, WalDecodeError> {
-            match self.pg_version {
-                // This is a trick to support both versions simultaneously.
-                // See WalStreamDecoderHandler comments.
-                14 => {
-                    use self::v14::waldecoder_handler::WalStreamDecoderHandler;
+            dispatch_pgversion!(
+                self.pg_version,
+                {
+                    use pgv::waldecoder_handler::WalStreamDecoderHandler;
                     self.poll_decode_internal()
-                }
-                15 => {
-                    use self::v15::waldecoder_handler::WalStreamDecoderHandler;
-                    self.poll_decode_internal()
-                }
-                16 => {
-                    use self::v16::waldecoder_handler::WalStreamDecoderHandler;
-                    self.poll_decode_internal()
-                }
-                _ => Err(WalDecodeError {
+                },
+                Err(WalDecodeError {
                     msg: format!("Unknown version {}", self.pg_version),
                     lsn: self.lsn,
-                }),
-            }
+                })
+            )
         }
     }
 }

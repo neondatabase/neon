@@ -1,6 +1,7 @@
-//
-// Created by Matthias on 2023-07-17.
-//
+/*
+ * Compatibility macros to cover up differences between supported PostgreSQL versions,
+ * to help with compiling the same sources for all of them.
+ */
 
 #ifndef NEON_PGVERSIONCOMPAT_H
 #define NEON_PGVERSIONCOMPAT_H

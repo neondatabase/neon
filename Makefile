@@ -153,7 +153,7 @@ neon-pg-ext-%: postgres-%
 neon-pg-ext-v14: neon-pg-ext-hnsw-v14
 neon-pg-ext-v15: neon-pg-ext-hnsw-v15
 
-neon-pg-ext-hnsw-%: postgres-headers-%
+neon-pg-ext-hnsw-%: postgres-headers-% postgres-%
 	+@echo "Compiling hnsw $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/hnsw-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \

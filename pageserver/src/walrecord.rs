@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
@@ -626,12 +627,10 @@ pub fn decode_wal_record(
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = match pg_version {
-                        14 => (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0,
-                        15 => (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0,
-                        16 => (blk.bimg_info & postgres_ffi::v16::bindings::BKPIMAGE_APPLY) != 0,
-                        _ => unreachable!(),
-                    };
+                    blk.apply_image = dispatch_pgversion!(
+                        pg_version,
+                        (blk.bimg_info & pgv::bindings::BKPIMAGE_APPLY) != 0
+                    );
 
                     let blk_img_is_compressed =
                         postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;

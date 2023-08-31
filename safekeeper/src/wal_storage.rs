@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
-use postgres_ffi::{XLogSegNo, PG_TLI};
+use postgres_ffi::{XLogSegNo, PG_TLI, dispatch_pgversion};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
 use std::io::{self, SeekFrom};
@@ -138,24 +138,17 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            match state.server.pg_version / 10000 {
-                14 => postgres_ffi::v14::xlog_utils::find_end_of_wal(
+            let version = state.server.pg_version / 10000;
+
+            dispatch_pgversion!(
+                version,
+                pgv::xlog_utils::find_end_of_wal(
                     &timeline_dir,
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
-                15 => postgres_ffi::v15::xlog_utils::find_end_of_wal(
-                    &timeline_dir,
-                    wal_seg_size,
-                    state.commit_lsn,
-                )?,
-                16 => postgres_ffi::v16::xlog_utils::find_end_of_wal(
-                    &timeline_dir,
-                    wal_seg_size,
-                    state.commit_lsn,
-                )?,
-                _ => bail!("unsupported postgres version: {}", state.server.pg_version),
-            }
+                bail!("unsupported postgres version: {}", version)
+            )
         };
 
         // TODO: do we really know that write_lsn is fully flushed to disk?

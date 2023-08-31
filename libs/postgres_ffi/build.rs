@@ -125,6 +125,7 @@ fn main() -> anyhow::Result<()> {
             .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
             .allowlist_type("PageHeaderData")
             .allowlist_type("DBState")
+            .allowlist_type("RelMapFile")
             // Because structs are used for serialization, tell bindgen to emit
             // explicit padding fields.
             .explicit_padding(true)

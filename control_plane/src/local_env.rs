@@ -177,26 +177,20 @@ impl LocalEnv {
         let path = self.pg_distrib_dir.clone();
 
         match pg_version {
-            14 => Ok(path.join(format!("v{pg_version}"))),
-            15 => Ok(path.join(format!("v{pg_version}"))),
-            16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
     pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            16 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            14 | 15 | 16 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            16 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            14 | 15 | 16 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }

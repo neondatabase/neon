@@ -13,7 +13,7 @@ in each major PostgreSQL version. Currently, this module supports
 PostgreSQL v14, v15 and v16: bindings and code that depends on them are
 version-specific.
 This code is organized in modules `postgres_ffi::v14`, `postgres_ffi::v15` and
-`postgres_ffi::v16`. Version independend code is explicitly exported into
+`postgres_ffi::v16`. Version independent code is explicitly exported into
 shared `postgres_ffi`.
 
 

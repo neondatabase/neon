@@ -25,6 +25,7 @@ use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
@@ -323,14 +324,14 @@ where
                 .timeline
                 .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
+
             ensure!(
-                img.len()
-                    == match self.timeline.pg_version {
-                        14 | 15 => 512,
-                        16 => 524,
-                        it => bail!("Unknown PG version {}", it),
-                    }
+                img.len() == dispatch_pgversion!(
+                    self.timeline.pg_version,
+                    pgv::bindings::SIZEOF_RELMAPFILE
+                )
             );
+
             Some(img)
         } else {
             None
