@@ -68,7 +68,7 @@ use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
-use crate::tenant::remote_timeline_client::index::IndexPart;
+pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;

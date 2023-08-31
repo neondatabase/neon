@@ -96,6 +96,10 @@ impl IndexPart {
     ///      is always generated from the keys of `layer_metadata`)
     /// - 4: timeline_layers is fully removed.
     const LATEST_VERSION: usize = 4;
+
+    // Versions we may see when reading from a bucket.
+    pub const KNOWN_VERSIONS: &[usize] = &[1, 2, 3, 4];
+
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
@@ -117,6 +121,16 @@ impl IndexPart {
             deleted_at: None,
         }
     }
+
+    pub fn get_version(&self) -> usize {
+        self.version
+    }
+
+    /// If you want this under normal operations, read it from self.metadata:
+    /// this method is just for the scrubber to use when validating an index.
+    pub fn get_disk_consistent_lsn(&self) -> Lsn {
+        self.disk_consistent_lsn
+    }
 }
 
 impl TryFrom<&UploadQueueInitialized> for IndexPart {
@@ -137,7 +151,7 @@ impl TryFrom<&UploadQueueInitialized> for IndexPart {
 /// Serialized form of [`LayerFileMetadata`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct IndexLayerMetadata {
-    pub(super) file_size: u64,
+    pub file_size: u64,
 
     #[serde(default = "Generation::none")]
     #[serde(skip_serializing_if = "Generation::is_none")]
