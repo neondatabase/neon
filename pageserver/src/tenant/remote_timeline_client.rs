@@ -1463,11 +1463,8 @@ mod tests {
         },
         DEFAULT_PG_VERSION,
     };
-    use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::{
-        collections::HashSet,
-        path::{Path, PathBuf},
-    };
+
+    use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1524,8 +1521,6 @@ mod tests {
         tenant: Arc<Tenant>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
-        remote_fs_dir: PathBuf,
-        client: Arc<RemoteTimelineClient>,
     }
 
     impl TestSetup {
@@ -1540,47 +1535,11 @@ mod tests {
                 .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
                 .await?;
 
-            let remote_fs_dir = harness.conf.workdir.join("remote_fs");
-            std::fs::create_dir_all(remote_fs_dir)?;
-            let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
-
-            let storage_config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                )
-                .unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                )
-                .unwrap(),
-                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
-            };
-
-            let generation = Generation::new(0xdeadbeef);
-
-            let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
-
-            let client = Arc::new(RemoteTimelineClient {
-                conf: harness.conf,
-                runtime: tokio::runtime::Handle::current(),
-                tenant_id: harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                generation,
-                storage_impl: storage,
-                upload_queue: Mutex::new(UploadQueue::Uninitialized),
-                metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                    &harness.tenant_id,
-                    &TIMELINE_ID,
-                )),
-            });
-
             Ok(Self {
                 harness,
                 tenant,
                 timeline,
                 tenant_ctx: ctx,
-                remote_fs_dir,
-                client,
             })
         }
     }
@@ -1605,24 +1564,20 @@ mod tests {
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline: _timeline,
+            timeline,
             tenant_ctx: _tenant_ctx,
-            remote_fs_dir,
-            client,
         } = TestSetup::new("upload_scheduling").await.unwrap();
+
+        let client = timeline.remote_client.as_ref().unwrap();
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         println!("workdir: {}", harness.conf.workdir.display());
 
-        let remote_timeline_dir =
-            remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
+        let remote_timeline_dir = harness
+            .remote_fs_dir
+            .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
-
-        let metadata = dummy_metadata(Lsn(0x10));
-        client
-            .init_upload_queue_for_empty_remote(&metadata)
-            .unwrap();
 
         let generation = Generation::new(0xdeadbeef);
 
@@ -1763,16 +1718,10 @@ mod tests {
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline: _timeline,
-            client,
+            timeline,
             ..
         } = TestSetup::new("metrics").await.unwrap();
-
-        let metadata = dummy_metadata(Lsn(0x10));
-        client
-            .init_upload_queue_for_empty_remote(&metadata)
-            .unwrap();
-
+        let client = timeline.remote_client.as_ref().unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
@@ -1783,10 +1732,19 @@ mod tests {
         )
         .unwrap();
 
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, Clone, Copy)]
         struct BytesStartedFinished {
             started: Option<usize>,
             finished: Option<usize>,
+        }
+        impl std::ops::Add for BytesStartedFinished {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self::Output {
+                Self {
+                    started: self.started.map(|v| v + rhs.started.unwrap_or(0)),
+                    finished: self.finished.map(|v| v + rhs.finished.unwrap_or(0)),
+                }
+            }
         }
         let get_bytes_started_stopped = || {
             let started = client
@@ -1804,47 +1762,38 @@ mod tests {
         };
 
         // Test
+        tracing::info!("now doing actual test");
 
-        let generation = Generation::new(0xdeadbeef);
-
-        let init = get_bytes_started_stopped();
+        let actual_a = get_bytes_started_stopped();
 
         client
             .schedule_layer_file_upload(
                 &layer_file_name_1,
-                &LayerFileMetadata::new(content_1.len() as u64, generation),
+                &LayerFileMetadata::new(content_1.len() as u64, harness.generation),
             )
             .unwrap();
 
-        let pre = get_bytes_started_stopped();
+        let actual_b = get_bytes_started_stopped();
 
         client.wait_completion().await.unwrap();
 
-        let post = get_bytes_started_stopped();
+        let actual_c = get_bytes_started_stopped();
 
         // Validate
 
-        assert_eq!(
-            init,
-            BytesStartedFinished {
-                started: None,
-                finished: None
-            }
-        );
-        assert_eq!(
-            pre,
-            BytesStartedFinished {
+        let expected_b = actual_a
+            + BytesStartedFinished {
                 started: Some(content_1.len()),
                 // assert that the _finished metric is created eagerly so that subtractions work on first sample
                 finished: Some(0),
-            }
-        );
-        assert_eq!(
-            post,
-            BytesStartedFinished {
+            };
+        assert_eq!(actual_b, expected_b);
+
+        let expected_c = actual_a
+            + BytesStartedFinished {
                 started: Some(content_1.len()),
-                finished: Some(content_1.len())
-            }
-        );
+                finished: Some(content_1.len()),
+            };
+        assert_eq!(actual_c, expected_c);
     }
 }

@@ -195,7 +195,7 @@ pub struct Tenant {
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
     // provides access to timeline data sitting in the remote storage
-    remote_storage: Option<GenericRemoteStorage>,
+    pub(crate) remote_storage: Option<GenericRemoteStorage>,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1516,6 +1516,9 @@ impl Tenant {
         // Flush to disk so that uninit_tl's check for valid disk_consistent_lsn passes.
         tline.maybe_spawn_flush_loop();
         tline.freeze_and_flush().await.context("freeze_and_flush")?;
+
+        // Make sure the freeze_and_flush reaches remote storage.
+        tline.remote_client.as_ref().unwrap().wait_completion().await.unwrap();
 
         let tl = uninit_tl.finish_creation()?;
         // The non-test code would call tl.activate() here.
@@ -3410,6 +3413,8 @@ pub mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
+        remote_storage: GenericRemoteStorage,
+        pub remote_fs_dir: PathBuf,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3447,11 +3452,25 @@ pub mod harness {
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
+            use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
+            let remote_fs_dir = conf.workdir.join("localfs");
+            std::fs::create_dir_all(&remote_fs_dir).unwrap();
+            let config = RemoteStorageConfig {
+                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            };
+            let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+
             Ok(Self {
                 conf,
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
+                remote_storage,
+                remote_fs_dir,
             })
         }
 
@@ -3466,22 +3485,7 @@ pub mod harness {
         }
 
         pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-
             let walredo_mgr = Arc::new(TestRedoManager);
-
-            let remote_storage = {
-                // this is never used for anything, because of how the create_test_timeline works, but
-                // it is with us in spirit and a Some.
-                use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-                let path = self.conf.workdir.join("localfs");
-                std::fs::create_dir_all(&path).unwrap();
-                let config = RemoteStorageConfig {
-                    max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                    max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
-                    storage: RemoteStorageKind::LocalFs(path),
-                };
-                GenericRemoteStorage::from_config(&config).unwrap()
-            };
 
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
@@ -3490,7 +3494,7 @@ pub mod harness {
                 walredo_mgr,
                 self.tenant_id,
                 self.generation,
-                Some(remote_storage),
+                Some(self.remote_storage.clone()),
             ));
             tenant
                 .load(None, ctx)
@@ -3961,6 +3965,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
+                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
                 .await
                 .ok()
                 .unwrap();
@@ -4001,6 +4006,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
+                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
                 .await
                 .ok()
                 .unwrap();
@@ -4059,6 +4065,7 @@ mod tests {
         // so that all uploads finish & we can call harness.try_load() below again
         tenant
             .shutdown(Default::default(), true)
+            .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
             .await
             .ok()
             .unwrap();
@@ -4527,7 +4534,11 @@ mod tests {
             let tline =
                 tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
             // Keeps uninit mark in place
-            tline.raw_timeline().unwrap().shutdown(false).await?;
+            let raw_tline = tline.raw_timeline().unwrap();
+            raw_tline
+                .shutdown(false)
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_id))
+                .await;
             std::mem::forget(tline);
         }
 

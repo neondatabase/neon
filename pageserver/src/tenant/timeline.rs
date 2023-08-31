@@ -952,7 +952,7 @@ impl Timeline {
                 Ok(()) => {}
                 Err(e) => {
                     warn!("failed to freeze and flush: {e:#}");
-                    return;
+                    return; // TODO: should probably drain remote timeline client anyways?
                 }
             }
 
