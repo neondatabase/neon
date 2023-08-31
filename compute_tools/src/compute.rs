@@ -27,6 +27,7 @@ use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 
+use crate::checker::create_availability_check_data;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -696,6 +697,7 @@ impl ComputeNode {
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        create_availability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);
@@ -1078,7 +1080,8 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) = remote_extensions.get_ext(library, true)?;
+            let (ext_name, ext_path) =
+                remote_extensions.get_ext(library, true, &self.build_tag, &self.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

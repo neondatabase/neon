@@ -7,6 +7,7 @@ use crate::{
             index::{IndexPart, LayerFileMetadata},
         },
         storage_layer::LayerFileName,
+        Generation,
     },
     METADATA_FILE_NAME,
 };
@@ -104,6 +105,7 @@ pub(super) fn reconcile(
     discovered: Vec<(LayerFileName, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
+    generation: Generation,
 ) -> Vec<(LayerFileName, Result<Decision, FutureLayer>)> {
     use Decision::*;
 
@@ -112,7 +114,15 @@ pub(super) fn reconcile(
 
     let mut discovered = discovered
         .into_iter()
-        .map(|(name, file_size)| (name, (Some(LayerFileMetadata::new(file_size)), None)))
+        .map(|(name, file_size)| {
+            (
+                name,
+                // The generation here will be corrected to match IndexPart in the merge below, unless
+                // it is not in IndexPart, in which case using our current generation makes sense
+                // because it will be uploaded in this generation.
+                (Some(LayerFileMetadata::new(file_size, generation)), None),
+            )
+        })
         .collect::<Collected>();
 
     // merge any index_part information, when available
@@ -137,7 +147,11 @@ pub(super) fn reconcile(
                 Err(FutureLayer { local })
             } else {
                 Ok(match (local, remote) {
-                    (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
+                    (Some(local), Some(remote)) if local != remote => {
+                        assert_eq!(local.generation, remote.generation);
+
+                        UseRemote { local, remote }
+                    }
                     (Some(x), Some(_)) => UseLocal(x),
                     (None, Some(x)) => Evicted(x),
                     (Some(x), None) => NeedsUpload(x),

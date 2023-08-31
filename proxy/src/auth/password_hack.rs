@@ -12,13 +12,19 @@ pub struct PasswordHackPayload {
 
 impl PasswordHackPayload {
     pub fn parse(bytes: &[u8]) -> Option<Self> {
-        // The format is `project=<utf-8>;<password-bytes>`.
-        let mut iter = bytes.splitn_str(2, ";");
-        let endpoint = iter.next()?.to_str().ok()?;
-        let endpoint = parse_endpoint_param(endpoint)?.to_owned();
-        let password = iter.next()?.to_owned();
+        // The format is `project=<utf-8>;<password-bytes>` or `project=<utf-8>$<password-bytes>`.
+        let separators = [";", "$"];
+        for sep in separators {
+            if let Some((endpoint, password)) = bytes.split_once_str(sep) {
+                let endpoint = endpoint.to_str().ok()?;
+                return Some(Self {
+                    endpoint: parse_endpoint_param(endpoint)?.to_owned(),
+                    password: password.to_owned(),
+                });
+            }
+        }
 
-        Some(Self { endpoint, password })
+        None
     }
 }
 
@@ -90,5 +96,24 @@ mod tests {
         let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
         assert_eq!(payload.endpoint, "foobar");
         assert_eq!(payload.password, b"pass;word");
+    }
+
+    #[test]
+    fn parse_password_hack_payload_dollar() {
+        let bytes = b"";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=$";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "");
+        assert_eq!(payload.password, b"");
+
+        let bytes = b"endpoint=foobar$pass$word";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "foobar");
+        assert_eq!(payload.password, b"pass$word");
     }
 }

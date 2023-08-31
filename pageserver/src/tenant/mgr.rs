@@ -25,6 +25,7 @@ use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantSt
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
 use utils::fs_ext::PathExt;
+use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
@@ -202,6 +203,7 @@ pub(crate) fn schedule_local_tenant_processing(
             match Tenant::spawn_attach(
                 conf,
                 tenant_id,
+                Generation::none(),
                 resources.broker_client,
                 tenants,
                 remote_storage,
@@ -224,7 +226,15 @@ pub(crate) fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, resources, init_order, tenants, ctx)
+        Tenant::spawn_load(
+            conf,
+            tenant_id,
+            Generation::none(),
+            resources,
+            init_order,
+            tenants,
+            ctx,
+        )
     };
     Ok(tenant)
 }

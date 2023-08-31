@@ -304,7 +304,7 @@ pub async fn task_main(
 
     let make_svc =
         hyper::service::make_service_fn(|stream: &tokio_rustls::server::TlsStream<AddrStream>| {
-            let sni_name = stream.get_ref().1.sni_hostname().map(|s| s.to_string());
+            let sni_name = stream.get_ref().1.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
 
             async move {
