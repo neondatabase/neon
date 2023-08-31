@@ -256,7 +256,7 @@ impl Serialize for TimelineMetadata {
 }
 
 /// Save timeline metadata to file
-pub fn save_metadata(
+pub async fn save_metadata(
     conf: &'static PageServerConf,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
