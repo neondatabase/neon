@@ -309,7 +309,7 @@ pub async fn task_main(
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
             let (io, tls) = stream.get_ref();
-            let peer_addr = io.client_socket().unwrap_or(io.inner.remote_addr());
+            let peer_addr = io.client_addr().unwrap_or(io.inner.remote_addr());
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
 
