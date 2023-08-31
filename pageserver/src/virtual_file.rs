@@ -389,6 +389,20 @@ impl VirtualFile {
         Ok(())
     }
 
+    /// Write the given buffer (which has to be below the kernel's internal page size) and fsync
+    ///
+    /// This ensures some level of atomicity (not a good one, but it's the best we have).
+    pub async fn write_and_fsync(&mut self, buf: &[u8]) -> Result<(), Error> {
+        if self.write(buf)? != buf.len() {
+            return Err(Error::new(
+                std::io::ErrorKind::Other,
+                "Could not write all the bytes in a single call",
+            ));
+        }
+        self.sync_all()?;
+        Ok(())
+    }
+
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
