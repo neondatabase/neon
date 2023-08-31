@@ -81,7 +81,7 @@ pub mod errors {
                 // retry some temporary failures because the compute was in a bad state
                 // (bad request can be returned when the endpoint was in transition)
                 Self::Console {
-                    status: http::StatusCode::BAD_REQUEST | http::StatusCode::LOCKED,
+                    status: http::StatusCode::BAD_REQUEST,
                     ..
                 } => true,
                 // retry server errors
