@@ -4705,17 +4705,31 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
             .open(&new_path);
 
         match res {
-            Ok(_) => {
-                std::fs::rename(path, &new_path)
-                    .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
-                return Ok(());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => { /* try next */ }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 return Err(anyhow::Error::new(e)
                     .context(format!("find backup file for {path:?} in {new_path:?}")))
             }
         }
+
+        let e = match std::fs::rename(path, &new_path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // the path to be renamed never existed
+                if let Err(e) = std::fs::remove_file(&new_path) {
+                    // this failure should not happen
+                    tracing::error!(
+                        "failed to remove the created backup file at {new_path:?}: {e}"
+                    );
+                }
+                e
+            }
+            Err(e) => e,
+        };
+
+        let e = anyhow::Error::new(e);
+        return Err(e.context(format!("rename {path:?} to {new_path:?}")));
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
