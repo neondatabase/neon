@@ -13,7 +13,7 @@
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -321,54 +321,8 @@ impl VirtualFile {
         drop(self);
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
-}
 
-impl Drop for VirtualFile {
-    /// If a VirtualFile is dropped, close the underlying file if it was open.
-    fn drop(&mut self) {
-        let handle = self.handle.get_mut().unwrap();
-
-        // We could check with a read-lock first, to avoid waiting on an
-        // unrelated I/O.
-        let slot = &get_open_files().slots[handle.index];
-        let mut slot_guard = slot.inner.write().unwrap();
-        if slot_guard.tag == handle.tag {
-            slot.recently_used.store(false, Ordering::Relaxed);
-            // there is also operation "close-by-replace" for closes done on eviction for
-            // comparison.
-            STORAGE_IO_TIME
-                .with_label_values(&["close"])
-                .observe_closure_duration(|| drop(slot_guard.file.take()));
-        }
-    }
-}
-
-impl Read for VirtualFile {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-        let pos = self.pos;
-        let n = self.read_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for VirtualFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // flush is no-op for File (at least on unix), so we don't need to do
-        // anything here either.
-        Ok(())
-    }
-}
-
-impl Seek for VirtualFile {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         match pos {
             SeekFrom::Start(offset) => {
                 self.pos = offset;
@@ -392,10 +346,50 @@ impl Seek for VirtualFile {
         }
         Ok(self.pos)
     }
-}
 
-impl FileExt for VirtualFile {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
+    pub fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.read_at(buf, offset) {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to fill whole buffer",
+                    ))
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
+    pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.write_at(buf, offset) {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
@@ -405,7 +399,7 @@ impl FileExt for VirtualFile {
         result
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+    pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("write", |file| file.write_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
@@ -413,6 +407,41 @@ impl FileExt for VirtualFile {
                 .add(size as i64);
         }
         result
+    }
+}
+
+impl Drop for VirtualFile {
+    /// If a VirtualFile is dropped, close the underlying file if it was open.
+    fn drop(&mut self) {
+        let handle = self.handle.get_mut().unwrap();
+
+        // We could check with a read-lock first, to avoid waiting on an
+        // unrelated I/O.
+        let slot = &get_open_files().slots[handle.index];
+        let mut slot_guard = slot.inner.write().unwrap();
+        if slot_guard.tag == handle.tag {
+            slot.recently_used.store(false, Ordering::Relaxed);
+            // there is also operation "close-by-replace" for closes done on eviction for
+            // comparison.
+            STORAGE_IO_TIME
+                .with_label_values(&["close"])
+                .observe_closure_duration(|| drop(slot_guard.file.take()));
+        }
+    }
+}
+
+impl Write for VirtualFile {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        let pos = self.pos;
+        let n = self.write_at(buf, pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        // flush is no-op for File (at least on unix), so we don't need to do
+        // anything here either.
+        Ok(())
     }
 }
 

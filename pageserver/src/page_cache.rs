@@ -80,6 +80,7 @@ use std::{
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -451,7 +452,7 @@ impl PageCache {
     ///
     async fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
         let cache_key_orig = cache_key.clone();
-        if let Some(slot_idx) = self.search_mapping(cache_key) {
+        if let Some(slot_idx) = self.search_mapping(cache_key).await {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we released the mapping
             // lock already, another thread could have evicted the page)
@@ -626,7 +627,7 @@ impl PageCache {
     /// returns.  The caller is responsible for re-checking that the slot still
     /// contains the page with the same key before using it.
     ///
-    fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
+    async fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
