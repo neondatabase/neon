@@ -123,33 +123,38 @@ impl<W> WriteBlobWriter<W> {
     }
 }
 
-impl<W> BlobWriter for WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
-        let offset = self.offset;
+macro_rules! write_blob_impl {
+    (WriteBlobWriter<$ty:ty>) => {
+        impl WriteBlobWriter<$ty> {
+            pub fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+                use std::io::Write;
+                let offset = self.offset;
 
-        if srcbuf.len() < 128 {
-            // Short blob. Write a 1-byte length header
-            let len_buf = srcbuf.len() as u8;
-            self.inner.write_all(&[len_buf])?;
-            self.offset += 1;
-        } else {
-            // Write a 4-byte length header
-            if srcbuf.len() > 0x7fff_ffff {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("blob too large ({} bytes)", srcbuf.len()),
-                ));
+                if srcbuf.len() < 128 {
+                    // Short blob. Write a 1-byte length header
+                    let len_buf = srcbuf.len() as u8;
+                    self.inner.write_all(&[len_buf])?;
+                    self.offset += 1;
+                } else {
+                    // Write a 4-byte length header
+                    if srcbuf.len() > 0x7fff_ffff {
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            format!("blob too large ({} bytes)", srcbuf.len()),
+                        ));
+                    }
+                    let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
+                    len_buf[0] |= 0x80;
+                    self.inner.write_all(&len_buf)?;
+                    self.offset += 4;
+                }
+                self.inner.write_all(srcbuf)?;
+                self.offset += srcbuf.len() as u64;
+                Ok(offset)
             }
-            let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
-            len_buf[0] |= 0x80;
-            self.inner.write_all(&len_buf)?;
-            self.offset += 4;
         }
-        self.inner.write_all(srcbuf)?;
-        self.offset += srcbuf.len() as u64;
-        Ok(offset)
-    }
+    };
 }
+
+write_blob_impl!(WriteBlobWriter<crate::tenant::io::BufWriter<crate::virtual_file::VirtualFile>>);
+write_blob_impl!(WriteBlobWriter<crate::virtual_file::VirtualFile>);
