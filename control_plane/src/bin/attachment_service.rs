@@ -59,7 +59,7 @@ where
     S: serde::Serializer,
     V: Clone + Serialize,
 {
-    let transformed = input.iter().map(|(k, v)| (hex::encode(&k), v.clone()));
+    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v.clone()));
 
     transformed
         .collect::<HashMap<String, V>>()
