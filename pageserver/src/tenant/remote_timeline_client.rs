@@ -1530,7 +1530,6 @@ mod tests {
             let harness = TenantHarness::create(test_name)?;
             let (tenant, ctx) = harness.load().await;
 
-            // create an empty timeline directory
             let timeline = tenant
                 .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
                 .await?;
@@ -1570,6 +1569,21 @@ mod tests {
 
         let client = timeline.remote_client.as_ref().unwrap();
 
+        // Download back the index.json, and check that the list of files is correct
+        let initial_index_part = match client.download_index_file().await.unwrap() {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
+        };
+        let initial_layers = initial_index_part
+            .layer_metadata
+            .keys()
+            .map(|f| f.to_owned())
+            .collect::<HashSet<LayerFileName>>();
+        let initial_layer = {
+            assert!(initial_layers.len() == 1);
+            initial_layers.into_iter().next().unwrap()
+        };
+
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         println!("workdir: {}", harness.conf.workdir.display());
@@ -1579,7 +1593,7 @@ mod tests {
             .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
-        let generation = Generation::new(0xdeadbeef);
+        let generation = harness.generation;
 
         // Create a couple of dummy files,  schedule upload for them
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
@@ -1660,6 +1674,7 @@ mod tests {
                 .map(|f| f.to_owned())
                 .collect(),
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_1.file_name(),
                 &layer_file_name_2.file_name(),
             ],
@@ -1689,6 +1704,7 @@ mod tests {
         }
         assert_remote_files(
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_1.file_name(),
                 &layer_file_name_2.file_name(),
                 "index_part.json",
@@ -1702,6 +1718,7 @@ mod tests {
 
         assert_remote_files(
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_2.file_name(),
                 &layer_file_name_3.file_name(),
                 "index_part.json",
