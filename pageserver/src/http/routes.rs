@@ -12,7 +12,6 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest, TenantLoadRequest,
 };
 use remote_storage::GenericRemoteStorage;
-use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -55,7 +54,7 @@ use utils::{
 // Imports only used for testing APIs
 use super::models::ConfigureFailpointsRequest;
 
-struct State {
+pub struct State {
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
@@ -65,7 +64,7 @@ struct State {
 }
 
 impl State {
-    fn new(
+    pub fn new(
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
@@ -1354,12 +1353,9 @@ where
 }
 
 pub fn make_router(
-    conf: &'static PageServerConf,
+    state: Arc<State>,
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
-    broker_client: BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
-    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -1383,16 +1379,7 @@ pub fn make_router(
     );
 
     Ok(router
-        .data(Arc::new(
-            State::new(
-                conf,
-                auth,
-                remote_storage,
-                broker_client,
-                disk_usage_eviction_state,
-            )
-            .context("Failed to initialize router state")?,
-        ))
+        .data(state)
         .get("/v1/status", |r| api_handler(r, status_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
