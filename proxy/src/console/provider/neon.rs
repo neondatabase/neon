@@ -16,12 +16,21 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     caches: &'static ApiCaches,
+    jwt: String,
 }
 
 impl Api {
     /// Construct an API object containing the auth parameters.
     pub fn new(endpoint: http::Endpoint, caches: &'static ApiCaches) -> Self {
-        Self { endpoint, caches }
+        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
+            Ok(v) => v,
+            Err(_) => "".to_string(),
+        };
+        Self {
+            endpoint,
+            caches,
+            jwt,
+        }
     }
 
     pub fn url(&self) -> &str {
@@ -39,6 +48,7 @@ impl Api {
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", &self.jwt)
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
@@ -83,6 +93,7 @@ impl Api {
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", &self.jwt)
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
