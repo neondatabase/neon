@@ -12,6 +12,7 @@ use utils::bin_ser::SerializeError;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::upload_queue::UploadQueueInitialized;
+use crate::tenant::Generation;
 
 use utils::lsn::Lsn;
 
@@ -20,22 +21,28 @@ use utils::lsn::Lsn;
 /// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
 /// might have less or more metadata depending if upgrading or rolling back an upgrade.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(test, derive(Default))]
+//#[cfg_attr(test, derive(Default))]
 pub struct LayerFileMetadata {
     file_size: u64,
+
+    pub(crate) generation: Generation,
 }
 
 impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
     fn from(other: &IndexLayerMetadata) -> Self {
         LayerFileMetadata {
             file_size: other.file_size,
+            generation: other.generation,
         }
     }
 }
 
 impl LayerFileMetadata {
-    pub fn new(file_size: u64) -> Self {
-        LayerFileMetadata { file_size }
+    pub fn new(file_size: u64, generation: Generation) -> Self {
+        LayerFileMetadata {
+            file_size,
+            generation,
+        }
     }
 
     pub fn file_size(&self) -> u64 {
@@ -128,15 +135,20 @@ impl TryFrom<&UploadQueueInitialized> for IndexPart {
 }
 
 /// Serialized form of [`LayerFileMetadata`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct IndexLayerMetadata {
     pub(super) file_size: u64,
+
+    #[serde(default = "Generation::none")]
+    #[serde(skip_serializing_if = "Generation::is_none")]
+    pub(super) generation: Generation,
 }
 
 impl From<LayerFileMetadata> for IndexLayerMetadata {
     fn from(other: LayerFileMetadata) -> Self {
         IndexLayerMetadata {
             file_size: other.file_size,
+            generation: other.generation,
         }
     }
 }
@@ -164,11 +176,13 @@ mod tests {
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
+                    generation: Generation::none()
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
+                    generation: Generation::none()
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -200,11 +214,13 @@ mod tests {
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
+                    generation: Generation::none()
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
+                    generation: Generation::none()
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -237,11 +253,13 @@ mod tests {
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: 25600000,
+                    generation: Generation::none()
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
+                    generation: Generation::none()
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
