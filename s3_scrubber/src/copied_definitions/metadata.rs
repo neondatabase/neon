@@ -14,10 +14,10 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
 
-use crate::copied_definitions::bin_ser::BeSer;
+use utils::bin_ser::BeSer;
 
-use super::id::{TenantId, TimelineId};
-use super::lsn::Lsn;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;

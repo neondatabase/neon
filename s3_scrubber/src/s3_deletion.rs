@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
-use crate::copied_definitions::id::TenantTimelineId;
 use crate::delete_batch_producer::DeleteBatch;
 use crate::{list_objects_with_retries, RootTarget, S3Target, TenantId, MAX_RETRIES};
+use utils::id::TenantTimelineId;
 
 pub struct S3Deleter {
     dry_run: bool,

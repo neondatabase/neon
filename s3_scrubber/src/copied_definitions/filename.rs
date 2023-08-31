@@ -7,7 +7,7 @@ use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
-use super::lsn::Lsn;
+use utils::lsn::Lsn;
 
 // Note: Timeline::load_layer_map() relies on this sort order
 #[derive(PartialEq, Eq, Clone, Hash)]

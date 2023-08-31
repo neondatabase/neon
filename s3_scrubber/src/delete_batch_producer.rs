@@ -15,10 +15,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
-use crate::copied_definitions::id::TenantTimelineId;
-use crate::{
-    list_objects_with_retries, RootTarget, S3Target, TenantId, TraversingDepth, MAX_RETRIES,
-};
+use crate::{list_objects_with_retries, RootTarget, S3Target, TraversingDepth, MAX_RETRIES};
+use utils::id::{TenantId, TenantTimelineId};
 
 /// Typical tenant to remove contains 1 layer and 1 index_part.json blobs
 /// Also, there are some non-standard tenants to remove, having more layers.

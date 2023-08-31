@@ -11,7 +11,7 @@ use tracing::warn;
 use super::filename::LayerFileName;
 use super::metadata::TimelineMetadata;
 
-use super::lsn::Lsn;
+use utils::lsn::Lsn;
 
 /// Metadata gathered for each of the layer files.
 ///

@@ -7,9 +7,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
-use crate::copied_definitions::id::TenantTimelineId;
 use crate::delete_batch_producer::{FetchResult, ProcessedS3List};
-use crate::{RootTarget, TenantId};
+use crate::RootTarget;
+use utils::id::{TenantId, TenantTimelineId};
 
 pub async fn schedule_cleanup_deleted_timelines(
     s3_root_target: &RootTarget,

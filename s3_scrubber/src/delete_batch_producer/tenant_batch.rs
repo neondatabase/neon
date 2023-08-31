@@ -7,9 +7,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
 use crate::cloud_admin_api::{CloudAdminApiClient, ProjectData};
-use crate::copied_definitions::id::TenantTimelineId;
 use crate::delete_batch_producer::FetchResult;
-use crate::{RootTarget, TenantId, TraversingDepth};
+use crate::{RootTarget, TraversingDepth};
+use utils::id::{TenantId, TenantTimelineId};
 
 use super::ProcessedS3List;
 

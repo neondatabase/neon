@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use reqwest::{header, Client, Url};
 use tokio::sync::Semaphore;
 
-use crate::copied_definitions::id::{TenantId, TimelineId};
-use crate::copied_definitions::lsn::Lsn;
+use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 #[derive(Debug)]
 pub struct Error {

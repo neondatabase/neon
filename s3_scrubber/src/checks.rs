@@ -10,11 +10,11 @@ use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectId};
 use crate::copied_definitions::filename::LayerFileName;
-use crate::copied_definitions::id::TenantTimelineId;
 use crate::copied_definitions::index::IndexPart;
 use crate::copied_definitions::metadata::TimelineMetadata;
 use crate::delete_batch_producer::DeleteProducerStats;
 use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
+use utils::id::TenantTimelineId;
 
 pub async fn validate_pageserver_active_tenant_and_timelines(
     s3_client: Arc<Client>,

@@ -15,12 +15,11 @@ use aws_config::sso::SsoCredentialsProvider;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::{Client, Config};
 
-pub use copied_definitions::id::TenantId;
-use copied_definitions::id::TenantTimelineId;
 pub use s3_deletion::S3Deleter;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use utils::id::{TenantId, TenantTimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
