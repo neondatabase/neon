@@ -50,7 +50,7 @@ impl Id {
         Id::from(tli_buf)
     }
 
-    pub fn hex_encode(&self) -> String {
+    fn hex_encode(&self) -> String {
         static HEX: &[u8] = b"0123456789abcdef";
 
         let mut buf = vec![0u8; self.0.len() * 2];
@@ -132,10 +132,6 @@ macro_rules! id_newtype {
 
             pub const fn from_array(b: [u8; 16]) -> Self {
                 $t(Id(b))
-            }
-
-            pub fn hex_encode(&self) -> String {
-                self.0.hex_encode()
             }
         }
 

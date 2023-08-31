@@ -1,6 +1,5 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
-use pageserver_api::control_api::HexTenantId;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, process::Child};
 use utils::id::{NodeId, TenantId};
@@ -15,7 +14,8 @@ const COMMAND: &str = "attachment_service";
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
-    pub tenant_id: HexTenantId,
+    #[serde(with = "hex")]
+    pub tenant_id: TenantId,
     pub pageserver_id: Option<NodeId>,
 }
 
@@ -89,7 +89,7 @@ impl AttachmentService {
             .expect("Failed to construct http client");
 
         let request = AttachHookRequest {
-            tenant_id: HexTenantId::new(tenant_id),
+            tenant_id,
             pageserver_id: Some(pageserver_id),
         };
 

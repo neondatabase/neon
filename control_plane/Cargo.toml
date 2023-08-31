@@ -12,6 +12,7 @@ git-version.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
+hex.workspace = true
 hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
