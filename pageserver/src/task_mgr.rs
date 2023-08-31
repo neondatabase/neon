@@ -300,6 +300,8 @@ pub enum TaskKind {
 
     DebugTool,
 
+    BackgroundRuntimeTurnaroundMeasure,
+
     #[cfg(test)]
     UnitTest,
 }

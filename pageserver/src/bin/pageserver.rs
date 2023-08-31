@@ -652,6 +652,31 @@ fn start_pageserver(
         );
     }
 
+    task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        TaskKind::BackgroundRuntimeTurnaroundMeasure,
+        None,
+        None,
+        "background runtime turnaround measure",
+        true,
+        async move {
+            let server = hyper::Server::try_bind(&"0.0.0.0:2342".parse().unwrap()).expect("bind");
+            let server = server
+                .serve(hyper::service::make_service_fn(|_| async move {
+                    Ok::<_, std::convert::Infallible>(hyper::service::service_fn(
+                        move |_: hyper::Request<hyper::Body>| async move {
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                                hyper::Body::from(format!("alive")),
+                            ))
+                        },
+                    ))
+                }))
+                .with_graceful_shutdown(task_mgr::shutdown_watcher());
+            server.await?;
+            Ok(())
+        },
+    );
+
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
