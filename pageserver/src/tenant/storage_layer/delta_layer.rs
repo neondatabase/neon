@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
-use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -582,8 +582,6 @@ struct DeltaLayerWriterInner {
     lsn_range: Range<Lsn>,
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
-
-    blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
 }
 
 impl DeltaLayerWriterInner {
@@ -605,12 +603,6 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path)?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
-        let buf_writer = BufWriter::new(file);
-        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
-
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
         let tree_builder = DiskBtreeBuilder::new(block_buf);
@@ -623,7 +615,6 @@ impl DeltaLayerWriterInner {
             key_start,
             lsn_range,
             tree: tree_builder,
-            blob_writer,
         })
     }
 
@@ -633,7 +624,8 @@ impl DeltaLayerWriterInner {
     /// The values must be appended in key, lsn order.
     ///
     async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init()).await
+        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
+            .await
     }
 
     async fn put_value_bytes(
@@ -644,30 +636,20 @@ impl DeltaLayerWriterInner {
         will_init: bool,
     ) -> anyhow::Result<()> {
         assert!(self.lsn_range.start <= lsn);
-
-        let off = self.blob_writer.write_blob(val)?; // TOOD: do what we discussed
-
-        let blob_ref = BlobRef::new(off, will_init);
-
-        let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
-
-        Ok(())
+        todo!("use TBD EphemeralFile superclass");
     }
 
     fn size(&self) -> u64 {
-        self.blob_writer.size() + self.tree.borrow_writer().size()
+        todo!()
     }
 
     ///
     /// Finish writing the delta layer.
     ///
     fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        let index_start_blk =
-            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+        let index_start_blk: u32 = todo!();
 
-        let buf_writer = self.blob_writer.into_inner();
-        let mut file = buf_writer.into_inner()?;
+        let mut file: VirtualFile = todo!("EphemeralFile superclass needs into_inner() api");
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
@@ -811,7 +793,8 @@ impl DeltaLayerWriter {
         self.inner
             .as_mut()
             .unwrap()
-            .put_value_bytes(key, lsn, val, will_init).await
+            .put_value_bytes(key, lsn, val, will_init)
+            .await
     }
 
     pub fn size(&self) -> u64 {
@@ -828,15 +811,7 @@ impl DeltaLayerWriter {
 
 impl Drop for DeltaLayerWriter {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            match inner.blob_writer.into_inner().into_inner() {
-                Ok(vfile) => vfile.remove(),
-                Err(err) => warn!(
-                    "error while flushing buffer of image layer temporary file: {}",
-                    err
-                ),
-            }
-        }
+        todo!("TBD EpheemralFile superclass into_inner(); => VirtualFile => remove()");
     }
 }
 

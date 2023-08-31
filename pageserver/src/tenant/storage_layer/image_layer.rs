@@ -27,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -511,7 +511,6 @@ struct ImageLayerWriterInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
@@ -538,13 +537,6 @@ impl ImageLayerWriterInner {
             },
         );
         info!("new image layer {}", path.display());
-        let mut file = VirtualFile::open_with_options(
-            &path,
-            std::fs::OpenOptions::new().write(true).create_new(true),
-        )?;
-        // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
-        let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -558,7 +550,6 @@ impl ImageLayerWriterInner {
             key_range: key_range.clone(),
             lsn,
             tree: tree_builder,
-            blob_writer,
         };
 
         Ok(writer)
@@ -570,13 +561,7 @@ impl ImageLayerWriterInner {
     /// The page versions must be appended in blknum order.
     ///
     fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        self.tree.append(&keybuf, off)?;
-
+        todo!("use TBD EphemeralFile superclass that skips copying into mutable_tail");
         Ok(())
     }
 
@@ -584,10 +569,9 @@ impl ImageLayerWriterInner {
     /// Finish writing the image layer.
     ///
     fn finish(self) -> anyhow::Result<ImageLayer> {
-        let index_start_blk =
-            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+        let index_start_blk: u32 = todo!();
 
-        let mut file = self.blob_writer.into_inner();
+        let mut file: VirtualFile = todo!("EphemeralFile superclass needs into_inner() api");
 
         // Write out the index
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
@@ -725,7 +709,7 @@ impl ImageLayerWriter {
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
+            todo!("TBD EpheemralFile superclass into_inner(); => VirtualFile => remove()");
         }
     }
 }
