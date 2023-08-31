@@ -64,6 +64,14 @@ impl Generation {
             }
         }
     }
+
+    pub fn previous(&self) -> Generation {
+        match self {
+            Self::Valid(n) => Self::Valid(n - 1),
+            Self::None => Self::None,
+            Self::Broken => panic!("Attempted to use a broken generation"),
+        }
+    }
 }
 
 impl Serialize for Generation {
