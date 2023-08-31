@@ -3030,7 +3030,7 @@ impl Timeline {
                                 }
                             }
                         };
-                        image_layer_writer.put_image(key, &img)?;
+                        image_layer_writer.put_image(key, &img).await?;
                         key = key.next();
                     }
                 }
@@ -3616,7 +3616,7 @@ impl Timeline {
                 )))
             });
 
-            writer.as_mut().unwrap().put_value(key, lsn, value)?;
+            writer.as_mut().unwrap().put_value(key, lsn, value).await?;
             prev_key = Some(key);
         }
         if let Some(writer) = writer {

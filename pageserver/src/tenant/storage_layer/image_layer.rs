@@ -569,9 +569,9 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
+        let off = self.blob_writer.write_blob(img).await?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -710,8 +710,8 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img)
+    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img).await
     }
 
     ///

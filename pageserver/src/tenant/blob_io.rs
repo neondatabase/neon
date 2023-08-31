@@ -126,7 +126,7 @@ impl<W> WriteBlobWriter<W> {
 macro_rules! write_blob_impl {
     (WriteBlobWriter<$ty:ty>) => {
         impl WriteBlobWriter<$ty> {
-            pub fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+            pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
                 use std::io::Write;
                 let offset = self.offset;
 
