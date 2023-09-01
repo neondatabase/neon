@@ -1425,6 +1425,30 @@ pub fn remote_index_path(
     .expect("Failed to construct path")
 }
 
+/// Given the key of an index, parse out the generation part of the name
+pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
+    let file_name = match path.get_path().file_name() {
+        Some(f) => f,
+        None => {
+            // Unexpected: we should be seeing index_part.json paths only
+            tracing::warn!("Malformed index key {0}", path);
+            return None;
+        }
+    };
+
+    let file_name_str = match file_name.to_str() {
+        Some(s) => s,
+        None => {
+            tracing::warn!("Malformed index key {0:?}", path);
+            return None;
+        }
+    };
+    match file_name_str.split_once('-') {
+        Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
+        None => None,
+    }
+}
+
 /// Files on the remote storage are stored with paths, relative to the workdir.
 /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
 ///

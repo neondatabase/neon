@@ -19,12 +19,15 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
-use super::{remote_index_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES};
+use super::{
+    parse_remote_index_path, remote_index_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
+    FAILED_REMOTE_OP_RETRIES,
+};
 
 static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
@@ -280,33 +283,6 @@ pub(super) async fn download_index_part(
         }
     };
 
-    /// Given the key of an index, parse out the generation part of the name
-    fn parse_generation(path: RemotePath) -> Option<Generation> {
-        let file_name = match path.get_path().file_name() {
-            Some(f) => f,
-            None => {
-                // Unexpected: we should be seeing index_part.json paths only
-                tracing::warn!("Malformed index key {0}", path);
-                return None;
-            }
-        };
-
-        let file_name_str = match file_name.to_str() {
-            Some(s) => s,
-            None => {
-                tracing::warn!("Malformed index key {0:?}", path);
-                return None;
-            }
-        };
-
-        match file_name_str.split_once('-') {
-            Some((_, gen_suffix)) => u32::from_str_radix(gen_suffix, 16)
-                .map(Generation::new)
-                .ok(),
-            None => None,
-        }
-    }
-
     // Fallback: we did not find an index_part.json from the previous generation, so
     // we will list all the index_part objects and pick the most recent.
     let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
@@ -326,7 +302,7 @@ pub(super) async fn download_index_part(
 
     let mut generations: Vec<_> = indices
         .into_iter()
-        .filter_map(parse_generation)
+        .filter_map(parse_remote_index_path)
         .filter(|g| g <= &my_generation)
         .collect();
 
