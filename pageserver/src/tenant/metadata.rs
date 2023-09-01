@@ -8,7 +8,6 @@
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
-
 use std::io::{self};
 
 use anyhow::{ensure, Context};
@@ -23,9 +22,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::TEMP_FILE_SUFFIX;
 use crate::config::PageServerConf;
 use crate::virtual_file::VirtualFile;
+use crate::TEMP_FILE_SUFFIX;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
