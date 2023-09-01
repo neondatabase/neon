@@ -197,7 +197,8 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
 
     let tenants = stream_tenants(&s3_client, &target);
 
-    // How many tenants to process in parallel.  The higher this is, the harder we hit S3.
+    // How many tenants to process in parallel.  We need to be mindful of pageservers
+    // accessing the same per tenant prefixes, so use a lower setting than pageservers.
     const CONCURRENCY: usize = 32;
 
     // Generate a stream of TenantTimelineId
