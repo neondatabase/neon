@@ -7,6 +7,7 @@ members = [
     "proxy",
     "safekeeper",
     "storage_broker",
+    "s3_scrubber",
     "workspace_hack",
     "trace",
     "libs/compute_api",
