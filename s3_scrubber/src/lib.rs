@@ -223,12 +223,15 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         )
     };
 
-    let config = Config::builder()
+    let mut builder = Config::builder()
         .region(bucket_region)
-        .credentials_provider(credentials_provider)
-        .build();
+        .credentials_provider(credentials_provider);
 
-    Client::from_conf(config)
+    if let Ok(endpoint) = env::var("AWS_ENDPOINT_URL") {
+        builder = builder.endpoint_url(endpoint)
+    }
+
+    Client::from_conf(builder.build())
 }
 
 async fn list_objects_with_retries(
