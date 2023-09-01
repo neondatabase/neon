@@ -68,11 +68,19 @@ impl TenantsMap {
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
 async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let parent = path
+        .as_ref()
+        .parent()
+        // It is invalid to call this function with a relative path.  Tenant directories
+        // should always have a parent.
+        .ok_or(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Path must be absolute",
+        ))?;
+
     let tmp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
     fs::rename(&path, &tmp_path).await?;
-    if let Some(parent) = path.as_ref().parent() {
-        fs::File::open(parent).await?.sync_all().await?;
-    }
+    fs::File::open(parent).await?.sync_all().await?;
     fs::remove_dir_all(tmp_path).await
 }
 
