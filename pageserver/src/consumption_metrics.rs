@@ -182,7 +182,7 @@ pub async fn collect_metrics(
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
-    info!("starting collect_metrics");
+    debug!("starting collect_metrics");
 
     // spin up background worker that caclulates tenant sizes
     let worker_ctx =
@@ -208,7 +208,8 @@ pub async fn collect_metrics(
         .build()
         .expect("Failed to create http client with timeout");
     let mut cached_metrics = HashMap::new();
-    let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
+    let mut prev_iteration_time = std::time::Instant::now();
+    let mut prev_tick_at: Option<tokio::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -217,6 +218,23 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             tick_at = ticker.tick() => {
+
+                if let Some(prev_tick_at) = prev_tick_at {
+                    let elapsed = prev_tick_at.elapsed();
+
+                    if elapsed >= metric_collection_interval {
+                        let diff = elapsed - metric_collection_interval;
+
+                        if diff.as_secs() > 1 {
+                            tracing::warn!(diff_ms = diff.as_millis(), "ticks are delayed by {diff:?}");
+                        }
+                    } else {
+                        let diff = metric_collection_interval - elapsed;
+                        if diff.as_secs() > 1 {
+                            tracing::warn!(diff_ms = diff.as_millis(), "ticks are happening too fast by {diff:?}");
+                        }
+                    }
+                }
 
                 // send cached metrics every cached_metric_collection_interval
                 let send_cached = prev_iteration_time.elapsed() >= cached_metric_collection_interval;
@@ -232,6 +250,8 @@ pub async fn collect_metrics(
                     metric_collection_interval,
                     "consumption_metrics_collect_metrics",
                 );
+
+                prev_tick_at = Some(tick_at);
             }
         }
     }
