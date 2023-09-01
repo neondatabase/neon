@@ -1837,7 +1837,8 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
-                js.spawn(async move { timeline.shutdown(freeze_and_flush).await });
+                let span = Span::current();
+                js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
             })
         };
         while let Some(res) = js.join_next().await {
