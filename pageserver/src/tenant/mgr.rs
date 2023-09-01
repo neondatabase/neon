@@ -1,13 +1,10 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use hyper::StatusCode;
-use pageserver_api::control_api::{ReAttachRequest, ReAttachResponse};
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs;
 
 use anyhow::Context;
@@ -21,6 +18,7 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::control_plane_client::ControlPlaneClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -80,75 +78,11 @@ pub async fn init_tenant_mgr(
     let mut tenants = HashMap::new();
 
     // If we are configured to use the control plane API, then it is the source of truth for what to attach
-    let tenant_generations = conf
-        .control_plane_api
-        .as_ref()
-        .map(|control_plane_api| async {
-            let client = reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client");
-
-            // FIXME: it's awkward that join() requires the base to have a trailing slash, makes
-            // it easy to get a config wrong
-            assert!(
-                control_plane_api.as_str().ends_with('/'),
-                "control plane API needs trailing slash"
-            );
-
-            let re_attach_path = control_plane_api
-                .join("re-attach")
-                .expect("Failed to build re-attach path");
-            let request = ReAttachRequest { node_id: conf.id };
-
-            // TODO: we should have been passed a cancellation token, and use it to end
-            // this loop gracefully
-            loop {
-                let response = match client
-                    .post(re_attach_path.clone())
-                    .json(&request)
-                    .send()
-                    .await
-                {
-                    Err(e) => Err(anyhow::Error::from(e)),
-                    Ok(r) => {
-                        if r.status() == StatusCode::OK {
-                            r.json::<ReAttachResponse>()
-                                .await
-                                .map_err(anyhow::Error::from)
-                        } else {
-                            Err(anyhow::anyhow!("Unexpected status {}", r.status()))
-                        }
-                    }
-                };
-
-                match response {
-                    Ok(res) => {
-                        tracing::info!(
-                            "Received re-attach response with {0} tenants",
-                            res.tenants.len()
-                        );
-
-                        // TODO: do something with it
-                        break res
-                            .tenants
-                            .into_iter()
-                            .map(|t| (t.id, t.generation))
-                            .collect::<HashMap<_, _>>();
-                    }
-                    Err(e) => {
-                        tracing::error!("Error re-attaching tenants, retrying: {e:#}");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        });
-
-    let tenant_generations = match tenant_generations {
-        Some(g) => Some(g.await),
-        None => {
-            info!("Control plane API not configured, tenant generations are disabled");
-            None
-        }
+    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf) {
+        Some(client.re_attach().await?)
+    } else {
+        info!("Control plane API not configured, tenant generations are disabled");
+        None
     };
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
@@ -218,7 +152,7 @@ pub async fn init_tenant_mgr(
                         // We have a generation map: treat it as the authority for whether
                         // this tenant is really attached.
                         if let Some(gen) = generations.get(&tenant_id) {
-                            Generation::new(*gen)
+                            *gen
                         } else {
                             info!("Detaching tenant {0}, control plane omitted it in re-attach response", tenant_id);
                             if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
