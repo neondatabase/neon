@@ -1947,7 +1947,7 @@ mod tests {
         let injected_1 = inject_index_part(&test_state, Generation::new(1)).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
-        // If a more-recent-than-me generation exists, we should decline to load that
+        // If a more-recent-than-me generation exists, we should ignore it.
         let _injected_10 = inject_index_part(&test_state, Generation::new(10)).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
