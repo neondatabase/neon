@@ -36,9 +36,18 @@ at scale, in several contexts:
    database and they need to migrate to a pageserver with more capacity.
 3. Restarting pageservers for upgrades and maintenance
 
-Currently, a tenant may migrated by attaching to a new node,
-re-configuring endpoints to use the new node, and then later detaching from the old node. This is safe once [generation numbers](025-generation-numbers.md) are implemented, but does meet
-our seamless/fast/efficient goals:
+The current situation steps for migration are:
+* detach from old node; skip if old node is dead; (the [skip part is still WIP](https://github.com/neondatabase/cloud/issues/5426)).
+* attach to new node
+* re-configure endpoints to use the new node
+
+Once [generation numbers](025-generation-numbers.md) are implemented,
+the detach step is no longer critical for correctness. So, we can
+* attach to a new node,
+* re-configure endpoints to use the new node, and then
+* detach from the old node.
+
+However, this still does not meet our seamless/fast/efficient goals:
 
 - Not fast: The new node will have to download potentially large amounts
   of data from S3, which may take many minutes.
