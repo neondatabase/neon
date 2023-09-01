@@ -1,4 +1,4 @@
-# Fast tenant migration for high availability
+# Seamless tenant migration
 
 - Author: john@neon.tech
 - Created on 2023-08-11
