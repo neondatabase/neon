@@ -1974,6 +1974,18 @@ mod tests {
         let _injected_10 = inject_index_part(&test_state, Generation::new(10)).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
+        // If a directly previous generation exists, _and_ an index exists in my own
+        // generation, I should prefer my own generation.
+        let _injected_prev =
+            inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
+        let injected_current = inject_index_part(&test_state, Generation::new(generation_n)).await;
+        assert_got_index_part(
+            &test_state,
+            Generation::new(generation_n),
+            &injected_current,
+        )
+        .await;
+
         Ok(())
     }
 }

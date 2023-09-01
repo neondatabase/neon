@@ -255,6 +255,11 @@ async fn do_download_index_part(
     Ok(index_part)
 }
 
+/// index_part.json objects are suffixed with a generation number, so we cannot
+/// directly GET the latest index part without doing some probing.
+///
+/// In this function we probe for the most recent index in a generation <= our current generation.
+/// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
 pub(super) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
@@ -266,9 +271,33 @@ pub(super) async fn download_index_part(
         return do_download_index_part(storage, tenant_id, timeline_id, my_generation).await;
     }
 
+    // Stale case: If we were intentionally attached in a stale generation, there may already be a remote
+    // index in our generation.
+    //
+    // This is an optimization to avoid doing the listing for the general case below.
+    let r_current = do_download_index_part(storage, tenant_id, timeline_id, my_generation).await;
+    match r_current {
+        Ok(index_part) => {
+            tracing::debug!("Found index_part from current generation (this is a stale attachment) {my_generation:?}");
+            return Ok(index_part);
+        }
+        Err(e) => {
+            if !matches!(e, DownloadError::NotFound) {
+                return Err(e);
+            }
+        }
+    };
+
+    // Typical case: the previous generation of this tenant was running healthily, and had uploaded
+    // and index part.  We may safely start from this index without doing a listing, because:
+    //  - We checked for current generation case above
+    //  - generations > my_generation are to be ignored
+    //  - any other indices that exist would have an older generation than `previous_gen`, and
+    //    we want to find the most recent index from a previous generation.
+    //
+    // This is an optimization to avoid doing the listing for the general case below.
     let previous_gen = my_generation.previous();
     let r_previous = do_download_index_part(storage, tenant_id, timeline_id, previous_gen).await;
-
     match r_previous {
         Ok(index_part) => {
             tracing::debug!("Found index_part from previous generation {previous_gen:?}");
@@ -283,8 +312,8 @@ pub(super) async fn download_index_part(
         }
     };
 
-    // Fallback: we did not find an index_part.json from the previous generation, so
-    // we will list all the index_part objects and pick the most recent.
+    // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
+    // objects, and select the highest one with a generation < my_generation.
     let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
     let indices = backoff::retry(
         || async { storage.list_files(Some(&index_prefix)).await },
@@ -300,6 +329,8 @@ pub(super) async fn download_index_part(
     .await
     .map_err(DownloadError::Other)?;
 
+    // General case logic for which index to use: the latest index whose generation
+    // is <= our own.  See "Finding the rmeote indices for timelines" in docs/rfcs/025-generation-numbers.md
     let max_previous_generation = indices
         .into_iter()
         .filter_map(parse_remote_index_path)
@@ -311,14 +342,13 @@ pub(super) async fn download_index_part(
             tracing::debug!(
                 "Found index_part in generation {g:?} (my generation {my_generation:?})"
             );
-            do_download_index_part(storage, tenant_id, timeline_id, *g).await
+            do_download_index_part(storage, tenant_id, timeline_id, g).await
         }
         None => {
-            // This is not an error: the timeline may be newly created, or we may be
-            // upgrading and have no historical index_part with a generation suffix.
-            // Fall back to trying to load the un-suffixed index_part.json.
+            // Migration from legacy pre-generation state: we have a generation but no prior
+            // attached pageservers did.  Try to load from a no-generation path.
             tracing::info!(
-                "No index_part.json-* found when loading {tenant_id}/{timeline_id} in generation {my_generation:?}"
+                "No index_part.json* found when loading {tenant_id}/{timeline_id} in generation {my_generation:?}"
             );
             do_download_index_part(storage, tenant_id, timeline_id, Generation::none()).await
         }
