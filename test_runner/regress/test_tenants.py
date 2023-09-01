@@ -244,7 +244,6 @@ def test_pageserver_metrics_removed_after_detach(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_metrics_removed_after_detach",
     )
 
     neon_env_builder.num_safekeepers = 3
@@ -305,7 +304,6 @@ def test_pageserver_with_empty_tenants(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_with_empty_tenants",
     )
 
     env = neon_env_builder.init_start()

@@ -96,7 +96,6 @@ def test_metric_collection(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_metric_collection",
     )
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")

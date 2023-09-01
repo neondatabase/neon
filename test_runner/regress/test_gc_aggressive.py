@@ -102,7 +102,6 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_gc_index_upload",
     )
 
     env = neon_env_builder.init_start()
