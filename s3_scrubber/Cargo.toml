@@ -24,11 +24,20 @@ workspace_hack.workspace = true
 utils.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
-aws-config = { workspace = true, default-features = false, features = ["rustls", "credentials-sso"] }
+chrono = { workspace = true, default-features = false, features = [
+    "clock",
+    "serde",
+] }
+reqwest = { workspace = true, default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+aws-config = { workspace = true, default-features = false, features = [
+    "rustls",
+    "credentials-sso",
+] }
 
-pageserver = {path="../pageserver"}
+pageserver = { path = "../pageserver" }
 
 
 tracing.workspace = true
