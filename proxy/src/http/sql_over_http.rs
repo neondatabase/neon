@@ -39,7 +39,6 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -325,11 +324,6 @@ async fn query_to_json<T: GenericClient>(
         let row = row?;
         *current_size += row.body_len();
         rows.push(row);
-        if *current_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!(
-                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
-            ));
-        }
     }
 
     // grab the command tag and number of rows affected

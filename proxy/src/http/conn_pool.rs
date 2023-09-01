@@ -23,8 +23,6 @@ use crate::{
 };
 use crate::{compute, config};
 
-use super::sql_over_http::MAX_RESPONSE_SIZE;
-
 use crate::proxy::ConnectMechanism;
 
 use tracing::{error, warn};
@@ -403,7 +401,6 @@ async fn connect_to_compute_once(
         .user(&conn_info.username)
         .password(&conn_info.password)
         .dbname(&conn_info.dbname)
-        .max_backend_message_size(MAX_RESPONSE_SIZE)
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
