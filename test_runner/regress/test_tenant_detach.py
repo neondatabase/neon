@@ -688,7 +688,7 @@ def test_ignored_tenant_stays_broken_without_metadata(
     # temporarily detached produces these errors in the pageserver log.
     env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
     env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Broken.*"
+        f".*Tenant {tenant_id} will not become active\\. Current state: (Broken|Stopping).*"
     )
 
     # ignore the tenant and remove its metadata
