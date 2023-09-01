@@ -342,7 +342,12 @@ impl RemoteTimelineClient {
     ) -> RemoteTimelineClient {
         RemoteTimelineClient {
             conf,
-            runtime: BACKGROUND_RUNTIME.handle().to_owned(),
+            runtime: if cfg!(test) {
+                // remote_timeline_client.rs tests rely on current-thread runtime
+                tokio::runtime::Handle::current()
+            } else {
+                BACKGROUND_RUNTIME.handle().clone()
+            },
             tenant_id,
             timeline_id,
             generation,
