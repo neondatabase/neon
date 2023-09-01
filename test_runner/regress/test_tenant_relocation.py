@@ -526,7 +526,6 @@ def test_emergency_relocate_with_branches_slow_replay(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_emergency_relocate_with_branches_slow_replay",
     )
 
     env = neon_env_builder.init_start()
@@ -683,7 +682,6 @@ def test_emergency_relocate_with_branches_createdb(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_emergency_relocate_with_branches_createdb",
     )
 
     env = neon_env_builder.init_start()

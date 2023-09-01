@@ -90,7 +90,6 @@ def test_remote_extensions(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_extensions",
         enable_remote_extensions=True,
     )
     env = neon_env_builder.init_start()
@@ -157,7 +156,6 @@ def test_remote_library(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_library",
         enable_remote_extensions=True,
     )
     env = neon_env_builder.init_start()
@@ -218,7 +216,6 @@ def test_multiple_extensions_one_archive(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
-        test_name="test_multiple_extensions_one_archive",
         enable_remote_extensions=True,
     )
     env = neon_env_builder.init_start()
@@ -266,7 +263,6 @@ def test_extension_download_after_restart(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_extension_download_after_restart",
         enable_remote_extensions=True,
     )
     env = neon_env_builder.init_start()
