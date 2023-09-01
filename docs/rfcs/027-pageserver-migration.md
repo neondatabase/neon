@@ -158,8 +158,8 @@ The following table summarizes how the state of the system advances:
 This procedure readily applies to other migration cases:
 
 - **Node failures**: if node A is unavailable, then all calls into
-  node A are simply skipped, and when waiting for node B LSN to catch
-  up, we may proceed immediately.
+  node A are skipped and we don't wait for B to catch up before
+  switching updating the endpoints to use B.
 - **Migration without a secondary location**: if node A is initially
   in Detached state, the procedure is idential, but waiting for Node B
   to download layers and catch up with WAL will take much longer.
