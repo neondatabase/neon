@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::{DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest};
+use pageserver_api::models::{
+    DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest, TenantLoadRequest,
+};
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -485,19 +487,8 @@ async fn tenant_attach_handler(
 
     let state = get_state(&request);
 
-    let generation = if state.conf.control_plane_api.is_some() {
-        // If we have been configured with a control plane URI, then generations are
-        // mandatory, as we will attempt to re-attach on startup.
-        maybe_body
-            .as_ref()
-            .and_then(|tar| tar.generation)
-            .map(Generation::new)
-            .ok_or(ApiError::BadRequest(anyhow!(
-                "generation attribute missing"
-            )))?
-    } else {
-        Generation::none()
-    };
+    let generation =
+        get_request_generation(state, maybe_body.as_ref().map(|r| r.generation).flatten())?;
 
     if let Some(remote_storage) = &state.remote_storage {
         mgr::attach_tenant(
@@ -555,7 +546,7 @@ async fn tenant_detach_handler(
 }
 
 async fn tenant_load_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
@@ -563,10 +554,19 @@ async fn tenant_load_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
+    let maybe_body: Option<TenantLoadRequest> = json_request_or_empty_body(&mut request).await?;
+
     let state = get_state(&request);
+
+    // The /load request is only usable when control_plane_api is not set.  Once it is set, callers
+    // should always use /attach instead.
+    let generation =
+        get_request_generation(state, maybe_body.as_ref().map(|r| r.generation).flatten())?;
+
     mgr::load_tenant(
         state.conf,
         tenant_id,
+        generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,
@@ -868,6 +868,21 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
     Ok(response)
 }
 
+/// Helper for requests that may take a generation, which is mandatory
+/// when control_plane_api is set, but otherwise defaults to Generation::none()
+fn get_request_generation(state: &State, req_gen: Option<u32>) -> Result<Generation, ApiError> {
+    if state.conf.control_plane_api.is_some() {
+        req_gen
+            .map(Generation::new)
+            .ok_or(ApiError::BadRequest(anyhow!(
+                "generation attribute missing"
+            )))
+    } else {
+        // Legacy mode: all tenants operate with no generation
+        Ok(Generation::none())
+    }
+}
+
 async fn tenant_create_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -884,15 +899,11 @@ async fn tenant_create_handler(
     let tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    // TODO: make generation mandatory here once control plane supports it.
-    let generation = request_data
-        .generation
-        .map(Generation::new)
-        .unwrap_or(Generation::none());
+    let state = get_state(&request);
+
+    let generation = get_request_generation(state, request_data.generation)?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let state = get_state(&request);
 
     let new_tenant = mgr::create_tenant(
         state.conf,

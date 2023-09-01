@@ -630,6 +630,7 @@ async fn detach_tenant0(
 pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
@@ -646,9 +647,7 @@ pub async fn load_tenant(
             broker_client,
             remote_storage,
         };
-        // TODO: remove the `/load` API once generation support is complete:
-        // it becomes equivalent to attaching.
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, Generation::none(), resources, None,  &TENANTS, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, generation, resources, None,  &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;

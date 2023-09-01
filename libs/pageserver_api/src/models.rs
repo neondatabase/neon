@@ -201,6 +201,15 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
+#[serde_as]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLoadRequest {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+}
+
 impl std::ops::Deref for TenantCreateRequest {
     type Target = TenantConfig;
 
