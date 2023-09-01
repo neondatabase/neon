@@ -3246,6 +3246,7 @@ dependencies = [
  "reqwest-tracing",
  "routerify",
  "rstest",
+ "rustc-hash",
  "rustls",
  "rustls-pemfile",
  "scopeguard",
