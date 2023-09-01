@@ -31,17 +31,16 @@ impl ControlPlaneClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
     pub(crate) fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
-        let url = match conf.control_plane_api.as_ref() {
+        let mut url = match conf.control_plane_api.as_ref() {
             Some(u) => u.clone(),
             None => return None,
         };
 
-        // FIXME: it's awkward that join() requires the base to have a trailing slash, makes
-        // it easy to get a config wrong
-        assert!(
-            url.as_str().ends_with('/'),
-            "control plane API needs trailing slash"
-        );
+        if let Ok(mut segs) = url.path_segments_mut() {
+            // This ensures that `url` ends with a slash if it doesn't already.
+            // That way, we can subsequently use join() to safely attach extra path elements.
+            segs.pop_if_empty().push("");
+        }
 
         let client = reqwest::ClientBuilder::new()
             .build()
