@@ -63,7 +63,7 @@ The user expectations for availability are:
 - For unplanned changes (e.g. node failures), there should be
   minimal availability gap.
 
-## Non Goals (if relevant)
+## Non Goals
 
 - We do not aim to have the pageservers fail over if the
   control plane is unavailable.
@@ -72,7 +72,7 @@ The user expectations for availability are:
   page cache usually contains such pages, we do not expect
   them to be read frequently from the pageserver).
 
-## Impacted components (e.g. pageserver, safekeeper, console, etc)
+## Impacted components
 
 Pageserver, control plane
 
