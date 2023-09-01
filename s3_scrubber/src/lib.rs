@@ -110,19 +110,31 @@ impl RootTarget {
 pub struct BucketConfig {
     pub region: String,
     pub bucket: String,
-    pub sso_account_id: String,
+
+    /// Use SSO if this is set, else rely on AWS_* environment vars
+    pub sso_account_id: Option<String>,
 }
 
 impl Display for BucketConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.sso_account_id, self.region, self.bucket)
+        write!(
+            f,
+            "{}/{}/{}",
+            self.sso_account_id
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("<none>"),
+            self.region,
+            self.bucket
+        )
     }
 }
 
 impl BucketConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let sso_account_id =
-            env::var("SSO_ACCOUNT_ID").context("'SSO_ACCOUNT_ID' param retrieval")?;
+        let sso_account_id = env::var("SSO_ACCOUNT_ID")
+            .context("'SSO_ACCOUNT_ID' param retrieval")
+            .ok();
         let region = env::var("REGION").context("'REGION' param retrieval")?;
         let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
 
@@ -183,22 +195,32 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
     guard
 }
 
-pub fn init_s3_client(account_id: String, bucket_region: Region) -> Client {
+pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Client {
     let credentials_provider = {
         // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
-            // uses sso
-            .or_else(
+        let chain = CredentialsProviderChain::first_try(
+            "env",
+            EnvironmentVariableCredentialsProvider::new(),
+        );
+
+        // Use SSO if we were given an account ID
+        match account_id {
+            Some(sso_account) => chain.or_else(
                 "sso",
                 SsoCredentialsProvider::builder()
-                    .account_id(account_id)
+                    .account_id(&sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
                     .region(Region::from_static("eu-central-1"))
                     .build(),
-            )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
+            ),
+            None => chain,
+        }
+        .or_else(
+            // Finally try IMDS
+            "imds",
+            ImdsCredentialsProvider::builder().build(),
+        )
     };
 
     let config = Config::builder()
