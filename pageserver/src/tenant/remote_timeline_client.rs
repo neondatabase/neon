@@ -1870,10 +1870,12 @@ mod tests {
 
     async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
         // An empty IndexPart, just sufficient to ensure deserialization will succeed
+        let example_metadata = TimelineMetadata::example();
         let example_index_part = IndexPart::new(
             HashMap::new(),
-            "0/16960E8".parse::<Lsn>().unwrap(),
-            TimelineMetadata::example(),
+            example_metadata.disk_consistent_lsn(),
+            example_metadata,
+            
         );
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
