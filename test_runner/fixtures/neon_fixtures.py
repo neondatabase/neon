@@ -1507,6 +1507,7 @@ class ComputeCtl(AbstractNeonCli):
 class NeonAttachmentService:
     def __init__(self, env: NeonEnv):
         self.env = env
+        self.running = False
 
     def start(self):
         assert not self.running
