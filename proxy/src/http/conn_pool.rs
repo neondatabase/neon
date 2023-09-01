@@ -17,7 +17,10 @@ use std::{
 use tokio::time;
 use tokio_postgres::AsyncMessage;
 
-use crate::{auth, console};
+use crate::{
+    auth, console,
+    metrics::{Ids, MetricCounter, USAGE_METRICS},
+};
 use crate::{compute, config};
 
 use super::sql_over_http::MAX_RESPONSE_SIZE;
@@ -412,6 +415,10 @@ async fn connect_to_compute_once(
     span.in_scope(|| {
         info!(%conn_info, %session, "new connection");
     });
+    let metrics = USAGE_METRICS.open(Ids {
+        endpoint_id: node_info.aux.endpoint_id.to_string(),
+        branch_id: node_info.aux.branch_id.to_string(),
+    });
 
     tokio::spawn(
         poll_fn(move |cx| {
@@ -450,10 +457,12 @@ async fn connect_to_compute_once(
     Ok(Client {
         inner: client,
         session: tx,
+        metrics,
     })
 }
 
 pub struct Client {
     pub inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
+    pub metrics: Arc<MetricCounter>,
 }

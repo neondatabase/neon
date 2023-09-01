@@ -236,10 +236,13 @@ pub async fn handle(
     //
     // Now execute the query and return the result
     //
+    let mut size = 0;
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client.inner, query, raw_output, array_mode)
-            .await
-            .map(|x| (x, HashMap::default())),
+        Payload::Single(query) => {
+            query_to_json(&client.inner, query, &mut size, raw_output, array_mode)
+                .await
+                .map(|x| (x, HashMap::default()))
+        }
         Payload::Batch(batch_query) => {
             let mut results = Vec::new();
             let mut builder = client.inner.build_transaction();
@@ -254,7 +257,8 @@ pub async fn handle(
             }
             let transaction = builder.start().await?;
             for query in batch_query.queries {
-                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                let result =
+                    query_to_json(&transaction, query, &mut size, raw_output, array_mode).await;
                 match result {
                     Ok(r) => results.push(r),
                     Err(e) => {
@@ -284,6 +288,10 @@ pub async fn handle(
         }
     };
 
+    if result.is_ok() {
+        client.metrics.add(size as u64)
+    }
+
     if allow_pool {
         let current_span = tracing::Span::current();
         // return connection to the pool
@@ -299,6 +307,7 @@ pub async fn handle(
 async fn query_to_json<T: GenericClient>(
     client: &T,
     data: QueryData,
+    current_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
 ) -> anyhow::Result<Value> {
@@ -312,12 +321,11 @@ async fn query_to_json<T: GenericClient>(
     // big.
     pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
-    let mut current_size = 0;
     while let Some(row) = row_stream.next().await {
         let row = row?;
-        current_size += row.body_len();
+        *current_size += row.body_len();
         rows.push(row);
-        if current_size > MAX_RESPONSE_SIZE {
+        if *current_size > MAX_RESPONSE_SIZE {
             return Err(anyhow::anyhow!(
                 "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
             ));
