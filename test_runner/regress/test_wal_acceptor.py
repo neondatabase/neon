@@ -439,7 +439,6 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_safekeepers_wal_backup",
     )
 
     neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
@@ -491,7 +490,6 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_s3_wal_replay",
     )
 
     neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER

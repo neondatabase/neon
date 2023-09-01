@@ -43,7 +43,6 @@ def test_tenant_delete_smoke(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_tenant_delete_smoke",
     )
 
     env = neon_env_builder.init_start()
@@ -177,9 +176,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if simulate_failures:
         neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_tenant_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -300,7 +297,6 @@ def test_tenant_delete_is_resumed_on_attach(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
     )
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)

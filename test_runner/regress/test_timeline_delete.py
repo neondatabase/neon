@@ -191,9 +191,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -350,7 +348,6 @@ def test_timeline_resurrection_on_attach(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_resurrection_on_attach",
     )
 
     ##### First start, insert data and upload it to the remote storage
@@ -438,7 +435,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_timeline_delete_fail_before_local_delete",
     )
 
     env = neon_env_builder.init_start()
@@ -558,7 +554,6 @@ def test_concurrent_timeline_delete_stuck_on(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name=f"concurrent_timeline_delete_stuck_on_{stuck_failpoint}",
     )
 
     env = neon_env_builder.init_start()
@@ -636,7 +631,6 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_delete_timeline_client_hangup",
     )
 
     env = neon_env_builder.init_start()
@@ -706,7 +700,6 @@ def test_timeline_delete_works_for_remote_smoke(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_delete_works_for_remote_smoke",
     )
 
     env = neon_env_builder.init_start()
@@ -780,7 +773,7 @@ def test_delete_orphaned_objects(
     pg_bin: PgBin,
 ):
     remote_storage_kind = RemoteStorageKind.LOCAL_FS
-    neon_env_builder.enable_remote_storage(remote_storage_kind, "test_delete_orphaned_objects")
+    neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -844,7 +837,6 @@ def test_timeline_delete_resumed_on_attach(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
     )
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
