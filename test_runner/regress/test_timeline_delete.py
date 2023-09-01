@@ -231,7 +231,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
     # This happens when we fail before scheduling background operation.
     # Timeline is left in stopping state and retry tries to stop it again.
@@ -449,7 +449,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
     # this happens, because the stuck timeline is visible to shutdown
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.+: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
 
     ps_http = env.pageserver.http_client()
@@ -881,7 +881,7 @@ def test_timeline_delete_resumed_on_attach(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
