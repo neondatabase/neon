@@ -195,7 +195,7 @@ pub struct Tenant {
     walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
 
     // provides access to timeline data sitting in the remote storage
-    remote_storage: Option<GenericRemoteStorage>,
+    pub(crate) remote_storage: Option<GenericRemoteStorage>,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -1517,6 +1517,15 @@ impl Tenant {
         tline.maybe_spawn_flush_loop();
         tline.freeze_and_flush().await.context("freeze_and_flush")?;
 
+        // Make sure the freeze_and_flush reaches remote storage.
+        tline
+            .remote_client
+            .as_ref()
+            .unwrap()
+            .wait_completion()
+            .await
+            .unwrap();
+
         let tl = uninit_tl.finish_creation()?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
@@ -1693,65 +1702,6 @@ impl Tenant {
         Ok(())
     }
 
-    /// Flush all in-memory data to disk and remote storage, if any.
-    ///
-    /// Used at graceful shutdown.
-    async fn freeze_and_flush_on_shutdown(&self) {
-        let mut js = tokio::task::JoinSet::new();
-
-        // execute on each timeline on the JoinSet, join after.
-        let per_timeline = |timeline_id: TimelineId, timeline: Arc<Timeline>| {
-            async move {
-                debug_assert_current_span_has_tenant_and_timeline_id();
-
-                match timeline.freeze_and_flush().await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        warn!("failed to freeze and flush: {e:#}");
-                        return;
-                    }
-                }
-
-                let res = if let Some(client) = timeline.remote_client.as_ref() {
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    client.wait_completion().await
-                } else {
-                    Ok(())
-                };
-
-                if let Err(e) = res {
-                    warn!("failed to await for frozen and flushed uploads: {e:#}");
-                }
-            }
-            .instrument(tracing::info_span!("freeze_and_flush_on_shutdown", %timeline_id))
-        };
-
-        {
-            let timelines = self.timelines.lock().unwrap();
-            timelines
-                .iter()
-                .map(|(id, tl)| (*id, Arc::clone(tl)))
-                .for_each(|(timeline_id, timeline)| {
-                    js.spawn(per_timeline(timeline_id, timeline));
-                })
-        };
-
-        while let Some(res) = js.join_next().await {
-            match res {
-                Ok(()) => {}
-                Err(je) if je.is_cancelled() => unreachable!("no cancelling used"),
-                Err(je) if je.is_panic() => { /* logged already */ }
-                Err(je) => warn!("unexpected JoinError: {je:?}"),
-            }
-        }
-    }
-
     pub fn current_state(&self) -> TenantState {
         self.state.borrow().clone()
     }
@@ -1882,19 +1832,22 @@ impl Tenant {
             }
         };
 
-        if freeze_and_flush {
-            // walreceiver has already began to shutdown with TenantState::Stopping, but we need to
-            // await for them to stop.
-            task_mgr::shutdown_tasks(
-                Some(TaskKind::WalReceiverManager),
-                Some(self.tenant_id),
-                None,
-            )
-            .await;
-
-            // this will wait for uploads to complete; in the past, it was done outside tenant
-            // shutdown in pageserver::shutdown_pageserver.
-            self.freeze_and_flush_on_shutdown().await;
+        let mut js = tokio::task::JoinSet::new();
+        {
+            let timelines = self.timelines.lock().unwrap();
+            timelines.values().for_each(|timeline| {
+                let timeline = Arc::clone(timeline);
+                let span = Span::current();
+                js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
+            })
+        };
+        while let Some(res) = js.join_next().await {
+            match res {
+                Ok(()) => {}
+                Err(je) if je.is_cancelled() => unreachable!("no cancelling used"),
+                Err(je) if je.is_panic() => { /* logged already */ }
+                Err(je) => warn!("unexpected JoinError: {je:?}"),
+            }
         }
 
         // shutdown all tenant and timeline tasks: gc, compaction, page service
@@ -3467,6 +3420,8 @@ pub mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
+        remote_storage: GenericRemoteStorage,
+        pub remote_fs_dir: PathBuf,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3504,29 +3459,39 @@ pub mod harness {
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_id))?;
 
+            use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
+            let remote_fs_dir = conf.workdir.join("localfs");
+            std::fs::create_dir_all(&remote_fs_dir).unwrap();
+            let config = RemoteStorageConfig {
+                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
+                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
+                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
+                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
+                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            };
+            let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+
             Ok(Self {
                 conf,
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
+                remote_storage,
+                remote_fs_dir,
             })
         }
 
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
-                self.try_load(&ctx, None)
+                self.try_load(&ctx)
                     .await
                     .expect("failed to load test tenant"),
                 ctx,
             )
         }
 
-        pub async fn try_load(
-            &self,
-            ctx: &RequestContext,
-            remote_storage: Option<remote_storage::GenericRemoteStorage>,
-        ) -> anyhow::Result<Arc<Tenant>> {
+        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(TestRedoManager);
 
             let tenant = Arc::new(Tenant::new(
@@ -3536,7 +3501,7 @@ pub mod harness {
                 walredo_mgr,
                 self.tenant_id,
                 self.generation,
-                remote_storage,
+                Some(self.remote_storage.clone()),
             ));
             tenant
                 .load(None, ctx)
@@ -4004,6 +3969,13 @@ mod tests {
                 .create_test_timeline(TIMELINE_ID, Lsn(0x7000), DEFAULT_PG_VERSION, &ctx)
                 .await?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
+            // so that all uploads finish & we can call harness.load() below again
+            tenant
+                .shutdown(Default::default(), true)
+                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
+                .await
+                .ok()
+                .unwrap();
         }
 
         let (tenant, _ctx) = harness.load().await;
@@ -4037,6 +4009,14 @@ mod tests {
                 .expect("Should have a local timeline");
 
             make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+
+            // so that all uploads finish & we can call harness.load() below again
+            tenant
+                .shutdown(Default::default(), true)
+                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
+                .await
+                .ok()
+                .unwrap();
         }
 
         // check that both of them are initially unloaded
@@ -4089,6 +4069,13 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         drop(tline);
+        // so that all uploads finish & we can call harness.try_load() below again
+        tenant
+            .shutdown(Default::default(), true)
+            .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
+            .await
+            .ok()
+            .unwrap();
         drop(tenant);
 
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
@@ -4100,11 +4087,7 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness
-            .try_load(&ctx, None)
-            .await
-            .err()
-            .expect("should fail");
+        let err = harness.try_load(&ctx).await.err().expect("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
         let expected = "failed to load metadata";
@@ -4558,6 +4541,11 @@ mod tests {
             let tline =
                 tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
             // Keeps uninit mark in place
+            let raw_tline = tline.raw_timeline().unwrap();
+            raw_tline
+                .shutdown(false)
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_id))
+                .await;
             std::mem::forget(tline);
         }
 
