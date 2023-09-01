@@ -72,7 +72,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReaderVirtual(&'a FileBlockReader<VirtualFile>),
+    FileBlockReaderVirtual(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -119,7 +119,7 @@ impl<'a> BlockCursor<'a> {
         BlockCursor { reader }
     }
     // Needed by cli
-    pub fn new_fileblockreader_virtual(reader: &'a FileBlockReader<VirtualFile>) -> Self {
+    pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
             reader: BlockReaderRef::FileBlockReaderVirtual(reader),
         }
@@ -140,14 +140,14 @@ impl<'a> BlockCursor<'a> {
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
-pub struct FileBlockReader<F> {
-    pub file: F,
+pub struct FileBlockReader {
+    pub file: VirtualFile,
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
 }
 
-impl FileBlockReader<VirtualFile> {
+impl FileBlockReader {
     pub fn new(file: VirtualFile) -> Self {
         let file_id = page_cache::next_file_id();
 
@@ -190,7 +190,7 @@ impl FileBlockReader<VirtualFile> {
     }
 }
 
-impl BlockReader for FileBlockReader<VirtualFile> {
+impl BlockReader for FileBlockReader {
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReaderVirtual(self))
     }
