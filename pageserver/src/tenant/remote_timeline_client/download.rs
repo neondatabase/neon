@@ -294,7 +294,7 @@ pub(super) async fn download_index_part(
         let file_name_str = match file_name.to_str() {
             Some(s) => s,
             None => {
-                tracing::warn!("Malformed index key {0}", path);
+                tracing::warn!("Malformed index key {0:?}", path);
                 return None;
             }
         };
