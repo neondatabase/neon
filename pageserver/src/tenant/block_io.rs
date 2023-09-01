@@ -156,7 +156,9 @@ impl FileBlockReader<VirtualFile> {
     /// Read a page from the underlying file into given buffer.
     async fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
-        self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+        self.file
+            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .await
     }
     /// Read a block.
     ///

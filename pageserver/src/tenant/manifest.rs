@@ -156,6 +156,7 @@ impl Manifest {
     ) -> Result<(Self, Vec<Operation>, ManifestPartiallyCorrupted), ManifestLoadError> {
         let mut buf = vec![];
         file.read_exact_at(&mut buf, 0)
+            .await
             .map_err(ManifestLoadError::Io)?;
 
         // Read manifest header
