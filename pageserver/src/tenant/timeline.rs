@@ -90,6 +90,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
+use super::debug_assert_current_span_has_tenant_and_timeline_id;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
@@ -931,6 +932,48 @@ impl Timeline {
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
+    }
+
+    #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
+    pub async fn shutdown(self: &Arc<Self>, freeze_and_flush: bool) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        // prevent writes to the InMemoryLayer
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
+
+        // now all writers to InMemory layer are gone, do the final flush if requested
+        if freeze_and_flush {
+            match self.freeze_and_flush().await {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!("failed to freeze and flush: {e:#}");
+                    return; // TODO: should probably drain remote timeline client anyways?
+                }
+            }
+
+            // drain the upload queue
+            let res = if let Some(client) = self.remote_client.as_ref() {
+                // if we did not wait for completion here, it might be our shutdown process
+                // didn't wait for remote uploads to complete at all, as new tasks can forever
+                // be spawned.
+                //
+                // what is problematic is the shutting down of RemoteTimelineClient, because
+                // obviously it does not make sense to stop while we wait for it, but what
+                // about corner cases like s3 suddenly hanging up?
+                client.wait_completion().await
+            } else {
+                Ok(())
+            };
+
+            if let Err(e) = res {
+                warn!("failed to await for frozen and flushed uploads: {e:#}");
+            }
+        }
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -4742,22 +4785,8 @@ mod tests {
         let harness =
             TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
 
-        let remote_storage = {
-            // this is never used for anything, because of how the create_test_timeline works, but
-            // it is with us in spirit and a Some.
-            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
-            let path = harness.conf.workdir.join("localfs");
-            std::fs::create_dir_all(&path).unwrap();
-            let config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
-                storage: RemoteStorageKind::LocalFs(path),
-            };
-            GenericRemoteStorage::from_config(&config).unwrap()
-        };
-
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness.try_load(&ctx).await.unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
@@ -4807,22 +4836,8 @@ mod tests {
     async fn layer_eviction_aba_fails() {
         let harness = TenantHarness::create("layer_eviction_aba_fails").unwrap();
 
-        let remote_storage = {
-            // this is never used for anything, because of how the create_test_timeline works, but
-            // it is with us in spirit and a Some.
-            use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
-            let path = harness.conf.workdir.join("localfs");
-            std::fs::create_dir_all(&path).unwrap();
-            let config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
-                storage: RemoteStorageKind::LocalFs(path),
-            };
-            GenericRemoteStorage::from_config(&config).unwrap()
-        };
-
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx, Some(remote_storage)).await.unwrap();
+        let tenant = harness.try_load(&ctx).await.unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
