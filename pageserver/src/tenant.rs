@@ -34,7 +34,6 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
-use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
@@ -2469,10 +2468,8 @@ impl Tenant {
             )?;
 
             target_config_file
-                .write(conf_content.as_bytes())
-                .context("write toml bytes into file")
-                .and_then(|_| target_config_file.sync_all().context("fsync config file"))
-                .context("write config file")?;
+                .write_and_fsync(conf_content.as_bytes())
+                .context("write tenant config toml bytes into file")?;
 
             // fsync the parent directory to ensure the directory entry is durable.
             // before this was done conditionally on creating_tenant, but these management actions are rare
