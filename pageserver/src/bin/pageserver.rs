@@ -388,6 +388,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
         },
         order,
+        shutdown_pageserver.clone(),
     ))?;
 
     BACKGROUND_RUNTIME.spawn({

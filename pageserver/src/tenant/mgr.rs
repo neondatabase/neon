@@ -11,6 +11,7 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
@@ -71,6 +72,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     resources: TenantSharedResources,
     init_order: InitializationOrder,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -78,7 +80,7 @@ pub async fn init_tenant_mgr(
     let mut tenants = HashMap::new();
 
     // If we are configured to use the control plane API, then it is the source of truth for what to attach
-    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf) {
+    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
         Some(client.re_attach().await?)
     } else {
         info!("Control plane API not configured, tenant generations are disabled");

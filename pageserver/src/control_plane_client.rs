@@ -1,14 +1,22 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use hyper::StatusCode;
 use pageserver_api::control_api::{ReAttachRequest, ReAttachResponse};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::{
+    backoff,
     generation::Generation,
     id::{NodeId, TenantId},
 };
 
 use crate::config::PageServerConf;
+
+// Backoffs when control plane requests do not succeed: compromise between reducing load
+// on control plane, and retrying frequently when we are blocked on a control plane
+// response to make progress.
+const BACKOFF_INCREMENT: f64 = 0.1;
+const BACKOFF_MAX: f64 = 10.0;
 
 /// The Pageserver's client for using the control plane API: this is a small subset
 /// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
@@ -16,12 +24,13 @@ pub(crate) struct ControlPlaneClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
+    cancel: CancellationToken,
 }
 
 impl ControlPlaneClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub(crate) fn new(conf: &'static PageServerConf) -> Option<Self> {
+    pub(crate) fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
         let url = match conf.control_plane_api.as_ref() {
             Some(u) => u.clone(),
             None => return None,
@@ -42,6 +51,7 @@ impl ControlPlaneClient {
             http_client: client,
             base_url: url,
             node_id: conf.id,
+            cancel: cancel.clone(),
         })
     }
 
@@ -74,8 +84,7 @@ impl ControlPlaneClient {
             node_id: self.node_id,
         };
 
-        // TODO: we should have been passed a cancellation token, and use it to end
-        // this loop gracefully
+        let mut attempt = 0;
         loop {
             let result = self.try_re_attach(re_attach_path.clone(), &request).await;
             match result {
@@ -93,7 +102,17 @@ impl ControlPlaneClient {
                 }
                 Err(e) => {
                     tracing::error!("Error re-attaching tenants, retrying: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    backoff::exponential_backoff(
+                        attempt,
+                        BACKOFF_INCREMENT,
+                        BACKOFF_MAX,
+                        &self.cancel,
+                    )
+                    .await;
+                    if self.cancel.is_cancelled() {
+                        return Err(anyhow::anyhow!("Shutting down"));
+                    }
+                    attempt += 1;
                 }
             }
         }
