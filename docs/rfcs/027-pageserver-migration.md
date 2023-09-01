@@ -90,7 +90,7 @@ Pageserver, control plane
 
 ## Implementation (high level)
 
-### Secondary locations
+### Warm secondary locations
 
 To enable faster migrations, we will identify at least one _secondary location_
 for each tenant. This secondary location will keep a warm cache of layers
