@@ -428,7 +428,6 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
-        enable_generations: bool = False,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
