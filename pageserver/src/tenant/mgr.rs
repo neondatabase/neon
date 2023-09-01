@@ -404,7 +404,7 @@ pub async fn set_new_tenant_config(
     let tenant = get_tenant(tenant_id, true).await?;
 
     let tenant_config_path = conf.tenant_config_path(&tenant_id);
-    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, new_tenant_conf, false)
+    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, new_tenant_conf)
         .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
