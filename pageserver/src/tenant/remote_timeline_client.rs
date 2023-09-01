@@ -1875,7 +1875,6 @@ mod tests {
             HashMap::new(),
             example_metadata.disk_consistent_lsn(),
             example_metadata,
-            
         );
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();

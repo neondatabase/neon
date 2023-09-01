@@ -487,8 +487,7 @@ async fn tenant_attach_handler(
 
     let state = get_state(&request);
 
-    let generation =
-        get_request_generation(state, maybe_body.as_ref().map(|r| r.generation).flatten())?;
+    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
 
     if let Some(remote_storage) = &state.remote_storage {
         mgr::attach_tenant(
@@ -560,8 +559,7 @@ async fn tenant_load_handler(
 
     // The /load request is only usable when control_plane_api is not set.  Once it is set, callers
     // should always use /attach instead.
-    let generation =
-        get_request_generation(state, maybe_body.as_ref().map(|r| r.generation).flatten())?;
+    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
 
     mgr::load_tenant(
         state.conf,
