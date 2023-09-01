@@ -300,14 +300,13 @@ pub(super) async fn download_index_part(
     .await
     .map_err(DownloadError::Other)?;
 
-    let mut generations: Vec<_> = indices
+    let max_previous_generation = indices
         .into_iter()
         .filter_map(parse_remote_index_path)
         .filter(|g| g <= &my_generation)
-        .collect();
+        .max();
 
-    generations.sort();
-    match generations.last() {
+    match max_previous_generation {
         Some(g) => {
             tracing::debug!(
                 "Found index_part in generation {g:?} (my generation {my_generation:?})"
