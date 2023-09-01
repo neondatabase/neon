@@ -1,4 +1,4 @@
-# Fast tenant transfers for high availability
+# Fast tenant migration for high availability
 
 - Author: john@neon.tech
 - Created on 2023-08-11
@@ -7,15 +7,15 @@
 ## Summary
 
 The preceding [generation numbers RFC](025-generation-numbers.md) may be thought of as "making tenant
-transfers safe". Following that,
-this RFC is about how those transfers are to be done:
+migration safe". Following that,
+this RFC is about how those migrations are to be done:
 
 1. Seamlessly (without interruption to client availability)
 2. Quickly (enabling faster operations)
 3. Efficiently (minimizing I/O and $ cost)
 
 These points are in priority order: if we have to sacrifice
-efficiency to make a transfer seamless for clients, we will
+efficiency to make a migration seamless for clients, we will
 do so, etc.
 
 This is accomplished by introducing two high level changes:
@@ -437,7 +437,7 @@ attachment on the secondary node.
 The downside to this approach is a potentially large gap in readability of
 recent LSNs while loading data onto the new node. To avoid this, it is worthwhile
 to incur the extra cost of double-replaying the WAL onto old and new nodes' local
-storage during a transfer.
+storage during a migration.
 
 ### Peer-to-peer pageserver communication
 
