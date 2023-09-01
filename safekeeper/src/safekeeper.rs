@@ -344,7 +344,8 @@ pub struct AppendRequest {
 pub struct AppendRequestHeader {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
-    // LSN since the proposer appends WAL; determines epoch switch point.
+    // TODO: remove this field, it in unused -- LSN of term switch can be taken
+    // from ProposerElected (as well as from term history).
     pub epoch_start_lsn: Lsn,
     /// start position of message in WAL
     pub begin_lsn: Lsn,
@@ -810,6 +811,14 @@ where
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
 
+        // Cache LSN where term starts to immediately fsync control file with
+        // commit_lsn once we reach it -- sync-safekeepers finishes when
+        // persisted commit_lsn on majority of safekeepers aligns.
+        self.epoch_start_lsn = match msg.term_history.0.last() {
+            None => bail!("proposer elected with empty term history"),
+            Some(term_lsn_start) => term_lsn_start.lsn,
+        };
+
         Ok(None)
     }
 
@@ -835,10 +844,7 @@ where
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
         // otherwise commit_lsn might jump over epoch_start_lsn.
-        // Also note that commit_lsn can reach epoch_start_lsn earlier
-        // that we receive new epoch_start_lsn, and we still need to sync
-        // control file in this case.
-        if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
+        if commit_lsn >= self.epoch_start_lsn && self.state.commit_lsn < self.epoch_start_lsn {
             self.persist_control_file(self.state.clone()).await?;
         }
 
@@ -902,7 +908,6 @@ where
         // Now we know that we are in the same term as the proposer,
         // processing the message.
 
-        self.epoch_start_lsn = msg.h.epoch_start_lsn;
         self.inmem.proposer_uuid = msg.h.proposer_uuid;
 
         // do the job
