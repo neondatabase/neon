@@ -267,6 +267,7 @@ pub async fn collect_metrics(
 ///
 /// TODO
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
+#[tracing::instrument(skip_all, fields(%send_cached, tenants, total_metrics))]
 async fn collect_metrics_iteration(
     client: &reqwest::Client,
     cached_metrics: &mut HashMap<MetricsKey, (EventType, u64)>,
@@ -275,11 +276,11 @@ async fn collect_metrics_iteration(
     ctx: &RequestContext,
     send_cached: bool,
 ) {
+    let span = tracing::Span::current();
+
+    let started_at = std::time::Instant::now();
     let mut current_metrics: Vec<(MetricsKey, (EventType, u64))> = Vec::new();
-    trace!(
-        "starting collect_metrics_iteration. metric_collection_endpoint: {}",
-        metric_collection_endpoint
-    );
+    info!("starting collect_metrics_iteration");
 
     // get list of tenants
     let tenants = match mgr::list_tenants().await {
@@ -289,6 +290,8 @@ async fn collect_metrics_iteration(
             return;
         }
     };
+
+    span.record("tenants", tenants.len());
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
@@ -372,9 +375,17 @@ async fn collect_metrics_iteration(
     }
 
     if current_metrics.is_empty() {
-        trace!("no new metrics to send");
+        info!("no new metrics to send");
         return;
     }
+
+    span.record("total_metrics", current_metrics.len());
+
+    let collected_at = std::time::Instant::now();
+    tracing::info!(
+        elapsed_ms = (collected_at - started_at).as_millis(),
+        "done collecting metrics"
+    );
 
     // Send metrics.
     // Split into chunks of 1000 metrics to avoid exceeding the max request size
@@ -383,6 +394,8 @@ async fn collect_metrics_iteration(
     let mut chunk_to_send: Vec<Event<Ids>> = Vec::with_capacity(CHUNK_SIZE);
 
     let node_id = node_id.to_string();
+
+    let mut sent = 0;
 
     for chunk in chunks {
         chunk_to_send.clear();
@@ -413,11 +426,13 @@ async fn collect_metrics_iteration(
             match res {
                 Ok(res) => {
                     if res.status().is_success() {
+                        sent += chunk.len();
                         // update cached metrics after they were sent successfully
                         for (curr_key, curr_val) in chunk.iter() {
                             cached_metrics.insert(curr_key.clone(), *curr_val);
                         }
                     } else {
+                        // FIXME: we should retry 502 at least, or just normal retries
                         error!("metrics endpoint refused the sent metrics: {:?}", res);
                         for metric in chunk_to_send
                             .iter()
@@ -440,6 +455,8 @@ async fn collect_metrics_iteration(
             }
         }
     }
+
+    tracing::info!(metrics_sent = %sent, elapsed_ms = collected_at.elapsed().as_millis(), "done sending metrics");
 }
 
 /// Internal type to make timeline metric production testable.
