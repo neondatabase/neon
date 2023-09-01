@@ -279,7 +279,7 @@ impl VirtualFile {
         let Some(final_path_parent) = final_path.parent() else {
             return Err(CrashsafeOverwriteError::FinalPathHasNoParentDir);
         };
-        match std::fs::remove_file(&tmp_path) {
+        match std::fs::remove_file(tmp_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
@@ -307,7 +307,7 @@ impl VirtualFile {
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
         let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, &OpenOptions::new().read(true))
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
                 .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
         final_parent_dirfd
             .sync_all()
