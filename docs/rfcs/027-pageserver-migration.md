@@ -1,4 +1,4 @@
-# Fast tenant transfers for high availability
+# Seamless tenant migration
 
 - Author: john@neon.tech
 - Created on 2023-08-11
@@ -7,15 +7,15 @@
 ## Summary
 
 The preceding [generation numbers RFC](025-generation-numbers.md) may be thought of as "making tenant
-transfers safe". Following that,
-this RFC is about how those transfers are to be done:
+migration safe". Following that,
+this RFC is about how those migrations are to be done:
 
 1. Seamlessly (without interruption to client availability)
 2. Quickly (enabling faster operations)
 3. Efficiently (minimizing I/O and $ cost)
 
 These points are in priority order: if we have to sacrifice
-efficiency to make a transfer seamless for clients, we will
+efficiency to make a migration seamless for clients, we will
 do so, etc.
 
 This is accomplished by introducing two high level changes:
@@ -36,9 +36,18 @@ at scale, in several contexts:
    database and they need to migrate to a pageserver with more capacity.
 3. Restarting pageservers for upgrades and maintenance
 
-Currently, a tenant may migrated by attaching to a new node,
-re-configuring endpoints to use the new node, and then later detaching from the old node. This is safe once [generation numbers](025-generation-numbers.md) are implemented, but does meet
-our seamless/fast/efficient goals:
+The current situation steps for migration are:
+* detach from old node; skip if old node is dead; (the [skip part is still WIP](https://github.com/neondatabase/cloud/issues/5426)).
+* attach to new node
+* re-configure endpoints to use the new node
+
+Once [generation numbers](025-generation-numbers.md) are implemented,
+the detach step is no longer critical for correctness. So, we can
+* attach to a new node,
+* re-configure endpoints to use the new node, and then
+* detach from the old node.
+
+However, this still does not meet our seamless/fast/efficient goals:
 
 - Not fast: The new node will have to download potentially large amounts
   of data from S3, which may take many minutes.
@@ -54,7 +63,7 @@ The user expectations for availability are:
 - For unplanned changes (e.g. node failures), there should be
   minimal availability gap.
 
-## Non Goals (if relevant)
+## Non Goals
 
 - We do not aim to have the pageservers fail over if the
   control plane is unavailable.
@@ -63,7 +72,7 @@ The user expectations for availability are:
   page cache usually contains such pages, we do not expect
   them to be read frequently from the pageserver).
 
-## Impacted components (e.g. pageserver, safekeeper, console, etc)
+## Impacted components
 
 Pageserver, control plane
 
@@ -81,7 +90,7 @@ Pageserver, control plane
 
 ## Implementation (high level)
 
-### Secondary locations
+### Warm secondary locations
 
 To enable faster migrations, we will identify at least one _secondary location_
 for each tenant. This secondary location will keep a warm cache of layers
@@ -149,8 +158,8 @@ The following table summarizes how the state of the system advances:
 This procedure readily applies to other migration cases:
 
 - **Node failures**: if node A is unavailable, then all calls into
-  node A are simply skipped, and when waiting for node B LSN to catch
-  up, we may proceed immediately.
+  node A are skipped and we don't wait for B to catch up before
+  switching updating the endpoints to use B.
 - **Migration without a secondary location**: if node A is initially
   in Detached state, the procedure is idential, but waiting for Node B
   to download layers and catch up with WAL will take much longer.
@@ -437,7 +446,7 @@ attachment on the secondary node.
 The downside to this approach is a potentially large gap in readability of
 recent LSNs while loading data onto the new node. To avoid this, it is worthwhile
 to incur the extra cost of double-replaying the WAL onto old and new nodes' local
-storage during a transfer.
+storage during a migration.
 
 ### Peer-to-peer pageserver communication
 
