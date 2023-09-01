@@ -1509,6 +1509,7 @@ class NeonAttachmentService:
         self.env = env
 
     def start(self):
+        assert not self.running
         self.env.neon_cli.attachment_service_start()
         self.running = True
         return self

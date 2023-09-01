@@ -79,7 +79,7 @@ pub async fn init_tenant_mgr(
 
     let mut tenants = HashMap::new();
 
-    // If we are configured to use the control plane API, then it is the source of truth for what to attach
+    // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
         Some(client.re_attach().await?)
     } else {

@@ -157,7 +157,6 @@ def test_remote_storage_backup_and_restore(
     # background task to load the tenant. In that background task,
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
-    # client.tenant_attach(tenant_id)
     env.pageserver.tenant_attach(tenant_id)
 
     tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
