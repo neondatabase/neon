@@ -34,6 +34,4 @@ pageserver = {path="../pageserver"}
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-
-atty = "0.2"
 tracing-appender = "0.2"

@@ -140,7 +140,6 @@ pub fn init_logging(binary_name: &str, dry_run: bool, node_kind: &str) -> Worker
         .with_writer(file_writer);
     let stdout_logs = fmt::Layer::new()
         .with_target(false)
-        .with_ansi(atty::is(atty::Stream::Stdout))
         .with_writer(std::io::stdout);
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
