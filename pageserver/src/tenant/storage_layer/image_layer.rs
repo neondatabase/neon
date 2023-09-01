@@ -155,7 +155,7 @@ pub struct ImageLayerInner {
     lsn: Lsn,
 
     /// Reader object for reading blocks from the file.
-    file: FileBlockReader<VirtualFile>,
+    file: FileBlockReader,
 }
 
 impl std::fmt::Debug for ImageLayerInner {

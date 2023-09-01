@@ -219,7 +219,7 @@ pub struct DeltaLayerInner {
     index_root_blk: u32,
 
     /// Reader object for reading blocks from the file.
-    file: FileBlockReader<VirtualFile>,
+    file: FileBlockReader,
 }
 
 impl AsRef<DeltaLayerInner> for DeltaLayerInner {
