@@ -106,7 +106,7 @@ impl super::Api for Api {
     async fn get_auth_info(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
         self.do_get_auth_info(creds).await
     }
@@ -115,7 +115,7 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        _creds: &ClientCredentials<'_>,
+        _creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)

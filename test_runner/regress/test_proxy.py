@@ -1,6 +1,6 @@
 import json
 import subprocess
-from typing import Any, List
+from typing import Any, List, Optional, Tuple
 
 import psycopg2
 import pytest
@@ -179,7 +179,8 @@ def test_close_on_connections_exit(static_proxy: NeonProxy):
 def test_sql_over_http(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    def q(sql: str, params: List[Any] = []) -> Any:
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
         connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         response = requests.post(
             f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
@@ -229,7 +230,8 @@ def test_sql_over_http(static_proxy: NeonProxy):
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
 
-    def q(sql: str, raw_text: bool, array_mode: bool, params: List[Any] = []) -> Any:
+    def q(sql: str, raw_text: bool, array_mode: bool, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
         connstr = (
             f"postgresql://http2:http2@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
         )
@@ -258,3 +260,130 @@ def test_sql_over_http_output_options(static_proxy: NeonProxy):
 
     rows = q("select 1 as n, 'a' as s, '{1,2,3}'::int4[] as arr", True, True)["rows"]
     assert rows == [["1", "a", "{1,2,3}"]]
+
+
+def test_sql_over_http_batch(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    def qq(
+        queries: List[Tuple[str, Optional[List[Any]]]],
+        read_only: bool = False,
+        deferrable: bool = False,
+    ) -> Any:
+        connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps(
+                {"queries": list(map(lambda x: {"query": x[0], "params": x[1] or []}, queries))}
+            ),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Batch-Isolation-Level": "Serializable",
+                "Neon-Batch-Read-Only": "true" if read_only else "false",
+                "Neon-Batch-Deferrable": "true" if deferrable else "false",
+            },
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == 200
+        return response.json()["results"], response.headers
+
+    result, headers = qq(
+        [
+            ("select 42 as answer", None),
+            ("select $1 as answer", [42]),
+            ("select $1 * 1 as answer", [42]),
+            ("select $1::int[] as answer", [[1, 2, 3]]),
+            ("select $1::json->'a' as answer", [{"a": {"b": 42}}]),
+            ("select * from pg_class limit 1", None),
+            ("create table t(id serial primary key, val int)", None),
+            ("insert into t(val) values (10), (20), (30) returning id", None),
+            ("select * from t", None),
+            ("drop table t", None),
+        ]
+    )
+
+    assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
+    assert "Neon-Batch-Read-Only" not in headers
+    assert "Neon-Batch-Deferrable" not in headers
+
+    assert result[0]["rows"] == [{"answer": 42}]
+    assert result[1]["rows"] == [{"answer": "42"}]
+    assert result[2]["rows"] == [{"answer": 42}]
+    assert result[3]["rows"] == [{"answer": [1, 2, 3]}]
+    assert result[4]["rows"] == [{"answer": {"b": 42}}]
+    assert len(result[5]["rows"]) == 1
+    res = result[6]
+    assert res["command"] == "CREATE"
+    assert res["rowCount"] is None
+    res = result[7]
+    assert res["command"] == "INSERT"
+    assert res["rowCount"] == 3
+    assert res["rows"] == [{"id": 1}, {"id": 2}, {"id": 3}]
+    res = result[8]
+    assert res["command"] == "SELECT"
+    assert res["rowCount"] == 3
+    res = result[9]
+    assert res["command"] == "DROP"
+    assert res["rowCount"] is None
+    assert len(result) == 10
+
+    result, headers = qq(
+        [
+            ("select 42 as answer", None),
+        ],
+        True,
+        True,
+    )
+    assert headers["Neon-Batch-Isolation-Level"] == "Serializable"
+    assert headers["Neon-Batch-Read-Only"] == "true"
+    assert headers["Neon-Batch-Deferrable"] == "true"
+
+    assert result[0]["rows"] == [{"answer": 42}]
+
+
+def test_sql_over_http_pool(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    def get_pid(status: int, pw: str) -> Any:
+        connstr = (
+            f"postgresql://http_auth:{pw}@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        )
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps(
+                {"query": "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "params": []}
+            ),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == status
+        return response.json()
+
+    pid1 = get_pid(200, "http")["rows"][0]["pid"]
+
+    # query should be on the same connection
+    rows = get_pid(200, "http")["rows"]
+    assert rows == [{"pid": pid1}]
+
+    # incorrect password should not work
+    res = get_pid(400, "foobar")
+    assert "password authentication failed for user" in res["message"]
+
+    static_proxy.safe_psql("alter user http_auth with password 'http2'")
+
+    # after password change, should open a new connection to verify it
+    pid2 = get_pid(200, "http2")["rows"][0]["pid"]
+    assert pid1 != pid2
+
+    # query should be on an existing connection
+    pid = get_pid(200, "http2")["rows"][0]["pid"]
+    assert pid in [pid1, pid2]
+
+    # old password should not work
+    res = get_pid(400, "http")
+    assert "password authentication failed for user" in res["message"]

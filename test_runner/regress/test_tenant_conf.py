@@ -4,11 +4,10 @@ from contextlib import closing
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnvBuilder,
-    RemoteStorageKind,
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
 
@@ -295,7 +294,6 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_creating_tenant_conf_after_attach",
     )
 
     env = neon_env_builder.init_start()
@@ -340,7 +338,6 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_live_reconfig_get_evictions_low_residence_duration_metric_threshold",
     )
 
     env = neon_env_builder.init_start()

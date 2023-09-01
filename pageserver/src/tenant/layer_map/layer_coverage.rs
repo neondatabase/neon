@@ -2,7 +2,7 @@ use std::ops::Range;
 
 // NOTE the `im` crate has 20x more downloads and also has
 // persistent/immutable BTree. But it's bugged so rpds is a
-// better choice https://github.com/neondatabase/neon/issues/3395
+// better choice <https://github.com/neondatabase/neon/issues/3395>
 use rpds::RedBlackTreeMapSync;
 
 /// Data structure that can efficiently:
@@ -11,7 +11,7 @@ use rpds::RedBlackTreeMapSync;
 /// - insert layers in non-decreasing lsn.start order
 ///
 /// For a detailed explanation and justification of this approach, see:
-/// https://neon.tech/blog/persistent-structures-in-neons-wal-indexing
+/// <https://neon.tech/blog/persistent-structures-in-neons-wal-indexing>
 ///
 /// NOTE The struct is parameterized over Value for easier
 ///      testing, but in practice it's some sort of layer.
@@ -113,8 +113,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     pub fn query(&self, key: i128) -> Option<Value> {
         self.nodes
             .range(..=key)
-            .rev()
-            .next()?
+            .next_back()?
             .1
             .as_ref()
             .map(|(_, v)| v.clone())

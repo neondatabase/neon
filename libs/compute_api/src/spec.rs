@@ -3,10 +3,15 @@
 //! The spec.json file is used to pass information to 'compute_ctl'. It contains
 //! all the information needed to start up the right version of PostgreSQL,
 //! and connect it to the storage nodes.
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+
+use regex::Regex;
+use remote_storage::RemotePath;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -60,6 +65,79 @@ pub struct ComputeSpec {
     /// If set, 'storage_auth_token' is used as the password to authenticate to
     /// the pageserver and safekeepers.
     pub storage_auth_token: Option<String>,
+
+    // information about available remote extensions
+    pub remote_extensions: Option<RemoteExtSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RemoteExtSpec {
+    pub public_extensions: Option<Vec<String>>,
+    pub custom_extensions: Option<Vec<String>>,
+    pub library_index: HashMap<String, String>,
+    pub extension_data: HashMap<String, ExtensionData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtensionData {
+    pub control_data: HashMap<String, String>,
+    pub archive_path: String,
+}
+
+impl RemoteExtSpec {
+    pub fn get_ext(
+        &self,
+        ext_name: &str,
+        is_library: bool,
+        build_tag: &str,
+        pg_major_version: &str,
+    ) -> anyhow::Result<(String, RemotePath)> {
+        let mut real_ext_name = ext_name;
+        if is_library {
+            // sometimes library names might have a suffix like
+            // library.so or library.so.3. We strip this off
+            // because library_index is based on the name without the file extension
+            let strip_lib_suffix = Regex::new(r"\.so.*").unwrap();
+            let lib_raw_name = strip_lib_suffix.replace(real_ext_name, "").to_string();
+
+            real_ext_name = self
+                .library_index
+                .get(&lib_raw_name)
+                .ok_or(anyhow::anyhow!("library {} is not found", lib_raw_name))?;
+        }
+
+        // Check if extension is present in public or custom.
+        // If not, then it is not allowed to be used by this compute.
+        if let Some(public_extensions) = &self.public_extensions {
+            if !public_extensions.contains(&real_ext_name.to_string()) {
+                if let Some(custom_extensions) = &self.custom_extensions {
+                    if !custom_extensions.contains(&real_ext_name.to_string()) {
+                        return Err(anyhow::anyhow!("extension {} is not found", real_ext_name));
+                    }
+                }
+            }
+        }
+
+        match self.extension_data.get(real_ext_name) {
+            Some(_ext_data) => {
+                // Construct the path to the extension archive
+                // BUILD_TAG/PG_MAJOR_VERSION/extensions/EXTENSION_NAME.tar.zst
+                //
+                // Keep it in sync with path generation in
+                // https://github.com/neondatabase/build-custom-extensions/tree/main
+                let archive_path_str =
+                    format!("{build_tag}/{pg_major_version}/extensions/{real_ext_name}.tar.zst");
+                Ok((
+                    real_ext_name.to_string(),
+                    RemotePath::from_string(&archive_path_str)?,
+                ))
+            }
+            None => Err(anyhow::anyhow!(
+                "real_ext_name {} is not found",
+                real_ext_name
+            )),
+        }
+    }
 }
 
 #[serde_as]

@@ -16,7 +16,7 @@ use crate::id::TenantId;
 /// Algorithm to use. We require EdDSA.
 const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     // Provides access to all data for a specific tenant (specified in `struct Claims` below)

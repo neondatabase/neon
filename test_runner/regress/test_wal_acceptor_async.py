@@ -245,7 +245,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     # we try to simulate large (flush_lsn - truncate_lsn) lag, to test that WAL segments
     # are not removed before broadcasted to all safekeepers, with the help of replication slot
     asyncio.run(
-        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=5)
+        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=4)
     )
 
 
@@ -392,7 +392,7 @@ async def run_concurrent_computes(
             break
         await asyncio.sleep(0.1)
     else:
-        assert False, "Timed out while waiting for another query by computes[0]"
+        raise AssertionError("Timed out while waiting for another query by computes[0]")
     computes[0].stopped = True
 
     await asyncio.gather(background_tasks[0])
@@ -545,7 +545,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
         # invalid, to make them unavailable to the endpoint.  We use
         # ports 10, 11 and 12 to simulate unavailable safekeepers.
         config = toml.load(test_output_dir / "repo" / "config")
-        for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk)):
+        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk)):
             if active:
                 config["safekeepers"][i]["pg_port"] = env.safekeepers[i].port.pg
             else:

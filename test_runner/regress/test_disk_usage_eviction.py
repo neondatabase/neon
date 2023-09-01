@@ -1,22 +1,19 @@
-import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, Tuple
 
 import pytest
 import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -138,23 +135,15 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     log.info(f"setting up eviction_env for test {request.node.name}")
 
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
+    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    # initial tenant will not be present on this pageserver
+    env = neon_env_builder.init_configs()
+    env.start()
     pageserver_http = env.pageserver.http_client()
 
     # allow because we are invoking this manually; we always warn on executing disk based eviction
     env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
-
-    # remove the initial tenant
-    assert env.initial_timeline
-    pageserver_http.tenant_detach(env.initial_tenant)
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    tenant_remote_storage = env.remote_storage.root / "tenants" / str(env.initial_tenant)
-    assert tenant_remote_storage.is_dir()
-    shutil.rmtree(tenant_remote_storage)
-    env.initial_tenant = TenantId("0" * 32)
-    env.initial_timeline = None
 
     # Choose small layer_size so that we can use low pgbench_scales and still get a large count of layers.
     # Large count of layers and small layer size is good for testing because it makes evictions predictable.
@@ -428,14 +417,14 @@ def poor_mans_du(
     largest_layer = 0
     smallest_layer = None
     for tenant_id, timeline_id in timelines:
-        dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-        assert dir.exists(), f"timeline dir does not exist: {dir}"
-        sum = 0
-        for file in dir.iterdir():
+        timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+        assert timeline_dir.exists(), f"timeline dir does not exist: {timeline_dir}"
+        total = 0
+        for file in timeline_dir.iterdir():
             if "__" not in file.name:
                 continue
             size = file.stat().st_size
-            sum += size
+            total += size
             largest_layer = max(largest_layer, size)
             if smallest_layer:
                 smallest_layer = min(smallest_layer, size)
@@ -443,8 +432,8 @@ def poor_mans_du(
                 smallest_layer = size
             log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
 
-        log.info(f"{tenant_id}/{timeline_id}: sum {sum}")
-        total_on_disk += sum
+        log.info(f"{tenant_id}/{timeline_id}: sum {total}")
+        total_on_disk += total
 
     assert smallest_layer is not None or total_on_disk == 0 and largest_layer == 0
     return (total_on_disk, largest_layer, smallest_layer or 0)

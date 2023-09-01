@@ -5,11 +5,11 @@
 //! It is similar to what tokio_util::codec::Framed with appropriate codec
 //! provides, but `FramedReader` and `FramedWriter` read/write parts can be used
 //! separately without using split from futures::stream::StreamExt (which
-//! allocates box[1] in polling internally). tokio::io::split is used for splitting
+//! allocates a [Box] in polling internally). tokio::io::split is used for splitting
 //! instead. Plus we customize error messages more than a single type for all io
 //! calls.
 //!
-//! [1] https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
+//! [Box]: https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
 use bytes::{Buf, BytesMut};
 use std::{
     future::Future,
@@ -117,7 +117,7 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
     /// Split into owned read and write parts. Beware of potential issues with
     /// using halves in different tasks on TLS stream:
-    /// https://github.com/tokio-rs/tls/issues/40
+    /// <https://github.com/tokio-rs/tls/issues/40>
     pub fn split(self) -> (FramedReader<S>, FramedWriter<S>) {
         let (read_half, write_half) = tokio::io::split(self.stream);
         let reader = FramedReader {

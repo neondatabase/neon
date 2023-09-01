@@ -43,7 +43,17 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
             if endpoint:
                 endpoint.start()
             else:
-                endpoint = env.endpoints.create_start("test_startup")
+                endpoint = env.endpoints.create_start(
+                    "test_startup",
+                    # Shared buffers need to be allocated during startup, so they
+                    # impact startup time. This is the default value we use for
+                    # 1CPU pods (maybe different for VMs).
+                    #
+                    # TODO extensions also contribute to shared memory allocation,
+                    #      and this test doesn't include all default extensions we
+                    #      load.
+                    config_lines=["shared_buffers=262144"],
+                )
             endpoint.safe_psql("select 1;")
 
         # Get metrics
@@ -51,13 +61,20 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
         durations = {
             "wait_for_spec_ms": f"{i}_wait_for_spec",
             "sync_safekeepers_ms": f"{i}_sync_safekeepers",
+            "sync_sk_check_ms": f"{i}_sync_sk_check",
             "basebackup_ms": f"{i}_basebackup",
+            "start_postgres_ms": f"{i}_start_postgres",
             "config_ms": f"{i}_config",
             "total_startup_ms": f"{i}_total_startup",
         }
         for key, name in durations.items():
             value = metrics[key]
             zenbenchmark.record(name, value, "ms", report=MetricReport.LOWER_IS_BETTER)
+
+        # Check basebackup size makes sense
+        basebackup_bytes = metrics["basebackup_bytes"]
+        if i > 0:
+            assert basebackup_bytes < 100 * 1024
 
         # Stop so we can restart
         endpoint.stop()

@@ -16,8 +16,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
-    RemoteStorageKind,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
@@ -29,6 +27,8 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
@@ -189,7 +189,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
                 # If we get here, the timeline size limit failed
                 log.error("Query unexpectedly succeeded")
-                assert False
+                raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
                 log.info(f"Query expectedly failed with: {err}")
@@ -284,9 +284,9 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     # give it some time to settle in the state where it waits for size computation task
     time.sleep(5)
     if not delete_timeline_success.empty():
-        assert (
-            False
-        ), f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        raise AssertionError(
+            f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        )
 
     log.info(
         "resume the size calculation. The failpoint checks that the timeline directory still exists."
@@ -306,9 +306,7 @@ def test_timeline_physical_size_init(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+        neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -349,9 +347,7 @@ def test_timeline_physical_size_post_checkpoint(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+        neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -382,9 +378,7 @@ def test_timeline_physical_size_post_compaction(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+        neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -416,6 +410,7 @@ def test_timeline_physical_size_post_compaction(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
 
     # shutdown safekeepers to prevent new data from coming in
+    endpoint.stop()  # We can't gracefully stop after safekeepers die
     for sk in env.safekeepers:
         sk.stop()
 
@@ -436,9 +431,7 @@ def test_timeline_physical_size_post_gc(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+        neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -571,9 +564,7 @@ def test_tenant_physical_size(
     random.seed(100)
 
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+        neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 

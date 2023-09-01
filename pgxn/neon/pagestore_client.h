@@ -145,9 +145,9 @@ extern char *nm_to_string(NeonMessage * msg);
 
 typedef struct
 {
-	void		(*send) (NeonRequest * request);
+	bool		(*send) (NeonRequest * request);
 	NeonResponse *(*receive) (void);
-	void		(*flush) (void);
+	bool		(*flush) (void);
 }			page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);

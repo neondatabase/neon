@@ -175,8 +175,8 @@ impl WalRedoManager for PostgresRedoManager {
         let mut img = base_img.map(|p| p.1);
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
-        for i in 1..records.len() {
-            let rec_neon = can_apply_in_neon(&records[i].1);
+        for (i, record) in records.iter().enumerate().skip(1) {
+            let rec_neon = can_apply_in_neon(&record.1);
 
             if rec_neon != batch_neon {
                 let result = if batch_neon {
@@ -685,7 +685,7 @@ impl PostgresRedoManager {
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
             .close_fds()
-            .spawn_no_leak_child()
+            .spawn_no_leak_child(self.tenant_id)
             .map_err(|e| {
                 Error::new(
                     e.kind(),
@@ -989,6 +989,7 @@ impl PostgresRedoManager {
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
 struct NoLeakChild {
+    tenant_id: TenantId,
     child: Option<Child>,
 }
 
@@ -1007,9 +1008,12 @@ impl DerefMut for NoLeakChild {
 }
 
 impl NoLeakChild {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
+    fn spawn(tenant_id: TenantId, command: &mut Command) -> io::Result<Self> {
         let child = command.spawn()?;
-        Ok(NoLeakChild { child: Some(child) })
+        Ok(NoLeakChild {
+            tenant_id,
+            child: Some(child),
+        })
     }
 
     fn kill_and_wait(mut self) {
@@ -1056,11 +1060,16 @@ impl Drop for NoLeakChild {
             Some(child) => child,
             None => return,
         };
+        let tenant_id = self.tenant_id;
         // Offload the kill+wait of the child process into the background.
         // If someone stops the runtime, we'll leak the child process.
         // We can ignore that case because we only stop the runtime on pageserver exit.
         BACKGROUND_RUNTIME.spawn(async move {
             tokio::task::spawn_blocking(move || {
+                // Intentionally don't inherit the tracing context from whoever is dropping us.
+                // This thread here is going to outlive of our dropper.
+                let span = tracing::info_span!("walredo", %tenant_id);
+                let _entered = span.enter();
                 Self::kill_and_wait_impl(child);
             })
             .await
@@ -1069,12 +1078,12 @@ impl Drop for NoLeakChild {
 }
 
 trait NoLeakChildCommandExt {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild>;
 }
 
 impl NoLeakChildCommandExt for Command {
-    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
-        NoLeakChild::spawn(self)
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild> {
+        NoLeakChild::spawn(tenant_id, self)
     }
 }
 

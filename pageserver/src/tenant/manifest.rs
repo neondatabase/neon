@@ -24,7 +24,7 @@
 //! Currently, this is not used in the system. Future refactors will ensure
 //! the storage state will be recorded in this file, and the system can be
 //! recovered from this file. This is tracked in
-//! https://github.com/neondatabase/neon/issues/4418
+//! <https://github.com/neondatabase/neon/issues/4418>
 
 use std::io::{self, Read, Write};
 

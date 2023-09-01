@@ -23,7 +23,7 @@
 									 * message header */
 
 /*
- * In the spirit of WL_SOCKET_READABLE and others, this corresponds to no events having occured,
+ * In the spirit of WL_SOCKET_READABLE and others, this corresponds to no events having occurred,
  * because all WL_* events are given flags equal to some (1 << i), starting from i = 0
  */
 #define WL_NO_EVENTS 0
@@ -317,7 +317,7 @@ typedef struct AppendResponse
 	/* this is a criterion for walproposer --sync mode exit */
 	XLogRecPtr	commitLsn;
 	HotStandbyFeedback hs;
-	/* Feedback recieved from pageserver includes standby_status_update fields */
+	/* Feedback received from pageserver includes standby_status_update fields */
 	/* and custom neon feedback. */
 	/* This part of the message is extensible. */
 	PageserverFeedback rf;

@@ -34,7 +34,6 @@
 
 #define PageStoreTrace DEBUG5
 
-#define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
@@ -55,13 +54,15 @@ int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
 
-int			n_unflushed_requests = 0;
-int			flush_every_n_requests = 8;
 int			readahead_buffer_size = 128;
+int			flush_every_n_requests = 8;
+
+int			n_reconnect_attempts = 0;
+int			max_reconnect_attempts = 60;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
-static void pageserver_flush(void);
+static bool pageserver_flush(void);
 
 static bool
 pageserver_connect(int elevel)
@@ -232,16 +233,17 @@ pageserver_disconnect(void)
 	}
 }
 
-static void
+static bool
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
-	int n_reconnect_attempts = 0;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
+	{
+		neon_log(LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect();
-
+	}
 
 	req_buff = nm_pack_request(request);
 
@@ -252,52 +254,35 @@ pageserver_send(NeonRequest * request)
 	 * See https://github.com/neondatabase/neon/issues/1138
 	 * So try to reestablish connection in case of failure.
 	 */
-	while (true)
+	if (!connected)
 	{
-		if (!connected)
+		while (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
-			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
-			{
-				n_reconnect_attempts += 1;
-				pg_usleep(RECONNECT_INTERVAL_USEC);
-				continue;
-			}
+			n_reconnect_attempts += 1;
+			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
+		n_reconnect_attempts = 0;
+	}
 
-		/*
-		 * Send request.
-		 *
-		 * In principle, this could block if the output buffer is full, and we
-		 * should use async mode and check for interrupts while waiting. In
-		 * practice, our requests are small enough to always fit in the output and
-		 * TCP buffer.
-		 */
-		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
-		{
-			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
-			{
-				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
-				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
-					pg_usleep(RECONNECT_INTERVAL_USEC);
-				n_reconnect_attempts += 1;
-				continue;
-			}
-			else
-			{
-				pageserver_disconnect();
-				neon_log(ERROR, "failed to send page request: %s", msg);
-			}
-		}
-		break;
+	/*
+	 * Send request.
+	 *
+	 * In principle, this could block if the output buffer is full, and we
+	 * should use async mode and check for interrupts while waiting. In
+	 * practice, our requests are small enough to always fit in the output and
+	 * TCP buffer.
+	 */
+	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	{
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		pageserver_disconnect();
+		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
+		pfree(msg);
+		pfree(req_buff.data);
+		return false;
 	}
 
 	pfree(req_buff.data);
-
-	n_unflushed_requests++;
-
-	if (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests)
-		pageserver_flush();
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
@@ -306,6 +291,7 @@ pageserver_send(NeonRequest * request)
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
+	return true;
 }
 
 static NeonResponse *
@@ -340,16 +326,25 @@ pageserver_receive(void)
 		}
 		else if (rc == -1)
 		{
+			neon_log(LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
 			pageserver_disconnect();
 			resp = NULL;
 		}
 		else if (rc == -2)
-			neon_log(ERROR, "could not read COPY data: %s", pchomp(PQerrorMessage(pageserver_conn)));
+		{
+			char* msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
+		}
 		else
-			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
+		{
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
+		}
 	}
 	PG_CATCH();
 	{
+		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
 		pageserver_disconnect();
 		PG_RE_THROW();
 	}
@@ -359,21 +354,25 @@ pageserver_receive(void)
 }
 
 
-static void
+static bool
 pageserver_flush(void)
 {
 	if (!connected)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
 	}
-	else if (PQflush(pageserver_conn))
+	else
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to flush page requests: %s", msg);
+		if (PQflush(pageserver_conn))
+		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
+			pfree(msg);
+			return false;
+		}
 	}
-	n_unflushed_requests = 0;
+	return true;
 }
 
 page_server_api api = {
@@ -438,6 +437,14 @@ pg_init_libpagestore(void)
 							8, -1, INT_MAX,
 							PGC_USERSET,
 							0,	/* no flags required */
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.max_reconnect_attempts",
+							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
+							NULL,
+							&max_reconnect_attempts,
+							10, 0, INT_MAX,
+							PGC_USERSET,
+							0,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",

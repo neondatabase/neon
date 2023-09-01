@@ -12,7 +12,7 @@ def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonPro
     parsed_metrics["safekeeper"] = parse_metrics(env.safekeepers[0].http_client().get_metrics_str())
     parsed_metrics["proxy"] = parse_metrics(link_proxy.get_metrics())
 
-    for component, metrics in parsed_metrics.items():
+    for _component, metrics in parsed_metrics.items():
         sample = metrics.query_one("libmetrics_build_info")
 
         assert "revision" in sample.labels

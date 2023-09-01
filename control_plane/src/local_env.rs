@@ -137,6 +137,7 @@ impl Default for PageServerConf {
 pub struct SafekeeperConf {
     pub id: NodeId,
     pub pg_port: u16,
+    pub pg_tenant_only_port: Option<u16>,
     pub http_port: u16,
     pub sync: bool,
     pub remote_storage: Option<String>,
@@ -149,12 +150,21 @@ impl Default for SafekeeperConf {
         Self {
             id: NodeId(0),
             pg_port: 0,
+            pg_tenant_only_port: None,
             http_port: 0,
             sync: true,
             remote_storage: None,
             backup_threads: None,
             auth_enabled: false,
         }
+    }
+}
+
+impl SafekeeperConf {
+    /// Compute is served by port on which only tenant scoped tokens allowed, if
+    /// it is configured.
+    pub fn get_compute_port(&self) -> u16 {
+        self.pg_tenant_only_port.unwrap_or(self.pg_port)
     }
 }
 
@@ -364,7 +374,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self, pg_version: u32) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32, force: bool) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -372,11 +382,29 @@ impl LocalEnv {
             "repository base path is missing"
         );
 
-        ensure!(
-            !base_path.exists(),
-            "directory '{}' already exists. Perhaps already initialized?",
-            base_path.display()
-        );
+        if base_path.exists() {
+            if force {
+                println!("removing all contents of '{}'", base_path.display());
+                // instead of directly calling `remove_dir_all`, we keep the original dir but removing
+                // all contents inside. This helps if the developer symbol links another directory (i.e.,
+                // S3 local SSD) to the `.neon` base directory.
+                for entry in std::fs::read_dir(base_path)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        fs::remove_dir_all(&path)?;
+                    } else {
+                        fs::remove_file(&path)?;
+                    }
+                }
+            } else {
+                bail!(
+                    "directory '{}' already exists. Perhaps already initialized? (Hint: use --force to remove all contents)",
+                    base_path.display()
+                );
+            }
+        }
+
         if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
@@ -392,7 +420,9 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir(base_path)?;
+        if !base_path.exists() {
+            fs::create_dir(base_path)?;
+        }
 
         // Generate keypair for JWT.
         //

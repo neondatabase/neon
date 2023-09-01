@@ -308,7 +308,8 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
     let mut env =
         LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
-    env.init(pg_version)
+    let force = init_match.get_flag("force");
+    env.init(pg_version, force)
         .context("Failed to initialize neon repository")?;
 
     // Initialize pageserver, create initial tenant and timeline.
@@ -657,6 +658,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
+            let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
+
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
                 if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
@@ -698,7 +701,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     _ => {}
                 }
                 println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token, safekeepers)?;
+                endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -742,7 +745,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     pg_version,
                     mode,
                 )?;
-                ep.start(&auth_token, safekeepers)?;
+                ep.start(&auth_token, safekeepers, remote_ext_config)?;
             }
         }
         "stop" => {
@@ -822,6 +825,16 @@ fn get_safekeeper(env: &local_env::LocalEnv, id: NodeId) -> Result<SafekeeperNod
     }
 }
 
+// Get list of options to append to safekeeper command invocation.
+fn safekeeper_extra_opts(init_match: &ArgMatches) -> Vec<String> {
+    init_match
+        .get_many::<String>("safekeeper-extra-opt")
+        .into_iter()
+        .flatten()
+        .map(|s| s.to_owned())
+        .collect()
+}
+
 fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let (sub_name, sub_args) = match sub_match.subcommand() {
         Some(safekeeper_command_data) => safekeeper_command_data,
@@ -838,7 +851,9 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 
     match sub_name {
         "start" => {
-            if let Err(e) = safekeeper.start() {
+            let extra_opts = safekeeper_extra_opts(sub_args);
+
+            if let Err(e) = safekeeper.start(extra_opts) {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -863,7 +878,8 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
 
-            if let Err(e) = safekeeper.start() {
+            let extra_opts = safekeeper_extra_opts(sub_args);
+            if let Err(e) = safekeeper.start(extra_opts) {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -890,7 +906,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start() {
+        if let Err(e) = safekeeper.start(vec![]) {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false);
             exit(1);
@@ -953,6 +969,14 @@ fn cli() -> Command {
 
     let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
 
+    let safekeeper_extra_opt_arg = Arg::new("safekeeper-extra-opt")
+        .short('e')
+        .long("safekeeper-extra-opt")
+        .num_args(1)
+        .action(ArgAction::Append)
+        .help("Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo")
+        .required(false);
+
     let tenant_id_arg = Arg::new("tenant-id")
         .long("tenant-id")
         .help("Tenant id. Represented as a hexadecimal string 32 symbols length")
@@ -1002,6 +1026,12 @@ fn cli() -> Command {
         .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
         .required(false);
 
+    let remote_ext_config_args = Arg::new("remote-ext-config")
+        .long("remote-ext-config")
+        .num_args(1)
+        .help("Configure the S3 bucket that we search for extensions in.")
+        .required(false);
+
     let lsn_arg = Arg::new("lsn")
         .long("lsn")
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
@@ -1011,6 +1041,13 @@ fn cli() -> Command {
         .value_parser(value_parser!(bool))
         .long("hot-standby")
         .help("If set, the node will be a hot replica on the specified timeline")
+        .required(false);
+
+    let force_arg = Arg::new("force")
+        .value_parser(value_parser!(bool))
+        .long("force")
+        .action(ArgAction::SetTrue)
+        .help("Force initialization even if the repository is not empty")
         .required(false);
 
     Command::new("Neon CLI")
@@ -1028,6 +1065,7 @@ fn cli() -> Command {
                         .value_name("config"),
                 )
                 .arg(pg_version_arg.clone())
+                .arg(force_arg)
         )
         .subcommand(
             Command::new("timeline")
@@ -1107,6 +1145,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("start")
                             .about("Start local safekeeper")
                             .arg(safekeeper_id_arg.clone())
+                            .arg(safekeeper_extra_opt_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                             .about("Stop local safekeeper")
@@ -1117,6 +1156,7 @@ fn cli() -> Command {
                             .about("Restart local safekeeper")
                             .arg(safekeeper_id_arg)
                             .arg(stop_mode_arg.clone())
+                            .arg(safekeeper_extra_opt_arg)
                 )
         )
         .subcommand(
@@ -1152,6 +1192,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
+                    .arg(remote_ext_config_args)
                 )
                 .subcommand(
                     Command::new("stop")

@@ -13,7 +13,7 @@ FROM debian:bullseye-slim AS build-deps
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd
 
 #########################################################################################
 #
@@ -77,6 +77,7 @@ ENV PATH "/usr/local/pgsql/bin:$PATH"
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postgis.tar.gz && \
     echo "9a2a219da005a1730a39d1959a1c7cec619b1efb009b65be80ffc25bad299068 postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -89,17 +90,28 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control && \
+    mkdir -p /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_raster.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_sfcgal.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_tiger_geocoder.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/postgis_topology.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/address_standardizer.control /extensions/postgis && \
+    cp /usr/local/pgsql/share/extension/address_standardizer_data_us.control /extensions/postgis
 
 RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
     echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
-    mkdir build && \
-    cd build && \
+    mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    cp /usr/local/pgsql/share/extension/pgrouting.control /extensions/postgis && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/postgis.tar.zst -T -
 
 #########################################################################################
 #
@@ -132,10 +144,20 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.5.tar.gz -O plv8.ta
 FROM build-deps AS h3-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-# packaged cmake is too old
-RUN wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-x86_64.sh \
+RUN case "$(uname -m)" in \
+      "x86_64") \
+        export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
+        ;; \
+      "aarch64") \
+        export CMAKE_CHECKSUM=281b42627c9a1beed03e29706574d04c6c53fae4994472e90985ef018dd29c02 \
+        ;; \
+      *) \
+        echo "Unsupported architecture '$(uname -m)'. Supported are x86_64 and aarch64" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-$(uname -m).sh \
       -q -O /tmp/cmake-install.sh \
-      && echo "739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 /tmp/cmake-install.sh" | sha256sum --check \
+      && echo "${CMAKE_CHECKSUM} /tmp/cmake-install.sh" | sha256sum --check \
       && chmod u+x /tmp/cmake-install.sh \
       && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
       && rm /tmp/cmake-install.sh
@@ -189,8 +211,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.4.0.tar.gz -O pgvector.tar.gz && \
-    echo "b76cf84ddad452cc880a6c8c661d137ddd8679c000a16332f4f03ecf6e10bcc8 pgvector.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.5.0.tar.gz -O pgvector.tar.gz && \
+    echo "d8aa3504b215467ca528525a6de12c3f85f9891b091ce0e5864dd8a9b757f77b pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -409,12 +431,16 @@ RUN apt-get update && \
     wget https://github.com/ketteq-neon/postgres-exts/archive/e0bd1a9d9313d7120c1b9c7bb15c48c0dede4c4e.tar.gz -O kq_imcx.tar.gz && \
     echo "dc93a97ff32d152d32737ba7e196d9687041cda15e58ab31344c2f2de8855336 kq_imcx.tar.gz" | sha256sum --check && \
     mkdir kq_imcx-src && cd kq_imcx-src && tar xvzf ../kq_imcx.tar.gz --strip-components=1 -C . && \
-    mkdir build && \
-    cd build && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
+    mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/kq_imcx.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/kq_imcx.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/kq_imcx && cp /usr/local/pgsql/share/extension/kq_imcx.control /extensions/kq_imcx && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/kq_imcx.tar.zst -T -
 
 #########################################################################################
 #
@@ -514,6 +540,44 @@ RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/roaringbitmap.control
+
+#########################################################################################
+#
+# Layer "pg-embedding-pg-build"
+# compile pg_embedding extension
+#
+#########################################################################################
+FROM build-deps AS pg-embedding-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/0.3.5.tar.gz -O pg_embedding.tar.gz && \
+    echo "0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 pg_embedding.tar.gz" | sha256sum --check && \
+    mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/embedding.control
+
+#########################################################################################
+#
+# Layer "pg-anon-pg-build"
+# compile anon extension
+#
+#########################################################################################
+FROM build-deps AS pg-anon-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgresql_anonymizer-1.1.0.tar.gz -O pg_anon.tar.gz && \
+    echo "08b09d2ff9b962f96c60db7e6f8e79cf7253eb8772516998fc35ece08633d3ad pg_anon.tar.gz" | sha256sum --check && \
+    mkdir pg_anon-src && cd pg_anon-src && tar xvzf ../pg_anon.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
+    mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
+    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zst -T -
 
 #########################################################################################
 #
@@ -623,6 +687,7 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -
 #
 #########################################################################################
 FROM build-deps AS neon-pg-ext-build
+# Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=postgis-build /sfcgal/* /
 COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -650,6 +715,7 @@ COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -700,15 +766,6 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 
 #########################################################################################
 #
-# Extenstion only
-#
-#########################################################################################
-FROM scratch AS postgres-extensions
-COPY --from=postgres-cleanup-layer /usr/local/pgsql/share/extension /usr/local/pgsql/share/extension
-COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
-
-#########################################################################################
-#
 # Final layer
 # Put it all together into the final image
 #
@@ -736,6 +793,7 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # libxml2, libxslt1.1 for xml2
 # libzstd1 for zstd
 # libboost*, libfreetype6, and zlib1g for rdkit
+# ca-certificates for communicating with s3 by compute_ctl
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
@@ -759,7 +817,8 @@ RUN apt update &&  \
         libcurl4-openssl-dev \
         locales \
         procps \
-        zlib1g && \
+        zlib1g \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 

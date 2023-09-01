@@ -20,6 +20,7 @@ tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
 tokio-util.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
+scopeguard.workspace = true
 metrics.workspace = true
 utils.workspace = true
 pin-project-lite.workspace = true

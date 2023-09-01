@@ -22,6 +22,8 @@ message SubscribeSafekeeperInfoRequest {
 message SafekeeperTimelineInfo {
     uint64 safekeeper_id = 1;
     TenantTimelineId tenant_timeline_id = 2;
+    // Safekeeper term
+    uint64 term = 12;
     // Term of the last entry.
     uint64 last_log_term = 3;
     // LSN of the last record.
@@ -36,6 +38,8 @@ message SafekeeperTimelineInfo {
     uint64 local_start_lsn = 9;
     // A connection string to use for WAL receiving.
     string safekeeper_connstr = 10;
+    // HTTP endpoint connection string
+    string http_connstr = 13;
     // Availability zone of a safekeeper.
     optional string availability_zone = 11;
 }

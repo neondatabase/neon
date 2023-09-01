@@ -788,7 +788,7 @@ ReconnectSafekeepers(void)
 
 /*
  * Performs the logic for advancing the state machine of the specified safekeeper,
- * given that a certain set of events has occured.
+ * given that a certain set of events has occurred.
  */
 static void
 AdvancePollState(Safekeeper *sk, uint32 events)
@@ -1393,8 +1393,22 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 	char	   *err;
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
+	char conninfo[MAXCONNINFO];
 
-	wrconn = walrcv_connect(safekeeper[donor].conninfo, false, "wal_proposer_recovery", &err);
+	if (!neon_auth_token)
+	{
+		memcpy(conninfo, safekeeper[donor].conninfo, MAXCONNINFO);
+	}
+	else
+	{
+		int written = 0;
+
+		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, safekeeper[donor].conninfo);
+		if (written > MAXCONNINFO || written < 0)
+			elog(FATAL, "could not append password to the safekeeper connection string");
+	}
+
+	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
 	if (!wrconn)
 	{
 		ereport(WARNING,
@@ -2231,6 +2245,18 @@ HandleSafekeeperResponse(void)
 		if (n_synced >= quorum)
 		{
 			/* All safekeepers synced! */
+			
+			/*
+			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
+			 * This helps to finish next sync-safekeepers eailier, by skipping recovery
+			 * step.
+			 * 
+			 * We don't need to wait for response because it doesn't affect correctness,
+			 * and TCP should be able to deliver the message to safekeepers in case of
+			 * network working properly.
+			 */
+			BroadcastAppendRequest();
+
 			fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
 			exit(0);
 		}

@@ -1,25 +1,25 @@
+use std::sync::Arc;
+
+use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
-use futures::TryFutureExt;
+use hashbrown::HashMap;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::{Body, HeaderMap, Request};
-use pq_proto::StartupMessageParams;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
+use tokio_postgres::GenericClient;
+use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
-use tracing::error;
-use tracing::info;
-use tracing::instrument;
 use url::Url;
 
-use crate::proxy::invalidate_cache;
-use crate::proxy::NUM_RETRIES_WAKE_COMPUTE;
-use crate::{auth, config::ProxyConfig, console};
+use super::conn_pool::ConnInfo;
+use super::conn_pool::GlobalConnPool;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -27,12 +27,28 @@ struct QueryData {
     params: Vec<serde_json::Value>,
 }
 
-const APP_NAME: &str = "sql_over_http";
-const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
+#[derive(serde::Deserialize)]
+struct BatchQueryData {
+    queries: Vec<QueryData>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Payload {
+    Single(QueryData),
+    Batch(BatchQueryData),
+}
+
+pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
+static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
+static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
+static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
+
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 //
@@ -94,13 +110,6 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
             Ok(Some(format!("{{{}}}", vals)))
         }
     }
-}
-
-struct ConnInfo {
-    username: String,
-    dbname: String,
-    hostname: String,
-    password: String,
 }
 
 fn get_conn_info(
@@ -169,50 +178,41 @@ fn get_conn_info(
 
 // TODO: return different http error codes
 pub async fn handle(
-    config: &'static ProxyConfig,
     request: Request<Body>,
     sni_hostname: Option<String>,
-) -> anyhow::Result<Value> {
+    conn_pool: Arc<GlobalConnPool>,
+    session_id: uuid::Uuid,
+) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
     //
     // Determine the destination and connection params
     //
     let headers = request.headers();
     let conn_info = get_conn_info(headers, sni_hostname)?;
-    let credential_params = StartupMessageParams::new([
-        ("user", &conn_info.username),
-        ("database", &conn_info.dbname),
-        ("application_name", APP_NAME),
-    ]);
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
     let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
-    //
-    // Wake up the destination if needed. Code here is a bit involved because
-    // we reuse the code from the usual proxy and we need to prepare few structures
-    // that this code expects.
-    //
-    let tls = config.tls_config.as_ref();
-    let common_names = tls.and_then(|tls| tls.common_names.clone());
-    let creds = config
-        .auth_backend
-        .as_ref()
-        .map(|_| {
-            auth::ClientCredentials::parse(
-                &credential_params,
-                Some(&conn_info.hostname),
-                common_names,
-            )
-        })
-        .transpose()?;
-    let extra = console::ConsoleReqExtra {
-        session_id: uuid::Uuid::new_v4(),
-        application_name: Some(APP_NAME),
+    // Allow connection pooling only if explicitly requested
+    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+
+    // isolation level, read only and deferrable
+
+    let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
+    let txn_isolation_level = match txn_isolation_level_raw {
+        Some(ref x) => Some(match x.as_bytes() {
+            b"Serializable" => IsolationLevel::Serializable,
+            b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
+            b"ReadCommitted" => IsolationLevel::ReadCommitted,
+            b"RepeatableRead" => IsolationLevel::RepeatableRead,
+            _ => bail!("invalid isolation level"),
+        }),
+        None => None,
     };
 
-    let mut node_info = creds.wake_compute(&extra).await?.expect("msg");
+    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+    let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -221,7 +221,7 @@ pub async fn handle(
 
     if request_content_length > MAX_REQUEST_SIZE {
         return Err(anyhow::anyhow!(
-            "request is too large (max {MAX_REQUEST_SIZE} bytes)"
+            "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
         ));
     }
 
@@ -229,27 +229,98 @@ pub async fn handle(
     // Read the query and query params from the request body
     //
     let body = hyper::body::to_bytes(request.into_body()).await?;
-    let QueryData { query, params } = serde_json::from_slice(&body)?;
-    let query_params = json_to_pg_text(params)?;
+    let payload: Payload = serde_json::from_slice(&body)?;
+
+    let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
     //
     // Now execute the query and return the result
     //
-    let client = connect_to_compute(&mut node_info, &extra, &creds, &conn_info).await?;
-    let row_stream = client.query_raw_txt(query, query_params).await?;
+    let result = match payload {
+        Payload::Single(query) => query_to_json(&client.inner, query, raw_output, array_mode)
+            .await
+            .map(|x| (x, HashMap::default())),
+        Payload::Batch(batch_query) => {
+            let mut results = Vec::new();
+            let mut builder = client.inner.build_transaction();
+            if let Some(isolation_level) = txn_isolation_level {
+                builder = builder.isolation_level(isolation_level);
+            }
+            if txn_read_only {
+                builder = builder.read_only(true);
+            }
+            if txn_deferrable {
+                builder = builder.deferrable(true);
+            }
+            let transaction = builder.start().await?;
+            for query in batch_query.queries {
+                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                match result {
+                    Ok(r) => results.push(r),
+                    Err(e) => {
+                        transaction.rollback().await?;
+                        return Err(e);
+                    }
+                }
+            }
+            transaction.commit().await?;
+            let mut headers = HashMap::default();
+            if txn_read_only {
+                headers.insert(
+                    TXN_READ_ONLY.clone(),
+                    HeaderValue::try_from(txn_read_only.to_string())?,
+                );
+            }
+            if txn_deferrable {
+                headers.insert(
+                    TXN_DEFERRABLE.clone(),
+                    HeaderValue::try_from(txn_deferrable.to_string())?,
+                );
+            }
+            if let Some(txn_isolation_level) = txn_isolation_level_raw {
+                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
+            }
+            Ok((json!({ "results": results }), headers))
+        }
+    };
+
+    if allow_pool {
+        let current_span = tracing::Span::current();
+        // return connection to the pool
+        tokio::task::spawn_blocking(move || {
+            let _span = current_span.enter();
+            let _ = conn_pool.put(&conn_info, client);
+        });
+    }
+
+    result
+}
+
+async fn query_to_json<T: GenericClient>(
+    client: &T,
+    data: QueryData,
+    raw_output: bool,
+    array_mode: bool,
+) -> anyhow::Result<Value> {
+    let query_params = json_to_pg_text(data.params)?;
+    let row_stream = client
+        .query_raw_txt::<String, _>(data.query, query_params)
+        .await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
     pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
-    let mut curret_size = 0;
+    let mut current_size = 0;
     while let Some(row) = row_stream.next().await {
         let row = row?;
-        curret_size += row.body_len();
+        current_size += row.body_len();
         rows.push(row);
-        if curret_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!("response too large"));
+        if current_size > MAX_RESPONSE_SIZE {
+            return Err(anyhow::anyhow!(
+                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
+            ));
         }
     }
 
@@ -300,70 +371,6 @@ pub async fn handle(
         "fields": fields,
         "rowAsArray": array_mode,
     }))
-}
-
-/// This function is a copy of `connect_to_compute` from `src/proxy.rs` with
-/// the difference that it uses `tokio_postgres` for the connection.
-#[instrument(skip_all)]
-async fn connect_to_compute(
-    node_info: &mut console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
-    conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
-
-    loop {
-        match connect_to_compute_once(node_info, conn_info).await {
-            Err(e) if num_retries > 0 => {
-                info!("compute node's state has changed; requesting a wake-up");
-                match creds.wake_compute(extra).await? {
-                    // Update `node_info` and try one more time.
-                    Some(new) => {
-                        *node_info = new;
-                    }
-                    // Link auth doesn't work that way, so we just exit.
-                    None => return Err(e),
-                }
-            }
-            other => return other,
-        }
-
-        num_retries -= 1;
-        info!("retrying after wake-up ({num_retries} attempts left)");
-    }
-}
-
-async fn connect_to_compute_once(
-    node_info: &console::CachedNodeInfo,
-    conn_info: &ConnInfo,
-) -> anyhow::Result<tokio_postgres::Client> {
-    let mut config = (*node_info.config).clone();
-
-    let (client, connection) = config
-        .user(&conn_info.username)
-        .password(&conn_info.password)
-        .dbname(&conn_info.dbname)
-        .max_backend_message_size(MAX_RESPONSE_SIZE)
-        .connect(tokio_postgres::NoTls)
-        .inspect_err(|e: &tokio_postgres::Error| {
-            error!(
-                "failed to connect to compute node hosts={:?} ports={:?}: {}",
-                node_info.config.get_hosts(),
-                node_info.config.get_ports(),
-                e
-            );
-            invalidate_cache(node_info)
-        })
-        .await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });
-
-    Ok(client)
 }
 
 //

@@ -19,7 +19,7 @@ static LOGGING_DONE: OnceCell<()> = OnceCell::new();
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
 
-const BASE_PREFIX: &str = "test/";
+const BASE_PREFIX: &str = "test";
 
 /// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.

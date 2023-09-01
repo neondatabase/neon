@@ -7,10 +7,10 @@
 //! - The y axis represents LSN, growing upwards.
 //!
 //! Coordinates in both axis are compressed for better readability.
-//! (see https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb)
+//! (see <https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb>)
 //!
 //! Example use:
-//! ```
+//! ```bash
 //! $ ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
 //! $   grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
 //! $ firefox out.svg
@@ -20,9 +20,10 @@
 //! or from pageserver log files.
 //!
 //! TODO Consider shipping this as a grafana panel plugin:
-//!      https://grafana.com/tutorials/build-a-panel-plugin/
+//!      <https://grafana.com/tutorials/build-a-panel-plugin/>
 use anyhow::Result;
 use pageserver::repository::Key;
+use pageserver::METADATA_FILE_NAME;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -71,6 +72,10 @@ pub fn main() -> Result<()> {
         let line = PathBuf::from_str(&line).unwrap();
         let filename = line.file_name().unwrap();
         let filename = filename.to_str().unwrap();
+        if filename == METADATA_FILE_NAME {
+            // Don't try and parse "metadata" like a key-lsn range
+            continue;
+        }
         let range = parse_filename(filename);
         ranges.push(range);
     }
@@ -117,7 +122,8 @@ pub fn main() -> Result<()> {
 
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
         let mut fill = Fill::None;
-        let mut margin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
+        let mut ymargin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
+        let xmargin = 0.05; // Height-dependent margin to disambiguate overlapping deltas
         let mut lsn_offset = 0.0;
 
         // Fill in and thicken rectangle if it's an
@@ -128,7 +134,7 @@ pub fn main() -> Result<()> {
                 num_images += 1;
                 lsn_diff = 0.3;
                 lsn_offset = -lsn_diff / 2.0;
-                margin = 0.05;
+                ymargin = 0.05;
                 fill = Fill::Color(rgb(0, 0, 0));
             }
             Ordering::Greater => panic!("Invalid lsn range {}-{}", lsn_start, lsn_end),
@@ -137,10 +143,10 @@ pub fn main() -> Result<()> {
         println!(
             "    {}",
             rectangle(
-                key_start as f32 + stretch * margin,
-                stretch * (lsn_max as f32 - (lsn_end as f32 - margin - lsn_offset)),
-                key_diff as f32 - stretch * 2.0 * margin,
-                stretch * (lsn_diff - 2.0 * margin)
+                key_start as f32 + stretch * xmargin,
+                stretch * (lsn_max as f32 - (lsn_end as f32 - ymargin - lsn_offset)),
+                key_diff as f32 - stretch * 2.0 * xmargin,
+                stretch * (lsn_diff - 2.0 * ymargin)
             )
             .fill(fill)
             .stroke(Stroke::Color(rgb(0, 0, 0), 0.1))

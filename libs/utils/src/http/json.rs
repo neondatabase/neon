@@ -14,7 +14,7 @@ pub async fn json_request<T: for<'de> Deserialize<'de>>(
         .map_err(ApiError::BadRequest)
 }
 
-/// Will be removed as part of https://github.com/neondatabase/neon/issues/4282
+/// Will be removed as part of <https://github.com/neondatabase/neon/issues/4282>
 pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
     request: &mut Request<Body>,
 ) -> Result<Option<T>, ApiError> {

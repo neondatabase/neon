@@ -1,16 +1,19 @@
 //! Every image of a certain timeline from [`crate::tenant::Tenant`]
 //! has a metadata that needs to be stored persistently.
 //!
-//! Later, the file gets is used in [`crate::remote_storage::storage_sync`] as a part of
+//! Later, the file gets used in [`remote_timeline_client`] as a part of
 //! external storage import and export operations.
 //!
 //! The module contains all structs and related helper methods related to timeline metadata.
+//!
+//! [`remote_timeline_client`]: super::remote_timeline_client
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::{bail, ensure, Context};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error, Deserialize, Serialize, Serializer};
+use thiserror::Error;
 use tracing::info_span;
 use utils::bin_ser::SerializeError;
 use utils::{
@@ -229,16 +232,38 @@ impl TimelineMetadata {
     }
 }
 
+impl<'de> Deserialize<'de> for TimelineMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
+    }
+}
+
+impl Serialize for TimelineMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = self
+            .to_bytes()
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
+        bytes.serialize(serializer)
+    }
+}
+
 /// Save timeline metadata to file
 pub fn save_metadata(
     conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
     data: &TimelineMetadata,
     first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
-    let path = conf.metadata_path(timeline_id, tenant_id);
+    let path = conf.metadata_path(tenant_id, timeline_id);
     // use OpenOptions to ensure file presence is consistent with first_save
     let mut file = VirtualFile::open_with_options(
         &path,
@@ -265,24 +290,24 @@ pub fn save_metadata(
     Ok(())
 }
 
+#[derive(Error, Debug)]
+pub enum LoadMetadataError {
+    #[error(transparent)]
+    Read(#[from] io::Error),
+
+    #[error(transparent)]
+    Decode(#[from] anyhow::Error),
+}
+
 pub fn load_metadata(
     conf: &'static PageServerConf,
-    timeline_id: TimelineId,
-    tenant_id: TenantId,
-) -> anyhow::Result<TimelineMetadata> {
-    let metadata_path = conf.metadata_path(timeline_id, tenant_id);
-    let metadata_bytes = std::fs::read(&metadata_path).with_context(|| {
-        format!(
-            "Failed to read metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })?;
-    TimelineMetadata::from_bytes(&metadata_bytes).with_context(|| {
-        format!(
-            "Failed to parse metadata bytes from path {}",
-            metadata_path.display()
-        )
-    })
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+) -> Result<TimelineMetadata, LoadMetadataError> {
+    let metadata_path = conf.metadata_path(tenant_id, timeline_id);
+    let metadata_bytes = std::fs::read(metadata_path)?;
+
+    Ok(TimelineMetadata::from_bytes(&metadata_bytes)?)
 }
 
 #[cfg(test)]

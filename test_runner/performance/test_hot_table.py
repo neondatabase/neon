@@ -33,6 +33,6 @@ def test_hot_table(env: PgCompare):
 
             # Read the table
             with env.record_duration("read"):
-                for i in range(num_reads):
+                for _ in range(num_reads):
                     cur.execute("select * from t;")
                     cur.fetchall()

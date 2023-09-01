@@ -53,6 +53,12 @@ pub enum BackendType<'a, T> {
     Postgres(Cow<'a, console::provider::mock::Api>, T),
     /// Authentication via a web browser.
     Link(Cow<'a, url::ApiUrl>),
+    /// Test backend.
+    Test(&'a dyn TestBackend),
+}
+
+pub trait TestBackend: Send + Sync + 'static {
+    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -62,6 +68,7 @@ impl std::fmt::Display for BackendType<'_, ()> {
             Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
             Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Test(_) => fmt.debug_tuple("Test").finish(),
         }
     }
 }
@@ -75,6 +82,7 @@ impl<T> BackendType<'_, T> {
             Console(c, x) => Console(Cow::Borrowed(c), x),
             Postgres(c, x) => Postgres(Cow::Borrowed(c), x),
             Link(c) => Link(Cow::Borrowed(c)),
+            Test(x) => Test(*x),
         }
     }
 }
@@ -89,6 +97,7 @@ impl<'a, T> BackendType<'a, T> {
             Console(c, x) => Console(c, f(x)),
             Postgres(c, x) => Postgres(c, f(x)),
             Link(c) => Link(c),
+            Test(x) => Test(x),
         }
     }
 }
@@ -102,6 +111,7 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
             Console(c, x) => x.map(|x| Console(c, x)),
             Postgres(c, x) => x.map(|x| Postgres(c, x)),
             Link(c) => Ok(Link(c)),
+            Test(x) => Ok(Test(x)),
         }
     }
 }
@@ -147,6 +157,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
             Console(_, creds) => creds.project.clone(),
             Postgres(_, creds) => creds.project.clone(),
             Link(_) => Some("link".to_owned()),
+            Test(_) => Some("test".to_owned()),
         }
     }
     /// Authenticate the client via the requested backend, possibly using credentials.
@@ -188,6 +199,9 @@ impl BackendType<'_, ClientCredentials<'_>> {
                     .await?
                     .map(CachedNodeInfo::new_uncached)
             }
+            Test(_) => {
+                unreachable!("this function should never be called in the test backend")
+            }
         };
 
         info!("user successfully authenticated");
@@ -206,6 +220,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
             Console(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
             Postgres(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
             Link(_) => Ok(None),
+            Test(x) => x.wake_compute().map(Some),
         }
     }
 }

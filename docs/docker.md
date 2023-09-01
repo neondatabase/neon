@@ -48,6 +48,7 @@ Creating docker-compose_storage_broker_1       ... done
 2. connect compute node
 ```
 $ echo "localhost:55433:postgres:cloud_admin:cloud_admin" >> ~/.pgpass
+$ chmod 600 ~/.pgpass
 $ psql -h localhost -p 55433 -U cloud_admin
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE

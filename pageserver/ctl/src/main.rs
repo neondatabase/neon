@@ -72,12 +72,13 @@ struct AnalyzeLayerMapCmd {
     max_holes: Option<usize>,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = CliOpts::parse();
 
     match cli.command {
         Commands::Layer(cmd) => {
-            layers::main(&cmd)?;
+            layers::main(&cmd).await?;
         }
         Commands::Metadata(cmd) => {
             handle_metadata(&cmd)?;
@@ -86,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             draw_timeline_dir::main()?;
         }
         Commands::AnalyzeLayerMap(cmd) => {
-            layer_map_analyzer::main(&cmd)?;
+            layer_map_analyzer::main(&cmd).await?;
         }
         Commands::PrintLayerFile(cmd) => {
             if let Err(e) = read_pg_control_file(&cmd.path) {
@@ -94,7 +95,7 @@ fn main() -> anyhow::Result<()> {
                     "Failed to read input file as a pg control one: {e:#}\n\
                     Attempting to read it as layer file"
                 );
-                print_layerfile(&cmd.path)?;
+                print_layerfile(&cmd.path).await?;
             }
         }
     };
@@ -113,12 +114,12 @@ fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_layerfile(path: &Path) -> anyhow::Result<()> {
+async fn print_layerfile(path: &Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
-    dump_layerfile_from_path(path, true, &ctx)
+    dump_layerfile_from_path(path, true, &ctx).await
 }
 
 fn handle_metadata(

@@ -1,6 +1,7 @@
 use crate::metrics::RemoteOpFileKind;
 
 use super::storage_layer::LayerFileName;
+use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -140,36 +141,24 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
-        for layer_name in &index_part.timeline_layers {
-            match index_part
-                .layer_metadata
-                .get(layer_name)
-                .map(LayerFileMetadata::from)
-            {
-                Some(layer_metadata) => {
-                    files.insert(layer_name.to_owned(), layer_metadata);
-                }
-                None => {
-                    anyhow::bail!(
-                        "No remote layer metadata found for layer {}",
-                        layer_name.file_name()
-                    );
-                }
-            }
+        let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
+        for (layer_name, layer_metadata) in &index_part.layer_metadata {
+            files.insert(
+                layer_name.to_owned(),
+                LayerFileMetadata::from(layer_metadata),
+            );
         }
 
-        let index_part_metadata = index_part.parse_metadata()?;
         info!(
             "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
-            index_part_metadata.disk_consistent_lsn()
+            index_part.metadata.disk_consistent_lsn()
         );
 
         let state = UploadQueueInitialized {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: index_part_metadata.clone(),
-            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
+            latest_metadata: index_part.metadata.clone(),
+            last_uploaded_consistent_lsn: index_part.metadata.disk_consistent_lsn(),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -217,6 +206,7 @@ pub(crate) struct Delete {
     pub(crate) file_kind: RemoteOpFileKind,
     pub(crate) layer_file_name: LayerFileName,
     pub(crate) scheduled_from_timeline_delete: bool,
+    pub(crate) generation: Generation,
 }
 
 #[derive(Debug)]
@@ -240,17 +230,21 @@ impl std::fmt::Display for UploadOp {
             UploadOp::UploadLayer(path, metadata) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?})",
+                    "UploadLayer({}, size={:?}, gen={:?})",
                     path.file_name(),
-                    metadata.file_size()
+                    metadata.file_size(),
+                    metadata.generation,
                 )
             }
-            UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
+            UploadOp::UploadMetadata(_, lsn) => {
+                write!(f, "UploadMetadata(lsn: {})", lsn)
+            }
             UploadOp::Delete(delete) => write!(
                 f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {})",
+                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {:?})",
                 delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete
+                delete.scheduled_from_timeline_delete,
+                delete.generation
             ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }

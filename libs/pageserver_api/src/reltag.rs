@@ -60,8 +60,9 @@ impl Ord for RelTag {
 
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
+/// ```text
 /// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
-///
+/// ```
 impl fmt::Display for RelTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(forkname) = forknumber_to_name(self.forknum) {

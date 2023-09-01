@@ -6,24 +6,22 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    RemoteStorageKind,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import LayerMapInfo
-from fixtures.types import TimelineId
+from fixtures.remote_storage import RemoteStorageKind
 from pytest_httpserver import HTTPServer
 
 # NB: basic config change tests are in test_tenant_conf.py
 
 
 def test_threshold_based_eviction(
-    request,
     httpserver: HTTPServer,
     httpserver_listen_address,
     pg_bin: PgBin,
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
+    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Start with metrics collection enabled, so that the eviction task
     # imitates its accesses. We'll use a non-existent endpoint to make it fail.
@@ -38,8 +36,13 @@ def test_threshold_based_eviction(
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.append(metrics_refused_log_line)
 
+    # these can happen whenever we run consumption metrics collection
+    env.pageserver.allowed_errors.append(r".*failed to calculate logical size at \S+: cancelled")
+    env.pageserver.allowed_errors.append(
+        r".*failed to calculate synthetic size for tenant \S+: failed to calculate some logical_sizes"
+    )
+
     tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
-    assert isinstance(timeline_id, TimelineId)
 
     ps_http = env.pageserver.http_client()
     assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {

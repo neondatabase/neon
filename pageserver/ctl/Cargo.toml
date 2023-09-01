@@ -13,6 +13,7 @@ clap = { workspace = true, features = ["string"] }
 git-version.workspace = true
 pageserver = { path = ".." }
 postgres_ffi.workspace = true
+tokio.workspace = true
 utils.workspace = true
 svg_fmt.workspace = true
 workspace_hack.workspace = true

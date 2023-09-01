@@ -2,21 +2,27 @@
 
 use anyhow::{bail, Context};
 use fail::fail_point;
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 use tokio::fs;
 
-use crate::{config::PageServerConf, tenant::remote_timeline_client::index::IndexPart};
+use super::Generation;
+use crate::{
+    config::PageServerConf,
+    tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
+};
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
 
+use tracing::info;
+
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
-    conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    generation: Generation,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
@@ -25,20 +31,16 @@ pub(super) async fn upload_index_part<'a>(
         bail!("failpoint before-upload-index")
     });
 
-    let index_part_bytes = serde_json::to_vec(&index_part)
-        .context("Failed to serialize index part file into bytes")?;
+    let index_part_bytes =
+        serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let index_part_path = conf
-        .metadata_path(timeline_id, tenant_id)
-        .with_file_name(IndexPart::FILE_NAME);
-    let storage_path = conf.remote_path(&index_part_path)?;
-
+    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
     storage
-        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
+        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
-        .with_context(|| format!("Failed to upload index part for '{tenant_id} / {timeline_id}'"))
+        .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -50,22 +52,34 @@ pub(super) async fn upload_timeline_layer<'a>(
     storage: &'a GenericRemoteStorage,
     source_path: &'a Path,
     known_metadata: &'a LayerFileMetadata,
+    generation: Generation,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
-    let storage_path = conf.remote_path(source_path)?;
 
-    let source_file = fs::File::open(&source_path)
-        .await
-        .with_context(|| format!("Failed to open a source file for layer {source_path:?}"))?;
+    let storage_path = remote_path(conf, source_path, generation)?;
+    let source_file_res = fs::File::open(&source_path).await;
+    let source_file = match source_file_res {
+        Ok(source_file) => source_file,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            // If we encounter this arm, it wasn't intended, but it's also not
+            // a big problem, if it's because the file was deleted before an
+            // upload. However, a nonexistent file can also be indicative of
+            // something worse, like when a file is scheduled for upload before
+            // it has been written to disk yet.
+            info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
+            return Ok(());
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("open a source file for layer {source_path:?}"))?
+        }
+    };
 
     let fs_size = source_file
         .metadata()
         .await
-        .with_context(|| {
-            format!("Failed to get the source file metadata for layer {source_path:?}")
-        })?
+        .with_context(|| format!("get the source file metadata for layer {source_path:?}"))?
         .len();
 
     let metadata_size = known_metadata.file_size();
@@ -73,19 +87,13 @@ pub(super) async fn upload_timeline_layer<'a>(
         bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
 
-    let fs_size = usize::try_from(fs_size).with_context(|| {
-        format!("File {source_path:?} size {fs_size} could not be converted to usize")
-    })?;
+    let fs_size = usize::try_from(fs_size)
+        .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
     storage
         .upload(source_file, fs_size, &storage_path, None)
         .await
-        .with_context(|| {
-            format!(
-                "Failed to upload a layer from local path '{}'",
-                source_path.display()
-            )
-        })?;
+        .with_context(|| format!("upload layer from local path '{}'", source_path.display()))?;
 
     Ok(())
 }

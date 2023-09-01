@@ -43,15 +43,12 @@ pub(crate) enum LayerCmd {
     },
 }
 
-fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    use pageserver::tenant::blob_io::BlobCursor;
-    use pageserver::tenant::block_io::BlockReader;
-
+async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     virtual_file::init(10);
     page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+    let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
@@ -60,25 +57,27 @@ fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     );
     // TODO(chi): dedup w/ `delta_layer.rs` by exposing the API.
     let mut all = vec![];
-    tree_reader.visit(
-        &[0u8; DELTA_KEY_SIZE],
-        VisitDirection::Forwards,
-        |key, value_offset| {
-            let curr = Key::from_slice(&key[..KEY_SIZE]);
-            all.push((curr, BlobRef(value_offset)));
-            true
-        },
-    )?;
-    let mut cursor = BlockCursor::new(&file);
+    tree_reader
+        .visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, value_offset| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                all.push((curr, BlobRef(value_offset)));
+                true
+            },
+        )
+        .await?;
+    let cursor = BlockCursor::new_fileblockreader(&file);
     for (k, v) in all {
-        let value = cursor.read_blob(v.pos())?;
+        let value = cursor.read_blob(v.pos()).await?;
         println!("key:{} value_len:{}", k, value.len());
     }
     // TODO(chi): special handling for last key?
     Ok(())
 }
 
-pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
+pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
     match cmd {
         LayerCmd::List { path } => {
             for tenant in fs::read_dir(path.join("tenants"))? {
@@ -153,7 +152,7 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                         );
 
                         if layer_file.is_delta {
-                            read_delta_file(layer.path())?;
+                            read_delta_file(layer.path()).await?;
                         } else {
                             anyhow::bail!("not supported yet :(");
                         }

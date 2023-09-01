@@ -1,8 +1,13 @@
 use crate::{
-    cancellation::CancelMap, config::ProxyConfig, error::io_error, proxy::handle_ws_client,
+    cancellation::CancelMap,
+    config::ProxyConfig,
+    error::io_error,
+    protocol2::{ProxyProtocolAccept, WithClientIp},
+    proxy::{handle_client, ClientMode},
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
+use hashbrown::HashMap;
 use hyper::{
     server::{
         accept,
@@ -35,7 +40,7 @@ use utils::http::{error::ApiError, json::json_response};
 // Tracking issue: https://github.com/rust-lang/rust/issues/98407.
 use sync_wrapper::SyncWrapper;
 
-use super::sql_over_http;
+use super::{conn_pool::GlobalConnPool, sql_over_http};
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
@@ -150,12 +155,12 @@ async fn serve_websocket(
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_ws_client(
+    handle_client(
         config,
         cancel_map,
         session_id,
         WebSocketRw::new(websocket),
-        hostname,
+        ClientMode::Websockets { hostname },
     )
     .await?;
     Ok(())
@@ -164,6 +169,7 @@ async fn serve_websocket(
 async fn ws_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
+    conn_pool: Arc<GlobalConnPool>,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
@@ -177,29 +183,35 @@ async fn ws_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
+        info!(session_id = ?session_id, "performing websocket upgrade");
+
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        tokio::spawn(async move {
-            if let Err(e) = serve_websocket(websocket, config, &cancel_map, session_id, host).await
-            {
-                error!("error in websocket connection: {e:?}");
+        tokio::spawn(
+            async move {
+                if let Err(e) =
+                    serve_websocket(websocket, config, &cancel_map, session_id, host).await
+                {
+                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         // Return the response so the spawned future can continue.
         Ok(response)
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = sql_over_http::handle(config, request, sni_hostname)
+        let result = sql_over_http::handle(request, sni_hostname, conn_pool, session_id)
             .instrument(info_span!("sql-over-http"))
             .await;
         let status_code = match result {
             Ok(_) => StatusCode::OK,
             Err(_) => StatusCode::BAD_REQUEST,
         };
-        let json = match result {
+        let (json, headers) = match result {
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
@@ -210,7 +222,14 @@ async fn ws_handler(
                     },
                     None => Value::Null,
                 };
-                json!({ "message": message, "code": code })
+                error!(
+                    ?code,
+                    "sql-over-http per-client task finished with an error: {e:#}"
+                );
+                (
+                    json!({ "message": message, "code": code }),
+                    HashMap::default(),
+                )
             }
         };
         json_response(status_code, json).map(|mut r| {
@@ -218,8 +237,23 @@ async fn ws_handler(
                 "Access-Control-Allow-Origin",
                 hyper::http::HeaderValue::from_static("*"),
             );
+            for (k, v) in headers {
+                r.headers_mut().insert(k, v);
+            }
             r
         })
+    } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
+        Response::builder()
+            .header("Allow", "OPTIONS, POST")
+            .header("Access-Control-Allow-Origin", "*")
+            .header(
+                "Access-Control-Allow-Headers",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+            )
+            .header("Access-Control-Max-Age", "86400" /* 24 hours */)
+            .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
+            .body(Body::empty())
+            .map_err(|e| ApiError::BadRequest(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
@@ -234,6 +268,20 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
+    let conn_pool: Arc<GlobalConnPool> = GlobalConnPool::new(config);
+
+    // shutdown the connection pool
+    tokio::spawn({
+        let cancellation_token = cancellation_token.clone();
+        let conn_pool = conn_pool.clone();
+        async move {
+            cancellation_token.cancelled().await;
+            tokio::task::spawn_blocking(move || conn_pool.shutdown())
+                .await
+                .unwrap();
+        }
+    });
+
     let tls_config = config.tls_config.as_ref().map(|cfg| cfg.to_server_config());
     let tls_acceptor: tokio_rustls::TlsAcceptor = match tls_config {
         Some(config) => config.into(),
@@ -245,6 +293,9 @@ pub async fn task_main(
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
+    let addr_incoming = ProxyProtocolAccept {
+        incoming: addr_incoming,
+    };
 
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
@@ -255,27 +306,34 @@ pub async fn task_main(
         }
     });
 
-    let make_svc =
-        hyper::service::make_service_fn(|stream: &tokio_rustls::server::TlsStream<AddrStream>| {
-            let sni_name = stream.get_ref().1.sni_hostname().map(|s| s.to_string());
+    let make_svc = hyper::service::make_service_fn(
+        |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
+            let (io, tls) = stream.get_ref();
+            let peer_addr = io.client_addr().unwrap_or(io.inner.remote_addr());
+            let sni_name = tls.server_name().map(|s| s.to_string());
+            let conn_pool = conn_pool.clone();
 
             async move {
                 Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| {
                     let sni_name = sni_name.clone();
+                    let conn_pool = conn_pool.clone();
+
                     async move {
                         let cancel_map = Arc::new(CancelMap::default());
                         let session_id = uuid::Uuid::new_v4();
 
-                        ws_handler(req, config, cancel_map, session_id, sni_name)
+                        ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
                             .instrument(info_span!(
                                 "ws-client",
-                                session = format_args!("{session_id}")
+                                session = %session_id,
+                                %peer_addr,
                             ))
                             .await
                     }
                 }))
             }
-        });
+        },
+    );
 
     hyper::Server::builder(accept::from_stream(tls_listener))
         .serve(make_svc)

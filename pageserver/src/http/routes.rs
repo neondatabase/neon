@@ -23,7 +23,6 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::disk_usage_eviction_task;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -35,6 +34,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
+use crate::{disk_usage_eviction_task, tenant};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -187,7 +187,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
             ),
-            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            a @ AlreadyInProgress(_) => ApiError::Conflict(a.to_string()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
@@ -204,6 +204,19 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
             ),
             Tenant(t) => ApiError::from(t),
             Timeline(t) => ApiError::from(t),
+        }
+    }
+}
+
+impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
+    fn from(value: crate::tenant::delete::DeleteTenantError) -> Self {
+        use crate::tenant::delete::DeleteTenantError::*;
+        match value {
+            Get(g) => ApiError::from(g),
+            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
+            Timeline(t) => ApiError::from(t),
+            Other(o) => ApiError::InternalServerError(o),
+            e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
         }
     }
 }
@@ -328,18 +341,25 @@ async fn timeline_create_handler(
             &ctx,
         )
         .await {
-            Ok(Some(new_timeline)) => {
+            Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
-            Err(err) => Err(ApiError::InternalServerError(err)),
+            Err(tenant::CreateTimelineError::AlreadyExists) => {
+                json_response(StatusCode::CONFLICT, ())
+            }
+            Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
+                json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
+                    format!("{err:#}")
+                ))
+            }
+            Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .instrument(info_span!("timeline_create", %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
 
@@ -374,7 +394,7 @@ async fn timeline_list_handler(
         }
         Ok::<Vec<TimelineInfo>, ApiError>(response_data)
     }
-    .instrument(info_span!("timeline_list", tenant = %tenant_id))
+    .instrument(info_span!("timeline_list", %tenant_id))
     .await?;
 
     json_response(StatusCode::OK, response_data)
@@ -411,7 +431,7 @@ async fn timeline_detail_handler(
 
         Ok::<_, ApiError>(timeline_info)
     }
-    .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
+    .instrument(info_span!("timeline_detail", %tenant_id, %timeline_id))
     .await?;
 
     json_response(StatusCode::OK, timeline_info)
@@ -472,7 +492,7 @@ async fn tenant_attach_handler(
             remote_storage.clone(),
             &ctx,
         )
-        .instrument(info_span!("tenant_attach", tenant = %tenant_id))
+        .instrument(info_span!("tenant_attach", %tenant_id))
         .await?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
@@ -494,10 +514,9 @@ async fn timeline_delete_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     mgr::delete_timeline(tenant_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
+        .instrument(info_span!("timeline_delete", %tenant_id, %timeline_id))
         .await?;
 
-    // FIXME: needs to be an error for console to retry it. Ideally Accepted should be used and retried until 404.
     json_response(StatusCode::ACCEPTED, ())
 }
 
@@ -512,7 +531,7 @@ async fn tenant_detach_handler(
     let state = get_state(&request);
     let conf = state.conf;
     mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", tenant = %tenant_id))
+        .instrument(info_span!("tenant_detach", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -535,7 +554,7 @@ async fn tenant_load_handler(
         state.remote_storage.clone(),
         &ctx,
     )
-    .instrument(info_span!("load", tenant = %tenant_id))
+    .instrument(info_span!("load", %tenant_id))
     .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -551,7 +570,7 @@ async fn tenant_ignore_handler(
     let state = get_state(&request);
     let conf = state.conf;
     mgr::ignore_tenant(conf, tenant_id)
-        .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
+        .instrument(info_span!("ignore_tenant", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -604,10 +623,27 @@ async fn tenant_status(
             attachment_status: state.attachment_status(),
         })
     }
-    .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
+    .instrument(info_span!("tenant_status_handler", %tenant_id))
     .await?;
 
     json_response(StatusCode::OK, tenant_info)
+}
+
+async fn tenant_delete_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // TODO openapi spec
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let state = get_state(&request);
+
+    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_id)
+        .instrument(info_span!("tenant_delete_handler", %tenant_id))
+        .await?;
+
+    json_response(StatusCode::ACCEPTED, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
@@ -843,7 +879,7 @@ async fn tenant_create_handler(
         state.remote_storage.clone(),
         &ctx,
     )
-    .instrument(info_span!("tenant_create", tenant = ?target_tenant_id))
+    .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
     .await?;
 
     // We created the tenant. Existing API semantics are that the tenant
@@ -905,7 +941,7 @@ async fn update_tenant_config_handler(
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
-        .instrument(info_span!("tenant_config", tenant = ?tenant_id))
+        .instrument(info_span!("tenant_config", %tenant_id))
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -943,14 +979,7 @@ async fn failpoints_handler(
 
         // We recognize one extra "action" that's not natively recognized
         // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = if fp.actions == "exit" {
-            fail::cfg_callback(fp.name, || {
-                info!("Exit requested by failpoint");
-                std::process::exit(1);
-            })
-        } else {
-            fail::cfg(fp.name, &fp.actions)
-        };
+        let cfg_result = crate::failpoint_support::apply_failpoint(&fp.name, &fp.actions);
 
         if let Err(err_msg) = cfg_result {
             return Err(ApiError::BadRequest(anyhow!(
@@ -987,31 +1016,29 @@ async fn timeline_gc_handler(
 // Run compaction immediately on given timeline.
 async fn timeline_compact_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let result_receiver = mgr::immediate_compact(tenant_id, timeline_id, &ctx)
-        .await
-        .context("spawn compaction task")
-        .map_err(ApiError::InternalServerError)?;
-
-    let result: anyhow::Result<()> = result_receiver
-        .await
-        .context("receive compaction result")
-        .map_err(ApiError::InternalServerError)?;
-    result.map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+        timeline
+            .compact(&cancel, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_compaction", %tenant_id, %timeline_id))
+    .await
 }
 
 // Run checkpoint immediately on given timeline.
 async fn timeline_checkpoint_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1024,13 +1051,13 @@ async fn timeline_checkpoint_handler(
             .await
             .map_err(ApiError::InternalServerError)?;
         timeline
-            .compact(&ctx)
+            .compact(&cancel, &ctx)
             .await
             .map_err(ApiError::InternalServerError)?;
 
         json_response(StatusCode::OK, ())
     }
-    .instrument(info_span!("manual_checkpoint", tenant_id = %tenant_id, timeline_id = %timeline_id))
+    .instrument(info_span!("manual_checkpoint", %tenant_id, %timeline_id))
     .await
 }
 
@@ -1136,7 +1163,7 @@ async fn disk_usage_eviction_run(
     let Some(storage) = state.remote_storage.clone() else {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
-        )))
+        )));
     };
 
     let state = state.disk_usage_eviction_state.clone();
@@ -1340,6 +1367,9 @@ pub fn make_router(
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
         .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
         .get("/v1/tenant/:tenant_id", |r| api_handler(r, tenant_status))
+        .delete("/v1/tenant/:tenant_id", |r| {
+            api_handler(r, tenant_delete_handler)
+        })
         .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
             api_handler(r, tenant_size_handler)
         })

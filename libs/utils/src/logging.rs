@@ -84,7 +84,7 @@ pub fn init(
     let r = r.with({
         let log_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
-            .with_ansi(atty::is(atty::Stream::Stdout))
+            .with_ansi(false)
             .with_writer(std::io::stdout);
         let log_layer = match log_format {
             LogFormat::Json => log_layer.json().boxed(),
@@ -112,7 +112,7 @@ pub fn init(
 ///
 /// When the return value is dropped, the hook is reverted to std default hook (prints to stderr).
 /// If the assumptions about the initialization order are not held, use
-/// [`TracingPanicHookGuard::disarm`] but keep in mind, if tracing is stopped, then panics will be
+/// [`TracingPanicHookGuard::forget`] but keep in mind, if tracing is stopped, then panics will be
 /// lost.
 #[must_use]
 pub fn replace_panic_hook_with_tracing_panic_hook() -> TracingPanicHookGuard {

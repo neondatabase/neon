@@ -4,6 +4,7 @@
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
+	extension_server.o \
 	file_cache.o \
 	libpagestore.o \
 	libpqwalproposer.o \

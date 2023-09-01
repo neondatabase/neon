@@ -60,7 +60,7 @@ use utils::serde_percent::Percent;
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, storage_layer::PersistentLayer, Timeline},
+    tenant::{self, storage_layer::PersistentLayer, timeline::EvictionError, Timeline},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +110,6 @@ pub fn launch_disk_usage_global_eviction_task(
 
             disk_usage_eviction_task(&state, task_config, storage, &conf.tenants_path(), cancel)
                 .await;
-            info!("disk usage based eviction task finishing");
             Ok(())
         },
     );
@@ -126,13 +125,16 @@ async fn disk_usage_eviction_task(
     tenants_dir: &Path,
     cancel: CancellationToken,
 ) {
+    scopeguard::defer! {
+        info!("disk usage based eviction task finishing");
+    };
+
     use crate::tenant::tasks::random_init_delay;
     {
         if random_init_delay(task_config.period, &cancel)
             .await
             .is_err()
         {
-            info!("shutting down");
             return;
         }
     }
@@ -164,12 +166,11 @@ async fn disk_usage_eviction_task(
         .await;
 
         let sleep_until = start + task_config.period;
-        tokio::select! {
-            _ = tokio::time::sleep_until(sleep_until) => {},
-            _ = cancel.cancelled() => {
-                info!("shutting down");
-                break
-            }
+        if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+            .await
+            .is_ok()
+        {
+            break;
         }
     }
 }
@@ -303,18 +304,19 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Debug-log the list of candidates
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        let desc = candidate.layer.layer_desc();
         debug!(
-            "cand {}/{}: size={}, no_access_for={}us, parition={:?}, tenant={} timeline={} layer={}",
+            "cand {}/{}: size={}, no_access_for={}us, partition={:?}, {}/{}/{}",
             i + 1,
             candidates.len(),
-            candidate.layer.file_size(),
+            desc.file_size,
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
             partition,
-            candidate.layer.get_tenant_id(),
-            candidate.layer.get_timeline_id(),
-            candidate.layer.filename().file_name(),
+            desc.tenant_id,
+            desc.timeline_id,
+            candidate.layer,
         );
     }
 
@@ -345,7 +347,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             warned = Some(usage_planned);
         }
 
-        usage_planned.add_available_bytes(candidate.layer.file_size());
+        usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
 
         batched
             .entry(TimelineKey(candidate.timeline))
@@ -388,24 +390,30 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 Ok(results) => {
                     assert_eq!(results.len(), batch.len());
                     for (result, layer) in results.into_iter().zip(batch.iter()) {
+                        let file_size = layer.layer_desc().file_size;
                         match result {
-                            Some(Ok(true)) => {
-                                usage_assumed.add_available_bytes(layer.file_size());
+                            Some(Ok(())) => {
+                                usage_assumed.add_available_bytes(file_size);
                             }
-                            Some(Ok(false)) => {
-                                // this is:
-                                // - Replacement::{NotFound, Unexpected}
-                                // - it cannot be is_remote_layer, filtered already
-                                evictions_failed.file_sizes += layer.file_size();
+                            Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
+                                unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
+                            }
+                            Some(Err(EvictionError::FileNotFound)) => {
+                                evictions_failed.file_sizes += file_size;
+                                evictions_failed.count += 1;
+                            }
+                            Some(Err(
+                                e @ EvictionError::LayerNotFound(_)
+                                | e @ EvictionError::StatFailed(_),
+                            )) => {
+                                let e = utils::error::report_compact_sources(&e);
+                                warn!(%layer, "failed to evict layer: {e}");
+                                evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }
                             None => {
                                 assert!(cancel.is_cancelled());
                                 return;
-                            }
-                            Some(Err(e)) => {
-                                // we really shouldn't be getting this, precondition failure
-                                error!("failed to evict layer: {:#}", e);
                             }
                         }
                     }
@@ -539,12 +547,12 @@ async fn collect_eviction_candidates(
         // We could be better here, e.g., sum of all L0 layers + most recent L1 layer.
         // That's what's typically used by the various background loops.
         //
-        // The default can be overriden with a fixed value in the tenant conf.
+        // The default can be overridden with a fixed value in the tenant conf.
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             debug!(
                 tenant_id=%tenant.tenant_id(),
-                overriden_size=s,
+                overridden_size=s,
                 "using overridden min resident size for tenant"
             );
             s

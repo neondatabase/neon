@@ -30,6 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
 };
@@ -70,7 +71,6 @@ impl Timeline {
                 };
 
                 self_clone.eviction_task(cancel).await;
-                info!("eviction task finishing");
                 Ok(())
             },
         );
@@ -86,7 +86,6 @@ impl Timeline {
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
-                info!("shutting down");
                 return;
             }
         }
@@ -99,12 +98,11 @@ impl Timeline {
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            info!("shutting down");
-                            break;
-                        }
-                        _ = tokio::time::sleep_until(sleep_until) => { }
+                    if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+                        .await
+                        .is_ok()
+                    {
+                        break;
                     }
                 }
             }
@@ -197,9 +195,11 @@ impl Timeline {
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
-            let layers = self.layers.read().await;
+            let guard = self.layers.read().await;
+            let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
+                let hist_layer = guard.get_from_desc(&hist_layer);
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
@@ -207,7 +207,7 @@ impl Timeline {
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
                     // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%hist_layer.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    debug!(layer=%hist_layer, "last_activity returns None, using SystemTime::now");
                     SystemTime::now()
                 });
 
@@ -268,20 +268,22 @@ impl Timeline {
                 None => {
                     stats.skipped_for_shutdown += 1;
                 }
-                Some(Ok(true)) => {
-                    debug!("evicted layer {l:?}");
+                Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Ok(false)) => {
-                    debug!("layer is not evictable: {l:?}");
+                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
                     stats.not_evictable += 1;
                 }
-                Some(Err(e)) => {
-                    // This variant is the case where an unexpected error happened during eviction.
-                    // Expected errors that result in non-eviction are `Some(Ok(false))`.
-                    // So, dump Debug here to gather as much info as possible in this rare case.
-                    warn!("failed to evict layer {l:?}: {e:?}");
-                    stats.errors += 1;
+                Some(Err(EvictionError::FileNotFound)) => {
+                    // compaction/gc removed the file while we were waiting on layer_removal_cs
+                    stats.not_evictable += 1;
+                }
+                Some(Err(
+                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
+                )) => {
+                    let e = utils::error::report_compact_sources(&e);
+                    warn!(layer = %l, "failed to evict layer: {e}");
+                    stats.not_evictable += 1;
                 }
             }
         }
@@ -303,8 +305,13 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let mut state = self.eviction_task_timeline_state.lock().await;
+
+        // Only do the imitate_layer accesses approximately as often as the threshold.  A little
+        // more frequently, to avoid this period racing with the threshold/period-th eviction iteration.
+        let inter_imitate_period = p.threshold.checked_sub(p.period).unwrap_or(p.threshold);
+
         match state.last_layer_access_imitation {
-            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
                 self.imitate_timeline_cached_layer_accesses(cancel, ctx)
                     .await;
@@ -327,7 +334,7 @@ impl Timeline {
         };
         let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {
-            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
                 self.imitate_synthetic_size_calculation_worker(&tenant, ctx, cancel)
                     .await;

@@ -12,6 +12,13 @@ pub struct Completion(mpsc::Sender<()>);
 #[derive(Clone)]
 pub struct Barrier(Arc<Mutex<mpsc::Receiver<()>>>);
 
+impl Default for Barrier {
+    fn default() -> Self {
+        let (_, rx) = channel();
+        rx
+    }
+}
+
 impl Barrier {
     pub async fn wait(self) {
         self.0.lock().await.recv().await;
@@ -23,6 +30,15 @@ impl Barrier {
         }
     }
 }
+
+impl PartialEq for Barrier {
+    fn eq(&self, other: &Self) -> bool {
+        // we don't use dyn so this is good
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Barrier {}
 
 /// Create new Guard and Barrier pair.
 pub fn channel() -> (Completion, Barrier) {

@@ -122,6 +122,43 @@ hnsw_populate(HierarchicalNSW* hnsw, Relation indexRel, Relation heapRel)
 						   true, true, hnsw_build_callback, (void *) hnsw, NULL);
 }
 
+#ifdef __APPLE__
+
+#include <sys/types.h>
+#include <sys/sysctl.h>
+
+static void
+hnsw_check_available_memory(Size requested)
+{
+	size_t total;
+	if (sysctlbyname("hw.memsize", NULL, &total, NULL, 0) < 0)
+		elog(ERROR, "Failed to get amount of RAM: %m");
+
+	if ((Size)NBuffers*BLCKSZ + requested >= total)
+		elog(ERROR, "HNSW index requeries %ld bytes while only %ld are available",
+			requested, total - (Size)NBuffers*BLCKSZ);
+}
+
+#else
+
+#include <sys/sysinfo.h>
+
+static void
+hnsw_check_available_memory(Size requested)
+{
+	struct sysinfo si;
+	Size total;
+	if (sysinfo(&si) < 0)
+		elog(ERROR, "Failed to get amount of RAM: %n");
+
+	total = si.totalram*si.mem_unit;
+	if ((Size)NBuffers*BLCKSZ + requested >= total)
+		elog(ERROR, "HNSW index requeries %ld bytes while only %ld are available",
+			requested, total - (Size)NBuffers*BLCKSZ);
+}
+
+#endif
+
 static HierarchicalNSW*
 hnsw_get_index(Relation indexRel, Relation heapRel)
 {
@@ -155,6 +192,8 @@ hnsw_get_index(Relation indexRel, Relation heapRel)
 		size_links_level0 = (maxM + 1) * sizeof(idx_t);
 		size_data_per_element = size_links_level0 + data_size + sizeof(label_t);
 		shmem_size =  hnsw_sizeof() + maxelements * size_data_per_element;
+
+		hnsw_check_available_memory(shmem_size);
 
 		/* first try to attach to existed index */
 		if (!dsm_impl_op(DSM_OP_ATTACH, handle, 0, &impl_private,

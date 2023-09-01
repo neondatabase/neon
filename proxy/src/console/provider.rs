@@ -14,6 +14,7 @@ pub mod errors {
     use crate::{
         error::{io_error, UserFacingError},
         http,
+        proxy::ShouldRetry,
     };
     use thiserror::Error;
 
@@ -62,12 +63,36 @@ pub mod errors {
                         format!("{REQUEST_FAILED}: endpoint is disabled")
                     }
                     http::StatusCode::LOCKED => {
-                        // Status 423: project might be in maintenance mode (or bad state).
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable")
+                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
+                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
                 _ => REQUEST_FAILED.to_owned(),
+            }
+        }
+    }
+
+    impl ShouldRetry for ApiError {
+        fn could_retry(&self) -> bool {
+            match self {
+                // retry some transport errors
+                Self::Transport(io) => io.could_retry(),
+                // retry some temporary failures because the compute was in a bad state
+                // (bad request can be returned when the endpoint was in transition)
+                Self::Console {
+                    status: http::StatusCode::BAD_REQUEST,
+                    ..
+                } => true,
+                // locked can be returned when the endpoint was in transition
+                // or when quotas are exceeded. don't retry when quotas are exceeded
+                Self::Console {
+                    status: http::StatusCode::LOCKED,
+                    ref text,
+                } => !text.contains("quota"),
+                // retry server errors
+                Self::Console { status, .. } if status.is_server_error() => true,
+                _ => false,
             }
         }
     }
@@ -186,18 +211,18 @@ pub trait Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<Option<AuthInfo>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 
-/// Various caches for [`console`].
+/// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,

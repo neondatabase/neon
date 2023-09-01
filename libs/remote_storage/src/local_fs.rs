@@ -7,6 +7,7 @@
 use std::{
     borrow::Cow,
     future::Future,
+    io::ErrorKind,
     path::{Path, PathBuf},
     pin::Pin,
 };
@@ -150,10 +151,7 @@ impl RemoteStorage for LocalFs {
         let mut files = vec![];
         let mut directory_queue = vec![full_path.clone()];
 
-        while !directory_queue.is_empty() {
-            let cur_folder = directory_queue
-                .pop()
-                .expect("queue cannot be empty: we just checked");
+        while let Some(cur_folder) = directory_queue.pop() {
             let mut entries = fs::read_dir(cur_folder.clone()).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let file_name: PathBuf = entry.file_name().into();
@@ -343,18 +341,14 @@ impl RemoteStorage for LocalFs {
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
-        if !file_path.exists() {
+        match fs::remove_file(&file_path).await {
+            Ok(()) => Ok(()),
+            // The file doesn't exist. This shouldn't yield an error to mirror S3's behaviour.
             // See https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
             // > If there isn't a null version, Amazon S3 does not remove any objects but will still respond that the command was successful.
-            return Ok(());
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::anyhow!(e)),
         }
-
-        if !file_path.is_file() {
-            anyhow::bail!("{file_path:?} is not a file");
-        }
-        Ok(fs::remove_file(file_path)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?)
     }
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {

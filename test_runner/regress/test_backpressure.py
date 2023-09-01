@@ -141,13 +141,13 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
                     log.info("stopping check thread")
                     check_stop_event.set()
                     check_thread.join()
-                    assert (
-                        False
-                    ), f"Exception {e} while inserting rows, but WAL lag is within configured threshold. That means backpressure is not tuned properly"
+                    raise AssertionError(
+                        f"Exception {e} while inserting rows, but WAL lag is within configured threshold. That means backpressure is not tuned properly"
+                    ) from e
                 else:
-                    assert (
-                        False
-                    ), f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
+                    raise AssertionError(
+                        f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
+                    ) from e
 
         log.info(f"inserted {rows_inserted} rows")
 
@@ -157,9 +157,9 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
         check_thread.join()
         log.info("check thread stopped")
     else:
-        assert (
-            False
-        ), "WAL lag overflowed configured threshold. That means backpressure doesn't work."
+        raise AssertionError(
+            "WAL lag overflowed configured threshold. That means backpressure doesn't work."
+        )
 
 
 # TODO test_backpressure_disk_consistent_lsn_lag. Play with pageserver's checkpoint settings

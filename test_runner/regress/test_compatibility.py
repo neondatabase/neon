@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import pytest
 import toml  # TODO: replace with tomllib for Python >= 3.11
@@ -13,7 +13,6 @@ from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -22,6 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -62,7 +62,6 @@ def test_create_snapshot(
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
-    neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
@@ -72,9 +71,9 @@ def test_create_snapshot(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg_bin.run(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
-    pg_bin.run(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
-    pg_bin.run(
+    pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
 
@@ -258,36 +257,15 @@ def prepare_snapshot(
         shutil.rmtree(repo_dir / "pgdatadirs")
     os.mkdir(repo_dir / "endpoints")
 
-    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
-    # them anymore, but old versions did.
-    for tenant in (repo_dir / "tenants").glob("*"):
-        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
-        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
-            shutil.rmtree(wal_redo_dir)
-
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
     pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
-    pageserver_config["listen_http_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_http_addr"]
-    )
-    pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_pg_addr"]
-    )
-    # since storage_broker these are overriden by neon_local during pageserver
-    # start; remove both to prevent unknown options during etcd ->
-    # storage_broker migration. TODO: remove once broker is released
-    pageserver_config.pop("broker_endpoint", None)
-    pageserver_config.pop("broker_endpoints", None)
-    etcd_broker_endpoints = [f"http://localhost:{port_distributor.get_port()}/"]
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
+    for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
+        pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])
 
-    # Older pageserver versions had just one `auth_type` setting. Now there
-    # are separate settings for pg and http ports. We don't use authentication
-    # in compatibility tests so just remove authentication related settings.
-    pageserver_config.pop("auth_type", None)
+    # We don't use authentication in compatibility tests
+    # so just remove authentication related settings.
     pageserver_config.pop("pg_auth_type", None)
     pageserver_config.pop("http_auth_type", None)
 
@@ -299,31 +277,16 @@ def prepare_snapshot(
 
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
-
-    # Provide up/downgrade etcd <-> storage_broker to make forward/backward
-    # compatibility test happy. TODO: leave only the new part once broker is released.
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        # old etcd version
-        snapshot_config["etcd_broker"] = {
-            "etcd_binary_path": shutil.which("etcd"),
-            "broker_endpoints": etcd_broker_endpoints,
-        }
-        snapshot_config.pop("broker", None)
-    else:
-        # new storage_broker version
-        broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
-        snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
-        snapshot_config.pop("etcd_broker", None)
-
-    snapshot_config["pageserver"]["listen_http_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_http_addr"]
-    )
-    snapshot_config["pageserver"]["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_pg_addr"]
+    for param in ("listen_http_addr", "listen_pg_addr"):
+        snapshot_config["pageserver"][param] = port_distributor.replace_with_new_port(
+            snapshot_config["pageserver"][param]
+        )
+    snapshot_config["broker"]["listen_addr"] = port_distributor.replace_with_new_port(
+        snapshot_config["broker"]["listen_addr"]
     )
     for sk in snapshot_config["safekeepers"]:
-        sk["http_port"] = port_distributor.replace_with_new_port(sk["http_port"])
-        sk["pg_port"] = port_distributor.replace_with_new_port(sk["pg_port"])
+        for param in ("http_port", "pg_port", "pg_tenant_only_port"):
+            sk[param] = port_distributor.replace_with_new_port(sk[param])
 
     if pg_distrib_dir:
         snapshot_config["pg_distrib_dir"] = str(pg_distrib_dir)
@@ -347,12 +310,6 @@ def prepare_snapshot(
     assert (
         rv.returncode != 0
     ), f"there're files referencing `test_create_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
-
-
-# get git SHA of neon binary
-def get_neon_version(neon_binpath: Path):
-    out = subprocess.check_output([neon_binpath / "neon_local", "--version"]).decode("utf-8")
-    return out.split("git:", 1)[1].rstrip()
 
 
 def check_neon_works(
@@ -380,7 +337,7 @@ def check_neon_works(
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
-    config.preserve_database_files = True
+    config.remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
@@ -404,7 +361,9 @@ def check_neon_works(
     request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
-    pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
+    pg_bin.run_capture(
+        ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
     initial_dump_differs = dump_differs(
         repo_dir.parent / "dump.sql",
         test_output_dir / "dump.sql",
@@ -424,7 +383,7 @@ def check_neon_works(
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
     pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
-    pg_bin.run(
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
     # The assert itself deferred to the end of the test
@@ -435,17 +394,24 @@ def check_neon_works(
         test_output_dir / "dump-from-wal.filediff",
     )
 
+    pg_bin.run_capture(["pg_amcheck", connstr, "--install-missing", "--verbose"])
+
     # Check that we can interract with the data
-    pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
+    pg_bin.run_capture(["pgbench", "--time=10", "--progress=2", connstr])
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"
 
 
-def dump_differs(first: Path, second: Path, output: Path) -> bool:
+def dump_differs(
+    first: Path, second: Path, output: Path, allowed_diffs: Optional[List[str]] = None
+) -> bool:
     """
     Runs diff(1) command on two SQL dumps and write the output to the given output file.
-    Returns True if the dumps differ, False otherwise.
+    The function supports allowed diffs, if the diff is in the allowed_diffs list, it's not considered as a difference.
+    See the example of it in https://github.com/neondatabase/neon/pull/4425/files#diff-15c5bfdd1d5cc1411b9221091511a60dd13a9edf672bdfbb57dd2ef8bb7815d6
+
+    Returns True if the dumps differ and produced diff is not allowed, False otherwise (in most cases we want it to return False).
     """
 
     with output.open("w") as stdout:
@@ -463,51 +429,30 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
 
     differs = res.returncode != 0
 
-    # TODO: Remove after https://github.com/neondatabase/neon/pull/4425 is merged, and a couple of releases are made
-    if differs:
-        with tempfile.NamedTemporaryFile(mode="w") as tmp:
-            tmp.write(PR4425_ALLOWED_DIFF)
-            tmp.flush()
+    allowed_diffs = allowed_diffs or []
+    if differs and len(allowed_diffs) > 0:
+        for allowed_diff in allowed_diffs:
+            with tempfile.NamedTemporaryFile(mode="w") as tmp:
+                tmp.write(allowed_diff)
+                tmp.flush()
 
-            allowed = subprocess.run(
-                [
-                    "diff",
-                    "--unified",  # Make diff output more readable
-                    r"--ignore-matching-lines=^---",  # Ignore diff headers
-                    r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
-                    "--ignore-matching-lines=^@@",  # Ignore diff blocks location
-                    "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
-                    "--ignore-matching-lines=^ --.*",  # Ignore the " --" lines for compatibility with PG14
-                    "--ignore-blank-lines",
-                    str(output),
-                    str(tmp.name),
-                ],
-            )
+                allowed = subprocess.run(
+                    [
+                        "diff",
+                        "--unified",  # Make diff output more readable
+                        r"--ignore-matching-lines=^---",  # Ignore diff headers
+                        r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
+                        "--ignore-matching-lines=^@@",  # Ignore diff blocks location
+                        "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
+                        "--ignore-matching-lines=^ --.*",  # Ignore SQL comments in diff
+                        "--ignore-blank-lines",
+                        str(output),
+                        str(tmp.name),
+                    ],
+                )
 
-            differs = allowed.returncode != 0
+                differs = allowed.returncode != 0
+                if not differs:
+                    break
 
     return differs
-
-
-PR4425_ALLOWED_DIFF = """
---- /tmp/test_output/test_backward_compatibility[release-pg15]/compatibility_snapshot/dump.sql 2023-06-08 18:12:45.000000000 +0000
-+++ /tmp/test_output/test_backward_compatibility[release-pg15]/dump.sql        2023-06-13 07:25:35.211733653 +0000
-@@ -13,12 +13,20 @@
-
- CREATE ROLE cloud_admin;
- ALTER ROLE cloud_admin WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
-+CREATE ROLE neon_superuser;
-+ALTER ROLE neon_superuser WITH NOSUPERUSER INHERIT CREATEROLE CREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;
-
- --
- -- User Configurations
- --
-
-
-+--
-+-- Role memberships
-+--
-+
-+GRANT pg_read_all_data TO neon_superuser GRANTED BY cloud_admin;
-+GRANT pg_write_all_data TO neon_superuser GRANTED BY cloud_admin;
-"""

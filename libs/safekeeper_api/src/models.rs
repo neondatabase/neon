@@ -31,6 +31,8 @@ fn lsn_invalid() -> Lsn {
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkTimelineInfo {
+    /// Term.
+    pub term: Option<u64>,
     /// Term of the last entry.
     pub last_log_term: Option<u64>,
     /// LSN of the last record.
@@ -58,4 +60,6 @@ pub struct SkTimelineInfo {
     /// A connection string to use for WAL receiving.
     #[serde(default)]
     pub safekeeper_connstr: Option<String>,
+    #[serde(default)]
+    pub http_connstr: Option<String>,
 }

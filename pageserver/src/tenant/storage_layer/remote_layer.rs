@@ -4,9 +4,9 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
-use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -20,12 +20,12 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
+    AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset,
     LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
-/// [`crate::storage_layer::DeltaLayer`].
+/// [`DeltaLayer`](super::DeltaLayer).
 ///
 /// RemoteLayer might be downloaded on-demand during operations which are
 /// allowed download remote layers and during which, it gets replaced with a
@@ -50,6 +50,8 @@ pub struct RemoteLayer {
     /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
     /// a possible fast loop between `Timeline::get_reconstruct_data` and
     /// `Timeline::download_remote_layer`, which also logs.
+    ///
+    /// [`ongoing_download`]: Self::ongoing_download
     pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
@@ -58,76 +60,40 @@ impl std::fmt::Debug for RemoteLayer {
         f.debug_struct("RemoteLayer")
             .field("file_name", &self.desc.filename())
             .field("layer_metadata", &self.layer_metadata)
-            .field("is_incremental", &self.desc.is_incremental)
+            .field("is_incremental", &self.desc.is_incremental())
             .finish()
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for RemoteLayer {
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_state: &mut ValueReconstructState,
         _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
-        bail!(
-            "layer {} needs to be downloaded",
-            self.filename().file_name()
-        );
+        bail!("layer {self} needs to be downloaded");
     }
+}
 
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.desc.tenant_id,
-            self.desc.timeline_id,
-            self.desc.key_range.start,
-            self.desc.key_range.end,
-            self.desc.lsn_range.start,
-            self.desc.lsn_range.end
-        );
-
-        Ok(())
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for RemoteLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
+}
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
+impl AsLayerDesc for RemoteLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
 }
 
 impl PersistentLayer for RemoteLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-
     fn local_path(&self) -> Option<PathBuf> {
         None
-    }
-
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        bail!("cannot iterate a remote layer");
-    }
-
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        bail!("cannot iterate a remote layer");
     }
 
     fn delete_resident_layer_file(&self) -> Result<()> {
@@ -143,8 +109,8 @@ impl PersistentLayer for RemoteLayer {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_range = self.layer_desc().lsn_range.clone();
 
         if self.desc.is_delta {
             HistoricLayerInfo::Delta {
@@ -185,7 +151,6 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn,
-                false,
                 layer_metadata.file_size(),
             ),
             layer_metadata: layer_metadata.clone(),
@@ -218,15 +183,12 @@ impl RemoteLayer {
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer<L>(
+    pub(crate) fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        _layer_map_lock_held_witness: &LayerManager,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer>
-    where
-        L: ?Sized + Layer,
-    {
+    ) -> Arc<dyn PersistentLayer> {
         if self.desc.is_delta {
             let fname = self.desc.delta_file_name();
             Arc::new(DeltaLayer::new(
@@ -235,10 +197,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         } else {
             let fname = self.desc.image_file_name();
@@ -248,10 +208,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         }
     }

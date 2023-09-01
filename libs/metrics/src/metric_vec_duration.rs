@@ -1,4 +1,4 @@
-//! Helpers for observing duration on HistogramVec / CounterVec / GaugeVec / MetricVec<T>.
+//! Helpers for observing duration on `HistogramVec` / `CounterVec` / `GaugeVec` / `MetricVec<T>`.
 
 use std::{future::Future, time::Instant};
 

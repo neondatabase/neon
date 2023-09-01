@@ -2,8 +2,9 @@
 //! protocol commands.
 
 use anyhow::Context;
-use std::str;
 use std::str::FromStr;
+use std::str::{self};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
@@ -11,6 +12,8 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::safekeeper::Term;
+use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
@@ -18,7 +21,7 @@ use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
-use utils::auth::{Claims, Scope};
+use utils::auth::{Claims, JwtAuth, Scope};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -34,6 +37,8 @@ pub struct SafekeeperPostgresHandler {
     pub ttid: TenantTimelineId,
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
+    /// Auth scope allowed on the connections and public key used to check auth tokens. None if auth is not configured.
+    auth: Option<(Scope, Arc<JwtAuth>)>,
     claims: Option<Claims>,
     io_metrics: Option<TrafficMetrics>,
 }
@@ -41,8 +46,9 @@ pub struct SafekeeperPostgresHandler {
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
     StartWalPush,
-    StartReplication { start_lsn: Lsn },
+    StartReplication { start_lsn: Lsn, term: Option<Term> },
     IdentifySystem,
+    TimelineStatus,
     JSONCtrl { cmd: AppendLogicalMessage },
 }
 
@@ -51,17 +57,25 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
-            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)",
+            // We follow postgres START_REPLICATION LOGICAL options to pass term.
+            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)(?: \(term='(\d+)'\))?",
         )
         .unwrap();
-        let mut caps = re.captures_iter(cmd);
-        let start_lsn = caps
-            .next()
-            .map(|cap| Lsn::from_str(&cap[1]))
-            .context("parse start LSN from START_REPLICATION command")??;
-        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
+        let caps = re
+            .captures(cmd)
+            .context(format!("failed to parse START_REPLICATION command {}", cmd))?;
+        let start_lsn =
+            Lsn::from_str(&caps[1]).context("parse start LSN from START_REPLICATION command")?;
+        let term = if let Some(m) = caps.get(2) {
+            Some(m.as_str().parse::<u64>().context("invalid term")?)
+        } else {
+            None
+        };
+        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn, term })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
+    } else if cmd.starts_with("TIMELINE_STATUS") {
+        Ok(SafekeeperPostgresCommand::TimelineStatus)
     } else if cmd.starts_with("JSON_CTRL") {
         let cmd = cmd.strip_prefix("JSON_CTRL").context("invalid prefix")?;
         Ok(SafekeeperPostgresCommand::JSONCtrl {
@@ -76,6 +90,7 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     match cmd {
         SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
+        SafekeeperPostgresCommand::TimelineStatus => "TIMELINE_STATUS",
         SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
         SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
@@ -140,12 +155,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
-        let data = self
-            .conf
+        let (allowed_auth_scope, auth) = self
             .auth
             .as_ref()
-            .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .expect("auth_type is configured but .auth of handler is missing");
+        let data =
+            auth.decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+
+        // The handler might be configured to allow only tenant scope tokens.
+        if matches!(allowed_auth_scope, Scope::Tenant)
+            && !matches!(data.claims.scope, Scope::Tenant)
+        {
+            return Err(QueryError::Other(anyhow::anyhow!(
+                "passed JWT token is for full access, but only tenant scope is allowed"
+            )));
+        }
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
             return Err(QueryError::Other(anyhow::anyhow!(
@@ -201,12 +225,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     .instrument(info_span!("WAL receiver", ttid = %span_ttid))
                     .await
             }
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                self.handle_start_replication(pgb, start_lsn)
+            SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
+                self.handle_start_replication(pgb, start_lsn, term)
                     .instrument(info_span!("WAL sender", ttid = %span_ttid))
                     .await
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+            SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
                 handle_json_ctrl(self, pgb, cmd).await
             }
@@ -215,7 +240,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf, conn_id: u32, io_metrics: Option<TrafficMetrics>) -> Self {
+    pub fn new(
+        conf: SafeKeeperConf,
+        conn_id: u32,
+        io_metrics: Option<TrafficMetrics>,
+        auth: Option<(Scope, Arc<JwtAuth>)>,
+    ) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
@@ -224,6 +254,7 @@ impl SafekeeperPostgresHandler {
             ttid: TenantTimelineId::empty(),
             conn_id,
             claims: None,
+            auth,
             io_metrics,
         }
     }
@@ -231,7 +262,7 @@ impl SafekeeperPostgresHandler {
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
     fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
-        if self.conf.auth.is_none() {
+        if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
         }
@@ -243,6 +274,38 @@ impl SafekeeperPostgresHandler {
             .as_ref()
             .expect("claims presence already checked");
         check_permission(claims, tenant_id)
+    }
+
+    async fn handle_timeline_status<IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+    ) -> Result<(), QueryError> {
+        // Get timeline, handling "not found" error
+        let tli = match GlobalTimelines::get(self.ttid) {
+            Ok(tli) => Ok(Some(tli)),
+            Err(TimelineError::NotFound(_)) => Ok(None),
+            Err(e) => Err(QueryError::Other(e.into())),
+        }?;
+
+        // Write row description
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[
+            RowDescriptor::text_col(b"flush_lsn"),
+            RowDescriptor::text_col(b"commit_lsn"),
+        ]))?;
+
+        // Write row if timeline exists
+        if let Some(tli) = tli {
+            let (inmem, _state) = tli.get_state().await;
+            let flush_lsn = tli.get_flush_lsn().await;
+            let commit_lsn = inmem.commit_lsn;
+            pgb.write_message_noflush(&BeMessage::DataRow(&[
+                Some(flush_lsn.to_string().as_bytes()),
+                Some(commit_lsn.to_string().as_bytes()),
+            ]))?;
+        }
+
+        pgb.write_message_noflush(&BeMessage::CommandComplete(b"TIMELINE_STATUS"))?;
+        Ok(())
     }
 
     ///

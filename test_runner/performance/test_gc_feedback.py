@@ -47,7 +47,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
         # without modifying the earlier parts of the table.
         for step in range(n_steps):
             cur.execute(f"INSERT INTO t (step) SELECT {step} FROM generate_series(1, {step_size})")
-            for i in range(n_update_iters):
+            for _ in range(n_update_iters):
                 cur.execute(f"UPDATE t set count=count+1 where step = {step}")
                 cur.execute("vacuum t")
 

@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - release
+      - ci-run/pr-*
   pull_request:
 
 defaults:
@@ -127,6 +128,11 @@ jobs:
       - name: Run cargo clippy (release)
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
+      - name: Check documentation generation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
         if: ${{ !cancelled() }}
@@ -155,7 +161,7 @@ jobs:
         build_type: [ debug, release ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
-      GIT_VERSION: ${{ github.sha }}
+      GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
 
     steps:
       - name: Fix git ownership
@@ -173,6 +179,27 @@ jobs:
         with:
           submodules: true
           fetch-depth: 1
+
+      - name: Check Postgres submodules revision
+        shell: bash -euo pipefail {0}
+        run: |
+          # This is a temporary solution to ensure that the Postgres submodules revision is correct (i.e. the updated intentionally).
+          # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
+
+          FAILED=false
+          for postgres in postgres-v14 postgres-v15; do
+            expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
+            actual=$(git rev-parse "HEAD:vendor/${postgres}")
+            if [ "${expected}" != "${actual}" ]; then
+              echo >&2 "Expected ${postgres} rev to be at '${expected}', but it is at '${actual}'"
+              FAILED=true
+            fi
+          done
+
+          if [ "${FAILED}" = "true" ]; then
+            echo >&2 "Please update vendors/revisions.json if these changes are intentional"
+            exit 1
+          fi
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -369,13 +396,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 1
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -384,9 +409,11 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
+          extra_params: --splits ${{ strategy.job-total }} --group ${{ matrix.pytest_split_group }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -405,6 +432,11 @@ jobs:
         if: ${{ !cancelled() }}
         id: create-allure-report
         uses: ./.github/actions/allure-report-generate
+        with:
+          store-test-results-into-db: true
+        env:
+          REGRESS_TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - uses: actions/github-script@v6
         if: ${{ !cancelled() }}
@@ -424,25 +456,6 @@ jobs:
               fetch,
               report,
             })
-
-      - name: Store Allure test stat in the DB
-        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
-        env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
-        run: |
-          ./scripts/pysync
-
-          curl --fail --output suites.json "${REPORT_JSON_URL}"
-          export BUILD_TYPE=unified
-          export DATABASE_URL="$TEST_RESULT_CONNSTR"
-
-          poetry run python3 scripts/ingest_regress_test_result.py \
-            --revision ${COMMIT_SHA} \
-            --reference ${GITHUB_REF} \
-            --build-type ${BUILD_TYPE} \
-            --ingest suites.json
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
@@ -614,7 +627,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -658,7 +671,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
@@ -715,7 +728,7 @@ jobs:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
-                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
@@ -723,32 +736,6 @@ jobs:
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --cleanup
-
-      # Due to a kaniko bug, we can't use cache for extensions image, thus it takes about the same amount of time as compute-node image to build (~10 min)
-      # During the transition period we need to have extensions in both places (in S3 and in compute-node image),
-      # so we won't build extension twice, but extract them from compute-node.
-      #
-      # - name: Kaniko build extensions only
-      #   run: |
-      #     # Kaniko is suposed to clean up after itself if --cleanup flag is set, but it doesn't.
-      #     # Despite some fixes were made in https://github.com/GoogleContainerTools/kaniko/pull/2504 (in kaniko v1.11.0),
-      #     # it still fails with error:
-      #     #   error building image: could not save file: copying file: symlink postgres /kaniko/1/usr/local/pgsql/bin/postmaster: file exists
-      #     #
-      #     # Ref https://github.com/GoogleContainerTools/kaniko/issues/1406
-      #     find /kaniko -maxdepth 1 -mindepth 1 -type d -regex "/kaniko/[0-9]*" -exec rm -rv {} \;
-      #
-      #     /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true \
-      #                      --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-      #                      --context . \
-      #                      --build-arg GIT_VERSION=${{ github.sha }} \
-      #                      --build-arg PG_VERSION=${{ matrix.version }} \
-      #                      --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
-      #                      --dockerfile Dockerfile.compute-node \
-      #                      --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-      #                      --destination neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-      #                      --cleanup \
-      #                      --target postgres-extensions
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
@@ -765,7 +752,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.11.0
+      VM_BUILDER_VERSION: v0.17.5
 
     steps:
       - name: Checkout
@@ -786,7 +773,11 @@ jobs:
 
       - name: Build vm image
         run: |
-          ./vm-builder -enable-file-cache -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder \
+            -enable-file-cache \
+            -cgroup-uid=postgres \
+            -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+            -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
@@ -869,8 +860,6 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          # TODO: Uncomment when we start to build this image in `compute-node-image`
-          # crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
@@ -883,8 +872,6 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
-          # TODO: Uncomment when we start to build this image in `compute-node-image`
-          # crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/extensions:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -908,75 +895,96 @@ jobs:
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          # TODO: Uncomment when we start to build this image in `compute-node-image`
-          # crane tag neondatabase/extensions:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  upload-postgres-extensions-to-s3:
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-       github.event_name != 'workflow_dispatch'
-    runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
-    needs: [ tag, promote-images ]
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [ v14, v15 ]
+  trigger-custom-extensions-build:
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      options: --init
+    needs: [ tag ]
+    steps:
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
+          REMOTE_REPO="${{ github.repository_owner }}/build-custom-extensions"
 
-    env:
-      # While on transition period extract extensions from compute-node image (see a comment above for compute-node-image job)
-      # EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:latest
-      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:latest
-      # In compute image we have a bit different directory layout (/usr/local/pgsql put into /usr/local).
-      # This variable can be inlined after
-      # USR_LOCAL_PGSQL_PATH: /usr/local/pgsql
-      USR_LOCAL_PGSQL_PATH: /usr/local
-      AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
-      AWS_SECRET_ACCESS_KEY: ${{ github.ref_name == 'release' && secrets.AWS_SECRET_KEY_PROD || secrets.AWS_SECRET_KEY_DEV }}
-      S3_BUCKETS: |
-        ${{ github.ref_name == 'release' &&
-          '["neon-prod-extensions-ap-southeast-1", "neon-prod-extensions-eu-central-1", "neon-prod-extensions-us-east-1", "neon-prod-extensions-us-east-2", "neon-prod-extensions-us-west-2"]' ||
-          '["neon-dev-extensions-eu-central-1", "neon-dev-extensions-eu-west-1", "neon-dev-extensions-us-east-2"]' }}
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"build-and-upload-extensions\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
+
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/build_and_upload_extensions.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"build-and-upload-extensions\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"remote_branch_name\": \"${{ github.ref_name }}\"
+              }
+            }"
+
+  wait-for-extensions-build:
+    runs-on: ubuntu-latest
+    needs: [ trigger-custom-extensions-build ]
 
     steps:
-      - name: Pull postgres-extensions image
+      - name: Wait for extension build to finish
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          docker pull ${EXTENSIONS_IMAGE}
+          TIMEOUT=600 # 10 minutes, currently it takes ~2-3 minutes
+          INTERVAL=15 # try each N seconds
 
-      - name: Create postgres-extensions container
-        id: create-container
-        run: |
-          CID=$(docker create ${EXTENSIONS_IMAGE} true)
-          echo "CID=${CID}" >> $GITHUB_OUTPUT
+          last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
 
-      - name: Extract postgres-extensions from container
-        run: |
-          rm -rf ./usr-local-pgsql # Just in case
-          docker cp ${{ steps.create-container.outputs.CID }}:${USR_LOCAL_PGSQL_PATH} ./usr-local-pgsql
+          for ((i=0; i <= $TIMEOUT; i+=$INTERVAL)); do
+            sleep $INTERVAL
 
-          # Delete Neon extensitons (they always present on compute-node image)
-          rm -rf ./usr-local-pgsql/share/extension/neon*
-          rm -rf ./usr-local-pgsql/lib/neon*
+            # Get statuses for the latest commit in the PR / branch
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }}" > statuses.json
 
-      - name: Upload postgres-extensions to S3
-        run: |
-          for BUCKET in $(echo ${S3_BUCKETS} | jq --raw-output '.[]'); do
-            # Source directories are specified in Dockerfile.compute-node for postgres-extensions target
-            aws s3 cp --recursive --only-show-errors ./usr-local-pgsql/share/extension s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/share/extension
-            aws s3 cp --recursive --only-show-errors ./usr-local-pgsql/lib             s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/lib
+            # Get the latest status for the "build-and-upload-extensions" context
+            last_status=$(jq --raw-output '[.[] | select(.context == "build-and-upload-extensions")] | sort_by(.created_at)[-1].state' statuses.json)
+            if [ "${last_status}" = "pending" ]; then
+              # Extension build is still in progress.
+              continue
+            elif [ "${last_status}" = "success" ]; then
+              # Extension build is successful.
+              exit 0
+            else
+              # Status is neither "pending" nor "success", exit the loop and fail the job.
+              break
+            fi
           done
 
-      - name: Cleanup
-        if: ${{ always() && steps.create-container.outputs.CID }}
-        run: |
-          docker rm ${{ steps.create-container.outputs.CID }}
+          # Extension build failed, print `statuses.json` for debugging and fail the job.
+          jq '.' statuses.json
+
+          echo >&2 "Status of extension build is '${last_status}' != 'success'"
+          exit 1
 
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests, wait-for-extensions-build ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
@@ -1050,7 +1058,7 @@ jobs:
             OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
             FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
 
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
+            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
             if [ -z "${S3_KEY}" ]; then
               echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
               exit 1

@@ -14,6 +14,7 @@
 !pgxn/
 !proxy/
 !safekeeper/
+!s3_scrubber/
 !storage_broker/
 !trace/
 !vendor/postgres-v14/
@@ -21,4 +22,5 @@
 !workspace_hack/
 !neon_local/
 !scripts/ninstall.sh
+!scripts/combine_control_files.py
 !vm-cgconfig.conf

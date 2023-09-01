@@ -144,15 +144,22 @@ const reportSummary = async (params) => {
                 }
                 summary += `- \`${testName}\`: ${links.join(", ")}\n`
             }
-
-            const testsToRerun = Object.values(failedTests[pgVersion]).map(x => x[0].name)
-            const command = `DEFAULT_PG_VERSION=${pgVersion} scripts/pytest -k "${testsToRerun.join(" or ")}"`
-
-            summary += "```\n"
-            summary += `# Run failed on Postgres ${pgVersion} tests locally:\n`
-            summary += `${command}\n`
-            summary += "```\n"
         }
+    }
+
+    if (failedTestsCount > 0) {
+        const testsToRerun = []
+        for (const pgVersion of Object.keys(failedTests)) {
+            for (const testName of Object.keys(failedTests[pgVersion])) {
+                testsToRerun.push(...failedTests[pgVersion][testName].map(test => test.name))
+            }
+        }
+        const command = `scripts/pytest -vv -n $(nproc) -k "${testsToRerun.join(" or ")}"`
+
+        summary += "```\n"
+        summary += `# Run all failed tests locally:\n`
+        summary += `${command}\n`
+        summary += "```\n"
     }
 
     if (flakyTestsCount > 0) {
@@ -164,8 +171,7 @@ const reportSummary = async (params) => {
                     const links = []
                     for (const test of tests) {
                         const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}/retries`
-                        const status = test.status === "passed" ? ":white_check_mark:" : ":x:"
-                        links.push(`[${status} ${test.buildType}](${allureLink})`)
+                        links.push(`[${test.buildType}](${allureLink})`)
                     }
                     summary += `- \`${testName}\`: ${links.join(", ")}\n`
                 }
@@ -199,27 +205,24 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     const {reportUrl, reportJsonUrl} = report
 
-    if (!reportUrl || !reportJsonUrl) {
+    if (reportUrl && reportJsonUrl) {
+        try {
+            const parsed = await parseReportJson({ reportJsonUrl, fetch })
+            commentBody += await reportSummary({ ...parsed, reportUrl })
+        } catch (error) {
+            commentBody += `### [full report](${reportUrl})\n___\n`
+            commentBody += `#### Failed to create a summary for the test run: \n`
+            commentBody += "```\n"
+            commentBody += `${error.stack}\n`
+            commentBody += "```\n"
+            commentBody += "\nTo reproduce and debug the error locally run:\n"
+            commentBody += "```\n"
+            commentBody += `scripts/comment-test-report.js ${reportJsonUrl}`
+            commentBody += "\n```\n"
+        }
+    } else {
         commentBody += `#### No tests were run or test report is not available\n`
-        commentBody += autoupdateNotice
-        return
     }
-
-    try {
-        const parsed = await parseReportJson({ reportJsonUrl, fetch })
-        commentBody += await reportSummary({ ...parsed, reportUrl })
-    } catch (error) {
-        commentBody += `### [full report](${reportUrl})\n___\n`
-        commentBody += `#### Failed to create a summary for the test run: \n`
-        commentBody += "```\n"
-        commentBody += `${error.stack}\n`
-        commentBody += "```\n"
-        commentBody += "\nTo reproduce and debug the error locally run:\n"
-        commentBody += "```\n"
-        commentBody += `scripts/comment-test-report.js ${reportJsonUrl}`
-        commentBody += "\n```\n"
-    }
-
     commentBody += autoupdateNotice
 
     let createCommentFn, listCommentsFn, updateCommentFn, issueNumberOrSha

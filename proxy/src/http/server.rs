@@ -1,6 +1,6 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use hyper::{Body, Request, Response, StatusCode};
-use std::net::TcpListener;
+use std::{convert::Infallible, net::TcpListener};
 use tracing::info;
 use utils::http::{endpoint, error::ApiError, json::json_response, RouterBuilder, RouterService};
 
@@ -12,7 +12,7 @@ fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router().get("/v1/status", status_handler)
 }
 
-pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("http has shut down");
     }
@@ -23,5 +23,5 @@ pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<()> {
         .serve(service().map_err(|e| anyhow!(e))?)
         .await?;
 
-    Ok(())
+    bail!("hyper server without shutdown handling cannot shutdown successfully");
 }

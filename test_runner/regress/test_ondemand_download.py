@@ -10,8 +10,6 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -23,19 +21,21 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
     wait_until_tenant_state,
 )
+from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 
-def get_num_downloaded_layers(client: PageserverHttpClient, tenant_id, timeline_id):
+def get_num_downloaded_layers(client: PageserverHttpClient):
+    """
+    This assumes that the pageserver only has a single tenant.
+    """
     value = client.get_metric_value(
         "pageserver_remote_operation_seconds_count",
         {
             "file_kind": "layer",
             "op_kind": "download",
             "status": "success",
-            "tenant_id": tenant_id,
-            "timeline_id": timeline_id,
         },
     )
     if value is None:
@@ -54,10 +54,10 @@ def test_ondemand_download_large_rel(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_ondemand_download_large_rel",
     )
 
-    ##### First start, insert secret data and upload it to the remote storage
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             # disable background GC
@@ -77,8 +77,8 @@ def test_ondemand_download_large_rel(
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # We want to make sure that the data is large enough that the keyspace is partitioned.
     num_rows = 1000000
@@ -129,7 +129,7 @@ def test_ondemand_download_large_rel(
     # safekeepers, that have now been shut down.
     endpoint = env.endpoints.create_start("main", lsn=current_lsn)
 
-    before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    before_downloads = get_num_downloaded_layers(client)
     assert before_downloads != 0, "basebackup should on-demand non-zero layers"
 
     # Probe in the middle of the table. There's a high chance that the beginning
@@ -140,7 +140,7 @@ def test_ondemand_download_large_rel(
     with endpoint.cursor() as cur:
         assert query_scalar(cur, "select count(*) from tbl where id = 500000") == 1
 
-    after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    after_downloads = get_num_downloaded_layers(client)
     log.info(f"layers downloaded before {before_downloads} and after {after_downloads}")
     assert after_downloads > before_downloads
 
@@ -156,16 +156,13 @@ def test_ondemand_download_timetravel(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_ondemand_download_timetravel",
     )
 
-    ##### First start, insert data and upload it to the remote storage
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
 
-    # Override defaults, to create more layers
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # Disable background GC & compaction
             # We don't want GC, that would break the assertion about num downloads.
             # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
@@ -178,14 +175,14 @@ def test_ondemand_download_timetravel(
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
-    env.initial_tenant = tenant
+    pageserver_http = env.pageserver.http_client()
 
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     lsns = []
 
@@ -283,7 +280,7 @@ def test_ondemand_download_timetravel(
                 == table_len
             )
 
-        after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+        after_downloads = get_num_downloaded_layers(client)
         num_layers_downloaded.append(after_downloads)
         log.info(f"num_layers_downloaded[-1]={num_layers_downloaded[-1]}")
 
@@ -320,15 +317,11 @@ def test_download_remote_layers_api(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_download_remote_layers_api",
     )
 
     ##### First start, insert data and upload it to the remote storage
-    env = neon_env_builder.init_start()
-
-    # Override defaults, to create more layers
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # Disable background GC & compaction
             # We don't want GC, that would break the assertion about num downloads.
             # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
@@ -341,14 +334,13 @@ def test_download_remote_layers_api(
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
-    env.initial_tenant = tenant
 
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     table_len = 10000
     with endpoint.cursor() as cur:
@@ -374,7 +366,7 @@ def test_download_remote_layers_api(
     filled_current_physical = get_api_current_physical_size()
     log.info(filled_current_physical)
     filled_size = get_resident_physical_size()
-    log.info(filled_size)
+    log.info(f"filled_size: {filled_size}")
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     env.pageserver.stop()
@@ -382,7 +374,7 @@ def test_download_remote_layers_api(
     # remove all the layer files
     # XXX only delete some of the layer files, to show that it really just downloads all the layers
     for layer in (Path(env.repo_dir) / "tenants").glob("*/timelines/*/*-*_*"):
-        log.info(f"unlinking layer {layer}")
+        log.info(f"unlinking layer {layer.name}")
         layer.unlink()
 
     # Shut down safekeepers before starting the pageserver.
@@ -408,7 +400,7 @@ def test_download_remote_layers_api(
         filled_current_physical == get_api_current_physical_size()
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
     post_unlink_size = get_resident_physical_size()
-    log.info(post_unlink_size)
+    log.info(f"post_unlink_size: {post_unlink_size}")
     assert (
         post_unlink_size < filled_size
     ), "we just deleted layers and didn't cause anything to re-download them yet"
@@ -486,10 +478,7 @@ def test_compaction_downloads_on_demand_without_image_creation(
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_downloads_on_demand_without_image_creation",
     )
-
-    env = neon_env_builder.init_start()
 
     conf = {
         # Disable background GC & compaction
@@ -506,6 +495,8 @@ def test_compaction_downloads_on_demand_without_image_creation(
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
+    env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
+
     def downloaded_bytes_and_count(pageserver_http: PageserverHttpClient) -> Tuple[int, int]:
         m = pageserver_http.get_metrics()
         # these are global counters
@@ -517,10 +508,10 @@ def test_compaction_downloads_on_demand_without_image_creation(
         assert count < 2**53 and count.is_integer(), "count should still be safe integer-in-f64"
         return (int(total_bytes), int(count))
 
-    # Override defaults, to create more layers
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
-    env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     with env.endpoints.create_start("main") as endpoint:
         # no particular reason to create the layers like this, but we are sure
@@ -574,10 +565,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_downloads_on_demand",
     )
-
-    env = neon_env_builder.init_start()
 
     conf = {
         # Disable background GC & compaction
@@ -593,9 +581,10 @@ def test_compaction_downloads_on_demand_with_image_creation(
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
-    # Override defaults, to create more layers
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
-    env.initial_tenant = tenant_id
+    env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
     pageserver_http = env.pageserver.http_client()
 
     endpoint = env.endpoints.create_start("main")
@@ -664,10 +653,6 @@ def test_compaction_downloads_on_demand_with_image_creation(
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
 
 
-def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
-    return dict(map(lambda x: (x[0], str(x[1])), conf.items()))
-
-
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_ondemand_download_failure_to_replace(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
@@ -680,7 +665,6 @@ def test_ondemand_download_failure_to_replace(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_ondemand_download_failure_to_replace",
     )
 
     # disable gc and compaction via default tenant config because config is lost while detaching
@@ -691,14 +675,11 @@ def test_ondemand_download_failure_to_replace(
 
     env = neon_env_builder.init_start()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    assert timeline_id is not None
 
-    env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
-
-    lsn = Lsn(pageserver_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
-
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
 
     # remove layers so that they will be redownloaded
     pageserver_http.tenant_detach(tenant_id)
@@ -710,12 +691,12 @@ def test_ondemand_download_failure_to_replace(
     # requesting details with non-incremental size should trigger a download of the only layer
     # this will need to be adjusted if an index for logical sizes is ever implemented
     with pytest.raises(PageserverApiException):
-        # error message is not useful
-        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=2)
+        # PageserverApiException is expected because of the failpoint (timeline_detail building does something)
+        # ReadTimeout can happen on our busy CI, but it should not, because there is no more busylooping
+        # but should it be added back, we would wait for 15s here.
+        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=15)
 
-    actual_message = (
-        ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"
-    )
+    actual_message = ".* ERROR .*layermap-replace-notfound"
     assert env.pageserver.log_contains(actual_message) is not None
     env.pageserver.allowed_errors.append(actual_message)
 
@@ -726,3 +707,7 @@ def test_ondemand_download_failure_to_replace(
     env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
 
     # if the above returned, then we didn't have a livelock, and all is well
+
+
+def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
+    return dict(map(lambda x: (x[0], str(x[1])), conf.items()))

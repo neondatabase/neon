@@ -1,5 +1,7 @@
+use std::ffi::OsStr;
 use std::{fmt, str::FromStr};
 
+use anyhow::Context;
 use hex::FromHex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -212,6 +214,18 @@ macro_rules! id_newtype {
 pub struct TimelineId(Id);
 
 id_newtype!(TimelineId);
+
+impl TryFrom<Option<&OsStr>> for TimelineId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Option<&OsStr>) -> Result<Self, Self::Error> {
+        value
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+            .parse::<TimelineId>()
+            .with_context(|| format!("Could not parse timeline id from {:?}", value))
+    }
+}
 
 /// Neon Tenant Id represents identifiar of a particular tenant.
 /// Is used for distinguishing requests and data belonging to different users.

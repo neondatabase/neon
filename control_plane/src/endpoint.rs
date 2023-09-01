@@ -2,7 +2,9 @@
 //!
 //! In the local test environment, the data for each endpoint is stored in
 //!
+//! ```text
 //!   .neon/endpoints/<endpoint id>
+//! ```
 //!
 //! Some basic information about the endpoint, like the tenant and timeline IDs,
 //! are stored in the `endpoint.json` file. The `endpoint.json` file is created
@@ -22,7 +24,7 @@
 //!
 //! Directory contents:
 //!
-//! ```ignore
+//! ```text
 //! .neon/endpoints/main/
 //!     compute.log               - log output of `compute_ctl` and `postgres`
 //!     endpoint.json             - serialized `EndpointConf` struct
@@ -136,7 +138,13 @@ impl ComputeControlPlane {
             mode,
             tenant_id,
             pg_version,
-            skip_pg_catalog_updates: false,
+            // We don't setup roles and databases in the spec locally, so we don't need to
+            // do catalog updates. Catalog updates also include check availability
+            // data creation. Yet, we have tests that check that size and db dump
+            // before and after start are the same. So, skip catalog updates,
+            // with this we basically test a case of waking up an idle compute, where
+            // we also skip catalog updates in the cloud.
+            skip_pg_catalog_updates: true,
         });
 
         ep.create_endpoint_dir()?;
@@ -150,7 +158,7 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
-                skip_pg_catalog_updates: false,
+                skip_pg_catalog_updates: true,
             })?,
         )?;
         std::fs::write(
@@ -287,7 +295,7 @@ impl Endpoint {
                         .env
                         .safekeepers
                         .iter()
-                        .map(|sk| format!("localhost:{}", sk.pg_port))
+                        .map(|sk| format!("localhost:{}", sk.get_compute_port()))
                         .collect::<Vec<String>>()
                         .join(",");
                     conf.append("neon.safekeepers", &safekeepers);
@@ -311,12 +319,12 @@ impl Endpoint {
 
                 // TODO: use future host field from safekeeper spec
                 // Pass the list of safekeepers to the replica so that it can connect to any of them,
-                // whichever is availiable.
+                // whichever is available.
                 let sk_ports = self
                     .env
                     .safekeepers
                     .iter()
-                    .map(|x| x.pg_port.to_string())
+                    .map(|x| x.get_compute_port().to_string())
                     .collect::<Vec<_>>()
                     .join(",");
                 let sk_hosts = vec!["localhost"; self.env.safekeepers.len()].join(",");
@@ -405,10 +413,25 @@ impl Endpoint {
                 String::from_utf8_lossy(&pg_ctl.stderr),
             );
         }
+
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        // TODO use background_process::stop_process instead
+        let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
+        let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        crate::background_process::wait_until_stopped("compute_ctl", pid)?;
+
         Ok(())
     }
 
-    pub fn start(&self, auth_token: &Option<String>, safekeepers: Vec<NodeId>) -> Result<()> {
+    pub fn start(
+        &self,
+        auth_token: &Option<String>,
+        safekeepers: Vec<NodeId>,
+        remote_ext_config: Option<&String>,
+    ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
         }
@@ -451,7 +474,7 @@ impl Endpoint {
                     .iter()
                     .find(|node| node.id == sk_id)
                     .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.pg_port));
+                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
             }
         }
 
@@ -476,6 +499,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
+            remote_extensions: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -507,7 +531,18 @@ impl Endpoint {
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
-        let _child = cmd.spawn()?;
+
+        if let Some(remote_ext_config) = remote_ext_config {
+            cmd.args(["--remote-ext-config", remote_ext_config]);
+        }
+
+        let child = cmd.spawn()?;
+
+        // Write down the pid so we can wait for it when we want to stop
+        // TODO use background_process::start_process instead
+        let pid = child.id();
+        let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
+        std::fs::write(pidfile_path, pid.to_string())?;
 
         // Wait for it to start
         let mut attempt = 0;
@@ -546,9 +581,7 @@ impl Endpoint {
                 }
                 Err(e) => {
                     if attempt == MAX_ATTEMPTS {
-                        return Err(e).context(
-                            "timed out waiting to connect to compute_ctl HTTP; last error: {e}",
-                        );
+                        return Err(e).context("timed out waiting to connect to compute_ctl HTTP");
                     }
                 }
             }

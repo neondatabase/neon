@@ -8,11 +8,10 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
-from fixtures.types import TenantId, TimelineId
-from fixtures.utils import query_scalar
+from fixtures.remote_storage import RemoteStorageKind
+from fixtures.types import TimelineId
 
 # Test configuration
 #
@@ -54,7 +53,7 @@ async def gc(env: NeonEnv, timeline: TimelineId):
 # At the same time, run UPDATEs and GC
 async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
     workers = []
-    for worker_id in range(num_connections):
+    for _ in range(num_connections):
         workers.append(asyncio.create_task(update_table(endpoint)))
     workers.append(asyncio.create_task(gc(env, timeline)))
 
@@ -71,13 +70,11 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_gc_aggressive", "main")
+    timeline = env.neon_cli.create_branch("test_gc_aggressive", "main")
     endpoint = env.endpoints.create_start("test_gc_aggressive")
     log.info("postgres is running on test_gc_aggressive branch")
 
     with endpoint.cursor() as cur:
-        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
-
         # Create table, and insert the first 100 rows
         cur.execute("CREATE TABLE foo (id int, counter int, t text)")
         cur.execute(
@@ -105,20 +102,17 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_gc_index_upload",
     )
 
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_gc_index_upload", "main")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_gc_index_upload", "main")
     endpoint = env.endpoints.create_start("test_gc_index_upload")
 
     pageserver_http = env.pageserver.http_client()
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
-
-    tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
-    timeline_id = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
     cur.execute("CREATE TABLE foo (id int, counter int, t text)")
     cur.execute(
@@ -136,8 +130,6 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
             filter={
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },

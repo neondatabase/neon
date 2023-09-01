@@ -33,8 +33,4 @@ def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
             cur.execute(f"insert into t1 values ({i}, {j})")
         cur.execute("commit")
 
-    # force wal flush
-    cur.execute("checkpoint")
-
-    # Check that we can restore the content of the datadir correctly
     check_restored_datadir_content(test_output_dir, env, endpoint)

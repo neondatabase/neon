@@ -4,12 +4,13 @@ use crate::{config::MetricCollectionConfig, http};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, convert::Infallible, time::Duration};
 use tracing::{error, info, instrument, trace, warn};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
-///
+const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Key that uniquely identifies the object, this metric describes.
 /// Currently, endpoint_id is enough, but this may change later,
 /// so keep it in a named struct.
@@ -17,20 +18,19 @@ const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 /// Both the proxy and the ingestion endpoint will live in the same region (or cell)
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
-///
-#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
+#[derive(Eq, Hash, PartialEq, Serialize, Debug, Clone)]
 pub struct Ids {
     pub endpoint_id: String,
     pub branch_id: String,
 }
 
-pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
+pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
     scopeguard::defer! {
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client();
+    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
     let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
@@ -147,7 +147,7 @@ async fn collect_metrics_iteration(
                     stop_time: *curr_time,
                 },
                 metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname.to_owned()),
+                idempotency_key: idempotency_key(hostname),
                 value,
                 extra: Ids {
                     endpoint_id: curr_key.endpoint_id.clone(),
@@ -165,12 +165,11 @@ async fn collect_metrics_iteration(
     // Send metrics.
     // Split into chunks of 1000 metrics to avoid exceeding the max request size
     for chunk in metrics_to_send.chunks(CHUNK_SIZE) {
-        let chunk_json = serde_json::value::to_raw_value(&EventChunk { events: chunk })
-            .expect("ProxyConsumptionMetric should not fail serialization");
-
         let res = client
             .post(metric_collection_endpoint.clone())
-            .json(&chunk_json)
+            .json(&EventChunk {
+                events: chunk.into(),
+            })
             .send()
             .await;
 
@@ -182,35 +181,35 @@ async fn collect_metrics_iteration(
             }
         };
 
-        if res.status().is_success() {
-            // update cached metrics after they were sent successfully
-            for send_metric in chunk {
-                let stop_time = match send_metric.kind {
-                    EventType::Incremental { stop_time, .. } => stop_time,
-                    _ => unreachable!(),
-                };
-
-                cached_metrics
-                    .entry(Ids {
-                        endpoint_id: send_metric.extra.endpoint_id.clone(),
-                        branch_id: send_metric.extra.branch_id.clone(),
-                    })
-                    // update cached value (add delta) and time
-                    .and_modify(|e| {
-                        e.0 = e.0.saturating_add(send_metric.value);
-                        e.1 = stop_time
-                    })
-                    // cache new metric
-                    .or_insert((send_metric.value, stop_time));
-            }
-        } else {
+        if !res.status().is_success() {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.iter() {
+            for metric in chunk.iter().filter(|metric| metric.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
-                if metric.value > (1u64 << 40) {
-                    error!("potentially abnormal metric value: {:?}", metric);
-                }
+                error!("potentially abnormal metric value: {:?}", metric);
             }
+        }
+        // update cached metrics after they were sent
+        // (to avoid sending the same metrics twice)
+        // see the relevant discussion on why to do so even if the status is not success:
+        // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
+        for send_metric in chunk {
+            let stop_time = match send_metric.kind {
+                EventType::Incremental { stop_time, .. } => stop_time,
+                _ => unreachable!(),
+            };
+
+            cached_metrics
+                .entry(Ids {
+                    endpoint_id: send_metric.extra.endpoint_id.clone(),
+                    branch_id: send_metric.extra.branch_id.clone(),
+                })
+                // update cached value (add delta) and time
+                .and_modify(|e| {
+                    e.0 = e.0.saturating_add(send_metric.value);
+                    e.1 = stop_time
+                })
+                // cache new metric
+                .or_insert((send_metric.value, stop_time));
         }
     }
     Ok(())

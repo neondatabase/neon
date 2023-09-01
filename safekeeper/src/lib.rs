@@ -19,6 +19,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod pull_timeline;
 pub mod receive_wal;
+pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
@@ -53,7 +54,9 @@ pub struct SafeKeeperConf {
     pub workdir: PathBuf,
     pub my_id: NodeId,
     pub listen_pg_addr: String,
+    pub listen_pg_addr_tenant_only: Option<String>,
     pub listen_http_addr: String,
+    pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
@@ -63,7 +66,9 @@ pub struct SafeKeeperConf {
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
-    pub auth: Option<Arc<JwtAuth>>,
+    pub pg_auth: Option<Arc<JwtAuth>>,
+    pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
+    pub http_auth: Option<Arc<JwtAuth>>,
     pub current_thread_runtime: bool,
 }
 
@@ -85,7 +90,9 @@ impl SafeKeeperConf {
             workdir: PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            listen_pg_addr_tenant_only: None,
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            advertise_pg_addr: None,
             availability_zone: None,
             remote_storage: None,
             my_id: NodeId(0),
@@ -95,7 +102,9 @@ impl SafeKeeperConf {
             broker_keepalive_interval: Duration::from_secs(5),
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
-            auth: None,
+            pg_auth: None,
+            pg_tenant_only_auth: None,
+            http_auth: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,

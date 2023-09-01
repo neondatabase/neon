@@ -3,12 +3,11 @@ from typing import Generator, Optional
 
 import pytest
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
 )
 from fixtures.pageserver.http import PageserverApiException, TenantConfig
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId
 from fixtures.utils import wait_until
 
@@ -17,7 +16,6 @@ from fixtures.utils import wait_until
 def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_attach_tenant_config",
     )
     env = neon_env_builder.init_start()
 
@@ -40,7 +38,6 @@ class NegativeTests:
 def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, None, None]:
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_attach_tenant_config",
     )
     env = neon_env_builder.init_start()
     assert isinstance(env.remote_storage, LocalFsStorage)
@@ -123,7 +120,7 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
 @pytest.mark.parametrize("content_type", [None, "application/json"])
 def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
     """
-    For backwards-compatiblity: if we send an empty body,
+    For backwards-compatibility: if we send an empty body,
     the request should be accepted and the config should be the default config.
     """
     env = positive_env

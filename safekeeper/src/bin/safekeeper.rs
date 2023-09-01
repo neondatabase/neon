@@ -15,6 +15,7 @@ use toml_edit::Document;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::Uri;
@@ -37,7 +38,7 @@ use safekeeper::{http, WAL_REMOVER_RUNTIME};
 use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
-use utils::auth::JwtAuth;
+use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
@@ -72,9 +73,17 @@ struct Args {
     /// Listen endpoint for receiving/sending WAL in the form host:port.
     #[arg(short, long, default_value = DEFAULT_PG_LISTEN_ADDR)]
     listen_pg: String,
+    /// Listen endpoint for receiving/sending WAL in the form host:port allowing
+    /// only tenant scoped auth tokens. Pointless if auth is disabled.
+    #[arg(long, default_value = None, verbatim_doc_comment)]
+    listen_pg_tenant_only: Option<String>,
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
+    /// Advertised endpoint for receiving/sending WAL in the form host:port. If not
+    /// specified, listen_pg is used to advertise instead.
+    #[arg(long, default_value = None)]
+    advertise_pg: Option<String>,
     /// Availability zone of the safekeeper.
     #[arg(long)]
     availability_zone: Option<String>,
@@ -94,7 +103,7 @@ struct Args {
     broker_keepalive_interval: Duration,
     /// Peer safekeeper is considered dead after not receiving heartbeats from
     /// it during this period passed as a human readable duration.
-    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT)]
+    #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT, verbatim_doc_comment)]
     heartbeat_timeout: Duration,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
@@ -114,9 +123,24 @@ struct Args {
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
-    /// Path to a .pem public key which is used to check JWT tokens.
-    #[arg(long)]
-    auth_validation_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to WAL service endpoint
+    /// (--listen-pg). Value specifies path to a .pem public key used for
+    /// validations of JWT tokens. Empty string is allowed and means disabling
+    /// auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    pg_auth_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to tenant only WAL
+    /// service endpoint (--listen-pg-tenant-only). Value specifies path to a
+    /// .pem public key used for validations of JWT tokens. Empty string is
+    /// allowed and means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    pg_tenant_only_auth_public_key_path: Option<PathBuf>,
+    /// If given, enables auth on incoming connections to http management
+    /// service endpoint (--listen-http). Value specifies path to a .pem public
+    /// key used for validations of JWT tokens. Empty string is allowed and
+    /// means disabling auth.
+    #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
+    http_auth_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
@@ -126,9 +150,39 @@ struct Args {
     current_thread_runtime: bool,
 }
 
+// Like PathBufValueParser, but allows empty string.
+fn opt_pathbuf_parser(s: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from_str(s).unwrap())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    // We want to allow multiple occurences of the same arg (taking the last) so
+    // that neon_local could generate command with defaults + overrides without
+    // getting 'argument cannot be used multiple times' error. This seems to be
+    // impossible with pure Derive API, so convert struct to Command, modify it,
+    // parse arguments, and then fill the struct back.
+    let cmd = <Args as clap::CommandFactory>::command().args_override_self(true);
+    let mut matches = cmd.get_matches();
+    let mut args = <Args as clap::FromArgMatches>::from_arg_matches_mut(&mut matches)?;
+
+    // I failed to modify opt_pathbuf_parser to return Option<PathBuf> in
+    // reasonable time, so turn empty string into option post factum.
+    if let Some(pb) = &args.pg_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.pg_tenant_only_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.pg_tenant_only_auth_public_key_path = None;
+        }
+    }
+    if let Some(pb) = &args.http_auth_public_key_path {
+        if pb.as_os_str().is_empty() {
+            args.http_auth_public_key_path = None;
+        }
+    }
 
     if let Some(addr) = args.dump_control_file {
         let state = control_file::FileStorage::load_control_file(addr)?;
@@ -162,13 +216,40 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let auth = match args.auth_validation_public_key_path.as_ref() {
+    let pg_auth = match args.pg_auth_public_key_path.as_ref() {
         None => {
-            info!("auth is disabled");
+            info!("pg auth is disabled");
             None
         }
         Some(path) => {
-            info!("loading JWT auth key from {}", path.display());
+            info!("loading pg auth JWT key from {}", path.display());
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+    let pg_tenant_only_auth = match args.pg_tenant_only_auth_public_key_path.as_ref() {
+        None => {
+            info!("pg tenant only auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!(
+                "loading pg tenant only auth JWT key from {}",
+                path.display()
+            );
+            Some(Arc::new(
+                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+            ))
+        }
+    };
+    let http_auth = match args.http_auth_public_key_path.as_ref() {
+        None => {
+            info!("http auth is disabled");
+            None
+        }
+        Some(path) => {
+            info!("loading http auth JWT key from {}", path.display());
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))
@@ -179,7 +260,9 @@ async fn main() -> anyhow::Result<()> {
         workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
+        listen_pg_addr_tenant_only: args.listen_pg_tenant_only,
         listen_http_addr: args.listen_http,
+        advertise_pg_addr: args.advertise_pg,
         availability_zone: args.availability_zone,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
@@ -189,7 +272,9 @@ async fn main() -> anyhow::Result<()> {
         max_offloader_lag_bytes: args.max_offloader_lag,
         wal_backup_enabled: !args.disable_wal_backup,
         backup_parallel_jobs: args.wal_backup_parallel_jobs,
-        auth,
+        pg_auth,
+        pg_tenant_only_auth,
+        http_auth,
         current_thread_runtime: args.current_thread_runtime,
     };
 
@@ -222,6 +307,24 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         e
     })?;
 
+    let pg_listener_tenant_only =
+        if let Some(listen_pg_addr_tenant_only) = &conf.listen_pg_addr_tenant_only {
+            info!(
+                "starting safekeeper tenant scoped WAL service on {}",
+                listen_pg_addr_tenant_only
+            );
+            let listener = tcp_listener::bind(listen_pg_addr_tenant_only.clone()).map_err(|e| {
+                error!(
+                    "failed to bind to address {}: {}",
+                    listen_pg_addr_tenant_only, e
+                );
+                e
+            })?;
+            Some(listener)
+        } else {
+            None
+        };
+
     info!(
         "starting safekeeper HTTP service on {}",
         conf.listen_http_addr
@@ -238,28 +341,62 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
 
-    // Load all timelines from disk to memory.
-    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
-
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
         FuturesUnordered::new();
+
+    // Start wal backup launcher before loading timelines as we'll notify it
+    // through the channel about timelines which need offloading, not draining
+    // the channel would cause deadlock.
+    let current_thread_rt = conf
+        .current_thread_runtime
+        .then(|| Handle::try_current().expect("no runtime in main"));
+    let conf_ = conf.clone();
+    let wal_backup_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
+        .spawn(wal_backup::wal_backup_launcher_task_main(
+            conf_,
+            wal_backup_launcher_rx,
+        ))
+        .map(|res| ("WAL backup launcher".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_backup_handle));
+
+    // Load all timelines from disk to memory.
+    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx).await?;
 
     let conf_ = conf.clone();
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
         info!("running in current thread runtime");
     }
-    let current_thread_rt = conf
-        .current_thread_runtime
-        .then(|| Handle::try_current().expect("no runtime in main"));
+
     let wal_service_handle = current_thread_rt
         .as_ref()
         .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
-        .spawn(wal_service::task_main(conf_, pg_listener))
+        .spawn(wal_service::task_main(
+            conf_,
+            pg_listener,
+            Scope::SafekeeperData,
+        ))
         // wrap with task name for error reporting
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
+
+    if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
+        let conf_ = conf.clone();
+        let wal_service_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
+            .spawn(wal_service::task_main(
+                conf_,
+                pg_listener_tenant_only,
+                Scope::Tenant,
+            ))
+            // wrap with task name for error reporting
+            .map(|res| ("WAL service tenant only main".to_owned(), res));
+        tasks_handles.push(Box::pin(wal_service_handle));
+    }
 
     let conf_ = conf.clone();
     let http_handle = current_thread_rt
@@ -284,17 +421,6 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .spawn(remove_wal::task_main(conf_))
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
-
-    let conf_ = conf.clone();
-    let wal_backup_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
-        .spawn(wal_backup::wal_backup_launcher_task_main(
-            conf_,
-            wal_backup_launcher_rx,
-        ))
-        .map(|res| ("WAL backup launcher".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_backup_handle));
 
     set_build_info_metric(GIT_VERSION);
 

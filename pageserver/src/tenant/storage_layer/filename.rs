@@ -57,8 +57,9 @@ impl Ord for DeltaFileName {
 
 /// Represents the filename of a DeltaLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN start>-<LSN end>
-///
+/// ```
 impl DeltaFileName {
     ///
     /// Parse a string as a delta file name. Returns None if the filename does not
@@ -162,7 +163,9 @@ impl ImageFileName {
 ///
 /// Represents the filename of an ImageLayer
 ///
+/// ```text
 ///    <key start>-<key end>__<LSN>
+/// ```
 impl ImageFileName {
     ///
     /// Parse a string as an image file name. Returns None if the filename does not
@@ -210,9 +213,26 @@ pub enum LayerFileName {
 
 impl LayerFileName {
     pub fn file_name(&self) -> String {
+        self.to_string()
+    }
+
+    /// Determines if this layer file is considered to be in future meaning we will discard these
+    /// layers during timeline initialization from the given disk_consistent_lsn.
+    pub(crate) fn is_in_future(&self, disk_consistent_lsn: Lsn) -> bool {
+        use LayerFileName::*;
         match self {
-            Self::Image(fname) => fname.to_string(),
-            Self::Delta(fname) => fname.to_string(),
+            Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
+            Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for LayerFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Image(fname) => write!(f, "{fname}"),
+            Self::Delta(fname) => write!(f, "{fname}"),
         }
     }
 }
@@ -254,8 +274,8 @@ impl serde::Serialize for LayerFileName {
         S: serde::Serializer,
     {
         match self {
-            Self::Image(fname) => serializer.serialize_str(&fname.to_string()),
-            Self::Delta(fname) => serializer.serialize_str(&fname.to_string()),
+            Self::Image(fname) => serializer.collect_str(fname),
+            Self::Delta(fname) => serializer.collect_str(fname),
         }
     }
 }

@@ -124,7 +124,7 @@ pub fn get_spec_from_control_plane(
 pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
     // File `postgresql.conf` is no longer included into `basebackup`, so just
     // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec)?;
+    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
 
     update_pg_hba(pgdata_path)?;
 
@@ -270,7 +270,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             }
             RoleAction::Create => {
                 let mut query: String = format!(
-                    "CREATE ROLE {} CREATEROLE CREATEDB IN ROLE neon_superuser",
+                    "CREATE ROLE {} CREATEROLE CREATEDB BYPASSRLS IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);
@@ -397,10 +397,44 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // We do not check either DB exists or not,
                 // Postgres will take care of it for us
                 "delete_db" => {
-                    let query: String = format!("DROP DATABASE IF EXISTS {}", &op.name.pg_quote());
+                    // In Postgres we can't drop a database if it is a template.
+                    // So we need to unset the template flag first, but it could
+                    // be a retry, so we could've already dropped the database.
+                    // Check that database exists first to make it idempotent.
+                    let unset_template_query: String = format!(
+                        "
+                        DO $$
+                        BEGIN
+                            IF EXISTS(
+                                SELECT 1
+                                FROM pg_catalog.pg_database
+                                WHERE datname = {}
+                            )
+                            THEN
+                            ALTER DATABASE {} is_template false;
+                            END IF;
+                        END
+                        $$;",
+                        escape_literal(&op.name),
+                        &op.name.pg_quote()
+                    );
+                    // Use FORCE to drop database even if there are active connections.
+                    // We run this from `cloud_admin`, so it should have enough privileges.
+                    // NB: there could be other db states, which prevent us from dropping
+                    // the database. For example, if db is used by any active subscription
+                    // or replication slot.
+                    // TODO: deal with it once we allow logical replication. Proper fix should
+                    // involve returning an error code to the control plane, so it could
+                    // figure out that this is a non-retryable error, return it to the user
+                    // and fail operation permanently.
+                    let drop_db_query: String = format!(
+                        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                        &op.name.pg_quote()
+                    );
 
                     warn!("deleting database '{}'", &op.name);
-                    client.execute(query.as_str(), &[])?;
+                    client.execute(unset_template_query.as_str(), &[])?;
+                    client.execute(drop_db_query.as_str(), &[])?;
                 }
                 "rename_db" => {
                     let new_name = op.new_name.as_ref().unwrap();

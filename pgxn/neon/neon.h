@@ -21,6 +21,8 @@ extern char *neon_tenant;
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
 
+extern void pg_init_extension_server(void);
+
 /*
  * Returns true if we shouldn't do REDO on that block in record indicated by
  * block_id; false otherwise.

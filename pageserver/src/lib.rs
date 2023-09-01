@@ -7,7 +7,7 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
-pub(crate) mod metrics;
+pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
@@ -20,6 +20,8 @@ pub mod virtual_file;
 pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
+
+pub mod failpoint_support;
 
 use std::path::Path;
 
@@ -47,48 +49,52 @@ pub use crate::metrics::preinitialize_metrics;
 
 #[tracing::instrument]
 pub async fn shutdown_pageserver(exit_code: i32) {
+    use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None),
+        "shutdown LibpqEndpointListener",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // Shut down any page service tasks.
-    task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
+        "shutdown PageRequestHandlers",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
-    tenant::mgr::shutdown_all_tenants().await;
+    timed(
+        tenant::mgr::shutdown_all_tenants(),
+        "shutdown all tenants",
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
-    task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None),
+        "shutdown http",
+        Duration::from_secs(1),
+    )
+    .await;
 
     // There should be nothing left, but let's be sure
-    task_mgr::shutdown_tasks(None, None, None).await;
+    timed(
+        task_mgr::shutdown_tasks(None, None, None),
+        "shutdown leftovers",
+        Duration::from_secs(1),
+    )
+    .await;
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
-}
-
-const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
-const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
-
-async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
-    let backoff_duration_seconds =
-        exponential_backoff_duration_seconds(n, base_increment, max_seconds);
-    if backoff_duration_seconds > 0.0 {
-        info!(
-            "Backoff: waiting {backoff_duration_seconds} seconds before processing with the task",
-        );
-        tokio::time::sleep(std::time::Duration::from_secs_f64(backoff_duration_seconds)).await;
-    }
-}
-
-pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
-    if n == 0 {
-        0.0
-    } else {
-        (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
-    }
 }
 
 /// The name of the metadata file pageserver creates per timeline.
@@ -109,6 +115,8 @@ pub const TEMP_FILE_SUFFIX: &str = "___temp";
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
 pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
+pub const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
+
 /// A marker file to prevent pageserver from loading a certain tenant on restart.
 /// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
 /// `ignore` management API command, that expects the ignored tenant to be properly loaded
@@ -123,13 +131,28 @@ pub fn is_temporary(path: &Path) -> bool {
     }
 }
 
-pub fn is_uninit_mark(path: &Path) -> bool {
+fn ends_with_suffix(path: &Path, suffix: &str) -> bool {
     match path.file_name() {
-        Some(name) => name
-            .to_string_lossy()
-            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        Some(name) => name.to_string_lossy().ends_with(suffix),
         None => false,
     }
+}
+
+pub fn is_uninit_mark(path: &Path) -> bool {
+    ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
+}
+
+pub fn is_delete_mark(path: &Path) -> bool {
+    ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
+}
+
+fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
+    if let Some(e) = e.io_error() {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return true;
+        }
+    }
+    false
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
@@ -147,7 +170,7 @@ pub struct InitializationOrder {
 
     /// Each timeline owns a clone of this to be consumed on the initial logical size calculation
     /// attempt. It is important to drop this once the attempt has completed.
-    pub initial_logical_size_attempt: utils::completion::Completion,
+    pub initial_logical_size_attempt: Option<utils::completion::Completion>,
 
     /// Barrier for when we can start any background jobs.
     ///
@@ -155,33 +178,75 @@ pub struct InitializationOrder {
     pub background_jobs_can_start: utils::completion::Barrier,
 }
 
-#[cfg(test)]
-mod backoff_defaults_tests {
-    use super::*;
+/// Time the future with a warning when it exceeds a threshold.
+async fn timed<Fut: std::future::Future>(
+    fut: Fut,
+    name: &str,
+    warn_at: std::time::Duration,
+) -> <Fut as std::future::Future>::Output {
+    let started = std::time::Instant::now();
 
-    #[test]
-    fn backoff_defaults_produce_growing_backoff_sequence() {
-        let mut current_backoff_value = None;
+    let mut fut = std::pin::pin!(fut);
 
-        for i in 0..10_000 {
-            let new_backoff_value = exponential_backoff_duration_seconds(
-                i,
-                DEFAULT_BASE_BACKOFF_SECONDS,
-                DEFAULT_MAX_BACKOFF_SECONDS,
+    match tokio::time::timeout(warn_at, &mut fut).await {
+        Ok(ret) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed"
+            );
+            ret
+        }
+        Err(_) => {
+            tracing::info!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "still waiting, taking longer than expected..."
             );
 
-            if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
-                assert!(
-                    old_backoff_value <= new_backoff_value,
-                    "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
-                )
-            }
-        }
+            let ret = fut.await;
 
-        assert_eq!(
-            current_backoff_value.expect("Should have produced backoff values to compare"),
-            DEFAULT_MAX_BACKOFF_SECONDS,
-            "Given big enough of retries, backoff should reach its allowed max value"
-        );
+            // this has a global allowed_errors
+            tracing::warn!(
+                task = name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "completed, took longer than expected"
+            );
+
+            ret
+        }
+    }
+}
+
+#[cfg(test)]
+mod timed_tests {
+    use super::timed;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn timed_completes_when_inner_future_completes() {
+        // A future that completes on time should have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                123
+            },
+            "test 1",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(r1, 123);
+
+        // A future that completes too slowly should also have its result returned
+        let r1 = timed(
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                456
+            },
+            "test 1",
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(r1, 456);
     }
 }

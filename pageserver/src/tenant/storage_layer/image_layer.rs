@@ -7,11 +7,15 @@
 //! timelines/<timeline_id> directory.  Currently, there are no
 //! subdirectories, and each image layer file is named like this:
 //!
+//! ```text
 //!    <key start>-<key end>__<LSN>
+//! ```
 //!
 //! For example:
 //!
+//! ```text
 //!    000000067F000032BE0000400000000070B6-000000067F000032BE0000400000000080B6__00000000346BC568
+//! ```
 //!
 //! Every image layer file consists of three parts: "summary",
 //! "index", and "values".  The summary is a fixed size header at the
@@ -23,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -43,7 +47,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -53,7 +57,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc};
+use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLayerDesc};
 
 ///
 /// Header stored in the beginning of the file
@@ -62,7 +66,7 @@ use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayer
 /// the 'index' starts at the block indicated by 'index_start_blk'
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Summary {
+pub(super) struct Summary {
     /// Magic value to identify this as a neon image file. Always IMAGE_FILE_MAGIC.
     magic: u16,
     format_version: u16,
@@ -81,13 +85,29 @@ struct Summary {
 
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
+        Self::expected(
+            layer.desc.tenant_id,
+            layer.desc.timeline_id,
+            layer.desc.key_range.clone(),
+            layer.lsn,
+        )
+    }
+}
+
+impl Summary {
+    pub(super) fn expected(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        key_range: Range<Key>,
+        lsn: Lsn,
+    ) -> Self {
         Self {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: layer.desc.tenant_id,
-            timeline_id: layer.desc.timeline_id,
-            key_range: layer.desc.key_range.clone(),
-            lsn: layer.lsn,
+            tenant_id,
+            timeline_id,
+            key_range,
+            lsn,
 
             index_start_blk: 0,
             index_root_blk: 0,
@@ -111,7 +131,7 @@ pub struct ImageLayer {
 
     access_stats: LayerAccessStats,
 
-    inner: RwLock<ImageLayerInner>,
+    inner: OnceCell<ImageLayerInner>,
 }
 
 impl std::fmt::Debug for ImageLayer {
@@ -128,60 +148,106 @@ impl std::fmt::Debug for ImageLayer {
 }
 
 pub struct ImageLayerInner {
-    /// If false, the 'index' has not been loaded into memory yet.
-    loaded: bool,
-
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
 
-    /// Reader object for reading blocks from the file. (None if not loaded yet)
-    file: Option<FileBlockReader<VirtualFile>>,
+    lsn: Lsn,
+
+    /// Reader object for reading blocks from the file.
+    file: FileBlockReader,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImageLayerInner")
-            .field("loaded", &self.loaded)
             .field("index_start_blk", &self.index_start_blk)
             .field("index_root_blk", &self.index_root_blk)
             .finish()
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for ImageLayer {
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    /// Look up given page in the file
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
+            .await
+    }
+}
+
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
+    }
+}
+
+impl AsLayerDesc for ImageLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
+    }
+}
+
+impl PersistentLayer for ImageLayer {
+    fn local_path(&self) -> Option<PathBuf> {
+        self.local_path()
+    }
+
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        self.delete_resident_layer_file()
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.info(reset)
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        self.access_stats()
+    }
+}
+
+impl ImageLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} ----",
+            "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
-            self.lsn
+            self.lsn,
+            self.desc.is_incremental(),
+            self.desc.file_size
         );
 
         if !verbose {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
-        let file = inner.file.as_ref().unwrap();
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+        let file = &inner.file;
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
 
-        tree_reader.dump()?;
+        tree_reader.dump().await?;
 
-        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-            println!("key: {} offset {}", hex::encode(key), value);
-            true
-        })?;
+        tree_reader
+            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+                println!("key: {} offset {}", hex::encode(key), value);
+                true
+            })
+            .await?;
 
         Ok(())
     }
 
-    /// Look up given page in the file
-    fn get_value_reconstruct_data(
+    pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -192,89 +258,43 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
-
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf)? {
-            let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                format!(
-                    "failed to read value from data file {} at offset {}",
-                    self.path().display(),
-                    offset
-                )
-            })?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
+        let inner = self
+            .load(LayerAccessKind::GetValueReconstructData, ctx)
+            .await?;
+        inner
+            .get_value_reconstruct_data(key, reconstruct_state)
+            .await
+            // FIXME: makes no sense to dump paths
+            .with_context(|| format!("read {}", self.path().display()))
     }
 
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_key_range(&self) -> Range<Key> {
-        self.layer_desc().key_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.layer_desc().lsn_range.clone()
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn is_incremental(&self) -> bool {
-        self.layer_desc().is_incremental
-    }
-
-    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-    fn short_id(&self) -> String {
-        self.layer_desc().short_id()
-    }
-}
-
-impl PersistentLayer for ImageLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        unimplemented!();
-    }
-
-    fn delete_resident_layer_file(&self) -> Result<()> {
+    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.layer_desc().filename().file_name();
+        let lsn_start = self.layer_desc().image_layer_lsn();
 
         HistoricLayerInfo::Image {
             layer_file_name,
             layer_file_size: self.desc.file_size,
-            lsn_start: lsn_range.start,
+            lsn_start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
         }
     }
 
-    fn access_stats(&self) -> &LayerAccessStats {
+    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
         &self.access_stats
     }
-}
 
-impl ImageLayer {
     fn path_for(
         path_or_conf: &PathOrConf,
         timeline_id: TimelineId,
@@ -284,7 +304,7 @@ impl ImageLayer {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
+                .timeline_path(&tenant_id, &timeline_id)
                 .join(fname.to_string()),
         }
     }
@@ -301,7 +321,7 @@ impl ImageLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id)
+        conf.timeline_path(&tenant_id, &timeline_id)
             .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 
@@ -309,83 +329,42 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
+    async fn load(
         &self,
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
-    ) -> Result<RwLockReadGuard<ImageLayerInner>> {
-        self.access_stats
-            .record_access(access_kind, ctx.task_kind());
-        loop {
-            // Quick exit if already loaded
-            let inner = self.inner.read().unwrap();
-            if inner.loaded {
-                return Ok(inner);
-            }
-
-            // Need to open the file and load the metadata. Upgrade our lock to
-            // a write lock. (Or rather, release and re-lock in write mode.)
-            drop(inner);
-            let mut inner = self.inner.write().unwrap();
-            if !inner.loaded {
-                self.load_inner(&mut inner).with_context(|| {
-                    format!("Failed to load image layer {}", self.path().display())
-                })?
-            } else {
-                // Another thread loaded it while we were not holding the lock.
-            }
-
-            // We now have the file open and loaded. There's no function to do
-            // that in the std library RwLock, so we have to release and re-lock
-            // in read mode. (To be precise, the lock guard was moved in the
-            // above call to `load_inner`, so it's already been released). And
-            // while we do that, another thread could unload again, so we have
-            // to re-check and retry if that happens.
-            drop(inner);
-        }
+    ) -> Result<&ImageLayerInner> {
+        self.access_stats.record_access(access_kind, ctx);
+        self.inner
+            .get_or_try_init(|| self.load_inner())
+            .await
+            .with_context(|| format!("Failed to load image layer {}", self.path().display()))
     }
 
-    fn load_inner(&self, inner: &mut ImageLayerInner) -> Result<()> {
+    async fn load_inner(&self) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        // Open the file if it's not open already.
-        if inner.file.is_none() {
-            let file = VirtualFile::open(&path)
-                .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-            inner.file = Some(FileBlockReader::new(file));
-        }
-        let file = inner.file.as_mut().unwrap();
-        let summary_blk = file.read_blk(0)?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let expected_summary = match &self.path_or_conf {
+            PathOrConf::Conf(_) => Some(Summary::from(self)),
+            PathOrConf::Path(_) => None,
+        };
 
-        match &self.path_or_conf {
-            PathOrConf::Conf(_) => {
-                let mut expected_summary = Summary::from(self);
-                expected_summary.index_start_blk = actual_summary.index_start_blk;
-                expected_summary.index_root_blk = actual_summary.index_root_blk;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary).await?;
 
-                if actual_summary != expected_summary {
-                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                }
-            }
-            PathOrConf::Path(path) => {
-                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+        if let PathOrConf::Path(ref path) = self.path_or_conf {
+            // not production code
+            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let expected_filename = self.filename().file_name();
 
-                if actual_filename != expected_filename {
-                    println!(
-                        "warning: filename does not match what is expected from in-file summary"
-                    );
-                    println!("actual: {:?}", actual_filename);
-                    println!("expected: {:?}", expected_filename);
-                }
+            if actual_filename != expected_filename {
+                println!("warning: filename does not match what is expected from in-file summary");
+                println!("actual: {:?}", actual_filename);
+                println!("expected: {:?}", expected_filename);
             }
         }
 
-        inner.index_start_blk = actual_summary.index_start_blk;
-        inner.index_root_blk = actual_summary.index_root_blk;
-        inner.loaded = true;
-        Ok(())
+        Ok(loaded)
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
@@ -404,17 +383,11 @@ impl ImageLayer {
                 timeline_id,
                 filename.key_range.clone(),
                 filename.lsn,
-                false,
                 file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
             access_stats,
-            inner: RwLock::new(ImageLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
+            inner: OnceCell::new(),
         }
     }
 
@@ -436,17 +409,11 @@ impl ImageLayer {
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
-                false,
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(ImageLayerInner {
-                file: None,
-                loaded: false,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
+            inner: OnceCell::new(),
         })
     }
 
@@ -462,6 +429,66 @@ impl ImageLayer {
             self.desc.tenant_id,
             &self.layer_name(),
         )
+    }
+}
+
+impl ImageLayerInner {
+    pub(super) async fn load(
+        path: &std::path::Path,
+        lsn: Lsn,
+        summary: Option<Summary>,
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path)
+            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0).await?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+
+        if let Some(mut expected_summary) = summary {
+            // production code path
+            expected_summary.index_start_blk = actual_summary.index_start_blk;
+            expected_summary.index_root_blk = actual_summary.index_root_blk;
+
+            if actual_summary != expected_summary {
+                bail!(
+                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                    actual_summary,
+                    expected_summary
+                );
+            }
+        }
+
+        Ok(ImageLayerInner {
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+            lsn,
+            file,
+        })
+    }
+
+    pub(super) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        reconstruct_state: &mut ValueReconstructState,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf).await? {
+            let blob = file
+                .block_cursor()
+                .read_blob(offset)
+                .await
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+
+            reconstruct_state.img = Some((self.lsn, value));
+            Ok(ValueReconstructResult::Complete)
+        } else {
+            Ok(ValueReconstructResult::Missing)
+        }
     }
 }
 
@@ -483,7 +510,6 @@ struct ImageLayerWriterInner {
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
-    is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
@@ -499,7 +525,6 @@ impl ImageLayerWriterInner {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -534,7 +559,6 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
-            is_incremental,
         };
 
         Ok(writer)
@@ -595,7 +619,6 @@ impl ImageLayerWriterInner {
             self.timeline_id,
             self.key_range.clone(),
             self.lsn,
-            self.is_incremental, // for now, image layer ALWAYS covers the full range
             metadata.len(),
         );
 
@@ -607,12 +630,7 @@ impl ImageLayerWriterInner {
             desc,
             lsn: self.lsn,
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(ImageLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk,
-                index_root_blk,
-            }),
+            inner: OnceCell::new(),
         };
 
         // fsync the file
@@ -652,7 +670,7 @@ impl ImageLayerWriterInner {
 ///
 /// # Note
 ///
-/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// As described in <https://github.com/neondatabase/neon/issues/2650>, it's
 /// possible for the writer to drop before `finish` is actually called. So this
 /// could lead to odd temporary files in the directory, exhausting file system.
 /// This structure wraps `ImageLayerWriterInner` and also contains `Drop`
@@ -675,7 +693,6 @@ impl ImageLayerWriter {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(ImageLayerWriterInner::new(
@@ -684,7 +701,6 @@ impl ImageLayerWriter {
                 tenant_id,
                 key_range,
                 lsn,
-                is_incremental,
             )?),
         })
     }

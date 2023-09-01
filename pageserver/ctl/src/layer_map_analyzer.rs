@@ -10,7 +10,7 @@ use std::{fs, path::Path, str};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
-use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
+use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
@@ -95,9 +95,9 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
+async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+    let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
@@ -107,29 +107,31 @@ fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     // min-heap (reserve space for one more element added before eviction)
     let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
     let mut prev_key: Option<Key> = None;
-    tree_reader.visit(
-        &[0u8; DELTA_KEY_SIZE],
-        VisitDirection::Forwards,
-        |key, _value| {
-            let curr = Key::from_slice(&key[..KEY_SIZE]);
-            if let Some(prev) = prev_key {
-                if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
-                    heap.push(Hole(prev..curr));
-                    if heap.len() > max_holes {
-                        heap.pop(); // remove smallest hole
+    tree_reader
+        .visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, _value| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                if let Some(prev) = prev_key {
+                    if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
+                        heap.push(Hole(prev..curr));
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
+                        }
                     }
                 }
-            }
-            prev_key = Some(curr.next());
-            true
-        },
-    )?;
+                prev_key = Some(curr.next());
+                true
+            },
+        )
+        .await?;
     let mut holes = heap.into_vec();
     holes.sort_by_key(|hole| hole.0.start);
     Ok(holes)
 }
 
-pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
+pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
 
@@ -160,7 +162,7 @@ pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {
-                        layer_file.holes = get_holes(&layer.path(), max_holes)?;
+                        layer_file.holes = get_holes(&layer.path(), max_holes).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

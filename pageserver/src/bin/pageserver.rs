@@ -6,11 +6,14 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
-use fail::FailScenario;
+
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::tenant::TenantSharedResources;
 use remote_storage::GenericRemoteStorage;
+use tokio::time::Instant;
 use tracing::*;
 
 use metrics::set_build_info_metric;
@@ -38,8 +41,6 @@ const PID_FILE_NAME: &str = "pageserver.pid";
 const FEATURES: &[&str] = &[
     #[cfg(feature = "testing")]
     "testing",
-    #[cfg(feature = "fail/failpoints")]
-    "fail/failpoints",
 ];
 
 fn version() -> String {
@@ -121,7 +122,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize up failpoints support
-    let scenario = FailScenario::setup();
+    let scenario = pageserver::failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
@@ -226,6 +227,19 @@ fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
 ) -> anyhow::Result<()> {
+    // Monotonic time for later calculating startup duration
+    let started_startup_at = Instant::now();
+
+    let startup_checkpoint = move |phase: &str, human_phase: &str| {
+        let elapsed = started_startup_at.elapsed();
+        let secs = elapsed.as_secs_f64();
+        STARTUP_DURATION.with_label_values(&[phase]).set(secs);
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            "{human_phase} ({secs:.3}s since start)"
+        )
+    };
+
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
     // A changed version string indicates changed software.
@@ -335,6 +349,11 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // Up to this point no significant I/O has been done: this should have been fast.  Record
+    // duration prior to starting I/O intensive phase of startup.
+    startup_checkpoint("initial", "Starting loading tenants");
+    STARTUP_IS_LOADING.set(1);
+
     // Startup staging or optimizing:
     //
     // We want to minimize downtime for `page_service` connections, and trying not to overload
@@ -355,18 +374,19 @@ fn start_pageserver(
     let order = pageserver::InitializationOrder {
         initial_tenant_load: Some(init_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
-        initial_logical_size_attempt: init_logical_size_done_tx,
+        initial_logical_size_attempt: Some(init_logical_size_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let init_started_at = std::time::Instant::now();
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
-        broker_client.clone(),
-        remote_storage.clone(),
+        TenantSharedResources {
+            broker_client: broker_client.clone(),
+            remote_storage: remote_storage.clone(),
+        },
         order,
     ))?;
 
@@ -378,17 +398,12 @@ fn start_pageserver(
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
 
             init_done_rx.wait().await;
+            startup_checkpoint("initial_tenant_load", "Initial load completed");
+            STARTUP_IS_LOADING.set(0);
+
             // initial logical sizes can now start, as they were waiting on init_done_rx.
 
             scopeguard::ScopeGuard::into_inner(guard);
-
-            let init_done = std::time::Instant::now();
-            let elapsed = init_done - init_started_at;
-
-            tracing::info!(
-                elapsed_millis = elapsed.as_millis(),
-                "Initial load completed"
-            );
 
             let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
 
@@ -396,17 +411,12 @@ fn start_pageserver(
 
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
 
-            let init_sizes_done = tokio::select! {
-                _ = &mut init_sizes_done => {
-                    let now = std::time::Instant::now();
-                    tracing::info!(
-                        from_init_done_millis = (now - init_done).as_millis(),
-                        from_init_millis = (now - init_started_at).as_millis(),
-                        "Initial logical sizes completed"
-                    );
+            let init_sizes_done = match tokio::time::timeout(timeout, &mut init_sizes_done).await {
+                Ok(_) => {
+                    startup_checkpoint("initial_logical_sizes", "Initial logical sizes completed");
                     None
                 }
-                _ = tokio::time::sleep(timeout) => {
+                Err(_) => {
                     tracing::info!(
                         timeout_millis = timeout.as_millis(),
                         "Initial logical size timeout elapsed; starting background jobs"
@@ -419,6 +429,7 @@ fn start_pageserver(
 
             // allow background jobs to start
             drop(background_jobs_can_start);
+            startup_checkpoint("background_jobs_can_start", "Starting background jobs");
 
             if let Some(init_sizes_done) = init_sizes_done {
                 // ending up here is not a bug; at the latest logical sizes will be queried by
@@ -428,14 +439,11 @@ fn start_pageserver(
 
                 scopeguard::ScopeGuard::into_inner(guard);
 
-                let now = std::time::Instant::now();
-                tracing::info!(
-                    from_init_done_millis = (now - init_done).as_millis(),
-                    from_init_millis = (now - init_started_at).as_millis(),
-                    "Initial logical sizes completed after timeout (background jobs already started)"
-                );
+                startup_checkpoint("initial_logical_sizes", "Initial logical sizes completed after timeout (background jobs already started)");
 
             }
+
+            startup_checkpoint("complete", "Startup complete");
         };
 
         async move {

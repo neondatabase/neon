@@ -189,7 +189,7 @@ services:
       - "/bin/bash"
       - "-c"
     command:
-      - "until pg_isready -h compute -p 55433 ; do
+      - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
             echo 'Waiting to start compute...' && sleep 1;
          done"
     depends_on:

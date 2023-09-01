@@ -4,11 +4,11 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import RemoteStorageKind
+from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
@@ -21,7 +21,6 @@ def test_basic_eviction(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_download_remote_layers_api",
     )
 
     env = neon_env_builder.init_start(
@@ -34,8 +33,8 @@ def test_basic_eviction(
     client = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # Create a number of layers in the tenant
     with endpoint.cursor() as cur:
@@ -58,7 +57,7 @@ def test_basic_eviction(
     for sk in env.safekeepers:
         sk.stop()
 
-    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_path = env.timeline_dir(tenant_id, timeline_id)
     initial_local_layers = sorted(
         list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
     )
@@ -157,7 +156,6 @@ def test_basic_eviction(
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_gc_of_remote_layers",
     )
 
     env = neon_env_builder.init_start()
