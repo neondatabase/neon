@@ -56,7 +56,7 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
          SET updated_at = now();";
 
     match client.simple_query(query).await {
-        Ok(result) => {
+        Result::Ok(result) => {
             if result.len() != 1 {
                 return Err(anyhow::format_err!(
                     "expected 1 query results, but got {}",
@@ -71,7 +71,7 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
                     return Ok(());
                 }
             }
-            return Err(e.into());
+            return Err(err.into());
         }
     }
 
