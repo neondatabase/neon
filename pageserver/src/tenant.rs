@@ -2389,6 +2389,7 @@ impl Tenant {
 
         let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
         VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
+            .await
             .with_context(|| {
                 format!(
                     "write tenant {tenant_id} config to {}",
