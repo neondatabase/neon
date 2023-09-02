@@ -746,4 +746,42 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_atomic_overwrite_basic() {
+        let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
+        std::fs::create_dir_all(&testdir).unwrap();
+
+        let path = testdir.join("myfile");
+        let tmp_path = testdir.join("myfile.tmp");
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo").unwrap();
+
+        let post = read_string(&mut VirtualFile::open(&path).unwrap()).unwrap();
+        assert_eq!(post, "foo");
+        assert!(!tmp_path.exists());
+
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar").unwrap();
+        let post = read_string(&mut VirtualFile::open(&path).unwrap()).unwrap();
+        assert_eq!(post, "bar");
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn test_atomic_overwrite_preexisting_tmp() {
+        let testdir =
+            crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
+        std::fs::create_dir_all(&testdir).unwrap();
+
+        let path = testdir.join("myfile");
+        let tmp_path = testdir.join("myfile.tmp");
+
+        std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
+        assert!(tmp_path.exists());
+
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo").unwrap();
+
+        let post = read_string(&mut VirtualFile::open(&path).unwrap()).unwrap();
+        assert_eq!(post, "foo");
+        assert!(!tmp_path.exists());
+    }
 }
