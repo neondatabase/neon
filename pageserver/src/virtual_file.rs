@@ -172,6 +172,41 @@ impl OpenFiles {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CrashsafeOverwriteError {
+    #[error("final path has no parent dir")]
+    FinalPathHasNoParentDir,
+    #[error("remove tempfile: {0}")]
+    RemovePreviousTempfile(#[source] std::io::Error),
+    #[error("create tempfile: {0}")]
+    CreateTempfile(#[source] std::io::Error),
+    #[error("write tempfile: {0}")]
+    WriteContents(#[source] std::io::Error),
+    #[error("sync tempfile: {0}")]
+    SyncTempfile(#[source] std::io::Error),
+    #[error("rename tempfile to final path: {0}")]
+    RenameTempfileToFinalPath(#[source] std::io::Error),
+    #[error("open final path parent dir: {0}")]
+    OpenFinalPathParentDir(#[source] std::io::Error),
+    #[error("sync final path parent dir: {0}")]
+    SyncFinalPathParentDir(#[source] std::io::Error),
+}
+impl CrashsafeOverwriteError {
+    /// Returns true iff the new contents are durably stored.
+    pub fn are_new_contents_durable(&self) -> bool {
+        match self {
+            Self::FinalPathHasNoParentDir => false,
+            Self::RemovePreviousTempfile(_) => false,
+            Self::CreateTempfile(_) => false,
+            Self::WriteContents(_) => false,
+            Self::SyncTempfile(_) => false,
+            Self::RenameTempfileToFinalPath(_) => false,
+            Self::OpenFinalPathParentDir(_) => false,
+            Self::SyncFinalPathParentDir(_) => true,
+        }
+    }
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
@@ -234,6 +269,50 @@ impl VirtualFile {
         slot_guard.file.replace(file);
 
         Ok(vfile)
+    }
+
+    pub fn crashsafe_overwrite(
+        final_path: &Path,
+        tmp_path: &Path,
+        content: &[u8],
+    ) -> Result<(), CrashsafeOverwriteError> {
+        let Some(final_path_parent) = final_path.parent() else {
+            return Err(CrashsafeOverwriteError::FinalPathHasNoParentDir);
+        };
+        match std::fs::remove_file(tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
+        }
+        let mut file = Self::open_with_options(
+            tmp_path,
+            OpenOptions::new()
+                .write(true)
+                // Use `create_new` so that, if we race with ourselves or something else,
+                // we bail out instead of causing damage.
+                .create_new(true),
+        )
+        .map_err(CrashsafeOverwriteError::CreateTempfile)?;
+        file.write_all(content)
+            .map_err(CrashsafeOverwriteError::WriteContents)?;
+        file.sync_all()
+            .map_err(CrashsafeOverwriteError::SyncTempfile)?;
+        drop(file); // before the rename, that's important!
+                    // renames are atomic
+        std::fs::rename(tmp_path, final_path)
+            .map_err(CrashsafeOverwriteError::RenameTempfileToFinalPath)?;
+        // Only open final path parent dirfd now, so that this operation only
+        // ever holds one VirtualFile fd at a time.  That's important because
+        // the current `find_victim_slot` impl might pick the same slot for both
+        // VirtualFile., and it eventually does a blocking write lock instead of
+        // try_lock.
+        let final_parent_dirfd =
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
+                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
+        final_parent_dirfd
+            .sync_all()
+            .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
+        Ok(())
     }
 
     /// Call File::sync_all() on the underlying File.

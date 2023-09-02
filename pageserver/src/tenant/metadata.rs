@@ -8,14 +8,14 @@
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{ensure, Context};
 use serde::{de::Error, Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracing::info_span;
 use utils::bin_ser::SerializeError;
+use utils::crashsafe::path_with_suffix_extension;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
@@ -24,6 +24,7 @@ use utils::{
 
 use crate::config::PageServerConf;
 use crate::virtual_file::VirtualFile;
+use crate::TEMP_FILE_SUFFIX;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
@@ -260,33 +261,13 @@ pub fn save_metadata(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     data: &TimelineMetadata,
-    first_save: bool,
 ) -> anyhow::Result<()> {
     let _enter = info_span!("saving metadata").entered();
     let path = conf.metadata_path(tenant_id, timeline_id);
-    // use OpenOptions to ensure file presence is consistent with first_save
-    let mut file = VirtualFile::open_with_options(
-        &path,
-        OpenOptions::new().write(true).create_new(first_save),
-    )
-    .context("open_with_options")?;
-
-    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
-
-    if file.write(&metadata_bytes)? != metadata_bytes.len() {
-        bail!("Could not write all the metadata bytes in a single call");
-    }
-    file.sync_all()?;
-
-    // fsync the parent directory to ensure the directory entry is durable
-    if first_save {
-        let timeline_dir = File::open(
-            path.parent()
-                .expect("Metadata should always have a parent dir"),
-        )?;
-        timeline_dir.sync_all()?;
-    }
-
+    let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    let metadata_bytes = data.to_bytes().context("serialize metadata")?;
+    VirtualFile::crashsafe_overwrite(&path, &temp_path, &metadata_bytes)
+        .context("write metadata")?;
     Ok(())
 }
 

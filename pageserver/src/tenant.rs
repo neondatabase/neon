@@ -32,9 +32,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::fs::OpenOptions;
 use std::io;
-use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
 use std::path::PathBuf;
@@ -115,7 +113,6 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
-pub mod manifest;
 mod span;
 
 pub mod metadata;
@@ -407,7 +404,6 @@ impl Tenant {
         remote_startup_data: Option<RemoteStartupData>,
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
-        first_save: bool,
         init_order: Option<&InitializationOrder>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -441,14 +437,8 @@ impl Tenant {
 
         // Save the metadata file to local disk.
         if !picked_local {
-            save_metadata(
-                self.conf,
-                &tenant_id,
-                &timeline_id,
-                up_to_date_metadata,
-                first_save,
-            )
-            .context("save_metadata")?;
+            save_metadata(self.conf, &tenant_id, &timeline_id, up_to_date_metadata)
+                .context("save_metadata")?;
         }
 
         let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
@@ -833,7 +823,6 @@ impl Tenant {
             }),
             local_metadata,
             ancestor,
-            true,
             None,
             ctx,
         )
@@ -1386,7 +1375,6 @@ impl Tenant {
             remote_startup_data,
             Some(local_metadata),
             ancestor,
-            false,
             init_order,
             ctx,
         )
@@ -2378,68 +2366,33 @@ impl Tenant {
         tenant_id: &TenantId,
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
-        creating_tenant: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
 
         // imitate a try-block with a closure
-        let do_persist = |target_config_path: &Path| -> anyhow::Result<()> {
-            let target_config_parent = target_config_path.parent().with_context(|| {
-                format!(
-                    "Config path does not have a parent: {}",
-                    target_config_path.display()
-                )
-            })?;
+        info!("persisting tenantconf to {}", target_config_path.display());
 
-            info!("persisting tenantconf to {}", target_config_path.display());
-
-            let mut conf_content = r#"# This file contains a specific per-tenant's config.
+        let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
 [tenant_config]
 "#
-            .to_string();
+        .to_string();
 
-            // Convert the config to a toml file.
-            conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
+        // Convert the config to a toml file.
+        conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
 
-            let mut target_config_file = VirtualFile::open_with_options(
-                target_config_path,
-                OpenOptions::new()
-                    .truncate(true) // This needed for overwriting with small config files
-                    .write(true)
-                    .create_new(creating_tenant)
-                    // when creating a new tenant, first_save will be true and `.create(true)` will be
-                    // ignored (per rust std docs).
-                    //
-                    // later when updating the config of created tenant, or persisting config for the
-                    // first time for attached tenant, the `.create(true)` is used.
-                    .create(true),
-            )?;
+        let conf_content = conf_content.as_bytes();
 
-            target_config_file
-                .write(conf_content.as_bytes())
-                .context("write toml bytes into file")
-                .and_then(|_| target_config_file.sync_all().context("fsync config file"))
-                .context("write config file")?;
-
-            // fsync the parent directory to ensure the directory entry is durable.
-            // before this was done conditionally on creating_tenant, but these management actions are rare
-            // enough to just fsync it always.
-
-            crashsafe::fsync(target_config_parent)?;
-            // XXX we're not fsyncing the parent dir, need to do that in case `creating_tenant`
-            Ok(())
-        };
-
-        // this function is called from creating the tenant and updating the tenant config, which
-        // would otherwise share this context, so keep it here in one place.
-        do_persist(target_config_path).with_context(|| {
-            format!(
-                "write tenant {tenant_id} config to {}",
-                target_config_path.display()
-            )
-        })
+        let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
+        VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
+            .with_context(|| {
+                format!(
+                    "write tenant {tenant_id} config to {}",
+                    target_config_path.display()
+                )
+            })?;
+        Ok(())
     }
 
     //
@@ -2968,14 +2921,8 @@ impl Tenant {
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
         });
 
-        save_metadata(
-            self.conf,
-            &self.tenant_id,
-            new_timeline_id,
-            new_metadata,
-            true,
-        )
-        .context("Failed to create timeline metadata")?;
+        save_metadata(self.conf, &self.tenant_id, new_timeline_id, new_metadata)
+            .context("Failed to create timeline metadata")?;
         Ok(())
     }
 
@@ -3215,7 +3162,7 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf)?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
