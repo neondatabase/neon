@@ -448,7 +448,7 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
+    pub async fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
         while !buf.is_empty() {
             match self.write_at(buf, offset) {
                 Ok(0) => {

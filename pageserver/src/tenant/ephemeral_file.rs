@@ -127,10 +127,15 @@ impl EphemeralFile {
                     self.off += n;
                     src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
-                        match self.ephemeral_file.file.write_all_at(
-                            &self.ephemeral_file.mutable_tail,
-                            self.blknum as u64 * PAGE_SZ as u64,
-                        ) {
+                        match self
+                            .ephemeral_file
+                            .file
+                            .write_all_at(
+                                &self.ephemeral_file.mutable_tail,
+                                self.blknum as u64 * PAGE_SZ as u64,
+                            )
+                            .await
+                        {
                             Ok(_) => {
                                 // Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.
