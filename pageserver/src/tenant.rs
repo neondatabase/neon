@@ -117,7 +117,7 @@ mod span;
 
 pub mod metadata;
 mod par_fsync;
-mod remote_timeline_client;
+pub mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;

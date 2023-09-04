@@ -83,15 +83,15 @@ impl ControlPlaneClient {
                     .json(&request)
                     .send()
                     .await
-                    .map_err(|e| RemoteAttemptError::Remote(e))?;
+                    .map_err(RemoteAttemptError::Remote)?;
 
                 response
                     .error_for_status_ref()
-                    .map_err(|e| RemoteAttemptError::Remote(e))?;
+                    .map_err(RemoteAttemptError::Remote)?;
                 response
                     .json::<T>()
                     .await
-                    .map_err(|e| RemoteAttemptError::Remote(e))
+                    .map_err(RemoteAttemptError::Remote)
             },
             |_| false,
             3,
@@ -128,11 +128,11 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             response.tenants.len()
         );
 
-        return Ok(response
+        Ok(response
             .tenants
             .into_iter()
             .map(|t| (t.id, Generation::new(t.generation)))
-            .collect::<HashMap<_, _>>());
+            .collect::<HashMap<_, _>>())
     }
 
     async fn validate(
