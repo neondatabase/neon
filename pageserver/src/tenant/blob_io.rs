@@ -118,6 +118,12 @@ impl<W> WriteBlobWriter<W>
 where
     W: std::io::Write,
 {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+        self.inner.write_all(buf)?;
+        self.offset += buf.len() as u64;
+        Ok(())
+    }
+
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
     pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
@@ -126,8 +132,7 @@ where
         if srcbuf.len() < 128 {
             // Short blob. Write a 1-byte length header
             let len_buf = srcbuf.len() as u8;
-            self.inner.write_all(&[len_buf])?;
-            self.offset += 1;
+            self.write_all(&[len_buf]).await?;
         } else {
             // Write a 4-byte length header
             if srcbuf.len() > 0x7fff_ffff {
@@ -138,11 +143,9 @@ where
             }
             let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
             len_buf[0] |= 0x80;
-            self.inner.write_all(&len_buf)?;
-            self.offset += 4;
+            self.write_all(&len_buf).await?;
         }
-        self.inner.write_all(srcbuf)?;
-        self.offset += srcbuf.len() as u64;
+        self.write_all(srcbuf).await?;
         Ok(offset)
     }
 }
