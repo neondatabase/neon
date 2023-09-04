@@ -11,7 +11,7 @@ use aws_sdk_s3::Client;
 use aws_types::region::Region;
 use futures_util::{pin_mut, StreamExt, TryStreamExt};
 use histogram::Histogram;
-use pageserver::tenant::IndexPart;
+use pageserver::tenant::{IndexPart, TENANTS_SEGMENT_NAME};
 use utils::id::TenantTimelineId;
 
 pub struct MetadataSummary {
@@ -191,7 +191,7 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
     let delimiter = "/";
     let target = RootTarget::Pageserver(S3Target {
         bucket_name: bucket_config.bucket.to_string(),
-        prefix_in_bucket: ["pageserver", "v1", "tenants", ""].join(delimiter),
+        prefix_in_bucket: ["pageserver", "v1", TENANTS_SEGMENT_NAME, ""].join(delimiter),
         delimiter: delimiter.to_string(),
     });
 
