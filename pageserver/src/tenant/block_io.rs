@@ -7,7 +7,6 @@ use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
-use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
 
@@ -73,8 +72,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReaderVirtual(&'a FileBlockReader<VirtualFile>),
-    FileBlockReaderFile(&'a FileBlockReader<std::fs::File>),
+    FileBlockReaderVirtual(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -87,7 +85,6 @@ impl<'a> BlockReaderRef<'a> {
         use BlockReaderRef::*;
         match self {
             FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
-            FileBlockReaderFile(r) => r.read_blk(blknum).await,
             EphemeralFile(r) => r.read_blk(blknum).await,
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
@@ -105,7 +102,7 @@ impl<'a> BlockReaderRef<'a> {
 ///
 /// ```no_run
 /// # use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
-/// # let reader: FileBlockReader<std::fs::File> = unimplemented!("stub");
+/// # let reader: FileBlockReader = unimplemented!("stub");
 /// let cursor = reader.block_cursor();
 /// let buf = cursor.read_blk(1);
 /// // do stuff with 'buf'
@@ -122,7 +119,7 @@ impl<'a> BlockCursor<'a> {
         BlockCursor { reader }
     }
     // Needed by cli
-    pub fn new_fileblockreader_virtual(reader: &'a FileBlockReader<VirtualFile>) -> Self {
+    pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
             reader: BlockReaderRef::FileBlockReaderVirtual(reader),
         }
@@ -143,18 +140,15 @@ impl<'a> BlockCursor<'a> {
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
-pub struct FileBlockReader<F> {
-    pub file: F,
+pub struct FileBlockReader {
+    pub file: VirtualFile,
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
 }
 
-impl<F> FileBlockReader<F>
-where
-    F: FileExt,
-{
-    pub fn new(file: F) -> Self {
+impl FileBlockReader {
+    pub fn new(file: VirtualFile) -> Self {
         let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
@@ -196,13 +190,7 @@ where
     }
 }
 
-impl BlockReader for FileBlockReader<File> {
-    fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReaderFile(self))
-    }
-}
-
-impl BlockReader for FileBlockReader<VirtualFile> {
+impl BlockReader for FileBlockReader {
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReaderVirtual(self))
     }

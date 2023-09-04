@@ -414,6 +414,7 @@ class NeonEnvBuilder:
         neon_binpath: Path,
         pg_distrib_dir: Path,
         pg_version: PgVersion,
+        test_name: str,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -456,6 +457,11 @@ class NeonEnvBuilder:
         self.initial_timeline = initial_timeline or TimelineId.generate()
         self.enable_generations = False
 
+        assert test_name.startswith(
+            "test_"
+        ), "Unexpectedly instantiated from outside a test function"
+        self.test_name = test_name
+
     def init_configs(self) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
@@ -487,23 +493,24 @@ class NeonEnvBuilder:
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
-        test_name: str,
         force_enable: bool = True,
         enable_remote_extensions: bool = False,
     ):
+        bucket_name = re.sub(r"[_\[\]]", "-", self.test_name)[:63]
+
         if remote_storage_kind == RemoteStorageKind.NOOP:
             return
         elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
             self.enable_local_fs_remote_storage(force_enable=force_enable)
         elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
             self.enable_mock_s3_remote_storage(
-                bucket_name=test_name,
+                bucket_name=bucket_name,
                 force_enable=force_enable,
                 enable_remote_extensions=enable_remote_extensions,
             )
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
             self.enable_real_s3_remote_storage(
-                test_name=test_name,
+                test_name=bucket_name,
                 force_enable=force_enable,
                 enable_remote_extensions=enable_remote_extensions,
             )
@@ -973,6 +980,7 @@ def _shared_simple_env(
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        test_name=request.node.name,
     ) as builder:
         env = builder.init_start()
 
@@ -1008,6 +1016,7 @@ def neon_env_builder(
     pg_version: PgVersion,
     default_broker: NeonBroker,
     run_id: uuid.UUID,
+    request: FixtureRequest,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1036,6 +1045,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        test_name=request.node.name,
     ) as builder:
         yield builder
 
