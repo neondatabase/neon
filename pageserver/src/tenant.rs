@@ -671,6 +671,7 @@ impl Tenant {
         for timeline_id in remote_timeline_ids {
             let client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -2259,6 +2260,9 @@ impl Tenant {
         Ok(timeline)
     }
 
+    // Allow too_many_arguments because a constructor's argument list naturally grows with the
+    // number of attributes in the struct: breaking these out into a builder wouldn't be helpful.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
@@ -2875,6 +2879,7 @@ impl Tenant {
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
             let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -3344,6 +3349,7 @@ pub mod harness {
     use utils::logging;
     use utils::lsn::Lsn;
 
+    use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::{
         config::PageServerConf,
         repository::Key,
@@ -3405,6 +3411,7 @@ pub mod harness {
         pub generation: Generation,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: PathBuf,
+        pub deletion_queue: MockDeletionQueue,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3453,6 +3460,7 @@ pub mod harness {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+            let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
 
             Ok(Self {
                 conf,
@@ -3461,6 +3469,7 @@ pub mod harness {
                 generation: Generation::new(0xdeadbeef),
                 remote_storage,
                 remote_fs_dir,
+                deletion_queue,
             })
         }
 
@@ -3485,7 +3494,7 @@ pub mod harness {
                 self.tenant_id,
                 self.generation,
                 Some(self.remote_storage.clone()),
-                DeletionQueueClient::broken(),
+                self.deletion_queue.new_client(),
             ));
             tenant
                 .load(None, ctx)

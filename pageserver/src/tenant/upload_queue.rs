@@ -1,5 +1,3 @@
-use crate::metrics::RemoteOpFileKind;
-
 use super::storage_layer::LayerFileName;
 use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
@@ -201,12 +199,11 @@ pub(crate) struct UploadTask {
     pub(crate) op: UploadOp,
 }
 
+/// A deletion of some layers within the lifetime of a timeline.  This is not used
+/// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) file_kind: RemoteOpFileKind,
-    pub(crate) layer_file_name: LayerFileName,
-    pub(crate) scheduled_from_timeline_delete: bool,
-    pub(crate) generation: Generation,
+    pub(crate) layers: Vec<(LayerFileName, Generation)>,
 }
 
 #[derive(Debug)]
@@ -217,7 +214,7 @@ pub(crate) enum UploadOp {
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Delete a layer file
+    /// Delete layer files
     Delete(Delete),
 
     /// Barrier. When the barrier operation is reached,
@@ -239,13 +236,9 @@ impl std::fmt::Display for UploadOp {
             UploadOp::UploadMetadata(_, lsn) => {
                 write!(f, "UploadMetadata(lsn: {})", lsn)
             }
-            UploadOp::Delete(delete) => write!(
-                f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {:?})",
-                delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete,
-                delete.generation
-            ),
+            UploadOp::Delete(delete) => {
+                write!(f, "Delete({} layers)", delete.layers.len(),)
+            }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

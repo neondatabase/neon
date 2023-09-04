@@ -1822,7 +1822,7 @@ impl Timeline {
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
+            rtc.schedule_layer_file_deletion(needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
@@ -3864,7 +3864,7 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+            remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
         }
 
         Ok(())
@@ -4199,7 +4199,7 @@ impl Timeline {
             }
 
             if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+                remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
             }
 
             apply.flush();
