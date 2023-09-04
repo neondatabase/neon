@@ -580,6 +580,27 @@ impl PageServerConf {
         self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
+    pub fn deletion_prefix(&self) -> PathBuf {
+        self.workdir.join("deletion")
+    }
+
+    pub fn deletion_list_path(&self, sequence: u64) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix()
+            .join(format!("{sequence:016x}-{VERSION:02x}.list"))
+    }
+
+    pub fn deletion_header_path(&self) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix().join(format!("header-{VERSION:02x}"))
+    }
+
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
         self.tenants_path().join(tenant_id.to_string())
     }
