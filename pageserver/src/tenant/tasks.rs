@@ -167,7 +167,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             let gc_horizon = tenant.get_gc_horizon();
             let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
-                #[cfg(feature = "testing")]
+                #[cfg(not(feature = "testing"))]
                 info!("automatic GC is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
