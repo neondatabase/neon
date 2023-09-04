@@ -519,7 +519,7 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -543,7 +543,7 @@ impl ImageLayerWriterInner {
             std::fs::OpenOptions::new().write(true).create_new(true),
         )?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
@@ -583,14 +583,15 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    fn finish(self) -> anyhow::Result<ImageLayer> {
+    async fn finish(self) -> anyhow::Result<ImageLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner();
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
             file.write_all(buf.as_ref())?;
@@ -617,7 +618,7 @@ impl ImageLayerWriterInner {
                 buf.len()
             );
         }
-        file.seek(SeekFrom::Start(0))?;
+        file.seek(SeekFrom::Start(0)).await?;
         file.write_all(&buf)?;
 
         let metadata = file
@@ -697,7 +698,7 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -705,13 +706,9 @@ impl ImageLayerWriter {
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
-            inner: Some(ImageLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_range,
-                lsn,
-            )?),
+            inner: Some(
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_id, key_range, lsn).await?,
+            ),
         })
     }
 
@@ -727,8 +724,8 @@ impl ImageLayerWriter {
     ///
     /// Finish writing the image layer.
     ///
-    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish()
+    pub async fn finish(mut self) -> anyhow::Result<ImageLayer> {
+        self.inner.take().unwrap().finish().await
     }
 }
 

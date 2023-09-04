@@ -333,7 +333,8 @@ impl InMemoryLayer {
             self.tenant_id,
             Key::MIN,
             self.start_lsn..end_lsn,
-        )?;
+        )
+        .await?;
 
         let mut buf = Vec::new();
 
@@ -352,7 +353,7 @@ impl InMemoryLayer {
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX)?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX).await?;
         Ok(delta_layer)
     }
 }

@@ -590,7 +590,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -607,7 +607,7 @@ impl DeltaLayerWriterInner {
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let buf_writer = BufWriter::new(file);
         let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
 
@@ -662,7 +662,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    async fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -671,7 +671,8 @@ impl DeltaLayerWriterInner {
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         for buf in block_buf.blocks {
             file.write_all(buf.as_ref())?;
         }
@@ -697,7 +698,7 @@ impl DeltaLayerWriterInner {
                 buf.len()
             );
         }
-        file.seek(SeekFrom::Start(0))?;
+        file.seek(SeekFrom::Start(0)).await?;
         file.write_all(&buf)?;
 
         let metadata = file
@@ -784,7 +785,7 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -792,13 +793,10 @@ impl DeltaLayerWriter {
         lsn_range: Range<Lsn>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            inner: Some(DeltaLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_start,
-                lsn_range,
-            )?),
+            inner: Some(
+                DeltaLayerWriterInner::new(conf, timeline_id, tenant_id, key_start, lsn_range)
+                    .await?,
+            ),
         })
     }
 
@@ -831,8 +829,8 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        self.inner.take().unwrap().finish(key_end)
+    pub async fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+        self.inner.take().unwrap().finish(key_end).await
     }
 }
 

@@ -3033,7 +3033,8 @@ impl Timeline {
                     self.tenant_id,
                     &img_range,
                     lsn,
-                )?;
+                )
+                .await?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {
                     Err(PageReconstructError::Other(anyhow::anyhow!(
@@ -3073,7 +3074,7 @@ impl Timeline {
                         key = key.next();
                     }
                 }
-                let image_layer = image_layer_writer.finish()?;
+                let image_layer = image_layer_writer.finish().await?;
                 image_layers.push(image_layer);
             }
         }
@@ -3618,7 +3619,11 @@ impl Timeline {
                     {
                         // ... if so, flush previous layer and prepare to write new one
                         new_layers.push(Arc::new(
-                            writer.take().unwrap().finish(prev_key.unwrap().next())?,
+                            writer
+                                .take()
+                                .unwrap()
+                                .finish(prev_key.unwrap().next())
+                                .await?,
                         ));
                         writer = None;
 
@@ -3633,20 +3638,23 @@ impl Timeline {
             }
             if writer.is_none() {
                 // Create writer if not initiaized yet
-                writer = Some(DeltaLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_id,
-                    key,
-                    if dup_end_lsn.is_valid() {
-                        // this is a layer containing slice of values of the same key
-                        debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
-                        dup_start_lsn..dup_end_lsn
-                    } else {
-                        debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
-                        lsn_range.clone()
-                    },
-                )?);
+                writer = Some(
+                    DeltaLayerWriter::new(
+                        self.conf,
+                        self.timeline_id,
+                        self.tenant_id,
+                        key,
+                        if dup_end_lsn.is_valid() {
+                            // this is a layer containing slice of values of the same key
+                            debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
+                            dup_start_lsn..dup_end_lsn
+                        } else {
+                            debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
+                            lsn_range.clone()
+                        },
+                    )
+                    .await?,
+                );
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
@@ -3659,7 +3667,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(Arc::new(writer.finish(prev_key.unwrap().next())?));
+            new_layers.push(Arc::new(writer.finish(prev_key.unwrap().next()).await?));
         }
 
         // Sync layers
