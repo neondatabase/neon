@@ -102,7 +102,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             let started_at = Instant::now();
 
             let sleep_duration = if period == Duration::ZERO {
-                #[cfg(feature = "testing")]
+                #[cfg(not(feature = "testing"))]
                 info!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
