@@ -13,7 +13,6 @@ use std::io::{self};
 use anyhow::{ensure, Context};
 use serde::{de::Error, Deserialize, Serialize, Serializer};
 use thiserror::Error;
-use tracing::info_span;
 use utils::bin_ser::SerializeError;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::{
@@ -256,17 +255,18 @@ impl Serialize for TimelineMetadata {
 }
 
 /// Save timeline metadata to file
-pub fn save_metadata(
+#[tracing::instrument(skip_all, fields(%tenant_id, %timeline_id))]
+pub async fn save_metadata(
     conf: &'static PageServerConf,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     data: &TimelineMetadata,
 ) -> anyhow::Result<()> {
-    let _enter = info_span!("saving metadata").entered();
     let path = conf.metadata_path(tenant_id, timeline_id);
     let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
     let metadata_bytes = data.to_bytes().context("serialize metadata")?;
     VirtualFile::crashsafe_overwrite(&path, &temp_path, &metadata_bytes)
+        .await
         .context("write metadata")?;
     Ok(())
 }

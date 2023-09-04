@@ -387,11 +387,11 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
+    tenant_map_insert(tenant_id, || async {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Create)?;
+        let tenant_directory = super::create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -431,6 +431,7 @@ pub async fn set_new_tenant_config(
 
     let tenant_config_path = conf.tenant_config_path(&tenant_id);
     Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, new_tenant_conf)
+        .await
         .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
@@ -551,7 +552,7 @@ pub async fn load_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
+    tenant_map_insert(tenant_id, || async {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
@@ -632,8 +633,8 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || {
-        let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach)?;
+    tenant_map_insert(tenant_id, || async {
+        let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -681,12 +682,13 @@ pub enum TenantMapInsertError {
 ///
 /// NB: the closure should return quickly because the current implementation of tenants map
 /// serializes access through an `RwLock`.
-async fn tenant_map_insert<F>(
+async fn tenant_map_insert<F, R>(
     tenant_id: TenantId,
     insert_fn: F,
 ) -> Result<Arc<Tenant>, TenantMapInsertError>
 where
-    F: FnOnce() -> anyhow::Result<Arc<Tenant>>,
+    F: FnOnce() -> R,
+    R: std::future::Future<Output = anyhow::Result<Arc<Tenant>>>,
 {
     let mut guard = TENANTS.write().await;
     let m = match &mut *guard {
@@ -699,7 +701,7 @@ where
             tenant_id,
             e.get().current_state(),
         )),
-        hash_map::Entry::Vacant(v) => match insert_fn() {
+        hash_map::Entry::Vacant(v) => match insert_fn().await {
             Ok(tenant) => {
                 v.insert(tenant.clone());
                 Ok(tenant)

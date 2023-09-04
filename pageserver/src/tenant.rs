@@ -438,6 +438,7 @@ impl Tenant {
         // Save the metadata file to local disk.
         if !picked_local {
             save_metadata(self.conf, &tenant_id, &timeline_id, up_to_date_metadata)
+                .await
                 .context("save_metadata")?;
         }
 
@@ -1438,7 +1439,7 @@ impl Tenant {
     /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
-    pub fn create_empty_timeline(
+    pub async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
@@ -1450,10 +1451,10 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timelines = self.timelines.lock().unwrap();
-        let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id, &timelines)?;
-        drop(timelines);
-
+        let timeline_uninit_mark = {
+            let timelines = self.timelines.lock().unwrap();
+            self.create_timeline_uninit_mark(new_timeline_id, &timelines)?
+        };
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
             // make it valid, before calling finish_creation()
@@ -1472,6 +1473,7 @@ impl Tenant {
             initdb_lsn,
             None,
         )
+        .await
     }
 
     /// Helper for unit tests to create an empty timeline.
@@ -1487,7 +1489,9 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_tl = self.create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)?;
+        let uninit_tl = self
+            .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
+            .await?;
         let tline = uninit_tl.raw_timeline().expect("we just created it");
         assert_eq!(tline.get_last_record_lsn(), Lsn(0));
 
@@ -2362,13 +2366,12 @@ impl Tenant {
         Ok(tenant_conf)
     }
 
-    pub(super) fn persist_tenant_config(
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    pub(super) async fn persist_tenant_config(
         tenant_id: &TenantId,
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
-        let _enter = info_span!("saving tenantconf").entered();
-
         // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
 
@@ -2386,6 +2389,7 @@ impl Tenant {
 
         let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
         VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
+            .await
             .with_context(|| {
                 format!(
                     "write tenant {tenant_id} config to {}",
@@ -2703,13 +2707,15 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let uninitialized_timeline = self.prepare_new_timeline(
-            dst_id,
-            &metadata,
-            timeline_uninit_mark,
-            start_lsn + 1,
-            Some(Arc::clone(src_timeline)),
-        )?;
+        let uninitialized_timeline = self
+            .prepare_new_timeline(
+                dst_id,
+                &metadata,
+                timeline_uninit_mark,
+                start_lsn + 1,
+                Some(Arc::clone(src_timeline)),
+            )
+            .await?;
 
         let new_timeline = uninitialized_timeline.finish_creation()?;
 
@@ -2787,13 +2793,15 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline = self.prepare_new_timeline(
-            timeline_id,
-            &new_metadata,
-            timeline_uninit_mark,
-            pgdata_lsn,
-            None,
-        )?;
+        let raw_timeline = self
+            .prepare_new_timeline(
+                timeline_id,
+                &new_metadata,
+                timeline_uninit_mark,
+                pgdata_lsn,
+                None,
+            )
+            .await?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2864,7 +2872,7 @@ impl Tenant {
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map and to remove the
     /// uninit mark file.
-    fn prepare_new_timeline(
+    async fn prepare_new_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -2892,8 +2900,9 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) =
-            self.create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
+        if let Err(e) = self
+            .create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
+            .await
         {
             error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
@@ -2909,7 +2918,7 @@ impl Tenant {
         ))
     }
 
-    fn create_timeline_files(
+    async fn create_timeline_files(
         &self,
         timeline_path: &Path,
         new_timeline_id: &TimelineId,
@@ -2922,6 +2931,7 @@ impl Tenant {
         });
 
         save_metadata(self.conf, &self.tenant_id, new_timeline_id, new_metadata)
+            .await
             .context("Failed to create timeline metadata")?;
         Ok(())
     }
@@ -3069,7 +3079,7 @@ pub(crate) enum CreateTenantFilesMode {
     Attach,
 }
 
-pub(crate) fn create_tenant_files(
+pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: &TenantId,
@@ -3105,7 +3115,8 @@ pub(crate) fn create_tenant_files(
         mode,
         &temporary_tenant_dir,
         &target_tenant_directory,
-    );
+    )
+    .await;
 
     if creation_result.is_err() {
         error!("Failed to create directory structure for tenant {tenant_id}, cleaning tmp data");
@@ -3123,7 +3134,7 @@ pub(crate) fn create_tenant_files(
     Ok(target_tenant_directory)
 }
 
-fn try_create_target_tenant_dir(
+async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: &TenantId,
@@ -3162,7 +3173,7 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf)?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf).await?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
@@ -3561,7 +3572,10 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx) {
+        match tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+        {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -4419,8 +4433,9 @@ mod tests {
             .await;
 
         let initdb_lsn = Lsn(0x20);
-        let utline =
-            tenant.create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)?;
+        let utline = tenant
+            .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let tline = utline.raw_timeline().unwrap();
 
         // Spawn flush loop now so that we can set the `expect_initdb_optimization`
@@ -4485,8 +4500,9 @@ mod tests {
         let harness = TenantHarness::create(name)?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant
+                .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+                .await?;
             // Keeps uninit mark in place
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
