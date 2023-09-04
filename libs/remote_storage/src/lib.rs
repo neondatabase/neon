@@ -111,6 +111,10 @@ impl RemotePath {
     pub fn extension(&self) -> Option<&str> {
         self.0.extension()?.to_str()
     }
+
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, std::path::StripPrefixError> {
+        self.0.strip_prefix(&p.0)
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.
