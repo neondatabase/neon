@@ -183,7 +183,7 @@ pub async fn init_tenant_mgr(
                             *gen
                         } else {
                             info!("Detaching tenant {0}, control plane omitted it in re-attach response", tenant_id);
-                            if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
+                            if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
                                 error!(
                                     "Failed to remove detached tenant directory '{}': {:?}",
                                     tenant_dir_path.display(),
