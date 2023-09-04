@@ -273,6 +273,53 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/walreceiver:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get walreceiver state
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Error when no tenant id found in path, no timeline id
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
     parameters:
       - name: tenant_id
