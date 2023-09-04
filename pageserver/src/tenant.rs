@@ -4155,7 +4155,8 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
+        let harness = TenantHarness::create("test_bulk_insert")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4201,7 +4202,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
+        let harness = TenantHarness::create("test_random_updates")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
