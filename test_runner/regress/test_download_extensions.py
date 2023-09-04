@@ -88,6 +88,7 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
+    # TODO: PG16 extension building
     if pg_version == PgVersion.V16:
         return
 
@@ -157,6 +158,7 @@ def test_remote_library(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
+    # TODO: PG16 extension building
     if pg_version == PgVersion.V16:
         return
 
@@ -220,6 +222,7 @@ def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
+    # TODO: PG16 extension building
     if pg_version == PgVersion.V16:
         return
 
@@ -267,6 +270,7 @@ def test_extension_download_after_restart(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
+    # TODO: PG15 + PG16 extension building
     if "v14" not in pg_version:  # test set only has extension built for v14
         return None
 

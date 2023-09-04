@@ -57,19 +57,41 @@ macro_rules! for_all_postgres_versions {
 
 for_all_postgres_versions! { postgres_ffi }
 
+/// dispatch_pgversion
+/// 
+/// Run a code block in a context where the postgres_ffi bindings for a
+/// specific (supported) PostgreSQL version are `use`-ed in scope under the pgv
+/// identifier.
+/// If the provided pg_version is not supported, we panic!(), unless the
+/// optional third argument was provided (in which case that code will provide
+/// the default handling instead).
+///
+/// Use like
+/// 
+/// dispatch_pgversion!(my_pgversion, { pgv::constants::XLOG_DBASE_CREATE })
+/// dispatch_pgversion!(my_pgversion, pgv::constants::XLOG_DBASE_CREATE)
+///
+/// Other uses are for macro-internal purposes only and strictly unsupported.
+///
 #[macro_export]
 macro_rules! dispatch_pgversion {
     ($version:expr, $code:expr) => {
         dispatch_pgversion!($version, $code, panic!("Unknown PostgreSQL version {}", $version))
     };
-    ($version:expr, $code:expr, $default:expr) => {
-        dispatch_pgversion!($version => $code,
-                            default = $default,
-                            pgversions = (14 v14, 15 v15, 16 v16))
+    ($version:expr, $code:expr, $invalid_pgver_handling:expr) => {
+        dispatch_pgversion!(
+            $version => $code,
+            default = $invalid_pgver_handling,
+            pgversions = [
+                14 : v14,
+                15 : v15,
+                16 : v16,
+            ]
+        )
     };
     ($pgversion:expr => $code:expr,
      default = $default:expr,
-     pgversions = ($($sv:literal $vsv:ident),+)) => {
+     pgversions = [$($sv:literal : $vsv:ident),+ $(,)?]) => {
         match ($pgversion) {
             $($sv => {
                 use $crate::$vsv as pgv;

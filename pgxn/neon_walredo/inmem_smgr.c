@@ -81,7 +81,7 @@ static void inmem_write(SMgrRelation reln, ForkNumber forknum,
 static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum, const void *buffer, bool skipFsync);
 static void inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
-							 BlockNumber blocknum, char *buffer, bool skipFsync);
+							 BlockNumber blocknum, int nblocks, bool skipFsync);
 static void inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					   void *buffer);
 static void inmem_write(SMgrRelation reln, ForkNumber forknum,
@@ -161,6 +161,18 @@ inmem_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	/* same as smgwrite() for us */
 	inmem_write(reln, forknum, blkno, buffer, skipFsync);
 }
+
+#if PG_MAJORVERSION_NUM >= 16
+static void
+inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
+				 BlockNumber blocknum, int nblocks, bool skipFsync)
+{
+	char buffer[BLCKSZ] = {0};
+
+	for (int i = 0; i < nblocks; i++)
+		inmem_extend(reln, forknum, blocknum + i, buffer, skipFsync);
+}
+#endif
 
 /*
  *  inmem_open() -- Initialize newly-opened relation.
@@ -313,6 +325,9 @@ static const struct f_smgr inmem_smgr =
 	.smgr_exists = inmem_exists,
 	.smgr_unlink = inmem_unlink,
 	.smgr_extend = inmem_extend,
+#if PG_MAJORVERSION_NUM >= 16
+	.smgr_zeroextend = inmem_zeroextend,
+#endif
 	.smgr_prefetch = inmem_prefetch,
 	.smgr_read = inmem_read,
 	.smgr_write = inmem_write,

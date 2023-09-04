@@ -387,7 +387,7 @@ WalProposerPoll(void)
 	while (true)
 	{
 		Safekeeper *sk;
-		int			rc;
+		bool		wait_timeout;
 		WaitEvent	event;
 		TimestampTz now = GetCurrentTimestamp();
 
@@ -396,6 +396,13 @@ WalProposerPoll(void)
 			ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
 #endif
 
+		/*
+		 * Wait for a wait event to happen, or timeout:
+		 *  - Safekeeper socket can become available for READ or WRITE
+		 *  - Our latch got set, because
+		 *     * PG15-: We got woken up by a process triggering the WalSender
+		 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
+		 */
 		if (WaitEventSetWait(waitEvents, TimeToReconnect(now),
 							 &event, 1, WAIT_EVENT_WAL_SENDER_MAIN) == 1)
 		{
@@ -420,7 +427,7 @@ WalProposerPoll(void)
 			 * If the event contains something that one of our safekeeper states
 			 * was waiting for, we'll advance its state.
 			 */
-			if (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE))
+			if (event.events & (WL_SOCKET_MASK))
 			{
 				sk = (Safekeeper *) event.user_data;
 				AdvancePollState(sk, event.events);
@@ -435,10 +442,11 @@ WalProposerPoll(void)
 			 * that we dropped
 			 */
 			ReconnectSafekeepers();
+			wait_timeout = true;
 		}
 
 		now = GetCurrentTimestamp();
-		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
+		if (wait_timeout || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
 
@@ -632,7 +640,8 @@ UpdateEventSet(Safekeeper *sk, uint32 events)
 	ModifyWaitEvent(waitEvents, sk->eventPos, events, NULL);
 }
 
-/* Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
+/*
+ * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
  *
  * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
  */
@@ -2268,9 +2277,10 @@ HandleSafekeeperResponse(void)
 			if (synced)
 				n_synced++;
 		}
+
 		if (n_synced >= quorum)
 		{
-			/* All safekeepers synced! */
+			/* A quorum of safekeepers has been synced! */
 			
 			/*
 			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
