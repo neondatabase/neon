@@ -12,7 +12,7 @@ use s3_scrubber::{
     checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, BucketConfig,
     ConsoleConfig, RootTarget, S3Deleter, S3Target, TraversingDepth, CLI_NAME,
 };
-use tracing::{info, info_span, warn};
+use tracing::{info, warn};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -87,7 +87,6 @@ async fn tidy(
     };
 
     let _guard = init_logging(&file_name);
-    let _main_span = info_span!("tidy", %dry_run).entered();
 
     if dry_run {
         info!("Dry run, not removing items for real");
