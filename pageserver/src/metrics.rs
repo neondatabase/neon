@@ -866,6 +866,39 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
     .expect("failed to define a metric")
 });
 
+pub(crate) static DELETION_QUEUE_SUBMITTED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_deletion_queue_submitted_total",
+        "Number of objects submitted for deletion"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELETION_QUEUE_DROPPED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_deletion_queue_dropped_total",
+        "Number of object deletions dropped due to stale generation."
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELETION_QUEUE_EXECUTED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_deletion_queue_executed_total",
+        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed."
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static DELETION_QUEUE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_deletion_queue_errors_total",
+        "Incremented on retryable remote I/O errors writing deletion lists or executing deletions.",
+        &["op_kind"],
+    )
+    .expect("failed to define a metric")
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
