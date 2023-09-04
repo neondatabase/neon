@@ -1550,12 +1550,6 @@ mod tests {
         tenant: Arc<Tenant>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
-<<<<<<< HEAD
-        remote_fs_dir: PathBuf,
-        client: Arc<RemoteTimelineClient>,
-        storage: GenericRemoteStorage,
-=======
->>>>>>> upstream/main
     }
 
     impl TestSetup {
@@ -1569,52 +1563,11 @@ mod tests {
                 .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
                 .await?;
 
-<<<<<<< HEAD
-            let remote_fs_dir = harness.conf.workdir.join("remote_fs");
-            std::fs::create_dir_all(remote_fs_dir)?;
-            let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
-
-            let storage_config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                )
-                .unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                )
-                .unwrap(),
-                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
-            };
-
-            let generation = Generation::new(0xdeadbeef);
-
-            let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
-
-            let client = Arc::new(RemoteTimelineClient {
-                conf: harness.conf,
-                runtime: tokio::runtime::Handle::current(),
-                tenant_id: harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                generation,
-                storage_impl: storage.clone(),
-                upload_queue: Mutex::new(UploadQueue::Uninitialized),
-                metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                    &harness.tenant_id,
-                    &TIMELINE_ID,
-                )),
-            });
-
-=======
->>>>>>> upstream/main
             Ok(Self {
                 harness,
                 tenant,
                 timeline,
                 tenant_ctx: ctx,
-<<<<<<< HEAD
-                remote_fs_dir,
-                client,
-                storage,
             })
         }
 
@@ -1626,14 +1579,12 @@ mod tests {
                 tenant_id: self.harness.tenant_id,
                 timeline_id: TIMELINE_ID,
                 generation,
-                storage_impl: self.storage.clone(),
+                storage_impl: self.harness.remote_storage.clone(),
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
                 metrics: Arc::new(RemoteTimelineClientMetrics::new(
                     &self.harness.tenant_id,
                     &TIMELINE_ID,
                 )),
-=======
->>>>>>> upstream/main
             })
         }
     }
@@ -1660,12 +1611,6 @@ mod tests {
             tenant: _tenant,
             timeline,
             tenant_ctx: _tenant_ctx,
-<<<<<<< HEAD
-            remote_fs_dir,
-            client,
-            ..
-=======
->>>>>>> upstream/main
         } = TestSetup::new("upload_scheduling").await.unwrap();
 
         let client = timeline.remote_client.as_ref().unwrap();
@@ -1927,7 +1872,7 @@ mod tests {
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
 
         let timeline_path = test_state.harness.timeline_path(&TIMELINE_ID);
-        let remote_timeline_dir = test_state.remote_fs_dir.join(
+        let remote_timeline_dir = test_state.harness.remote_fs_dir.join(
             timeline_path
                 .strip_prefix(&test_state.harness.conf.workdir)
                 .unwrap(),
@@ -1935,7 +1880,7 @@ mod tests {
 
         std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
 
-        let index_path = test_state.remote_fs_dir.join(
+        let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
         );
         eprintln!("Writing {}", index_path.display());
