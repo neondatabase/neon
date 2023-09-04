@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::control_plane_client::{ControlPlaneClient, ControlPlaneGenerationsApi};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -20,6 +21,7 @@ use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
     context::{DownloadBehavior, RequestContext},
+    deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
@@ -346,8 +348,53 @@ fn start_pageserver(
         }
     };
 
+    // Top-level cancellation token for the process
+    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
+
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
+
+    // Set up control plane client
+    let control_plane_client = match ControlPlaneClient::new(conf, &shutdown_pageserver) {
+        Some(c) => {
+            let inner: Arc<dyn ControlPlaneGenerationsApi + Send + Sync> = Arc::new(c);
+            Some(inner)
+        }
+        None => None,
+    };
+
+    // Set up deletion queue
+    let (deletion_queue, deletion_frontend, deletion_backend, deletion_executor) =
+        DeletionQueue::new(
+            remote_storage.clone(),
+            control_plane_client,
+            conf,
+            shutdown_pageserver.clone(),
+        );
+    if let Some(mut deletion_frontend) = deletion_frontend {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_frontend
+                .background()
+                .instrument(info_span!(parent:None, "deletion frontend"))
+                .await
+        });
+    }
+    if let Some(mut deletion_backend) = deletion_backend {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_backend
+                .background()
+                .instrument(info_span!(parent: None, "deletion backend"))
+                .await
+        });
+    }
+    if let Some(mut deletion_executor) = deletion_executor {
+        BACKGROUND_RUNTIME.spawn(async move {
+            deletion_executor
+                .background()
+                .instrument(info_span!(parent: None, "deletion executor"))
+                .await
+        });
+    }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
@@ -379,8 +426,7 @@ fn start_pageserver(
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
-
+    let deletion_queue_client = deletion_queue.new_client();
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
@@ -481,7 +527,7 @@ fn start_pageserver(
             http::routes::State::new(
                 conf,
                 http_auth.clone(),
-                remote_storage,
+                remote_storage.clone(),
                 broker_client.clone(),
                 disk_usage_eviction_state,
             )
@@ -607,7 +653,11 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+            let bg_remote_storage = remote_storage.clone();
+            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                bg_remote_storage.map(|_| deletion_queue.new_client()),
+                0,
+            ));
             unreachable!()
         }
     })

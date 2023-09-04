@@ -20,7 +20,8 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::ControlPlaneClient;
+use crate::control_plane_client::{ControlPlaneClient, ControlPlaneGenerationsApi};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -116,7 +117,15 @@ pub async fn init_tenant_mgr(
 
     // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        Some(client.re_attach().await?)
+        let result = client.re_attach().await?;
+
+        // Tip off the deletion queue about latest attached generations before starting any Tenants
+        resources
+            .deletion_queue_client
+            .recover(result.clone())
+            .await?;
+
+        Some(result)
     } else {
         info!("Control plane API not configured, tenant generations are disabled");
         None
