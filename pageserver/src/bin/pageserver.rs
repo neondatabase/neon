@@ -432,6 +432,7 @@ fn start_pageserver(
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
+            deletion_queue_client,
         },
         order,
         shutdown_pageserver.clone(),
@@ -530,6 +531,7 @@ fn start_pageserver(
                 remote_storage.clone(),
                 broker_client.clone(),
                 disk_usage_eviction_state,
+                deletion_queue.new_client(),
             )
             .context("Failed to initialize router state")?,
         );

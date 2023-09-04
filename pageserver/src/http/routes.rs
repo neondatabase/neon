@@ -24,6 +24,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -34,7 +35,7 @@ use crate::tenant::mgr::{
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::Timeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
@@ -61,6 +62,7 @@ pub struct State {
     remote_storage: Option<GenericRemoteStorage>,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+    deletion_queue_client: DeletionQueueClient,
 }
 
 impl State {
@@ -70,6 +72,7 @@ impl State {
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -82,7 +85,16 @@ impl State {
             remote_storage,
             broker_client,
             disk_usage_eviction_state,
+            deletion_queue_client,
         })
+    }
+
+    fn tenant_resources(&self) -> TenantSharedResources {
+        TenantSharedResources {
+            broker_client: self.broker_client.clone(),
+            remote_storage: self.remote_storage.clone(),
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 }
 
@@ -492,23 +504,22 @@ async fn tenant_attach_handler(
 
     let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
 
-    if let Some(remote_storage) = &state.remote_storage {
-        mgr::attach_tenant(
-            state.conf,
-            tenant_id,
-            generation,
-            tenant_conf,
-            state.broker_client.clone(),
-            remote_storage.clone(),
-            &ctx,
-        )
-        .instrument(info_span!("tenant_attach", %tenant_id))
-        .await?;
-    } else {
+    if state.remote_storage.is_none() {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
         )));
     }
+
+    mgr::attach_tenant(
+        state.conf,
+        tenant_id,
+        generation,
+        tenant_conf,
+        state.tenant_resources(),
+        &ctx,
+    )
+    .instrument(info_span!("tenant_attach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -570,6 +581,7 @@ async fn tenant_load_handler(
         generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        state.deletion_queue_client.clone(),
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))
@@ -911,8 +923,7 @@ async fn tenant_create_handler(
         tenant_conf,
         target_tenant_id,
         generation,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
+        state.tenant_resources(),
         &ctx,
     )
     .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
