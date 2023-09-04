@@ -43,6 +43,9 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
+/// As defined in S3 docs
+pub const MAX_KEYS_PER_DELETE: usize = 1000;
+
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
 /// Path on the remote storage, relative to some inner prefix.
