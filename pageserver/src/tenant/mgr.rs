@@ -22,8 +22,9 @@ use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
+use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
@@ -60,6 +61,29 @@ impl TenantsMap {
     }
 }
 
+/// This is "safe" in that that it won't leave behind a partially deleted directory
+/// at the original path, because we rename with TEMP_FILE_SUFFIX before starting deleting
+/// the contents.
+///
+/// This is pageserver-specific, as it relies on future processes after a crash to check
+/// for TEMP_FILE_SUFFIX when loading things.
+async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let parent = path
+        .as_ref()
+        .parent()
+        // It is invalid to call this function with a relative path.  Tenant directories
+        // should always have a parent.
+        .ok_or(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Path must be absolute",
+        ))?;
+
+    let tmp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    fs::rename(&path, &tmp_path).await?;
+    fs::File::open(parent).await?.sync_all().await?;
+    fs::remove_dir_all(tmp_path).await
+}
+
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
 /// Initialize repositories with locally available timelines.
@@ -92,6 +116,8 @@ pub async fn init_tenant_mgr(
                         "Found temporary tenant directory, removing: {}",
                         tenant_dir_path.display()
                     );
+                    // No need to use safe_remove_tenant_dir_all because this is already
+                    // a temporary path
                     if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
@@ -490,7 +516,7 @@ async fn detach_tenant0(
 ) -> Result<(), TenantStateError> {
     let local_files_cleanup_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
-        fs::remove_dir_all(&local_tenant_directory)
+        safe_remove_tenant_dir_all(&local_tenant_directory)
             .await
             .with_context(|| {
                 format!("local tenant directory {local_tenant_directory:?} removal")
