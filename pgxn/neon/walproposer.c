@@ -437,12 +437,35 @@ WalProposerPoll(void)
 		}
 		else /* timeout expired */
 		{
+#if PG_MAJORVERSION_NUM >= 16
+			/* First, cancel sleep - we might do some complex stuff after this */
+			if (WalSndCtl != NULL)
+				ConditionVariableCancelSleep();
+#endif
+
 			/*
 			 * If the timeout expired, attempt to reconnect to any safekeepers
 			 * that we dropped
 			 */
 			ReconnectSafekeepers();
 			wait_timeout = true;
+
+			/*
+			 * Ensure flushrecptr is set to a recent value. This fixes a case
+			 * where we've not been notified of new WAL records when we were
+			 * planning on consuming them.
+			 */
+			if (!syncSafekeepers) {
+				XLogRecPtr flushed;
+
+#if PG_MAJORVERSION_NUM < 15
+				flushed = GetFlushRecPtr();
+#else
+				flushed = GetFlushRecPtr(NULL);
+#endif
+				if (flushed != availableLsn)
+					break;
+			}
 		}
 
 		now = GetCurrentTimestamp();
