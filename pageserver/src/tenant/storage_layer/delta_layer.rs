@@ -703,6 +703,7 @@ impl DeltaLayerWriterInner {
 
         let metadata = file
             .metadata()
+            .await
             .context("get file metadata to determine size")?;
 
         // 5GB limit for objects without multipart upload (which we don't want to use)

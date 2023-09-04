@@ -326,7 +326,7 @@ impl VirtualFile {
         self.with_file("fsync", |file| file.sync_all())?
     }
 
-    pub fn metadata(&self) -> Result<fs::Metadata, Error> {
+    pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
         self.with_file("metadata", |file| file.metadata())?
     }
 

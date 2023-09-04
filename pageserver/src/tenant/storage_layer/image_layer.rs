@@ -623,6 +623,7 @@ impl ImageLayerWriterInner {
 
         let metadata = file
             .metadata()
+            .await
             .context("get metadata to determine file size")?;
 
         let desc = PersistentLayerDesc::new_img(
