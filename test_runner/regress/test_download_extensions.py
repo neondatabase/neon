@@ -9,7 +9,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, skip_on_postgres
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages
 
 
@@ -81,6 +81,7 @@ def upload_files(env):
 
 
 # Test downloading remote extension.
+@skip_on_postgres(PgVersion.V16, reason="TODO: PG16 extension building")
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 @pytest.mark.skip(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_remote_extensions(
@@ -88,10 +89,6 @@ def test_remote_extensions(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
-    # TODO: PG16 extension building
-    if pg_version == PgVersion.V16:
-        return
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         enable_remote_extensions=True,
@@ -151,6 +148,7 @@ def test_remote_extensions(
 
 
 # Test downloading remote library.
+@skip_on_postgres(PgVersion.V16, reason="TODO: PG16 extension building")
 @pytest.mark.parametrize("remote_storage_kind", available_s3_storages())
 @pytest.mark.skip(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_remote_library(
@@ -158,10 +156,6 @@ def test_remote_library(
     remote_storage_kind: RemoteStorageKind,
     pg_version: PgVersion,
 ):
-    # TODO: PG16 extension building
-    if pg_version == PgVersion.V16:
-        return
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         enable_remote_extensions=True,
@@ -217,15 +211,12 @@ def test_remote_library(
 #    RemoteStorageKind.REAL_S3 not in available_s3_storages(),
 #    reason="skipping test because real s3 not enabled",
 # )
+@skip_on_postgres(PgVersion.V16, reason="TODO: PG16 extension building")
 @pytest.mark.skip(reason="https://github.com/neondatabase/neon/issues/4949")
 def test_multiple_extensions_one_archive(
     neon_env_builder: NeonEnvBuilder,
     pg_version: PgVersion,
 ):
-    # TODO: PG16 extension building
-    if pg_version == PgVersion.V16:
-        return
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.REAL_S3,
         enable_remote_extensions=True,
