@@ -89,6 +89,14 @@ impl Generation {
             Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
+
+    pub fn into(self) -> Option<u32> {
+        if let Self::Valid(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 }
 
 impl Serialize for Generation {
