@@ -677,13 +677,13 @@ mod tests {
         file_a.write_all(b"foobar").await?;
 
         // cannot read from a file opened in write-only mode
-        assert!(file_a.read_string().await.is_err());
+        let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
         let mut file_a = openfunc(&path_a, OpenOptions::new().read(true))?;
 
         // cannot write to a file opened in read-only mode
-        assert!(file_a.write_all(b"bar").await.is_err());
+        let _ = file_a.write_all(b"bar").await.unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);
