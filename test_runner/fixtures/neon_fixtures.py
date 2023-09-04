@@ -744,7 +744,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self, self.remote_storage).scan_metadata()
+                    S3Scrubber(self.test_output_dir, self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1760,7 +1760,10 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
+        base_path, _, _ = subprocess_capture(
+            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+        )
+        return base_path
 
 
 @pytest.fixture(scope="function")
@@ -2767,13 +2770,13 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, env, remote_storage):
+    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
         self.env = env
-        self.remote_storage = remote_storage
+        self.log_dir = log_dir
 
     def scrubber_cli(self, args, timeout):
+        assert isinstance(self.env.remote_storage, S3Storage)
         s3_storage = self.env.remote_storage
-        assert isinstance(s3_storage, S3Storage)
 
         env = {
             "REGION": s3_storage.bucket_region,
@@ -2786,20 +2789,14 @@ class S3Scrubber:
 
         base_args = [self.env.neon_binpath / "s3_scrubber"]
         args = base_args + args
-        r = subprocess.run(
-            args,
-            env=env,
-            check=False,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
+
+        (output_path, _, status_code) = subprocess_capture(
+            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
         )
-        if r.returncode:
+        if status_code:
             log.warning(f"Scrub command {args} failed")
             log.warning(f"Scrub environment: {env}")
-            log.warning(f"Scrub stdout: {r.stdout}")
-            log.warning(f"Scrub stderr: {r.stderr}")
+            log.warning(f"Output at: {output_path}")
 
             raise RuntimeError("Remote storage scrub failed")
 
