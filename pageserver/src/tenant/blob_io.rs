@@ -120,7 +120,7 @@ where
 {
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+    pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
         let offset = self.offset;
 
         if srcbuf.len() < 128 {

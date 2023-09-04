@@ -349,7 +349,9 @@ impl InMemoryLayer {
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let will_init = Value::des(&buf)?.will_init();
-                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
+                delta_layer_writer
+                    .put_value_bytes(key, *lsn, &buf, will_init)
+                    .await?;
             }
         }
 
