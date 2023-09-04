@@ -2827,14 +2827,8 @@ impl Timeline {
             x.unwrap()
         ));
 
-        save_metadata(
-            self.conf,
-            &self.tenant_id,
-            &self.timeline_id,
-            &metadata,
-            false,
-        )
-        .context("save_metadata")?;
+        save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
+            .context("save_metadata")?;
 
         if let Some(remote_client) = &self.remote_client {
             for (path, layer_metadata) in layer_paths_to_upload {
