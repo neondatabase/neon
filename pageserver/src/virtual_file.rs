@@ -426,6 +426,22 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
+    #[cfg(test)]
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        loop {
+            let mut tmp = [0; 128];
+            match self.read_at(&mut tmp, self.pos).await {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    self.pos += n as u64;
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
     pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
         while !buf.is_empty() {
@@ -617,10 +633,9 @@ mod tests {
             let mut buf = String::new();
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
-                    let pos = file.seek(SeekFrom::Current(0))?;
-                    let len = file.metadata()?.len().saturating_sub(pos);
-                    let len_usize = len.try_into().unwrap();
-                    return self.read_string_at(pos, len_usize).await;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    return Ok(String::from_utf8(buf).unwrap());
                 }
                 MaybeVirtualFile::File(file) => {
                     file.read_to_string(&mut buf)?;
@@ -631,8 +646,7 @@ mod tests {
 
         // Helper function to slurp a portion of a file into a string
         async fn read_string_at(&mut self, pos: u64, len: usize) -> Result<String, Error> {
-            let mut buf = Vec::new();
-            buf.resize(len, 0);
+            let mut buf = vec![0; len];
             self.read_exact_at(&mut buf, pos).await?;
             Ok(String::from_utf8(buf).unwrap())
         }
