@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+clap.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
