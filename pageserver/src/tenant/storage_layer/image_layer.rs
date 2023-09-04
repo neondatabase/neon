@@ -645,7 +645,7 @@ impl ImageLayerWriterInner {
         };
 
         // fsync the file
-        file.sync_all()?;
+        file.sync_all().await?;
 
         // Rename the file to its final name
         //

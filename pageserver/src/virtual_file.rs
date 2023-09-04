@@ -304,6 +304,7 @@ impl VirtualFile {
             .await
             .map_err(CrashsafeOverwriteError::WriteContents)?;
         file.sync_all()
+            .await
             .map_err(CrashsafeOverwriteError::SyncTempfile)?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
@@ -319,12 +320,13 @@ impl VirtualFile {
                 .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
         final_parent_dirfd
             .sync_all()
+            .await
             .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
         Ok(())
     }
 
     /// Call File::sync_all() on the underlying File.
-    pub fn sync_all(&self) -> Result<(), Error> {
+    pub async fn sync_all(&self) -> Result<(), Error> {
         self.with_file("fsync", |file| file.sync_all())?
     }
 
