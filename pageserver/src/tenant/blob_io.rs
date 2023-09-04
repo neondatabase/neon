@@ -90,6 +90,15 @@ impl<'a> BlockCursor<'a> {
 pub struct WriteBlobWriter<W> {
     inner: W,
     offset: u64,
+    /// A buffer to save on read calls
+    buf: [u8; PAGE_SZ],
+    /// The number of bytes already occupied in buf
+    /// In other words: pointer to the first unwritten byte in buf.
+    ///
+    /// After each `write_all` call concludes, we maintain the
+    /// invariant that buf_offs < buf.len(), so the buffer is
+    /// never completely full outside of the `write_all` function.
+    buf_offs: usize,
 }
 
 impl<W> WriteBlobWriter<W> {
@@ -97,6 +106,8 @@ impl<W> WriteBlobWriter<W> {
         WriteBlobWriter {
             inner,
             offset: start_offset,
+            buf: [0; PAGE_SZ],
+            buf_offs: 0,
         }
     }
 
@@ -118,9 +129,71 @@ impl<W> WriteBlobWriter<W>
 where
     W: std::io::Write,
 {
-    async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
-        self.inner.write_all(buf)?;
-        self.offset += buf.len() as u64;
+    #[inline(always)]
+    /// Writes the given buffer directly to the underlying `VirtualFile`.
+    /// You need to make sure that the internal buffer is empty, otherwise
+    /// data will be written in wrong order.
+    async fn write_all_unbuffered(&mut self, src_buf: &[u8]) -> Result<(), Error> {
+        self.inner.write_all(src_buf)?;
+        self.offset += src_buf.len() as u64;
+        Ok(())
+    }
+
+    #[inline(always)]
+    async fn flush_buffer(&mut self) -> Result<(), Error> {
+        self.inner.write_all(&self.buf)?;
+        self.buf_offs = 0;
+        Ok(())
+    }
+
+    #[inline(always)]
+    /// Writes as much of `src_buf` into the internal buffer as it fits
+    fn write_into_buffer(&mut self, src_buf: &[u8]) -> usize {
+        let remaining = self.buf.len() - self.buf_offs;
+        let to_copy = src_buf.len().min(remaining);
+        self.buf[..to_copy].copy_from_slice(src_buf);
+        self.buf_offs += to_copy;
+        self.offset += src_buf.len() as u64;
+        to_copy
+    }
+
+    /// Internal, possibly buffered, write function
+    async fn write_all(&mut self, mut src_buf: &[u8], no_buffering: bool) -> Result<(), Error> {
+        if no_buffering {
+            if self.buf_offs > 0 {
+                // Flush the buffer. This creates a write call for
+                // potentially very small data, but there is no way
+                // we can unify it with the data we are writing below
+                // without copying it.
+                self.flush_buffer().await?;
+            }
+            self.write_all_unbuffered(src_buf).await?;
+            return Ok(());
+        }
+        let remaining = self.buf.len() - self.buf_offs;
+        // First try to copy as much as we can into the buffer
+        if src_buf.len() <= remaining {
+            let copied = self.write_into_buffer(src_buf);
+            src_buf = &src_buf[(copied - 1)..];
+        }
+        // Then, if the buffer is full, flush it out
+        if self.buf.len() == self.buf_offs {
+            self.flush_buffer().await?;
+        }
+        // Finally, write the tail of src_buf:
+        // If it wholly fits into the buffer without
+        // completely filling it, then put it there.
+        // If not, write it out directly.
+        if !src_buf.is_empty() {
+            assert_eq!(self.buf_offs, 0);
+            if src_buf.len() >= self.buf.len() {
+                let copied = self.write_into_buffer(src_buf);
+                // We just verified above that src_buf fits into our internal buffer.
+                assert_eq!(copied, src_buf.len());
+            } else {
+                self.write_all_unbuffered(src_buf).await?;
+            }
+        }
         Ok(())
     }
 
@@ -128,11 +201,12 @@ where
     /// which can be used to retrieve the data later.
     pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
         let offset = self.offset;
+        let no_buffering = srcbuf.len() >= PAGE_SZ;
 
         if srcbuf.len() < 128 {
             // Short blob. Write a 1-byte length header
             let len_buf = srcbuf.len() as u8;
-            self.write_all(&[len_buf]).await?;
+            self.write_all(&[len_buf], no_buffering).await?;
         } else {
             // Write a 4-byte length header
             if srcbuf.len() > 0x7fff_ffff {
@@ -143,9 +217,9 @@ where
             }
             let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
             len_buf[0] |= 0x80;
-            self.write_all(&len_buf).await?;
+            self.write_all(&len_buf, no_buffering).await?;
         }
-        self.write_all(srcbuf).await?;
+        self.write_all(srcbuf, no_buffering).await?;
         Ok(offset)
     }
 }
