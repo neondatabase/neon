@@ -120,10 +120,7 @@ impl Display for BucketConfig {
         write!(
             f,
             "{}/{}/{}",
-            self.sso_account_id
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("<none>"),
+            self.sso_account_id.as_deref().unwrap_or("<none>"),
             self.region,
             self.bucket
         )
@@ -208,7 +205,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
             Some(sso_account) => chain.or_else(
                 "sso",
                 SsoCredentialsProvider::builder()
-                    .account_id(&sso_account)
+                    .account_id(sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
                     .region(Region::from_static("eu-central-1"))
