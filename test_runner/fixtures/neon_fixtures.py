@@ -415,6 +415,7 @@ class NeonEnvBuilder:
         pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
+        test_output_dir: Path,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -456,6 +457,7 @@ class NeonEnvBuilder:
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
         self.scrub_on_exit = False
+        self.test_output_dir = test_output_dir
 
         assert test_name.startswith(
             "test_"
@@ -956,6 +958,7 @@ def _shared_simple_env(
     default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
+    test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
@@ -984,6 +987,7 @@ def _shared_simple_env(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         env = builder.init_start()
 
@@ -1011,7 +1015,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 @pytest.fixture(scope="function")
 def neon_env_builder(
     pytestconfig: Config,
-    test_output_dir: str,
+    test_output_dir: Path,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
@@ -1049,6 +1053,7 @@ def neon_env_builder(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         yield builder
 
