@@ -687,8 +687,18 @@ impl DeltaLayerWriterInner {
             index_start_blk,
             index_root_blk,
         };
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
         file.seek(SeekFrom::Start(0))?;
-        Summary::ser_into(&summary, &mut file)?;
+        file.write_all(&buf)?;
 
         let metadata = file
             .metadata()
