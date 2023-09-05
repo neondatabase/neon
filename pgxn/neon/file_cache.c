@@ -83,11 +83,12 @@ typedef struct FileCacheControl
 } FileCacheControl;
 
 static HTAB* lfc_hash;
-static int   lfc_desc;
+static int   lfc_desc = 0;
 static LWLockId lfc_lock;
 static int   lfc_max_size;
 static int   lfc_size_limit;
 static int   lfc_free_space_watermark;
+static bool	lfc_disabled_by_failure = false;
 static char* lfc_path;
 static  FileCacheControl* lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -95,6 +96,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
+
+#define DISABLE_LFC() (lfc_max_size = 0, lfc_disabled_by_failure = true, lfc_desc = -1)
 
 void FileCacheMonitorMain(Datum main_arg);
 
@@ -168,7 +171,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		return;
 
 	/* Open cache file if not done yet */
-	if (lfc_desc == 0)
+	if (lfc_desc <= 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
@@ -328,7 +331,7 @@ lfc_init(void)
 							   NULL,
 							   NULL);
 
-	if (lfc_max_size == 0)
+	if (lfc_max_size == 0 || lfc_disabled_by_failure)
 		return;
 
 	if (lfc_free_space_watermark != 0)
@@ -357,7 +360,7 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	bool found;
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0 || lfc_disabled_by_failure) /* fast exit if file cache is disabled */
 		return false;
 
 	tag.rnode = rnode;
@@ -384,7 +387,7 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0 || lfc_disabled_by_failure) /* fast exit if file cache is disabled */
 		return;
 
 	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
@@ -455,7 +458,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	bool result = true;
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0 || lfc_disabled_by_failure) /* fast exit if file cache is disabled */
 		return false;
 
 	tag.rnode = rnode;
@@ -477,15 +480,17 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	LWLockRelease(lfc_lock);
 
 	/* Open cache file if not done yet */
-	if (lfc_desc == 0)
+	if (lfc_desc <= 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
+
 		if (lfc_desc < 0) {
 			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
-			lfc_size_limit = 0; /* disable file cache */
+			DISABLE_LFC();
 			result = false;
 		}
 	}
+
 
 	if (lfc_desc > 0)
 	{
@@ -493,7 +498,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (rc != BLCKSZ)
 		{
 			elog(INFO, "Failed to read file cache: %m");
-			lfc_size_limit = 0; /* disable file cache */
+			DISABLE_LFC();
 			result = false;
 		}
 	}
@@ -523,7 +528,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0 || lfc_disabled_by_failure) /* fast exit if file cache is disabled */
 		return;
 
 	tag.rnode = rnode;
@@ -570,12 +575,12 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	LWLockRelease(lfc_lock);
 
 	/* Open cache file if not done yet */
-	if (lfc_desc == 0)
+	if (lfc_desc <= 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
 		if (lfc_desc < 0) {
 			elog(WARNING, "Failed to open file cache %s: %m, disabling file cache", lfc_path);
-			lfc_size_limit = 0; /* disable file cache */
+			DISABLE_LFC(); /* disable file cache */
 		}
 	}
 	if (lfc_desc > 0)
@@ -584,7 +589,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (rc != BLCKSZ)
 		{
 			elog(WARNING, "Failed to write file cache: %m, disabling file cache");
-			lfc_size_limit = 0; /* disable file cache */
+			DISABLE_LFC(); /* disable file cache */
 		}
 	}
 	/* Place entry to the head of LRU list */
