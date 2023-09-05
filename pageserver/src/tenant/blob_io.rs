@@ -147,8 +147,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     }
 
     /// Internal, possibly buffered, write function
-    async fn write_all(&mut self, mut src_buf: &[u8], no_buffering: bool) -> Result<(), Error> {
-        if no_buffering {
+    async fn write_all(&mut self, mut src_buf: &[u8]) -> Result<(), Error> {
+        if !BUFFERED {
             if self.buf_offs > 0 {
                 // Flush the buffer. This creates a write call for
                 // potentially very small data, but there is no way
@@ -190,12 +190,11 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// which can be used to retrieve the data later.
     pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
         let offset = self.offset;
-        let no_buffering = srcbuf.len() >= PAGE_SZ;
 
         if srcbuf.len() < 128 {
             // Short blob. Write a 1-byte length header
             let len_buf = srcbuf.len() as u8;
-            self.write_all(&[len_buf], no_buffering).await?;
+            self.write_all(&[len_buf]).await?;
         } else {
             // Write a 4-byte length header
             if srcbuf.len() > 0x7fff_ffff {
@@ -206,9 +205,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             }
             let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
             len_buf[0] |= 0x80;
-            self.write_all(&len_buf, no_buffering).await?;
+            self.write_all(&len_buf).await?;
         }
-        self.write_all(srcbuf, no_buffering).await?;
+        self.write_all(srcbuf).await?;
         Ok(offset)
     }
 }
