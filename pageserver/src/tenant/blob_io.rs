@@ -163,7 +163,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         // First try to copy as much as we can into the buffer
         if src_buf.len() <= remaining {
             let copied = self.write_into_buffer(src_buf);
-            src_buf = &src_buf[(copied - 1)..];
+            src_buf = &src_buf[copied..];
         }
         // Then, if the buffer is full, flush it out
         if self.buf.len() == self.buf_offs {
