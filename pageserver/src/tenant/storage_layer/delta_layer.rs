@@ -46,7 +46,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::SeekFrom;
-use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -673,7 +672,7 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref())?;
+            file.write_all(buf.as_ref()).await?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -698,7 +697,7 @@ impl DeltaLayerWriterInner {
             );
         }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf)?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()

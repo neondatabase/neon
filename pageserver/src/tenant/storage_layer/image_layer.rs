@@ -43,7 +43,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::SeekFrom;
-use std::io::Write;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
@@ -594,7 +593,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref())?;
+            file.write_all(buf.as_ref()).await?;
         }
 
         // Fill in the summary on blk 0
@@ -619,7 +618,7 @@ impl ImageLayerWriterInner {
             );
         }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf)?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()

@@ -15,7 +15,7 @@ use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
-use std::io::{Error, ErrorKind, Write};
+use std::io::{Error, ErrorKind};
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
@@ -122,7 +122,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
     async fn write_all_unbuffered(&mut self, src_buf: &[u8]) -> Result<(), Error> {
-        self.inner.write_all(src_buf)?;
+        self.inner.write_all(src_buf).await?;
         self.offset += src_buf.len() as u64;
         Ok(())
     }
@@ -130,7 +130,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     #[inline(always)]
     /// Flushes the internal buffer to the underlying `VirtualFile`.
     pub async fn flush_buffer(&mut self) -> Result<(), Error> {
-        self.inner.write_all(&self.buf)?;
+        self.inner.write_all(&self.buf).await?;
         self.buf_offs = 0;
         Ok(())
     }

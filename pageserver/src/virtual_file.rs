@@ -13,7 +13,7 @@
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -300,6 +300,7 @@ impl VirtualFile {
         )
         .map_err(CrashsafeOverwriteError::CreateTempfile)?;
         file.write_all(content)
+            .await
             .map_err(CrashsafeOverwriteError::WriteContents)?;
         file.sync_all()
             .map_err(CrashsafeOverwriteError::SyncTempfile)?;
@@ -490,6 +491,32 @@ impl VirtualFile {
         Ok(())
     }
 
+    pub async fn write_all(&mut self, mut buf: &[u8]) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.write(buf).await {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        let pos = self.pos;
+        let n = self.write_at(buf, pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("read", |file| file.read_at(buf, offset))?;
         if let Ok(size) = result {
@@ -528,21 +555,6 @@ impl Drop for VirtualFile {
                 .with_label_values(&["close"])
                 .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
-    }
-}
-
-impl Write for VirtualFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // flush is no-op for File (at least on unix), so we don't need to do
-        // anything here either.
-        Ok(())
     }
 }
 
@@ -599,6 +611,7 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
+    use std::io::Write;
     use std::sync::Arc;
 
     enum MaybeVirtualFile {
@@ -627,7 +640,7 @@ mod tests {
         }
         async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf),
+                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
                 MaybeVirtualFile::File(file) => file.write_all(buf),
             }
         }
