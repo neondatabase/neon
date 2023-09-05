@@ -24,7 +24,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::deletion_queue::DeletionQueueClient;
+use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -1146,6 +1146,46 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+async fn deletion_queue_flush(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if state.remote_storage.is_none() {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
+    tokio::select! {
+        flush_result = async {
+            if execute {
+                state.deletion_queue_client.flush_execute().await
+            } else {
+                state.deletion_queue_client.flush().await
+            }
+        } => {
+            match flush_result {
+                Ok(())=> {
+                    json_response(StatusCode::OK, ())
+                },
+                Err(e) => {
+                    match e {
+                        DeletionQueueError::ShuttingDown => {
+            Err(ApiError::ShuttingDown)
+                        }
+                    }
+                }
+            }
+        },
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
+}
+
 async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1479,6 +1519,9 @@ pub fn make_router(
         )
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
+        })
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
