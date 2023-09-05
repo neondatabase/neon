@@ -899,11 +899,8 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  trigger-custom-extensions-build:
-    runs-on: [ self-hosted, gen3, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
+  trigger-custom-extensions-build-and-wait:
+    runs-on: ubuntu-latest
     needs: [ tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
@@ -938,16 +935,11 @@ jobs:
               }
             }"
 
-  wait-for-extensions-build:
-    runs-on: ubuntu-latest
-    needs: [ trigger-custom-extensions-build ]
-
-    steps:
       - name: Wait for extension build to finish
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          TIMEOUT=600 # 10 minutes, currently it takes ~2-3 minutes
+          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
           INTERVAL=15 # try each N seconds
 
           last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
@@ -984,7 +976,7 @@ jobs:
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests, wait-for-extensions-build ]
+    needs: [ promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
