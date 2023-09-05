@@ -418,10 +418,11 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
             start_pos,
             end_pos,
-            matches!(end_watch, EndWatch::Flush(_))
+            matches!(end_watch, EndWatch::Flush(_)),
+            appname
         );
 
         // switch to copy
