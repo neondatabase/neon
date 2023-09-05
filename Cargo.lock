@@ -214,6 +214,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "atty"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
+dependencies = [
+ "hermit-abi 0.1.19",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +238,7 @@ checksum = "de3d533e0263bf453cc80af4c8bcc4d64e2aca293bd16f81633a36f1bf4a97cb"
 dependencies = [
  "aws-credential-types",
  "aws-http",
+ "aws-sdk-sso",
  "aws-sdk-sts",
  "aws-smithy-async",
  "aws-smithy-client",
@@ -237,12 +249,15 @@ dependencies = [
  "aws-types",
  "bytes",
  "fastrand 2.0.0",
+ "hex",
  "http",
  "hyper",
+ "ring",
  "time",
  "tokio",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -330,6 +345,30 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sso"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f41bf2c28d32dbb9894a8fcfcb148265d034d3f4a170552a47553a09de890895"
+dependencies = [
+ "aws-credential-types",
+ "aws-http",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-client",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "http",
+ "regex",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -1746,6 +1785,15 @@ name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
+
+[[package]]
+name = "hermit-abi"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -3686,6 +3734,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f91339c0467de62360649f8d3e185ca8de4224ff281f66000de5eb2a77a79041"
 
 [[package]]
+name = "s3_scrubber"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atty",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-http",
+ "aws-types",
+ "bincode",
+ "bytes",
+ "chrono",
+ "clap",
+ "crc32c",
+ "either",
+ "hex",
+ "pageserver",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "safekeeper"
 version = "0.1.0"
 dependencies = [
@@ -4769,6 +4850,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-appender"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09d48f71a791638519505cefafe162606f706c25592e4bde4d97600c0195312e"
+dependencies = [
+ "crossbeam-channel",
+ "time",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5506,6 +5598,10 @@ name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-http",
  "axum",
  "base64 0.21.1",
  "bytes",
@@ -5514,7 +5610,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
- "digest",
  "either",
  "fail",
  "futures",
@@ -5523,6 +5618,7 @@ dependencies = [
  "futures-executor",
  "futures-sink",
  "futures-util",
+ "hex",
  "hyper",
  "itertools",
  "libc",
@@ -5546,6 +5642,7 @@ dependencies = [
  "socket2 0.4.9",
  "syn 1.0.109",
  "syn 2.0.28",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -5555,6 +5652,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
+ "uuid",
 ]
 
 [[package]]

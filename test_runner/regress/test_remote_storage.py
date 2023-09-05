@@ -62,7 +62,6 @@ def test_remote_storage_backup_and_restore(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
     )
 
     # Exercise retry code path by making all uploads and downloads fail for the
@@ -225,7 +224,6 @@ def test_remote_storage_upload_queue_retries(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_upload_queue_retries",
     )
 
     env = neon_env_builder.init_start()
@@ -381,7 +379,6 @@ def test_remote_timeline_client_calls_started_metric(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_timeline_client_metrics",
     )
 
     # thinking about using a shared environment? the test assumes that global
@@ -524,7 +521,6 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
     )
 
     env = neon_env_builder.init_start(
@@ -642,7 +638,6 @@ def test_empty_branch_remote_storage_upload(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload",
     )
 
     env = neon_env_builder.init_start()
@@ -694,7 +689,6 @@ def test_empty_branch_remote_storage_upload_on_restart(
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload_on_restart",
     )
 
     env = neon_env_builder.init_start()
@@ -792,7 +786,6 @@ def test_compaction_delete_before_upload(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_delete_before_upload",
     )
 
     env = neon_env_builder.init_start(

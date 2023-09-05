@@ -63,8 +63,8 @@ pub mod errors {
                         format!("{REQUEST_FAILED}: endpoint is disabled")
                     }
                     http::StatusCode::LOCKED => {
-                        // Status 423: project might be in maintenance mode (or bad state).
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable")
+                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
+                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
@@ -81,9 +81,15 @@ pub mod errors {
                 // retry some temporary failures because the compute was in a bad state
                 // (bad request can be returned when the endpoint was in transition)
                 Self::Console {
-                    status: http::StatusCode::BAD_REQUEST | http::StatusCode::LOCKED,
+                    status: http::StatusCode::BAD_REQUEST,
                     ..
                 } => true,
+                // locked can be returned when the endpoint was in transition
+                // or when quotas are exceeded. don't retry when quotas are exceeded
+                Self::Console {
+                    status: http::StatusCode::LOCKED,
+                    ref text,
+                } => !text.contains("quota"),
                 // retry server errors
                 Self::Console { status, .. } if status.is_server_error() => true,
                 _ => false,

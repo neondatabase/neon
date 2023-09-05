@@ -45,8 +45,8 @@ use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
+use std::io::SeekFrom;
 use std::io::{BufWriter, Write};
-use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -219,7 +219,7 @@ pub struct DeltaLayerInner {
     index_root_blk: u32,
 
     /// Reader object for reading blocks from the file.
-    file: FileBlockReader<VirtualFile>,
+    file: FileBlockReader,
 }
 
 impl AsRef<DeltaLayerInner> for DeltaLayerInner {

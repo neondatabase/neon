@@ -191,9 +191,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -231,7 +229,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
     # This happens when we fail before scheduling background operation.
     # Timeline is left in stopping state and retry tries to stop it again.
@@ -350,7 +348,6 @@ def test_timeline_resurrection_on_attach(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_resurrection_on_attach",
     )
 
     ##### First start, insert data and upload it to the remote storage
@@ -438,7 +435,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_timeline_delete_fail_before_local_delete",
     )
 
     env = neon_env_builder.init_start()
@@ -449,7 +445,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
     # this happens, because the stuck timeline is visible to shutdown
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.+: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
 
     ps_http = env.pageserver.http_client()
@@ -558,7 +554,6 @@ def test_concurrent_timeline_delete_stuck_on(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name=f"concurrent_timeline_delete_stuck_on_{stuck_failpoint}",
     )
 
     env = neon_env_builder.init_start()
@@ -636,7 +631,6 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_delete_timeline_client_hangup",
     )
 
     env = neon_env_builder.init_start()
@@ -706,7 +700,6 @@ def test_timeline_delete_works_for_remote_smoke(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_delete_works_for_remote_smoke",
     )
 
     env = neon_env_builder.init_start()
@@ -780,7 +773,7 @@ def test_delete_orphaned_objects(
     pg_bin: PgBin,
 ):
     remote_storage_kind = RemoteStorageKind.LOCAL_FS
-    neon_env_builder.enable_remote_storage(remote_storage_kind, "test_delete_orphaned_objects")
+    neon_env_builder.enable_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -844,7 +837,6 @@ def test_timeline_delete_resumed_on_attach(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
     )
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
@@ -881,7 +873,7 @@ def test_timeline_delete_resumed_on_attach(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
