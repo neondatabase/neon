@@ -433,22 +433,6 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    #[cfg(test)]
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
-        loop {
-            let mut tmp = [0; 128];
-            match self.read_at(&mut tmp, self.pos).await {
-                Ok(0) => return Ok(()),
-                Ok(n) => {
-                    self.pos += n as u64;
-                    buf.extend_from_slice(&tmp[..n]);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
     pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
         while !buf.is_empty() {
@@ -535,6 +519,35 @@ impl VirtualFile {
                 .add(size as i64);
         }
         result
+    }
+}
+
+#[cfg(test)]
+impl VirtualFile {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+    ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
+        use crate::page_cache::PAGE_SZ;
+        let mut buf = [0; PAGE_SZ];
+        self.read_exact_at(&mut buf, blknum as u64 * (PAGE_SZ as u64))
+            .await?;
+        Ok(std::sync::Arc::new(buf).into())
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        loop {
+            let mut tmp = [0; 128];
+            match self.read_at(&mut tmp, self.pos).await {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    self.pos += n as u64;
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 

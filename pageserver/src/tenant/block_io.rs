@@ -76,6 +76,8 @@ pub(crate) enum BlockReaderRef<'a> {
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
+    #[cfg(test)]
+    VirtualFile(&'a VirtualFile),
 }
 
 impl<'a> BlockReaderRef<'a> {
@@ -88,6 +90,8 @@ impl<'a> BlockReaderRef<'a> {
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
+            #[cfg(test)]
+            VirtualFile(r) => r.read_blk(blknum).await,
         }
     }
 }
