@@ -74,6 +74,7 @@ More specifically, here is an example ext_index.json
 use anyhow::Context;
 use anyhow::{self, Result};
 use compute_api::spec::RemoteExtSpec;
+use regex::Regex;
 use remote_storage::*;
 use serde_json;
 use std::io::Read;
@@ -108,10 +109,16 @@ pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15
     let human_version = get_pg_config("--version", pgbin);
-    if human_version.contains("15") {
-        return "v15".to_string();
-    } else if human_version.contains("14") {
-        return "v14".to_string();
+    match Regex::new(r"(?<major>\d+)\.(?<minor>\d+)")
+        .unwrap()
+        .captures(&human_version)
+    {
+        Some(captures) if captures.len() == 3 => match &captures["major"] {
+            "14" => return "v14".to_string(),
+            "15" => return "v15".to_string(),
+            _ => {}
+        },
+        _ => {}
     }
     panic!("Unsuported postgres version {human_version}");
 }
