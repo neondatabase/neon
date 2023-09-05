@@ -473,7 +473,7 @@ impl VirtualFile {
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
     pub async fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
         while !buf.is_empty() {
-            match self.write_at(buf, offset) {
+            match self.write_at(buf, offset).await {
                 Ok(0) => {
                     return Err(Error::new(
                         std::io::ErrorKind::WriteZero,
@@ -512,7 +512,7 @@ impl VirtualFile {
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
         let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
+        let n = self.write_at(buf, pos).await?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -527,7 +527,7 @@ impl VirtualFile {
         result
     }
 
-    pub fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
         let result = self.with_file("write", |file| file.write_at(buf, offset))?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
