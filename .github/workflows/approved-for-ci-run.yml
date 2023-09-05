@@ -32,7 +32,8 @@ jobs:
       contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
 
-    runs-on: [ ubuntu-latest ]
+    runs-on: ubuntu-latest
+    permissions: write-all
 
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
@@ -44,7 +45,8 @@ jobs:
       github.event.action == 'labeled' &&
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
 
-    runs-on: [ ubuntu-latest ]
+    runs-on: ubuntu-latest
+    permissions: write-all
 
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
