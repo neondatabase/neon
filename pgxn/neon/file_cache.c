@@ -83,11 +83,12 @@ typedef struct FileCacheControl
 } FileCacheControl;
 
 static HTAB* lfc_hash;
-static int   lfc_desc;
+static int   lfc_desc = 0;
 static LWLockId lfc_lock;
 static int   lfc_max_size;
 static int   lfc_size_limit;
 static int   lfc_free_space_watermark;
+static bool	lfc_disabled_by_failure = false;
 static char* lfc_path;
 static  FileCacheControl* lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -455,7 +456,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	bool result = true;
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0 && !lfc_disabled_by_failure) /* fast exit if file cache is disabled */
 		return false;
 
 	tag.rnode = rnode;
@@ -480,11 +481,13 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_desc == 0)
 	{
 		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
-		if (lfc_desc < 0) {
-			elog(LOG, "Failed to open file cache %s: %m", lfc_path);
-			lfc_size_limit = 0; /* disable file cache */
-			result = false;
-		}
+	}
+
+	if (lfc_desc < 0) {
+		elog(LOG, "Failed to open file cache %s: %m", lfc_path);
+		lfc_size_limit = 0; /* disable file cache */
+		lfc_desc = 0;
+		result = false;
 	}
 
 	if (lfc_desc > 0)
