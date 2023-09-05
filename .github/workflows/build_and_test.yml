@@ -939,7 +939,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          TIMEOUT=600 # 10 minutes, currently it takes ~2-3 minutes
+          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
           INTERVAL=15 # try each N seconds
 
           last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
