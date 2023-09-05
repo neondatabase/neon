@@ -109,18 +109,50 @@ pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15
     let human_version = get_pg_config("--version", pgbin);
+    return parse_pg_version(&human_version).to_string();
+}
+
+fn parse_pg_version(human_version: &str) -> &str {
     match Regex::new(r"(?<major>\d+)\.(?<minor>\d+)")
         .unwrap()
-        .captures(&human_version)
+        .captures(human_version)
     {
         Some(captures) if captures.len() == 3 => match &captures["major"] {
-            "14" => return "v14".to_string(),
-            "15" => return "v15".to_string(),
+            "14" => return "v14",
+            "15" => return "v15",
             _ => {}
         },
         _ => {}
     }
     panic!("Unsuported postgres version {human_version}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pg_version;
+
+    #[test]
+    fn test_parse_pg_version() {
+        assert_eq!(parse_pg_version("PostgreSQL 15.4"), "v15");
+        assert_eq!(parse_pg_version("PostgreSQL 15.14"), "v15");
+        assert_eq!(parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"), "v15");
+
+        assert_eq!(parse_pg_version("PostgreSQL 14.15"), "v14");
+        assert_eq!(parse_pg_version("PostgreSQL 14.0"), "v14");
+        assert_eq!(parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"), "v14");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_unsupported_version() {
+        parse_pg_version("PostgreSQL 13.14"); 
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_incorrect_version_format() {
+        parse_pg_version("PostgreSQL 14"); 
+    }
 }
 
 // download the archive for a given extension,
