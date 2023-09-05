@@ -27,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::WriteBlobWriter;
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -511,7 +511,7 @@ struct ImageLayerWriterInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    blob_writer: WriteBlobWriter<VirtualFile>,
+    blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
@@ -544,7 +544,7 @@ impl ImageLayerWriterInner {
         )?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();

@@ -13,8 +13,9 @@
 //!
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
+use crate::virtual_file::VirtualFile;
 use std::cmp::min;
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Write};
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
@@ -83,12 +84,13 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
+/// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
-/// An implementation of BlobWriter to write blobs to anything that
-/// implements std::io::Write.
-///
-pub struct WriteBlobWriter<W> {
-    inner: W,
+/// If a `BlobWriter` is dropped, the internal buffer will be
+/// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
+/// manually before dropping.
+pub struct BlobWriter<const BUFFERED: bool> {
+    inner: VirtualFile,
     offset: u64,
     /// A buffer to save on read calls
     buf: [u8; PAGE_SZ],
@@ -101,9 +103,9 @@ pub struct WriteBlobWriter<W> {
     buf_offs: usize,
 }
 
-impl<W> WriteBlobWriter<W> {
-    pub fn new(inner: W, start_offset: u64) -> Self {
-        WriteBlobWriter {
+impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
+    pub fn new(inner: VirtualFile, start_offset: u64) -> Self {
+        Self {
             inner,
             offset: start_offset,
             buf: [0; PAGE_SZ],
@@ -115,20 +117,6 @@ impl<W> WriteBlobWriter<W> {
         self.offset
     }
 
-    /// Access the underlying Write object.
-    ///
-    /// NOTE: WriteBlobWriter keeps track of the current write offset. If
-    /// you write something directly to the inner Write object, it makes the
-    /// internally tracked 'offset' to go out of sync. So don't do that.
-    pub fn into_inner(self) -> W {
-        self.inner
-    }
-}
-
-impl<W> WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
     #[inline(always)]
     /// Writes the given buffer directly to the underlying `VirtualFile`.
     /// You need to make sure that the internal buffer is empty, otherwise
@@ -140,7 +128,8 @@ where
     }
 
     #[inline(always)]
-    async fn flush_buffer(&mut self) -> Result<(), Error> {
+    /// Flushes the internal buffer to the underlying `VirtualFile`.
+    pub async fn flush_buffer(&mut self) -> Result<(), Error> {
         self.inner.write_all(&self.buf)?;
         self.buf_offs = 0;
         Ok(())
@@ -221,5 +210,31 @@ where
         }
         self.write_all(srcbuf, no_buffering).await?;
         Ok(offset)
+    }
+}
+
+impl BlobWriter<true> {
+    /// Access the underlying `VirtualFile`.
+    ///
+    /// This function flushes the internal buffer before giving access
+    /// to the underlying `VirtualFile`.
+    pub async fn into_inner(mut self) -> Result<VirtualFile, Error> {
+        self.flush_buffer().await?;
+        Ok(self.inner)
+    }
+
+    /// Access the underlying `VirtualFile`.
+    ///
+    /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
+    /// the internal buffer before giving access.
+    pub fn into_inner_no_flush(self) -> VirtualFile {
+        self.inner
+    }
+}
+
+impl BlobWriter<false> {
+    /// Access the underlying `VirtualFile`.
+    pub fn into_inner(self) -> VirtualFile {
+        self.inner
     }
 }

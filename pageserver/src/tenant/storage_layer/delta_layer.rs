@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
-use crate::tenant::blob_io::WriteBlobWriter;
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -46,7 +46,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::SeekFrom;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -583,7 +583,7 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
+    blob_writer: BlobWriter<true>,
 }
 
 impl DeltaLayerWriterInner {
@@ -608,8 +608,7 @@ impl DeltaLayerWriterInner {
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let buf_writer = BufWriter::new(file);
-        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -667,8 +666,7 @@ impl DeltaLayerWriterInner {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
-        let buf_writer = self.blob_writer.into_inner();
-        let mut file = buf_writer.into_inner()?;
+        let mut file = self.blob_writer.into_inner().await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
@@ -840,13 +838,10 @@ impl DeltaLayerWriter {
 impl Drop for DeltaLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            match inner.blob_writer.into_inner().into_inner() {
-                Ok(vfile) => vfile.remove(),
-                Err(err) => warn!(
-                    "error while flushing buffer of image layer temporary file: {}",
-                    err
-                ),
-            }
+            // We want to remove the virtual file here, so it's fine to not
+            // having completely flushed unwritten data.
+            let vfile = inner.blob_writer.into_inner_no_flush();
+            vfile.remove();
         }
     }
 }
