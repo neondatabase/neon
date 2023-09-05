@@ -546,7 +546,7 @@ class NeonEnvBuilder:
         user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
-    ) -> Optional[RemoteStorage]:
+    ) -> RemoteStorage:
         ret = kind.configure(
             self.repo_dir,
             self.mock_s3_server,
