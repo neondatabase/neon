@@ -118,6 +118,9 @@ class LocalFsStorage:
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 
+    def to_toml_inline_table(self) -> str:
+        return f"local_path='{self.root}'"
+
 
 @dataclass
 class S3Storage:
@@ -144,6 +147,19 @@ class S3Storage:
             }
         )
 
+    def to_toml_inline_table(self) -> str:
+        s = f"bucket_name='{self.bucket_name}',\
+            bucket_region='{self.bucket_region}'"
+
+        if self.prefix_in_bucket is not None:
+            s += f",prefix_in_bucket='{self.prefix_in_bucket}'"
+
+        if self.endpoint is not None:
+            s += f",endpoint='{self.endpoint}'"
+
+        return s
+
+
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
 
@@ -151,16 +167,9 @@ RemoteStorage = Union[LocalFsStorage, S3Storage]
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
     if isinstance(remote_storage, LocalFsStorage):
-        remote_storage_config = f"local_path='{remote_storage.root}'"
+        remote_storage_config = remote_storage.to_toml_inline_table()
     elif isinstance(remote_storage, S3Storage):
-        remote_storage_config = f"bucket_name='{remote_storage.bucket_name}',\
-            bucket_region='{remote_storage.bucket_region}'"
-
-        if remote_storage.prefix_in_bucket is not None:
-            remote_storage_config += f",prefix_in_bucket='{remote_storage.prefix_in_bucket}'"
-
-        if remote_storage.endpoint is not None:
-            remote_storage_config += f",endpoint='{remote_storage.endpoint}'"
+        remote_storage_config = remote_storage.to_toml_inline_table()
     else:
         raise Exception("invalid remote storage type")
 
