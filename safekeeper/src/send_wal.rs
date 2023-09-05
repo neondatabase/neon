@@ -418,10 +418,11 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
             start_pos,
             end_pos,
-            matches!(end_watch, EndWatch::Flush(_))
+            matches!(end_watch, EndWatch::Flush(_)),
+            appname
         );
 
         // switch to copy
@@ -680,7 +681,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     }
 }
 
-const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
+const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Wait until we have available WAL > start_pos or timeout expires. Returns
 /// - Ok(Some(end_pos)) if needed lsn is successfully observed;
