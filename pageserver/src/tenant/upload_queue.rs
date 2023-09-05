@@ -56,7 +56,13 @@ pub(crate) struct UploadQueueInitialized {
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
     /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
     /// Safekeeper can rely on it to make decisions for WAL storage.
-    pub(crate) last_uploaded_consistent_lsn: Lsn,
+    ///
+    /// visible_remote_consistent_lsn is only updated after our generation has been validated with
+    /// the control plane: this is coordinated via the channel defined below.
+    pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
+    pub(crate) visible_remote_consistent_lsn: Option<Lsn>,
+    pub(crate) visible_remote_consistent_lsn_rx: tokio::sync::mpsc::Receiver<Lsn>,
+    pub(crate) visible_remote_consistent_lsn_tx: tokio::sync::mpsc::Sender<Lsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
@@ -78,6 +84,18 @@ pub(crate) struct UploadQueueInitialized {
 impl UploadQueueInitialized {
     pub(super) fn no_pending_work(&self) -> bool {
         self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_visible(&mut self) -> Option<Lsn> {
+        while let Ok(lsn) = self.visible_remote_consistent_lsn_rx.try_recv() {
+            self.visible_remote_consistent_lsn = Some(lsn);
+        }
+
+        self.visible_remote_consistent_lsn
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_projected(&mut self) -> Option<Lsn> {
+        self.projected_remote_consistent_lsn
     }
 }
 
@@ -107,14 +125,18 @@ impl UploadQueue {
 
         info!("initializing upload queue for empty remote");
 
+        let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
+            tokio::sync::mpsc::channel(16);
+
         let state = UploadQueueInitialized {
             // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
-            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
-            // safekeepers from garbage-collecting anything.
-            last_uploaded_consistent_lsn: Lsn(0),
+            projected_remote_consistent_lsn: None,
+            visible_remote_consistent_lsn: None,
+            visible_remote_consistent_lsn_tx,
+            visible_remote_consistent_lsn_rx,
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -152,11 +174,16 @@ impl UploadQueue {
             index_part.metadata.disk_consistent_lsn()
         );
 
+        let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
+            tokio::sync::mpsc::channel(16);
         let state = UploadQueueInitialized {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
-            last_uploaded_consistent_lsn: index_part.metadata.disk_consistent_lsn(),
+            projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
+            visible_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
+            visible_remote_consistent_lsn_tx,
+            visible_remote_consistent_lsn_rx,
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,

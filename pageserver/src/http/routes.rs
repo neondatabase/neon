@@ -295,7 +295,12 @@ async fn build_timeline_info_common(
     };
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
-    let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+    let remote_consistent_lsn_projected = timeline
+        .get_remote_consistent_lsn_projected()
+        .unwrap_or(Lsn(0));
+    let remote_consistent_lsn_visible = timeline
+        .get_remote_consistent_lsn_visible()
+        .unwrap_or(Lsn(0));
 
     let walreceiver_status = timeline.walreceiver_status();
 
@@ -305,7 +310,8 @@ async fn build_timeline_info_common(
         ancestor_timeline_id,
         ancestor_lsn,
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-        remote_consistent_lsn,
+        remote_consistent_lsn: remote_consistent_lsn_projected,
+        remote_consistent_lsn_visible,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),

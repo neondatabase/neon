@@ -116,8 +116,12 @@
 //! # Completion
 //!
 //! Once an operation has completed, we update
-//! [`UploadQueueInitialized::last_uploaded_consistent_lsn`] which indicates
-//! to safekeepers that they can delete the WAL up to that LSN.
+//! [`UploadQueueInitialized::projected_remote_consistent_lsn`] immediately,
+//! and submit a request through the DeletionQueue to update
+//! [`UploadQueueInitialized::visible_remote_consistent_lsn`] after it has
+//! validated that our generation is not stale.  It is this visible value
+//! that is advertized to safekeepers as a signal that that they can
+//! delete the WAL up to that LSN.
 //!
 //! The [`RemoteTimelineClient::wait_completion`] method can be used to wait
 //! for all pending operations to complete. It does not prevent more
@@ -417,13 +421,23 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    pub fn last_uploaded_consistent_lsn(&self) -> Option<Lsn> {
-        match &*self.upload_queue.lock().unwrap() {
+    pub fn remote_consistent_lsn_projected(&self) -> Option<Lsn> {
+        match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
-            UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
-            UploadQueue::Stopped(q) => {
-                Some(q.upload_queue_for_deletion.last_uploaded_consistent_lsn)
-            }
+            UploadQueue::Initialized(q) => q.get_last_remote_consistent_lsn_projected(),
+            UploadQueue::Stopped(q) => q
+                .upload_queue_for_deletion
+                .get_last_remote_consistent_lsn_projected(),
+        }
+    }
+
+    pub fn remote_consistent_lsn_visible(&self) -> Option<Lsn> {
+        match &mut *self.upload_queue.lock().unwrap() {
+            UploadQueue::Uninitialized => None,
+            UploadQueue::Initialized(q) => q.get_last_remote_consistent_lsn_visible(),
+            UploadQueue::Stopped(q) => q
+                .upload_queue_for_deletion
+                .get_last_remote_consistent_lsn_visible(),
         }
     }
 
@@ -1178,7 +1192,7 @@ impl RemoteTimelineClient {
         }
 
         // The task has completed successfully. Remove it from the in-progress list.
-        {
+        let lsn_update = {
             let mut upload_queue_guard = self.upload_queue.lock().unwrap();
             let upload_queue = match upload_queue_guard.deref_mut() {
                 UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
@@ -1198,23 +1212,48 @@ impl RemoteTimelineClient {
 
             upload_queue.inprogress_tasks.remove(&task.task_id);
 
-            match task.op {
+            let lsn_update = match task.op {
                 UploadOp::UploadLayer(_, _) => {
                     upload_queue.num_inprogress_layer_uploads -= 1;
+                    None
                 }
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
-                    upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
+                    // XXX monotonicity check?
+
+                    upload_queue.projected_remote_consistent_lsn = Some(lsn);
+                    if self.generation.is_none() {
+                        // Legacy mode: skip validating generation
+                        upload_queue.visible_remote_consistent_lsn = Some(lsn);
+                        None
+                    } else {
+                        Some((lsn, upload_queue.visible_remote_consistent_lsn_tx.clone()))
+                    }
                 }
                 UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions -= 1;
+                    None
                 }
                 UploadOp::Barrier(_) => unreachable!(),
             };
 
             // Launch any queued tasks that were unblocked by this one.
             self.launch_queued_tasks(upload_queue);
+            lsn_update
+        };
+
+        if let Some((lsn, tx)) = lsn_update {
+            self.deletion_queue_client
+                .update_remote_consistent_lsn(
+                    self.tenant_id,
+                    self.timeline_id,
+                    self.generation,
+                    lsn,
+                    tx,
+                )
+                .await;
         }
+
         self.calls_unfinished_metric_end(&task.op);
     }
 
@@ -1298,12 +1337,17 @@ impl RemoteTimelineClient {
                     // In-place replace of Initialized to Stopped can be done with the help of https://github.com/Sgeo/take_mut
                     // but for this use case it doesnt really makes sense to bring unsafe code only for this usage point.
                     // Deletion is not really perf sensitive so there shouldnt be any problems with cloning a fraction of it.
+                    let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
+                        tokio::sync::mpsc::channel(16);
                     let upload_queue_for_deletion = UploadQueueInitialized {
                         task_counter: 0,
                         latest_files: initialized.latest_files.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
                         latest_metadata: initialized.latest_metadata.clone(),
-                        last_uploaded_consistent_lsn: initialized.last_uploaded_consistent_lsn,
+                        projected_remote_consistent_lsn: initialized.visible_remote_consistent_lsn,
+                        visible_remote_consistent_lsn: initialized.visible_remote_consistent_lsn,
+                        visible_remote_consistent_lsn_tx,
+                        visible_remote_consistent_lsn_rx,
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,

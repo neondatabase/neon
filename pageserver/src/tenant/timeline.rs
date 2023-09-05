@@ -523,9 +523,21 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
-    pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+    /// remote_consistent_lsn for objects uploaded in the tenant's current generation
+    pub fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
-            remote_client.last_uploaded_consistent_lsn()
+            remote_client.remote_consistent_lsn_projected()
+        } else {
+            None
+        }
+    }
+
+    /// remote_consistent_lsn which the tenant is guaranteed not to go backward from,
+    /// i.e. a value of remote_consistent_lsn_projected which has undergone
+    /// generation validation in the deletion queue.
+    pub fn get_remote_consistent_lsn_visible(&self) -> Option<Lsn> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.remote_consistent_lsn_visible()
         } else {
             None
         }
