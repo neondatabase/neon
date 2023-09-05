@@ -475,8 +475,8 @@ impl PageServerConfigBuilder {
         self.background_task_maximum_delay = BuilderValue::Set(delay);
     }
 
-    pub fn control_plane_api(&mut self, api: Url) {
-        self.control_plane_api = BuilderValue::Set(Some(api))
+    pub fn control_plane_api(&mut self, api: Option<Url>) {
+        self.control_plane_api = BuilderValue::Set(api)
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -755,7 +755,14 @@ impl PageServerConf {
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
-                "control_plane_api" => builder.control_plane_api(parse_toml_string(key, item)?.parse().context("failed to parse control plane URL")?),
+                "control_plane_api" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api(None)
+                    } else {
+                        builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
+                    }
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
