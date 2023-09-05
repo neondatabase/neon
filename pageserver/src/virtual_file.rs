@@ -326,7 +326,7 @@ impl VirtualFile {
         self.with_file("fsync", |file| file.sync_all())?
     }
 
-    pub fn metadata(&self) -> Result<fs::Metadata, Error> {
+    pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
         self.with_file("metadata", |file| file.metadata())?
     }
 
@@ -407,7 +407,7 @@ impl VirtualFile {
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
 
-    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         match pos {
             SeekFrom::Start(offset) => {
                 self.pos = offset;
@@ -619,9 +619,9 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.write_all_at(buf, offset),
             }
         }
-        fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.seek(pos),
+                MaybeVirtualFile::VirtualFile(file) => file.seek(pos).await,
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
@@ -712,23 +712,23 @@ mod tests {
         assert_eq!("", file_a.read_string().await?);
 
         // Test seeks.
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
         assert_eq!("oobar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::End(-2))?, 4);
+        assert_eq!(file_a.seek(SeekFrom::End(-2)).await?, 4);
         assert_eq!("ar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
-        assert_eq!(file_a.seek(SeekFrom::Current(2))?, 3);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Current(2)).await?, 3);
         assert_eq!("bar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::Current(-5))?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Current(-5)).await?, 1);
         assert_eq!("oobar", file_a.read_string().await?);
 
         // Test erroneous seeks to before byte 0
-        assert!(file_a.seek(SeekFrom::End(-7)).is_err());
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
-        assert!(file_a.seek(SeekFrom::Current(-2)).is_err());
+        file_a.seek(SeekFrom::End(-7)).await.unwrap_err();
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
+        file_a.seek(SeekFrom::Current(-2)).await.unwrap_err();
 
         // the erroneous seek should have left the position unchanged
         assert_eq!("oobar", file_a.read_string().await?);
@@ -752,7 +752,7 @@ mod tests {
         // open the same file many times. The effect is the same.)
         //
         // leave file_a positioned at offset 1 before we start
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {

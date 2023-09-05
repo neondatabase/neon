@@ -31,7 +31,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
-use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::WriteBlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -590,7 +590,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -607,7 +607,7 @@ impl DeltaLayerWriterInner {
 
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let buf_writer = BufWriter::new(file);
         let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
 
@@ -632,11 +632,12 @@ impl DeltaLayerWriterInner {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+    async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
         self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
+            .await
     }
 
-    fn put_value_bytes(
+    async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -645,7 +646,7 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
-        let off = self.blob_writer.write_blob(val)?;
+        let off = self.blob_writer.write_blob(val).await?;
 
         let blob_ref = BlobRef::new(off, will_init);
 
@@ -662,7 +663,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    async fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -671,7 +672,8 @@ impl DeltaLayerWriterInner {
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         for buf in block_buf.blocks {
             file.write_all(buf.as_ref())?;
         }
@@ -687,11 +689,22 @@ impl DeltaLayerWriterInner {
             index_start_blk,
             index_root_blk,
         };
-        file.seek(SeekFrom::Start(0))?;
-        Summary::ser_into(&summary, &mut file)?;
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf)?;
 
         let metadata = file
             .metadata()
+            .await
             .context("get file metadata to determine size")?;
 
         // 5GB limit for objects without multipart upload (which we don't want to use)
@@ -774,7 +787,7 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -782,13 +795,10 @@ impl DeltaLayerWriter {
         lsn_range: Range<Lsn>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            inner: Some(DeltaLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_start,
-                lsn_range,
-            )?),
+            inner: Some(
+                DeltaLayerWriterInner::new(conf, timeline_id, tenant_id, key_start, lsn_range)
+                    .await?,
+            ),
         })
     }
 
@@ -797,11 +807,11 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_value(key, lsn, val)
+    pub async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_value(key, lsn, val).await
     }
 
-    pub fn put_value_bytes(
+    pub async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -812,6 +822,7 @@ impl DeltaLayerWriter {
             .as_mut()
             .unwrap()
             .put_value_bytes(key, lsn, val, will_init)
+            .await
     }
 
     pub fn size(&self) -> u64 {
@@ -821,8 +832,8 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        self.inner.take().unwrap().finish(key_end)
+    pub async fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+        self.inner.take().unwrap().finish(key_end).await
     }
 }
 

@@ -27,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::WriteBlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -519,7 +519,7 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -543,7 +543,7 @@ impl ImageLayerWriterInner {
             std::fs::OpenOptions::new().write(true).create_new(true),
         )?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
@@ -569,9 +569,9 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
+        let off = self.blob_writer.write_blob(img).await?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -583,14 +583,15 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    fn finish(self) -> anyhow::Result<ImageLayer> {
+    async fn finish(self) -> anyhow::Result<ImageLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner();
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
             file.write_all(buf.as_ref())?;
@@ -607,11 +608,22 @@ impl ImageLayerWriterInner {
             index_start_blk,
             index_root_blk,
         };
-        file.seek(SeekFrom::Start(0))?;
-        Summary::ser_into(&summary, &mut file)?;
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf)?;
 
         let metadata = file
             .metadata()
+            .await
             .context("get metadata to determine file size")?;
 
         let desc = PersistentLayerDesc::new_img(
@@ -687,7 +699,7 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -695,13 +707,9 @@ impl ImageLayerWriter {
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
-            inner: Some(ImageLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_range,
-                lsn,
-            )?),
+            inner: Some(
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_id, key_range, lsn).await?,
+            ),
         })
     }
 
@@ -710,15 +718,15 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img)
+    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img).await
     }
 
     ///
     /// Finish writing the image layer.
     ///
-    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish()
+    pub async fn finish(mut self) -> anyhow::Result<ImageLayer> {
+        self.inner.take().unwrap().finish().await
     }
 }
 
