@@ -43,6 +43,12 @@ def test_tenant_delete_smoke(
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
+        ]
+    )
 
     # lucky race with stopping from flushing a layer we fail to schedule any uploads
     env.pageserver.allowed_errors.append(
@@ -194,6 +200,14 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             '.*stopping left-over name="remote upload".*',
         ]
     )
+
+    if simulate_failures:
+        env.pageserver.allowed_errors.extend(
+            [
+                # The deletion queue will complain when it encounters simulated S3 errors
+                ".*deletion executor: DeleteObjects request failed.*",
+            ]
+        )
 
     ps_http = env.pageserver.http_client()
 
@@ -383,6 +397,7 @@ def test_tenant_delete_is_resumed_on_attach(
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():
+        ps_http.deletion_queue_flush(execute=True)
         assert_prefix_empty(
             neon_env_builder,
             prefix="/".join(
