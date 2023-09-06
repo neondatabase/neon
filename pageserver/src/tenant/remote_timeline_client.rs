@@ -1587,6 +1587,16 @@ mod tests {
                 )),
             })
         }
+
+        /// A tracing::Span that satisfies remote_timeline_client methods that assert tenant_id
+        /// and timeline_id are present.
+        fn span(&self) -> tracing::Span {
+            tracing::info_span!(
+                "test",
+                tenant_id = %self.harness.tenant_id,
+                timeline_id = %TIMELINE_ID
+            )
+        }
     }
 
     // Test scheduling
@@ -1913,6 +1923,8 @@ mod tests {
     #[tokio::test]
     async fn index_part_download_simple() -> anyhow::Result<()> {
         let test_state = TestSetup::new("index_part_download_simple").await.unwrap();
+        let span = test_state.span();
+        let _guard = span.enter();
 
         // Simple case: we are in generation N, load the index from generation N - 1
         let generation_n = 5;
@@ -1928,6 +1940,9 @@ mod tests {
         let test_state = TestSetup::new("index_part_download_ordering")
             .await
             .unwrap();
+
+        let span = test_state.span();
+        let _guard = span.enter();
 
         // A generation-less IndexPart exists in the bucket, we should find it
         let generation_n = 5;
