@@ -636,6 +636,7 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
+    use std::future::Future;
     use std::io::Write;
     use std::sync::Arc;
 
@@ -705,7 +706,7 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| {
+        test_files("virtual_files", |path, open_options| async {
             let vf = VirtualFile::open_with_options(path, open_options).await?;
             Ok(MaybeVirtualFile::VirtualFile(vf))
         })
@@ -714,15 +715,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_physical_files() -> Result<(), Error> {
-        test_files("physical_files", |path, open_options| {
+        test_files("physical_files", |path, open_options| async {
             Ok(MaybeVirtualFile::File(open_options.open(path)?))
         })
         .await
     }
 
-    async fn test_files<OF>(testname: &str, openfunc: OF) -> Result<(), Error>
+    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
-        OF: Fn(&Path, &OpenOptions) -> Result<MaybeVirtualFile, std::io::Error>,
+        OF: Fn(&Path, &OpenOptions) -> FT,
+        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
@@ -731,14 +733,15 @@ mod tests {
         let mut file_a = openfunc(
             &path_a,
             OpenOptions::new().write(true).create(true).truncate(true),
-        )?;
+        )
+        .await?;
         file_a.write_all(b"foobar").await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(&path_a, OpenOptions::new().read(true))?;
+        let mut file_a = openfunc(&path_a, OpenOptions::new().read(true)).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar").await.unwrap_err();
@@ -780,7 +783,8 @@ mod tests {
                 .write(true)
                 .create(true)
                 .truncate(true),
-        )?;
+        )
+        .await?;
         file_b.write_all_at(b"BAR", 3).await?;
         file_b.write_all_at(b"FOO", 0).await?;
 
@@ -794,7 +798,7 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(&path_b, OpenOptions::new().read(true))?;
+            let mut vfile = openfunc(&path_b, OpenOptions::new().read(true)).await?;
             assert_eq!("FOOBAR", vfile.read_string().await?);
             vfiles.push(vfile);
         }
@@ -819,8 +823,8 @@ mod tests {
     /// Test using VirtualFiles from many threads concurrently. This tests both using
     /// a lot of VirtualFiles concurrently, causing evictions, and also using the same
     /// VirtualFile from multiple threads concurrently.
-    #[test]
-    fn test_vfile_concurrency() -> Result<(), Error> {
+    #[tokio::test]
+    async fn test_vfile_concurrency() -> Result<(), Error> {
         const SIZE: usize = 8 * 1024;
         const VIRTUAL_FILES: usize = 100;
         const THREADS: usize = 100;
