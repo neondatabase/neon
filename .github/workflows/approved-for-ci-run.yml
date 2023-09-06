@@ -17,8 +17,10 @@ on:
       - labeled
 
 env:
-  GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PR_NUMBER: ${{ github.event.pull_request.number }}
+
+permissions: write-all
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -60,14 +62,17 @@ jobs:
       - run: git push --force origin "ci-run/pr-${PR_NUMBER}"
 
       - name: Create a Pull Request for CI run (if required)
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           HEAD="ci-run/pr-${PR_NUMBER}"
+          BODY="This Pull Request was create automatically to run CI pipeline for #${PR_NUMBER}.\n\nPlease do not alter or merge/close it.\n\nFeel free to comment the original PR."
 
-          ALREADY_CREATED=$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${HEAD}" --base main --json number --jq '.[].number')
+          ALREADY_CREATED=$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${HEAD}" --base "main" --json "number" --jq '.[].number')
           if [ -z "${ALREADY_CREATED}" ]; then
-            gh pr --repo "${GITHUB_REPOSITORY}" create  --title "[DO NOT MERGE] CI run for PR #${PR_NUMBER}" \
-                                                        --body "Ref #${PR_NUMBER}" \
+            gh pr --repo "${GITHUB_REPOSITORY}" create  --title "CI run for PR #${PR_NUMBER}" \
+                                                        --body "${BODY}" \
                                                         --head "${HEAD}" \
-                                                        --base main \
+                                                        --base "main" \
                                                         --draft
           fi
