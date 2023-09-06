@@ -5,8 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-pageserver = { path = "../pageserver" }
-
 aws-sdk-s3.workspace = true
 aws-smithy-http.workspace = true
 aws-types.workspace = true
@@ -24,14 +22,8 @@ serde_json.workspace = true
 serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-clap.workspace = true
 
-aws-config = { workspace = true, default-features = false, features = [
-    "rustls",
-    "credentials-sso",
-] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = [
     "clock",
     "serde",
@@ -40,5 +32,15 @@ reqwest = { workspace = true, default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+aws-config = { workspace = true, default-features = false, features = [
+    "rustls",
+    "credentials-sso",
+] }
+
+pageserver = { path = "../pageserver" }
+
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
 tracing-appender = "0.2"
