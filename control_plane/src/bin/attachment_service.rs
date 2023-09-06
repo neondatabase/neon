@@ -36,9 +36,11 @@ use control_plane::attachment_service::{AttachHookRequest, AttachHookResponse};
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
 struct Cli {
+    /// Host and port to listen on, like `127.0.0.1:1234`
     #[arg(short, long)]
-    listen: String,
+    listen: std::net::SocketAddr,
 
+    /// Path to the .json file to store state (will be created if it doesn't exist)
     #[arg(short, long)]
     path: PathBuf,
 }
@@ -109,16 +111,23 @@ impl PersistentState {
 
     async fn load_or_new(path: &Path) -> Self {
         match Self::load(path).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::info!(
-                    "Creating new state file at {0} (load returned {e})",
-                    path.to_string_lossy()
-                );
+            Ok(s) => {
+                tracing::info!("Loaded state file at {0}", path.display());
+                s
+            }
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .map(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    .unwrap_or(false) =>
+            {
+                tracing::info!("Will create state file at {0}", path.display());
                 Self {
                     tenants: HashMap::new(),
                     path: path.to_owned(),
                 }
+            }
+            Err(e) => {
+                panic!("Failed to load state from '{}': {e:#} (maybe your .neon/ dir was written by an older version?)", path.display())
             }
         }
     }
@@ -176,8 +185,7 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
 async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
 
-    let state = get_state(&req).inner.clone();
-    let locked = state.read().await;
+    let locked = get_state(&req).inner.read().await;
 
     let mut response = ValidateResponse {
         tenants: Vec::new(),
@@ -258,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
     let service = utils::http::RouterService::new(router).unwrap();
     let server = hyper::Server::from_tcp(http_listener)?.serve(service);
 
-    tracing::info!("Serving on {0}", args.listen.as_str());
+    tracing::info!("Serving on {0}", args.listen);
     server.await?;
 
     Ok(())
