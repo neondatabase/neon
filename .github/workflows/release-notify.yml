@@ -6,8 +6,9 @@ concurrency:
 
 on:
   pull_request:
-    branches:
-      - release
+    # TODO: uncomment
+    # branches:
+    #   - release
     types:
       # Default types that triggers a workflow:
       # - https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
@@ -22,178 +23,9 @@ jobs:
     runs-on: [ ubuntu-latest ]
 
     steps:
-      - name: Generate Slack Message
-        id: generate-slack-message
-        uses: actions/github-script@v6
+      # TODO: move to neondatabase/dev-actions
+      - uses: bayandin/dev-actions/release-pr-notify@main
         with:
-          retries: 5
-          result-encoding: string
-          github-token: ${{ secrets.CI_ACCESS_TOKEN }}
-          script: |
-            // Helper function to create a URL for a PR
-            const urlForPr = function (prNumber) {
-              return `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`
-            }
-
-            // Helper function to replace #XXX with a Slack mrkdwn link to the PR XXX
-            const linkify = function (text) {
-              return text.replace(/#(\d+)/g, (match, prNumber) => { return `<${urlForPr(prNumber)}|#${prNumber}>` })
-            }
-
-            const action = context.payload.action
-            const isMerged = context.payload.pull_request.merged
-
-            let statusEmoji = ":new:"
-            if (action == "synchronize") {
-              statusEmoji = ":hammer_and_wrench:" //
-            } else if (action == "closed" && isMerged) {
-              statusEmoji = ":pr-merged:"
-            } else if (action == "closed" && !isMerged) {
-              statusEmoji = ":no_entry_sign:"
-            }
-
-            const pullRequest = context.payload.pull_request
-
-            const ownerRepoPrParams = {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-            }
-
-            // Prepare a header for the Slack message
-            const repoToProjectName = {
-              "neondatabase/neon": "Storage",
-              "neondatabase/cloud": "Console & Control Plane",
-            }
-            const project = repoToProjectName[pullRequest.base.repo.full_name] || pullRequest.base.repo.name.toUpperCase()
-            const header = `${project} release is coming: "${pullRequest.title}" :tada:`
-
-            // Fetch commits for the PR
-            const listCommitsOpts = github.rest.pulls.listCommits.endpoint.merge(ownerRepoPrParams)
-            const commits = await github.paginate(listCommitsOpts)
-
-            const blocks = []
-            blocks.push({
-              type: "header",
-              text: {
-                type: "plain_text",
-                text: header,
-              },
-            }, {
-              type: "context",
-              elements: [
-                {
-                  type: "mrkdwn",
-                  text: `Release PR: ${urlForPr(context.issue.number)}`,
-                },
-              ],
-            }, {
-              "type": "divider"
-            })
-
-            // The length of each section is limited to 3000 characters,
-            // split them into several sections if needed
-            const messages = []
-            let currentMessage = ""
-
-            for (const commit of commits) {
-              const commitMessage = commit.commit.message.replace(/\r\n/g, "\n")
-              let firstLine = commitMessage.split("\n\n", 1)[0].trim()
-
-              // if the first line doesn't end with PR like "(#1234)", add a direct link to the commit
-              if (!/\(#\d+\)$/.test(firstLine)) {
-                const sha = commit.sha
-                const htmlUrl = commit.html_url
-
-                firstLine += ` (<${htmlUrl}|${sha.slice(0, 7)}>)`
-              }
-
-              let title = `- ${linkify(firstLine)}\n`
-
-              if (title.length > 3000) {
-                title = title.slice(0, 3000)
-              }
-
-              if (title.length + currentMessage.length > 3000) {
-                messages.push(currentMessage)
-                currentMessage = ""
-              }
-
-              currentMessage += title
-            }
-            messages.push(currentMessage)
-
-            for (const message of messages) {
-              blocks.push({
-                type: "section",
-                text: {
-                  type: "mrkdwn",
-                  text: message,
-                },
-              })
-            }
-
-            const updatedAt = Math.floor(new Date(pullRequest.updated_at) / 1000)
-            blocks.push({
-              "type": "divider"
-            }, {
-              type: "context",
-              elements: [{
-                type: "mrkdwn",
-                text: `${statusEmoji} PR updated at <!date^${updatedAt}^{date_num} {time_secs} (local time)|${new Date().toISOString()}>`,
-              }],
-            })
-
-            const slackMessage = {
-              text: header,
-              blocks,
-            }
-
-            return JSON.stringify(slackMessage)
-
-      - name: Get a file with Slack message ID from GitHub Actions cache
-        uses: actions/cache/restore@v3
-        id: posted-message
-        with:
-          path: release-notify.json
-          key: release-notify-${{ github.event.number }}.json
-
-      - name: Get Slack message ID from the file from GitHub Actions cache
-        id: message-id
-        run: |
-          UPDATE_TS=$(cat release-notify.json | jq --raw-output '.ts' || true)
-          echo "update-ts=${UPDATE_TS}" >> $GITHUB_OUTPUT
-
-      - name: Send Slack message
-        uses: slackapi/slack-github-action@v1
-        id: slack
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        with:
-          channel-id: ${{ vars.SLACK_UPCOMING_RELEASE_CHANNEL_ID || 'C05QQ9J1BRC' }} # if not set, then `#test-release-notifications`
-          update-ts: ${{ steps.message-id.outputs.update-ts }}
-          payload: ${{ steps.generate-slack-message.outputs.result }}
-
-      - name: Prepare a file with Slack message ID for GitHub Actions cache
-        if: steps.posted-message.outputs.cache-hit != 'true'
-        run: |
-          echo '{"ts": "${{ steps.slack.outputs.ts }}"}' > release-notify.json
-
-      - name: Save a file with Slack message ID to GitHub Actions cache
-        uses: actions/cache/save@v3
-        if: steps.posted-message.outputs.cache-hit != 'true'
-        with:
-          path: release-notify.json
-          key: release-notify-${{ github.event.number }}.json
-
-      - name: Delete a file with Slack message ID from GitHub Actions cache
-        uses: actions/github-script@v6
-        if: always() && github.event.action == 'closed'
-        with:
-          retries: 5
-          script: |
-            github.rest.actions.deleteActionsCacheByKey({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              key: "release-notify-${{ github.event.number }}.json"
-            });
+          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel-id: ${{ vars.SLACK_UPCOMING_RELEASE_CHANNEL_ID || 'C05QQ9J1BRC' }} # if not set, then `#test-release-notifications`
+          github-token: ${{ secrets.GITHUB_TOKEN }}
