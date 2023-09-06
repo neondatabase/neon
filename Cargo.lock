@@ -2756,7 +2756,6 @@ dependencies = [
  "bytes",
  "const_format",
  "enum-map",
- "hex",
  "postgres_ffi",
  "serde",
  "serde_json",

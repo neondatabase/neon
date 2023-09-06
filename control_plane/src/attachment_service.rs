@@ -1,6 +1,7 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::{path::PathBuf, process::Child};
 use utils::id::{NodeId, TenantId};
 
@@ -12,9 +13,10 @@ pub struct AttachmentService {
 
 const COMMAND: &str = "attachment_service";
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
-    #[serde(with = "hex")]
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     pub pageserver_id: Option<NodeId>,
 }
