@@ -331,12 +331,28 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
-                let sz: u16 = rng.gen();
+                let mut sz: u16 = rng.gen();
+                // Make 50% of the arrays small
+                if rng.gen() {
+                    sz |= 63;
+                }
                 random_array(sz.into())
             })
             .collect::<Vec<_>>();
         round_trip_test::<false>(&blobs).await?;
         round_trip_test::<true>(&blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_page_boundary() -> Result<(), Error> {
+        let blobs = &[
+            random_array(PAGE_SZ - 4),
+            random_array(PAGE_SZ - 4),
+            random_array(PAGE_SZ - 4),
+        ];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
         Ok(())
     }
 }
