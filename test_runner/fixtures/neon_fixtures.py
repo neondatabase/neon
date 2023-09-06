@@ -543,27 +543,16 @@ class NeonEnvBuilder:
     def _configure_and_create_remote_storage(
         self, kind: RemoteStorageKind, user: str
     ) -> Optional[RemoteStorage]:
-        if kind == RemoteStorageKind.LOCAL_FS:
-            ret = kind.configure(
-                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
-            )
-        elif kind == RemoteStorageKind.MOCK_S3:
-            ret = kind.configure(
-                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
-            )
+        ret = kind.configure(
+            self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
+        )
+
+        if kind == RemoteStorageKind.MOCK_S3:
             assert isinstance(ret, S3Storage)
-            # mock_s3_server is running for single test, so we must always create the bucket
             ret.client.create_bucket(Bucket=ret.bucket_name)
         elif kind == RemoteStorageKind.REAL_S3:
-            ret = kind.configure(
-                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
-            )
             assert isinstance(ret, S3Storage)
             assert ret.cleanup, "we should not leave files in REAL_S3"
-        elif kind == RemoteStorageKind.NOOP:
-            ret = None
-        else:
-            raise RuntimeError(f"Unknown storage type: {kind}")
 
         return ret
 
