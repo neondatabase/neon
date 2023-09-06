@@ -142,13 +142,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Internal, possibly buffered, write function
     async fn write_all(&mut self, mut src_buf: &[u8]) -> Result<(), Error> {
         if !BUFFERED {
-            if !self.buf.is_empty() {
-                // Flush the buffer. This creates a write call for
-                // potentially very small data, but there is no way
-                // we can unify it with the data we are writing below
-                // without copying it.
-                self.flush_buffer().await?;
-            }
+            assert!(self.buf.is_empty());
             self.write_all_unbuffered(src_buf).await?;
             return Ok(());
         }
