@@ -71,7 +71,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReaderVirtual(&'a FileBlockReader),
+    FileBlockReader(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -85,7 +85,7 @@ impl<'a> BlockReaderRef<'a> {
     async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
-            FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
+            FileBlockReader(r) => r.read_blk(blknum).await,
             EphemeralFile(r) => r.read_blk(blknum).await,
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
@@ -124,7 +124,7 @@ impl<'a> BlockCursor<'a> {
     // Needed by cli
     pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
-            reader: BlockReaderRef::FileBlockReaderVirtual(reader),
+            reader: BlockReaderRef::FileBlockReader(reader),
         }
     }
 
@@ -197,7 +197,7 @@ impl FileBlockReader {
 
 impl BlockReader for FileBlockReader {
     fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReaderVirtual(self))
+        BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }
 }
 
