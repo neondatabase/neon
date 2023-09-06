@@ -455,15 +455,7 @@ async fn walreceiver_detail_handler(
             .get_timeline(timeline_id, false)
             .map_err(|e| ApiError::NotFound(e.into()))?;
 
-        let walreceiver_status = {
-            match &*timeline.walreceiver.lock().unwrap() {
-                None => "stopping or stopped".to_string(),
-                Some(walreceiver) => match walreceiver.status() {
-                    Some(status) => status.to_human_readable_string(),
-                    None => "Not active".to_string(),
-                },
-            }
-        };
+        let walreceiver_status = timeline.walreceiver_status();
 
         Ok::<_, ApiError>(walreceiver_status)
     }
