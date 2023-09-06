@@ -442,7 +442,6 @@ class NeonEnvBuilder:
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
-        self.safekeepers_remote_storage: Optional[RemoteStorage] = None
         self.safekeepers_id_start = safekeepers_id_start
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
@@ -619,8 +618,8 @@ class NeonEnvBuilder:
         if isinstance(self.remote_storage, S3Storage):
             self.remote_storage.do_cleanup()
 
-        if isinstance(self.safekeepers_remote_storage, S3Storage):
-            self.safekeepers_remote_storage.do_cleanup()
+        if isinstance(self.sk_remote_storage, S3Storage):
+            self.sk_remote_storage.do_cleanup()
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
@@ -720,7 +719,7 @@ class NeonEnv:
         # Compute extensions remote storage
         self.ext_remote_storage = config.ext_remote_storage
         # Safekeeper remote storage
-        self.safekeepers_remote_storage = config.safekeepers_remote_storage
+        self.safekeepers_remote_storage = config.sk_remote_storage
         self.pg_version = config.pg_version
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
@@ -807,10 +806,10 @@ class NeonEnv:
                 auth_enabled = true
                 """
                 )
-            if config.safekeepers_remote_storage is not None:
+            if config.sk_remote_storage is not None:
                 toml += textwrap.dedent(
                     f"""
-                remote_storage = "{remote_storage_to_toml_inline_table(config.safekeepers_remote_storage)}"
+                remote_storage = "{remote_storage_to_toml_inline_table(config.sk_remote_storage)}"
                 """
                 )
             safekeeper = Safekeeper(env=self, id=id, port=port)
@@ -1273,7 +1272,7 @@ class NeonCli(AbstractNeonCli):
             pageserver_config_override=self.env.pageserver.config_override,
         )
 
-        if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
+        if isinstance(self.env.remote_storage, S3Storage):
             s3_env_vars = self.env.remote_storage.access_env_vars()
             extra_env_vars = (extra_env_vars or {}) | s3_env_vars
 
@@ -1291,8 +1290,8 @@ class NeonCli(AbstractNeonCli):
         self, id: int, extra_opts: Optional[List[str]] = None
     ) -> "subprocess.CompletedProcess[str]":
         s3_env_vars = None
-        if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
-            s3_env_vars = self.env.remote_storage.access_env_vars()
+        if isinstance(self.env.safekeepers_remote_storage, S3Storage):
+            s3_env_vars = self.env.safekeepers_remote_storage.access_env_vars()
 
         if extra_opts is not None:
             extra_opts = [f"-e={opt}" for opt in extra_opts]
