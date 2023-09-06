@@ -1616,12 +1616,16 @@ mod tests {
         // Schedule another deletion. Check that it's launched immediately.
         // Schedule index upload. Check that it's queued
 
+        let test_setup = TestSetup::new("upload_scheduling").await.unwrap();
+        let span = test_setup.span();
+        let _guard = span.enter();
+
         let TestSetup {
             harness,
             tenant: _tenant,
             timeline,
             tenant_ctx: _tenant_ctx,
-        } = TestSetup::new("upload_scheduling").await.unwrap();
+        } = test_setup;
 
         let client = timeline.remote_client.as_ref().unwrap();
 
