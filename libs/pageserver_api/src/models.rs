@@ -381,6 +381,8 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
+
+    pub walreceiver_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
