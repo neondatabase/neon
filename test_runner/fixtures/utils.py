@@ -73,24 +73,27 @@ def subprocess_capture(
 
         def run(self):
             for line in self.in_file:
-                if self.echo:
-                    log.info(line)
+                # Only bother decoding if we are going to do something more than stream to a file
+                if self.echo or self.capture:
+                    string = line.decode(encoding="utf-8", errors="replace")
 
-                if self.capture:
-                    self.captured += line
+                    if self.echo:
+                        log.info(string)
+
+                    if self.capture:
+                        self.captured += string
 
                 self.out_file.write(line)
 
     captured = None
     try:
-        with open(stdout_filename, "w") as stdout_f:
-            with open(stderr_filename, "w") as stderr_f:
+        with open(stdout_filename, "wb") as stdout_f:
+            with open(stderr_filename, "wb") as stderr_f:
                 log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
 
                 p = subprocess.Popen(
                     cmd,
                     **kwargs,
-                    universal_newlines=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
