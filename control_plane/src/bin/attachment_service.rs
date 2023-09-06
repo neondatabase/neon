@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
 
     let persistent_state = PersistentState::load_or_new(&args.path).await;
 
-    let http_listener = tcp_listener::bind(&args.listen)?;
+    let http_listener = tcp_listener::bind(args.listen)?;
     let router = make_router(persistent_state)
         .build()
         .map_err(|err| anyhow!(err))?;
