@@ -800,7 +800,7 @@ impl PageCache {
         assert!(num_pages > 0, "page cache size must be > 0");
 
         // We could use Vec::leak here, but that potentially also leaks
-        // uninitialized reserved capcaity. With into_boxed_slice and Box::leak
+        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
         // this is avoided.
         let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
 
