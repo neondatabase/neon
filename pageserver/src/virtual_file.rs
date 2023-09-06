@@ -327,17 +327,17 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        self.with_file("fsync", |file| file.sync_all())?
+        self.with_file("fsync", |file| file.sync_all()).await?
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file("metadata", |file| file.metadata())?
+        self.with_file("metadata", |file| file.metadata()).await?
     }
 
     /// Helper function that looks up the underlying File for this VirtualFile,
     /// opening it and evicting some other File if necessary. It calls 'func'
     /// with the physical File.
-    fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
+    async fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
     where
         F: FnMut(&File) -> R,
     {
@@ -417,7 +417,9 @@ impl VirtualFile {
                 self.pos = offset;
             }
             SeekFrom::End(offset) => {
-                self.pos = self.with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))??
+                self.pos = self
+                    .with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))
+                    .await??
             }
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
@@ -505,7 +507,9 @@ impl VirtualFile {
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+        let result = self
+            .with_file("read", |file| file.read_at(buf, offset))
+            .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -515,7 +519,9 @@ impl VirtualFile {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("write", |file| file.write_at(buf, offset))?;
+        let result = self
+            .with_file("write", |file| file.write_at(buf, offset))
+            .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
