@@ -354,7 +354,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .unwrap_or_default();
 
             // If tenant ID was not specified, generate one
-            let tenant_id = parse_tenant_id(create_match)?.unwrap_or(TenantId::generate());
+            let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
             let generation = if env.pageserver.control_plane_api.is_some() {
                 // We must register the tenant with the attachment service, so
