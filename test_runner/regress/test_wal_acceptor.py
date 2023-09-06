@@ -37,7 +37,6 @@ from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     RemoteStorageKind,
-    RemoteStorageUsers,
     available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -436,12 +435,7 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
-
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
-
-    neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -488,11 +482,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
-
-    neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant

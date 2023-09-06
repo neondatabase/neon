@@ -24,7 +24,6 @@ from urllib.parse import urlparse
 
 import asyncpg
 import backoff
-import boto3
 import jwt
 import psycopg2
 import pytest
@@ -32,7 +31,6 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
-from mypy_boto3_s3 import S3Client
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -47,11 +45,9 @@ from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
-    LocalFsStorage,
     MockS3Server,
     RemoteStorage,
     RemoteStorageKind,
-    RemoteStorageUsers,
     S3Storage,
     remote_storage_to_toml_inline_table,
 )
@@ -417,7 +413,6 @@ class NeonEnvBuilder:
         test_name: str,
         test_output_dir: Path,
         remote_storage: Optional[RemoteStorage] = None,
-        remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -434,15 +429,20 @@ class NeonEnvBuilder:
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
+
+        # Pageserver remote storage
         self.remote_storage = remote_storage
+        # Extensions remote storage
         self.ext_remote_storage: Optional[S3Storage] = None
-        self.remote_storage_client: Optional[S3Client] = None
-        self.remote_storage_users = remote_storage_users
+        # Safekeepers remote storage
+        self.sk_remote_storage: Optional[RemoteStorage] = None
+
         self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
+        self.safekeepers_remote_storage: Optional[RemoteStorage] = None
         self.safekeepers_id_start = safekeepers_id_start
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
@@ -513,138 +513,89 @@ class NeonEnvBuilder:
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
-        force_enable: bool = True,
+        force_enable: bool = False,
         enable_remote_extensions: bool = False,
     ):
-        bucket_name = re.sub(r"[_\[\]]", "-", self.test_name)[:63]
+        """
+        Configure pageserver and possibly compute extension remote storage.
 
-        if remote_storage_kind == RemoteStorageKind.NOOP:
-            return
-        elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
-            self.enable_local_fs_remote_storage(force_enable=force_enable)
-        elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
-            self.enable_mock_s3_remote_storage(
-                bucket_name=bucket_name,
-                force_enable=force_enable,
-                enable_remote_extensions=enable_remote_extensions,
-            )
-        elif remote_storage_kind == RemoteStorageKind.REAL_S3:
-            self.enable_real_s3_remote_storage(
-                test_name=bucket_name,
-                force_enable=force_enable,
-                enable_remote_extensions=enable_remote_extensions,
-            )
-        else:
-            raise RuntimeError(f"Unknown storage type: {remote_storage_kind}")
+        Does not configure safekeeper remote storage.
+        """
+        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
 
+        ret = self._configure_and_create_remote_storage(remote_storage_kind, "pageserver")
+
+        self.remote_storage = ret
         self.remote_storage_kind = remote_storage_kind
 
-    def enable_local_fs_remote_storage(self, force_enable: bool = True):
+        if enable_remote_extensions:
+            # there is an assumption that REAL_S3 for extensions is never cleaned up
+            ext = self._configure_and_create_remote_storage(remote_storage_kind, "ext")
+            assert isinstance(ext, S3Storage)
+            self.ext_remote_storage = ext
+
+    def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
+        assert self.sk_remote_storage is None, "sk_remote_storage already configured"
+
+        self.sk_remote_storage = self._configure_and_create_remote_storage(kind, "safekeeper")
+
+    def _configure_and_create_remote_storage(
+        self, kind: RemoteStorageKind, user: str
+    ) -> Optional[RemoteStorage]:
+        if kind == RemoteStorageKind.LOCAL_FS:
+            ret = kind.configure(
+                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
+            )
+        elif kind == RemoteStorageKind.MOCK_S3:
+            ret = kind.configure(
+                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
+            )
+            assert isinstance(ret, S3Storage)
+            # mock_s3_server is running for single test, so we must always create the bucket
+            ret.client.create_bucket(Bucket=ret.bucket_name)
+        elif kind == RemoteStorageKind.REAL_S3:
+            ret = kind.configure(
+                self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
+            )
+            assert isinstance(ret, S3Storage)
+            assert ret.cleanup, "we should not leave files in REAL_S3"
+        elif kind == RemoteStorageKind.NOOP:
+            ret = None
+        else:
+            raise RuntimeError(f"Unknown storage type: {kind}")
+
+        return ret
+
+    def enable_local_fs_remote_storage(self):
         """
         Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.
         Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
         """
-        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
-        self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
+        self.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     def enable_mock_s3_remote_storage(
         self,
-        bucket_name: str,
-        force_enable: bool = True,
         enable_remote_extensions: bool = False,
     ):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
         Starts up the mock server, if that does not run yet.
-        Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
-
         Also creates the bucket for extensions, self.ext_remote_storage bucket
         """
-        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
-        mock_endpoint = self.mock_s3_server.endpoint()
-        mock_region = self.mock_s3_server.region()
-
-        self.remote_storage_client = boto3.client(
-            "s3",
-            endpoint_url=mock_endpoint,
-            region_name=mock_region,
-            aws_access_key_id=self.mock_s3_server.access_key(),
-            aws_secret_access_key=self.mock_s3_server.secret_key(),
+        self.enable_remote_storage(
+            RemoteStorageKind.MOCK_S3, enable_remote_extensions=enable_remote_extensions
         )
-        self.remote_storage_client.create_bucket(Bucket=bucket_name)
-
-        self.remote_storage = S3Storage(
-            bucket_name=bucket_name,
-            endpoint=mock_endpoint,
-            bucket_region=mock_region,
-            access_key=self.mock_s3_server.access_key(),
-            secret_key=self.mock_s3_server.secret_key(),
-            prefix_in_bucket="pageserver",
-        )
-
-        if enable_remote_extensions:
-            self.ext_remote_storage = S3Storage(
-                bucket_name=bucket_name,
-                endpoint=mock_endpoint,
-                bucket_region=mock_region,
-                access_key=self.mock_s3_server.access_key(),
-                secret_key=self.mock_s3_server.secret_key(),
-                prefix_in_bucket="ext",
-            )
 
     def enable_real_s3_remote_storage(
         self,
-        test_name: str,
-        force_enable: bool = True,
         enable_remote_extensions: bool = False,
     ):
         """
         Sets up configuration to use real s3 endpoint without mock server
         """
-        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
-
-        access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        assert access_key, "no aws access key provided"
-        secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        assert secret_key, "no aws access key provided"
-
-        # session token is needed for local runs with sso auth
-        session_token = os.getenv("AWS_SESSION_TOKEN")
-
-        bucket_name = os.getenv("REMOTE_STORAGE_S3_BUCKET")
-        assert bucket_name, "no remote storage bucket name provided"
-        region = os.getenv("REMOTE_STORAGE_S3_REGION")
-        assert region, "no remote storage region provided"
-
-        # do not leave data in real s3
-        self.keep_remote_storage_contents = False
-
-        # construct a prefix inside bucket for the particular test case and test run
-        self.remote_storage_prefix = f"{self.run_id}/{test_name}"
-
-        self.remote_storage_client = boto3.client(
-            "s3",
-            region_name=region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            aws_session_token=session_token,
+        self.enable_remote_storage(
+            RemoteStorageKind.REAL_S3, enable_remote_extensions=enable_remote_extensions
         )
-        self.remote_storage = S3Storage(
-            bucket_name=bucket_name,
-            bucket_region=region,
-            access_key=access_key,
-            secret_key=secret_key,
-            prefix_in_bucket=self.remote_storage_prefix,
-        )
-
-        if enable_remote_extensions:
-            self.ext_remote_storage = S3Storage(
-                bucket_name="neon-dev-extensions-eu-central-1",
-                bucket_region="eu-central-1",
-                access_key=access_key,
-                secret_key=secret_key,
-                prefix_in_bucket=None,
-            )
 
     def cleanup_local_storage(self):
         if self.preserve_database_files:
@@ -675,54 +626,60 @@ class NeonEnvBuilder:
             log.info("no remote storage was set up, skipping cleanup")
             return
 
-        # Making mypy happy with allowing only `S3Storage` further.
-        # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
-        # so this line effectively a no-op
-        assert isinstance(self.remote_storage, S3Storage)
-        assert self.remote_storage_client is not None
+        if isinstance(self.remote_storage, S3Storage):
+            self.remote_storage.do_cleanup()
 
-        if self.keep_remote_storage_contents:
-            log.info("keep_remote_storage_contents skipping remote storage cleanup")
-            return
+        if isinstance(self.safekeepers_remote_storage, S3Storage):
+            self.safekeepers_remote_storage.do_cleanup()
 
-        log.info(
-            "removing data from test s3 bucket %s by prefix %s",
-            self.remote_storage.bucket_name,
-            self.remote_storage_prefix,
-        )
-        paginator = self.remote_storage_client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(
-            Bucket=self.remote_storage.bucket_name,
-            Prefix=self.remote_storage_prefix,
-        )
+        # # Making mypy happy with allowing only `S3Storage` further.
+        # # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
+        # # so this line effectively a no-op
+        # assert isinstance(self.remote_storage, S3Storage)
+        # assert self.remote_storage_client is not None
 
-        # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
-        objects_to_delete: Any = {"Objects": []}
-        cnt = 0
-        for item in pages.search("Contents"):
-            # weirdly when nothing is found it returns [None]
-            if item is None:
-                break
+        # if self.keep_remote_storage_contents:
+        #     log.info("keep_remote_storage_contents skipping remote storage cleanup")
+        #     return
 
-            objects_to_delete["Objects"].append({"Key": item["Key"]})
+        # log.info(
+        #     "removing data from test s3 bucket %s by prefix %s",
+        #     self.remote_storage.bucket_name,
+        #     self.remote_storage_prefix,
+        # )
+        # paginator = self.remote_storage_client.get_paginator("list_objects_v2")
+        # pages = paginator.paginate(
+        #     Bucket=self.remote_storage.bucket_name,
+        #     Prefix=self.remote_storage_prefix,
+        # )
 
-            # flush once aws limit reached
-            if len(objects_to_delete["Objects"]) >= 1000:
-                self.remote_storage_client.delete_objects(
-                    Bucket=self.remote_storage.bucket_name,
-                    Delete=objects_to_delete,
-                )
-                objects_to_delete = {"Objects": []}
-                cnt += 1
+        # # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
+        # objects_to_delete: Any = {"Objects": []}
+        # cnt = 0
+        # for item in pages.search("Contents"):
+        #     # weirdly when nothing is found it returns [None]
+        #     if item is None:
+        #         break
 
-        # flush rest
-        if len(objects_to_delete["Objects"]):
-            self.remote_storage_client.delete_objects(
-                Bucket=self.remote_storage.bucket_name,
-                Delete=objects_to_delete,
-            )
+        #     objects_to_delete["Objects"].append({"Key": item["Key"]})
 
-        log.info(f"deleted {cnt} objects from remote storage")
+        #     # flush once aws limit reached
+        #     if len(objects_to_delete["Objects"]) >= 1000:
+        #         self.remote_storage_client.delete_objects(
+        #             Bucket=self.remote_storage.bucket_name,
+        #             Delete=objects_to_delete,
+        #         )
+        #         objects_to_delete = {"Objects": []}
+        #         cnt += 1
+
+        # # flush rest
+        # if len(objects_to_delete["Objects"]):
+        #     self.remote_storage_client.delete_objects(
+        #         Bucket=self.remote_storage.bucket_name,
+        #         Delete=objects_to_delete,
+        #     )
+
+        # log.info(f"deleted {cnt} objects from remote storage")
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
@@ -817,14 +774,16 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
+        # Pagserver remote storage
         self.remote_storage = config.remote_storage
-        self.remote_storage_users = config.remote_storage_users
+        # Compute extensions remote storage
+        self.ext_remote_storage = config.ext_remote_storage
+        # Safekeeper remote storage
+        self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
-        self.remote_storage_client = config.remote_storage_client
-        self.ext_remote_storage = config.ext_remote_storage
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -907,13 +866,10 @@ class NeonEnv:
                 auth_enabled = true
                 """
                 )
-            if (
-                bool(self.remote_storage_users & RemoteStorageUsers.SAFEKEEPER)
-                and self.remote_storage is not None
-            ):
+            if config.safekeepers_remote_storage is not None:
                 toml += textwrap.dedent(
                     f"""
-                remote_storage = "{remote_storage_to_toml_inline_table(self.remote_storage)}"
+                remote_storage = "{remote_storage_to_toml_inline_table(config.safekeepers_remote_storage)}"
                 """
                 )
             safekeeper = Safekeeper(env=self, id=id, port=port)
@@ -1342,7 +1298,6 @@ class NeonCli(AbstractNeonCli):
             append_pageserver_param_overrides(
                 params_to_update=cmd,
                 remote_storage=self.env.remote_storage,
-                remote_storage_users=self.env.remote_storage_users,
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
@@ -1374,7 +1329,6 @@ class NeonCli(AbstractNeonCli):
         append_pageserver_param_overrides(
             params_to_update=start_args,
             remote_storage=self.env.remote_storage,
-            remote_storage_users=self.env.remote_storage_users,
             pageserver_config_override=self.env.pageserver.config_override,
         )
 
@@ -1762,10 +1716,9 @@ class NeonPageserver(PgProtocol):
 def append_pageserver_param_overrides(
     params_to_update: List[str],
     remote_storage: Optional[RemoteStorage],
-    remote_storage_users: RemoteStorageUsers,
     pageserver_config_override: Optional[str] = None,
 ):
-    if bool(remote_storage_users & RemoteStorageUsers.PAGESERVER) and remote_storage is not None:
+    if remote_storage is not None:
         remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
 
         params_to_update.append(

@@ -1,10 +1,14 @@
 import enum
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
+
+import boto3
+from mypy_boto3_s3 import S3Client
 
 from fixtures.log_helper import log
 from fixtures.types import TenantId, TimelineId
@@ -58,6 +62,118 @@ class MockS3Server:
         self.subprocess.kill()
 
 
+@dataclass
+class LocalFsStorage:
+    root: Path
+
+    def tenant_path(self, tenant_id: TenantId) -> Path:
+        return self.root / "tenants" / str(tenant_id)
+
+    def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+        return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
+
+    def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
+        return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME
+
+    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
+        with self.index_path(tenant_id, timeline_id).open("r") as f:
+            return json.load(f)
+
+    def to_toml_inline_table(self) -> str:
+        return f"local_path='{self.root}'"
+
+    def cleanup(self):
+        # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
+        pass
+
+
+@dataclass
+class S3Storage:
+    bucket_name: str
+    bucket_region: str
+    access_key: str
+    secret_key: str
+    endpoint: Optional[str] = None
+    prefix_in_bucket: str
+    client: S3Client
+    cleanup: bool
+
+    def access_env_vars(self) -> Dict[str, str]:
+        return {
+            "AWS_ACCESS_KEY_ID": self.access_key,
+            "AWS_SECRET_ACCESS_KEY": self.secret_key,
+        }
+
+    def to_string(self) -> str:
+        return json.dumps(
+            {
+                "bucket": self.bucket_name,
+                "region": self.bucket_region,
+                "endpoint": self.endpoint,
+                "prefix": self.prefix_in_bucket,
+            }
+        )
+
+    def to_toml_inline_table(self) -> str:
+        s = f"bucket_name='{self.bucket_name}',\
+            bucket_region='{self.bucket_region}'"
+
+        if self.prefix_in_bucket is not None:
+            s += f",prefix_in_bucket='{self.prefix_in_bucket}'"
+
+        if self.endpoint is not None:
+            s += f",endpoint='{self.endpoint}'"
+
+        return s
+
+    def do_cleanup(self):
+        if not self.cleanup:
+            # handles previous keep_remote_storage_contents
+            return
+
+        log.info(
+            "removing data from test s3 bucket %s by prefix %s",
+            self.bucket_name,
+            self.prefix_in_bucket,
+        )
+        paginator = self.client.get_paginator("list_objects_v2")
+        pages = paginator.paginate(
+            Bucket=self.bucket_name,
+            Prefix=self.prefix_in_bucket,
+        )
+
+        # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
+        objects_to_delete: Any = {"Objects": []}
+        cnt = 0
+        for item in pages.search("Contents"):
+            # weirdly when nothing is found it returns [None]
+            if item is None:
+                break
+
+            objects_to_delete["Objects"].append({"Key": item["Key"]})
+
+            # flush once aws limit reached
+            if len(objects_to_delete["Objects"]) >= 1000:
+                self.client.delete_objects(
+                    Bucket=self.bucket_name,
+                    Delete=objects_to_delete,
+                )
+                objects_to_delete = {"Objects": []}
+                cnt += 1
+
+        # flush rest
+        if len(objects_to_delete["Objects"]):
+            self.client.delete_objects(
+                Bucket=self.bucket_name,
+                Delete=objects_to_delete,
+            )
+
+        log.info(f"deleted {cnt} objects from remote storage")
+
+
+RemoteStorage = Union[LocalFsStorage, S3Storage]
+
+
 @enum.unique
 class RemoteStorageKind(str, enum.Enum):
     LOCAL_FS = "local_fs"
@@ -66,6 +182,83 @@ class RemoteStorageKind(str, enum.Enum):
     # Pass to tests that are generic to remote storage
     # to ensure the test pass with or without the remote storage
     NOOP = "noop"
+
+    def configure(
+        self, repo_dir: Path, mock_s3_server, run_id: str, test_name: str, user: str
+    ) -> Optional[RemoteStorage]:
+        if self == RemoteStorageKind.NOOP:
+            return None
+
+        if self == RemoteStorageKind.LOCAL_FS:
+            return LocalFsStorage(Path(repo_dir / "local_fs_remote_storage" / user))
+
+        # real_s3 uses this as part of prefix, mock_s3 uses this as part of bucket name, giving all users unique buckets because we have to create them
+        test_name = re.sub(r"[_\[\]]", "-", test_name)[:63]
+
+        def shrink(s: str) -> str:
+            assert len(s) <= 63
+            # TODO: maybe truncated sha256?
+            return s
+
+        if self == RemoteStorageKind.MOCK_S3:
+            mock_endpoint = mock_s3_server.endpoint()
+            mock_region = mock_s3_server.region()
+
+            access_key, secret_key = mock_s3_server.access_key(), mock_s3_server.secret_key()
+
+            client = boto3.client(
+                "s3",
+                endpoint_url=mock_endpoint,
+                region_name=mock_region,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+            )
+
+            return S3Storage(
+                bucket_name=shrink(f"{user}-{test_name}"),
+                endpoint=mock_endpoint,
+                bucket_region=mock_region,
+                access_key=access_key,
+                secret_key=secret_key,
+                prefix_in_bucket="",
+                client=client,
+                cleanup=False,
+            )
+
+        assert self == RemoteStorageKind.REAL_S3
+
+        env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+        assert env_access_key, "no aws access key provided"
+        env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        assert env_secret_key, "no aws access key provided"
+
+        # session token is needed for local runs with sso auth
+        session_token = os.getenv("AWS_SESSION_TOKEN")
+
+        env_bucket_name = os.getenv("REMOTE_STORAGE_S3_BUCKET")
+        assert env_bucket_name is str, "no remote storage bucket name provided"
+        env_region = os.getenv("REMOTE_STORAGE_S3_REGION")
+        assert env_region is str, "no remote storage region provided"
+
+        prefix_in_bucket = f"{run_id}/{test_name}/{user}"
+
+        client = boto3.client(
+            "s3",
+            region_name=env_region,
+            aws_access_key_id=env_access_key,
+            aws_secret_access_key=env_secret_key,
+            aws_session_token=session_token,
+        )
+
+        return S3Storage(
+            bucket_name="neon-dev-extensions-eu-central-1",
+            bucket_region="eu-central-1",
+            access_key=env_access_key,
+            secret_key=env_secret_key,
+            prefix_in_bucket=prefix_in_bucket,
+            client=client,
+            cleanup=True,
+        )
 
 
 def available_remote_storages() -> List[RemoteStorageKind]:
@@ -101,69 +294,6 @@ def s3_storage() -> RemoteStorageKind:
         return RemoteStorageKind.MOCK_S3
 
 
-@dataclass
-class LocalFsStorage:
-    root: Path
-
-    def tenant_path(self, tenant_id: TenantId) -> Path:
-        return self.root / "tenants" / str(tenant_id)
-
-    def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
-        return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
-
-    def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
-        return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME
-
-    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
-        with self.index_path(tenant_id, timeline_id).open("r") as f:
-            return json.load(f)
-
-    def to_toml_inline_table(self) -> str:
-        return f"local_path='{self.root}'"
-
-
-@dataclass
-class S3Storage:
-    bucket_name: str
-    bucket_region: str
-    access_key: str
-    secret_key: str
-    endpoint: Optional[str] = None
-    prefix_in_bucket: Optional[str] = ""
-
-    def access_env_vars(self) -> Dict[str, str]:
-        return {
-            "AWS_ACCESS_KEY_ID": self.access_key,
-            "AWS_SECRET_ACCESS_KEY": self.secret_key,
-        }
-
-    def to_string(self) -> str:
-        return json.dumps(
-            {
-                "bucket": self.bucket_name,
-                "region": self.bucket_region,
-                "endpoint": self.endpoint,
-                "prefix": self.prefix_in_bucket,
-            }
-        )
-
-    def to_toml_inline_table(self) -> str:
-        s = f"bucket_name='{self.bucket_name}',\
-            bucket_region='{self.bucket_region}'"
-
-        if self.prefix_in_bucket is not None:
-            s += f",prefix_in_bucket='{self.prefix_in_bucket}'"
-
-        if self.endpoint is not None:
-            s += f",endpoint='{self.endpoint}'"
-
-        return s
-
-
-
-RemoteStorage = Union[LocalFsStorage, S3Storage]
-
-
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
     if isinstance(remote_storage, LocalFsStorage):
@@ -174,8 +304,3 @@ def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
         raise Exception("invalid remote storage type")
 
     return f"{{{remote_storage_config}}}"
-
-
-class RemoteStorageUsers(enum.Flag):
-    PAGESERVER = enum.auto()
-    SAFEKEEPER = enum.auto()

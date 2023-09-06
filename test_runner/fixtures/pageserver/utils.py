@@ -266,7 +266,7 @@ def list_prefix(
     )
     # For mypy
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
-    assert neon_env_builder.remote_storage_client is not None
+    assert neon_env_builder.remote_storage.client is not None
 
     prefix_in_bucket = neon_env_builder.remote_storage.prefix_in_bucket or ""
     if not prefix:
@@ -277,7 +277,7 @@ def list_prefix(
         prefix = "/".join((prefix_in_bucket, prefix))
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
+    response = neon_env_builder.remote_storage.client.list_objects_v2(
         Delimiter="/",
         Bucket=neon_env_builder.remote_storage.bucket_name,
         Prefix=prefix,
