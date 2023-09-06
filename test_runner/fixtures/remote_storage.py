@@ -192,7 +192,9 @@ class RemoteStorageKind(str, enum.Enum):
         if self == RemoteStorageKind.LOCAL_FS:
             return LocalFsStorage(Path(repo_dir / "local_fs_remote_storage" / user))
 
-        # real_s3 uses this as part of prefix, mock_s3 uses this as part of bucket name, giving all users unique buckets because we have to create them
+        # real_s3 uses this as part of prefix, mock_s3 uses this as part of
+        # bucket name, giving all users unique buckets because we have to
+        # create them
         test_name = re.sub(r"[_\[\]]", "-", test_name)[:63]
 
         def shrink(s: str) -> str:
