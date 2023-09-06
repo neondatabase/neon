@@ -3,6 +3,7 @@
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
 use anyhow::Result;
+use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -142,12 +143,12 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
-    for tenant in fs::read_dir(storage_path.join("tenants"))? {
+    for tenant in fs::read_dir(storage_path.join(TENANTS_SEGMENT_NAME))? {
         let tenant = tenant?;
         if !tenant.file_type()?.is_dir() {
             continue;
         }
-        for timeline in fs::read_dir(tenant.path().join("timelines"))? {
+        for timeline in fs::read_dir(tenant.path().join(TIMELINES_SEGMENT_NAME))? {
             let timeline = timeline?;
             if !timeline.file_type()?.is_dir() {
                 continue;

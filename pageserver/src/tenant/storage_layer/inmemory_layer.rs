@@ -333,7 +333,8 @@ impl InMemoryLayer {
             self.tenant_id,
             Key::MIN,
             self.start_lsn..end_lsn,
-        )?;
+        )
+        .await?;
 
         let mut buf = Vec::new();
 
@@ -348,11 +349,13 @@ impl InMemoryLayer {
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf).await?;
                 let will_init = Value::des(&buf)?.will_init();
-                delta_layer_writer.put_value_bytes(key, *lsn, &buf, will_init)?;
+                delta_layer_writer
+                    .put_value_bytes(key, *lsn, &buf, will_init)
+                    .await?;
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX)?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX).await?;
         Ok(delta_layer)
     }
 }

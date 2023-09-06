@@ -4,13 +4,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
-use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
 use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectId};
 use crate::delete_batch_producer::DeleteProducerStats;
-use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
+use crate::{download_object_with_retries, list_objects_with_retries, RootTarget, MAX_RETRIES};
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
 use utils::id::TenantTimelineId;
@@ -92,9 +91,9 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
             branch_checks.spawn(
                 async move {
                     let check_errors = branch_cleanup_and_check_errors(
-                        id,
+                        &id,
                         &s3_root,
-                        &s3_active_branch,
+                        Some(&s3_active_branch),
                         console_branch,
                         s3_data,
                     )
@@ -107,13 +106,13 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
     }
 
     let mut total_stats = BranchCheckStats::default();
-    while let Some((id, branch_check_errors)) = branch_checks
+    while let Some((id, analysis)) = branch_checks
         .join_next()
         .await
         .transpose()
         .context("branch check task join")?
     {
-        total_stats.add(id, branch_check_errors);
+        total_stats.add(id, analysis.errors);
     }
     Ok(total_stats)
 }
@@ -160,35 +159,59 @@ impl BranchCheckStats {
     }
 }
 
-async fn branch_cleanup_and_check_errors(
-    id: TenantTimelineId,
+pub struct TimelineAnalysis {
+    /// Anomalies detected
+    pub errors: Vec<String>,
+
+    /// Healthy-but-noteworthy, like old-versioned structures that are readable but
+    /// worth reporting for awareness that we must not remove that old version decoding
+    /// yet.
+    pub warnings: Vec<String>,
+
+    /// Keys not referenced in metadata: candidates for removal
+    pub garbage_keys: Vec<String>,
+}
+
+impl TimelineAnalysis {
+    fn new() -> Self {
+        Self {
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            garbage_keys: Vec::new(),
+        }
+    }
+}
+
+pub async fn branch_cleanup_and_check_errors(
+    id: &TenantTimelineId,
     s3_root: &RootTarget,
-    s3_active_branch: &BranchData,
+    s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
     s3_data: Option<S3TimelineBlobData>,
-) -> Vec<String> {
-    info!(
-        "Checking timeline for branch branch {:?}/{:?}",
-        s3_active_branch.project_id, s3_active_branch.id
-    );
-    let mut branch_check_errors = Vec::new();
+) -> TimelineAnalysis {
+    let mut result = TimelineAnalysis::new();
 
-    match console_branch {
-        Some(console_active_branch) => {
-            if console_active_branch.deleted {
-                branch_check_errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
-                    s3_active_branch.id, s3_active_branch.project_id))
-            }
-        },
-        None => branch_check_errors.push(format!("Timeline has no branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
+    info!("Checking timeline {id}");
+
+    if let Some(s3_active_branch) = s3_active_branch {
+        info!(
+            "Checking console status for timeline for branch {:?}/{:?}",
+            s3_active_branch.project_id, s3_active_branch.id
+        );
+        match console_branch {
+            Some(_) => {result.errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether it got removed during the check",
+                s3_active_branch.id, s3_active_branch.project_id))
+            },
+            None => {
+                result.errors.push(format!("Timeline has no branch data in the console (id = {:?}, project_id = {:?}), recheck whether it got removed during the check",
             s3_active_branch.id, s3_active_branch.project_id))
+            }
+        };
     }
-
-    let mut keys_to_remove = Vec::new();
 
     match s3_data {
         Some(s3_data) => {
-            keys_to_remove.extend(s3_data.keys_to_remove);
+            result.garbage_keys.extend(s3_data.keys_to_remove);
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
@@ -196,8 +219,15 @@ async fn branch_cleanup_and_check_errors(
                     mut s3_layers,
                 } => {
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.get_version()) {
-                        branch_check_errors.push(format!(
+                        result.errors.push(format!(
                             "index_part.json version: {}",
+                            index_part.get_version()
+                        ))
+                    }
+
+                    if &index_part.get_version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
+                        result.warnings.push(format!(
+                            "index_part.json version is not latest: {}",
                             index_part.get_version()
                         ))
                     }
@@ -205,7 +235,7 @@ async fn branch_cleanup_and_check_errors(
                     if index_part.metadata.disk_consistent_lsn()
                         != index_part.get_disk_consistent_lsn()
                     {
-                        branch_check_errors.push(format!(
+                        result.errors.push(format!(
                                     "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
                                     index_part.metadata.disk_consistent_lsn(),
                                     index_part.get_disk_consistent_lsn(),
@@ -220,13 +250,13 @@ async fn branch_cleanup_and_check_errors(
 
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
-                            branch_check_errors.push(format!(
+                            result.errors.push(format!(
                                             "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
                                         ))
                         }
 
                         if !s3_layers.remove(&layer) {
-                            branch_check_errors.push(format!(
+                            result.errors.push(format!(
                                 "index_part.json contains a layer {} that is not present in S3",
                                 layer.file_name(),
                             ))
@@ -234,55 +264,66 @@ async fn branch_cleanup_and_check_errors(
                     }
 
                     if !s3_layers.is_empty() {
-                        branch_check_errors.push(format!(
+                        result.errors.push(format!(
                             "index_part.json does not contain layers from S3: {:?}",
                             s3_layers
                                 .iter()
                                 .map(|layer_name| layer_name.file_name())
                                 .collect::<Vec<_>>(),
                         ));
-                        keys_to_remove.extend(s3_layers.iter().map(|layer_name| {
-                            let mut key = s3_root.timeline_root(id).prefix_in_bucket;
-                            let delimiter = s3_root.delimiter();
-                            if !key.ends_with(delimiter) {
-                                key.push_str(delimiter);
-                            }
-                            key.push_str(&layer_name.file_name());
-                            key
-                        }));
+                        result
+                            .garbage_keys
+                            .extend(s3_layers.iter().map(|layer_name| {
+                                let mut key = s3_root.timeline_root(id).prefix_in_bucket;
+                                let delimiter = s3_root.delimiter();
+                                if !key.ends_with(delimiter) {
+                                    key.push_str(delimiter);
+                                }
+                                key.push_str(&layer_name.file_name());
+                                key
+                            }));
                     }
                 }
-                BlobDataParseResult::Incorrect(parse_errors) => branch_check_errors.extend(
+                BlobDataParseResult::Incorrect(parse_errors) => result.errors.extend(
                     parse_errors
                         .into_iter()
                         .map(|error| format!("parse error: {error}")),
                 ),
             }
         }
-        None => branch_check_errors.push("Timeline has no data on S3 at all".to_string()),
+        None => result
+            .errors
+            .push("Timeline has no data on S3 at all".to_string()),
     }
 
-    if branch_check_errors.is_empty() {
+    if result.errors.is_empty() {
         info!("No check errors found");
     } else {
-        warn!("Found check errors: {branch_check_errors:?}");
+        warn!("Timeline metadata errors: {0:?}", result.errors);
     }
 
-    if !keys_to_remove.is_empty() {
-        error!("The following keys should be removed from S3: {keys_to_remove:?}")
+    if !result.warnings.is_empty() {
+        warn!("Timeline metadata warnings: {0:?}", result.warnings);
     }
 
-    branch_check_errors
+    if !result.garbage_keys.is_empty() {
+        error!(
+            "The following keys should be removed from S3: {0:?}",
+            result.garbage_keys
+        )
+    }
+
+    result
 }
 
 #[derive(Debug)]
-struct S3TimelineBlobData {
-    blob_data: BlobDataParseResult,
-    keys_to_remove: Vec<String>,
+pub struct S3TimelineBlobData {
+    pub blob_data: BlobDataParseResult,
+    pub keys_to_remove: Vec<String>,
 }
 
 #[derive(Debug)]
-enum BlobDataParseResult {
+pub enum BlobDataParseResult {
     Parsed {
         index_part: IndexPart,
         s3_layers: HashSet<LayerFileName>,
@@ -290,7 +331,7 @@ enum BlobDataParseResult {
     Incorrect(Vec<String>),
 }
 
-async fn list_timeline_blobs(
+pub async fn list_timeline_blobs(
     s3_client: &Client,
     id: TenantTimelineId,
     s3_root: &RootTarget,
@@ -298,7 +339,7 @@ async fn list_timeline_blobs(
     let mut s3_layers = HashSet::new();
     let mut index_part_object = None;
 
-    let timeline_dir_target = s3_root.timeline_root(id);
+    let timeline_dir_target = s3_root.timeline_root(&id);
     let mut continuation_token = None;
 
     let mut errors = Vec::new();
@@ -393,46 +434,4 @@ async fn list_timeline_blobs(
         blob_data: BlobDataParseResult::Incorrect(errors),
         keys_to_remove,
     })
-}
-
-async fn download_object_with_retries(
-    s3_client: &Client,
-    bucket_name: &str,
-    key: &str,
-) -> anyhow::Result<Vec<u8>> {
-    for _ in 0..MAX_RETRIES {
-        let mut body_buf = Vec::new();
-        let response_stream = match s3_client
-            .get_object()
-            .bucket(bucket_name)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                error!("Failed to download object for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-
-        match response_stream
-            .body
-            .into_async_read()
-            .read_to_end(&mut body_buf)
-            .await
-        {
-            Ok(bytes_read) => {
-                info!("Downloaded {bytes_read} bytes for object object with key {key}");
-                return Ok(body_buf);
-            }
-            Err(e) => {
-                error!("Failed to stream object body for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-
-    anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }

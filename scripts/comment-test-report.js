@@ -18,6 +18,10 @@
 //           reportUrl: "...",
 //           reportJsonUrl: "...",
 //         },
+//         coverage: {
+//           coverageUrl: "...",
+//           summaryJsonUrl: "...",
+//         }
 //       })
 //
 
@@ -183,7 +187,24 @@ const reportSummary = async (params) => {
     return summary
 }
 
-module.exports = async ({ github, context, fetch, report }) => {
+const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
+    let summary = `### Code coverage [full report](${coverageUrl})\n`
+
+    const coverage = await (await fetch(summaryJsonUrl)).json()
+    for (const covType of Object.keys(coverage).sort()) {
+        if (!coverage.hasOwnProperty(covType)) {
+            continue
+        }
+
+        summary += `- \`${covType}s\`: \`${coverage[covType]["_summary"]}\`\n`
+    }
+
+    summary += `\n___\n`
+
+    return summary
+}
+
+module.exports = async ({ github, context, fetch, report, coverage }) => {
     // Marker to find the comment in the subsequent runs
     const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
     // If we run the script in the PR or in the branch (main/release/...)
@@ -204,7 +225,6 @@ module.exports = async ({ github, context, fetch, report }) => {
     }
 
     const {reportUrl, reportJsonUrl} = report
-
     if (reportUrl && reportJsonUrl) {
         try {
             const parsed = await parseReportJson({ reportJsonUrl, fetch })
@@ -223,6 +243,22 @@ module.exports = async ({ github, context, fetch, report }) => {
     } else {
         commentBody += `#### No tests were run or test report is not available\n`
     }
+
+    const { coverageUrl, summaryJsonUrl } = coverage
+    if (coverageUrl && summaryJsonUrl) {
+        try {
+            commentBody += await parseCoverageSummary({ summaryJsonUrl, coverageUrl, fetch })
+        } catch (error) {
+            commentBody += `### [full report](${coverageUrl})\n___\n`
+            commentBody += `#### Failed to create a coverage summary for the test run: \n`
+            commentBody += "```\n"
+            commentBody += `${error.stack}\n`
+            commentBody += "```\n"
+        }
+    } else {
+        commentBody += `#### Test coverage report is not avaibale\n`
+    }
+
     commentBody += autoupdateNotice
 
     let createCommentFn, listCommentsFn, updateCommentFn, issueNumberOrSha

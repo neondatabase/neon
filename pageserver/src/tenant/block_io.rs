@@ -8,7 +8,6 @@ use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
-use std::os::unix::fs::FileExt;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -155,9 +154,11 @@ impl FileBlockReader {
     }
 
     /// Read a page from the underlying file into given buffer.
-    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
+    async fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
-        self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+        self.file
+            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .await
     }
     /// Read a block.
     ///
@@ -179,7 +180,7 @@ impl FileBlockReader {
                 ReadBufResult::Found(guard) => break Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
-                    self.fill_buffer(write_guard.deref_mut(), blknum)?;
+                    self.fill_buffer(write_guard.deref_mut(), blknum).await?;
                     write_guard.mark_valid();
 
                     // Swap for read lock

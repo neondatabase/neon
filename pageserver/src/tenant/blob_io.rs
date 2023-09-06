@@ -84,30 +84,15 @@ impl<'a> BlockCursor<'a> {
 }
 
 ///
-/// Abstract trait for a data sink that you can write blobs to.
-///
-pub trait BlobWriter {
-    /// Write a blob of data. Returns the offset that it was written to,
-    /// which can be used to retrieve the data later.
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error>;
-}
-
-///
 /// An implementation of BlobWriter to write blobs to anything that
 /// implements std::io::Write.
 ///
-pub struct WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
+pub struct WriteBlobWriter<W> {
     inner: W,
     offset: u64,
 }
 
-impl<W> WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
+impl<W> WriteBlobWriter<W> {
     pub fn new(inner: W, start_offset: u64) -> Self {
         WriteBlobWriter {
             inner,
@@ -129,11 +114,13 @@ where
     }
 }
 
-impl<W> BlobWriter for WriteBlobWriter<W>
+impl<W> WriteBlobWriter<W>
 where
     W: std::io::Write,
 {
-    fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+    /// Write a blob of data. Returns the offset that it was written to,
+    /// which can be used to retrieve the data later.
+    pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
         let offset = self.offset;
 
         if srcbuf.len() < 128 {
