@@ -532,6 +532,7 @@ class NeonEnvBuilder:
             # there is an assumption that REAL_S3 for extensions is never cleaned up
             ext = self._configure_and_create_remote_storage(remote_storage_kind, "ext")
             assert isinstance(ext, S3Storage)
+            ext.cleanup = False
             self.ext_remote_storage = ext
 
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
