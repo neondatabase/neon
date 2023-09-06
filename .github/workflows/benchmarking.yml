@@ -436,7 +436,7 @@ jobs:
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
-      SCALE: ${{ matrix.scale }}
+      TEST_OLAP_SCALE: ${{ matrix.scale }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
