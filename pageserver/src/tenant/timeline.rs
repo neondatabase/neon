@@ -2754,9 +2754,7 @@ impl Timeline {
 
                 // update metrics
                 let sz = l.layer_desc().file_size;
-                self.metrics.resident_physical_size_gauge.add(sz);
-                self.metrics.num_persistent_files_created.inc_by(1);
-                self.metrics.persistent_bytes_written.inc_by(sz);
+                self.metrics.record_new_file_metrics(sz);
             }
 
             guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
@@ -3131,9 +3129,8 @@ impl Timeline {
                 LayerFileMetadata::new(metadata.len(), self.generation),
             );
 
-            self.metrics
-                .resident_physical_size_gauge
-                .add(metadata.len());
+            // update metrics
+            self.metrics.record_new_file_metrics(metadata.len());
             let l = Arc::new(l);
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
@@ -3815,10 +3812,8 @@ impl Timeline {
                 )?;
             }
 
-            // update the timeline's physical size
-            self.metrics
-                .resident_physical_size_gauge
-                .add(metadata.len());
+            // update metrics, including the timeline's physical size
+            self.metrics.record_new_file_metrics(metadata.len());
 
             new_layer_paths.insert(
                 new_delta_path,

@@ -1165,6 +1165,12 @@ impl TimelineMetrics {
             ),
         }
     }
+
+    pub fn record_new_file_metrics(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        self.num_persistent_files_created.inc_by(1);
+        self.persistent_bytes_written.inc_by(sz);
+    }
 }
 
 impl Drop for TimelineMetrics {
