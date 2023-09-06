@@ -1,4 +1,5 @@
 import enum
+import hashlib
 import json
 import os
 import re
@@ -195,14 +196,22 @@ class RemoteStorageKind(str, enum.Enum):
         # real_s3 uses this as part of prefix, mock_s3 uses this as part of
         # bucket name, giving all users unique buckets because we have to
         # create them
-        test_name = re.sub(r"[_\[\]]", "-", test_name)[:63]
+        test_name = re.sub(r"[_\[\]]", "-", test_name)
 
-        def shrink(s: str) -> str:
-            assert len(s) <= 63
-            # TODO: maybe truncated sha256?
+        def to_bucket_name(user: str, test_name: str) -> str:
+            s = f"{user}-{test_name}"
+
+            if len(s) > 63:
+                prefix = s[:30]
+                suffix = hashlib.sha256(test_name.encode()).hexdigest()[:32]
+                s = f"{prefix}-{suffix}"
+                assert len(s) == 63
+                return s
+
             return s
 
         if self == RemoteStorageKind.MOCK_S3:
+            # there's a single mock_s3 server for each process running the tests
             mock_endpoint = mock_s3_server.endpoint()
             mock_region = mock_s3_server.region()
 
@@ -216,8 +225,13 @@ class RemoteStorageKind(str, enum.Enum):
                 aws_secret_access_key=secret_key,
             )
 
+            bucket_name = to_bucket_name(user, test_name)
+            log.info(
+                f"using mock_s3 bucket name {bucket_name} for user={user}, test_name={test_name}"
+            )
+
             return S3Storage(
-                bucket_name=shrink(f"{user}-{test_name}"),
+                bucket_name=bucket_name,
                 endpoint=mock_endpoint,
                 bucket_region=mock_region,
                 access_key=access_key,
