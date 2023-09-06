@@ -196,7 +196,7 @@ pub async fn init_tenant_mgr(
                         // Legacy mode: no generation information, any tenant present
                         // on local disk may activate
                         info!(
-                            "Starting tenant {0} in legacy mode, no generation",
+                            "Starting tenant {} in legacy mode, no generation",
                             tenant_dir_path.display()
                         );
                         Generation::none()

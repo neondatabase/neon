@@ -89,7 +89,7 @@ impl ControlPlaneClient {
             match result {
                 Ok(res) => {
                     tracing::info!(
-                        "Received re-attach response with {0} tenants",
+                        "Received re-attach response with {} tenants",
                         res.tenants.len()
                     );
 

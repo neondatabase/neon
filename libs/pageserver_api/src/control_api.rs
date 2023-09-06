@@ -1,10 +1,10 @@
+//! Types in this file are for pageserver's upward-facing API calls to the control plane,
+//! required for acquiring and validating tenant generation numbers.
+//!
+//! See docs/rfcs/025-generation-numbers.md
+
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
-
-/// Types in this file are for pageserver's upward-facing API calls to the control plane,
-/// required for acquiring and validating tenant generation numbers.
-///
-/// See docs/rfcs/025-generation-numbers.md
 
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachRequest {

@@ -327,7 +327,7 @@ pub(super) async fn download_index_part(
     .map_err(DownloadError::Other)?;
 
     // General case logic for which index to use: the latest index whose generation
-    // is <= our own.  See "Finding the rmeote indices for timelines" in docs/rfcs/025-generation-numbers.md
+    // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
     let max_previous_generation = indices
         .into_iter()
         .filter_map(parse_remote_index_path)

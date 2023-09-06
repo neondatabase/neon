@@ -1436,7 +1436,7 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         Some(f) => f,
         None => {
             // Unexpected: we should be seeing index_part.json paths only
-            tracing::warn!("Malformed index key {0}", path);
+            tracing::warn!("Malformed index key {}", path);
             return None;
         }
     };
@@ -1444,7 +1444,7 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
     let file_name_str = match file_name.to_str() {
         Some(s) => s,
         None => {
-            tracing::warn!("Malformed index key {0:?}", path);
+            tracing::warn!("Malformed index key {:?}", path);
             return None;
         }
     };
