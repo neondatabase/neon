@@ -604,7 +604,7 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::create(&path).await?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);

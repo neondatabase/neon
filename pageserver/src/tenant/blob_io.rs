@@ -238,7 +238,7 @@ mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(&path)?;
+            let file = VirtualFile::create(&path).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let offs = wtr.write_blob(blob).await?;

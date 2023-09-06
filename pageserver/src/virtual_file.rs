@@ -211,16 +211,17 @@ impl CrashsafeOverwriteError {
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true))
+        Self::open_with_options(path, OpenOptions::new().read(true)).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
         )
+        .await
     }
 
     /// Open a file with given options.
@@ -228,7 +229,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
-    pub fn open_with_options(
+    pub async fn open_with_options(
         path: &Path,
         open_options: &OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
@@ -299,6 +300,7 @@ impl VirtualFile {
                 // we bail out instead of causing damage.
                 .create_new(true),
         )
+        .await
         .map_err(CrashsafeOverwriteError::CreateTempfile)?;
         file.write_all(content)
             .await
@@ -317,6 +319,7 @@ impl VirtualFile {
         // try_lock.
         let final_parent_dirfd =
             Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
+                .await
                 .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
         final_parent_dirfd
             .sync_all()
@@ -703,7 +706,7 @@ mod tests {
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
         test_files("virtual_files", |path, open_options| {
-            let vf = VirtualFile::open_with_options(path, open_options)?;
+            let vf = VirtualFile::open_with_options(path, open_options).await?;
             Ok(MaybeVirtualFile::VirtualFile(vf))
         })
         .await
@@ -836,7 +839,8 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))?;
+            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))
+                .await?;
             files.push(f);
         }
         let files = Arc::new(files);
