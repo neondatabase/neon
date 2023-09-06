@@ -9,7 +9,6 @@ use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
-use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
@@ -88,7 +87,8 @@ impl EphemeralFile {
                         let buf: &mut [u8] = write_guard.deref_mut();
                         debug_assert_eq!(buf.len(), PAGE_SZ);
                         self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
+                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                            .await?;
                         write_guard.mark_valid();
 
                         // Swap for read lock
@@ -128,10 +128,15 @@ impl EphemeralFile {
                     self.off += n;
                     src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
-                        match self.ephemeral_file.file.write_all_at(
-                            &self.ephemeral_file.mutable_tail,
-                            self.blknum as u64 * PAGE_SZ as u64,
-                        ) {
+                        match self
+                            .ephemeral_file
+                            .file
+                            .write_all_at(
+                                &self.ephemeral_file.mutable_tail,
+                                self.blknum as u64 * PAGE_SZ as u64,
+                            )
+                            .await
+                        {
                             Ok(_) => {
                                 // Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.

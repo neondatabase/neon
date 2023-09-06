@@ -164,7 +164,7 @@ async fn delete_tenants_batch(
         s3_target,
         s3_client,
         dry_run,
-        |root_target, tenant_to_delete| root_target.tenant_root(tenant_to_delete),
+        |root_target, tenant_to_delete| root_target.tenant_root(&tenant_to_delete),
     )
     .await?;
 
@@ -215,7 +215,7 @@ async fn delete_timelines_batch(
         s3_target,
         s3_client,
         dry_run,
-        |root_target, timeline_to_delete| root_target.timeline_root(timeline_to_delete),
+        |root_target, timeline_to_delete| root_target.timeline_root(&timeline_to_delete),
     )
     .await?;
 
@@ -386,7 +386,7 @@ async fn ensure_tenant_batch_deleted(
 
     for &tenant_id in batch {
         let fetch_response =
-            list_objects_with_retries(s3_client, &s3_target.tenant_root(tenant_id), None).await?;
+            list_objects_with_retries(s3_client, &s3_target.tenant_root(&tenant_id), None).await?;
 
         if fetch_response.is_truncated()
             || fetch_response.contents().is_some()
@@ -415,7 +415,7 @@ async fn ensure_timeline_batch_deleted(
 
     for &id in batch {
         let fetch_response =
-            list_objects_with_retries(s3_client, &s3_target.timeline_root(id), None).await?;
+            list_objects_with_retries(s3_client, &s3_target.timeline_root(&id), None).await?;
 
         if fetch_response.is_truncated()
             || fetch_response.contents().is_some()

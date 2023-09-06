@@ -5,7 +5,6 @@ on:
     branches:
       - main
       - release
-      - ci-run/pr-*
   pull_request:
 
 defaults:
@@ -422,7 +421,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests, benchmarks ]
+    needs: [ regress-tests, coverage-report, benchmarks ]
     if: ${{ !cancelled() }}
 
     steps:
@@ -449,12 +448,18 @@ jobs:
               reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
             }
 
+            const coverage = {
+              coverageUrl: "${{ needs.coverage-report.outputs.coverage-html }}",
+              summaryJsonUrl: "${{ needs.coverage-report.outputs.coverage-json }}",
+            }
+
             const script = require("./scripts/comment-test-report.js")
             await script({
               github,
               context,
               fetch,
               report,
+              coverage,
             })
 
   coverage-report:
@@ -467,24 +472,15 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug ]
+    outputs:
+        coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
+        coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 1
-
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          fetch-depth: 0
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -527,13 +523,45 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
+      - name: Build coverage report NEW
+        id: upload-coverage-report-new
+        env:
+          BUCKET: neon-github-public-dev
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          BASELINE="$(git merge-base HEAD origin/main)"
+          CURRENT="${COMMIT_SHA}"
+
+          cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
+
+          GENHTML_ARGS="--ignore-errors path,unmapped,empty --synthesize-missing --demangle-cpp rustfilt --output-directory lcov-html ${CURRENT}.info"
+
+          # Use differential coverage if the baseline coverage exists.
+          # It can be missing if the coverage repoer wasn't uploaded yet or tests has failed on BASELINE commit.
+          if aws s3 cp --only-show-errors s3://${BUCKET}/code-coverage/${BASELINE}/lcov.info ./${BASELINE}.info; then
+            git diff ${BASELINE} ${CURRENT} -- '*.rs' > baseline-current.diff
+
+            GENHTML_ARGS="--baseline-file ${BASELINE}.info --diff-file baseline-current.diff ${GENHTML_ARGS}"
+          fi
+
+          genhtml ${GENHTML_ARGS}
+
+          aws s3 cp --only-show-errors --recursive ./lcov-html/ s3://${BUCKET}/code-coverage/${COMMIT_SHA}/lcov
+
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/index.html
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
+          echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
+
       - uses: actions/github-script@v6
         env:
           REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
+          REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           script: |
-            const { REPORT_URL, COMMIT_SHA } = process.env
+            const { REPORT_URL, REPORT_URL_NEW, COMMIT_SHA } = process.env
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
@@ -542,6 +570,15 @@ jobs:
               state: 'success',
               target_url: `${REPORT_URL}`,
               context: 'Code coverage report',
+            })
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${COMMIT_SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL_NEW}`,
+              context: 'Code coverage report NEW',
             })
 
   trigger-e2e-tests:
@@ -899,17 +936,13 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  build-private-extensions:
-    runs-on: [ self-hosted, gen3, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
+  trigger-custom-extensions-build-and-wait:
+    runs-on: ubuntu-latest
     needs: [ tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+          COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           REMOTE_REPO="${{ github.repository_owner }}/build-custom-extensions"
 
           curl -f -X POST \
@@ -939,10 +972,48 @@ jobs:
               }
             }"
 
+      - name: Wait for extension build to finish
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
+          INTERVAL=15 # try each N seconds
+
+          last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
+
+          for ((i=0; i <= $TIMEOUT; i+=$INTERVAL)); do
+            sleep $INTERVAL
+
+            # Get statuses for the latest commit in the PR / branch
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }}" > statuses.json
+
+            # Get the latest status for the "build-and-upload-extensions" context
+            last_status=$(jq --raw-output '[.[] | select(.context == "build-and-upload-extensions")] | sort_by(.created_at)[-1].state' statuses.json)
+            if [ "${last_status}" = "pending" ]; then
+              # Extension build is still in progress.
+              continue
+            elif [ "${last_status}" = "success" ]; then
+              # Extension build is successful.
+              exit 0
+            else
+              # Status is neither "pending" nor "success", exit the loop and fail the job.
+              break
+            fi
+          done
+
+          # Extension build failed, print `statuses.json` for debugging and fail the job.
+          jq '.' statuses.json
+
+          echo >&2 "Status of extension build is '${last_status}' != 'success'"
+          exit 1
+
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
