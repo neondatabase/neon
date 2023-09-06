@@ -53,6 +53,7 @@ impl Generation {
         matches!(self, Self::None)
     }
 
+    #[track_caller]
     pub fn get_suffix(&self) -> String {
         match self {
             Self::Valid(v) => {
@@ -72,6 +73,7 @@ impl Generation {
         u32::from_str_radix(suffix, 16).map(Generation::new).ok()
     }
 
+    #[track_caller]
     pub fn previous(&self) -> Generation {
         match self {
             Self::Valid(n) => {
