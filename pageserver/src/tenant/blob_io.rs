@@ -143,7 +143,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let to_copy = src_buf.len().min(remaining);
         unwritten_buf[..to_copy].copy_from_slice(&src_buf[..to_copy]);
         self.buf_offs += to_copy;
-        self.offset += src_buf.len() as u64;
+        self.offset += to_copy as u64;
         to_copy
     }
 
@@ -243,6 +243,8 @@ impl BlobWriter<false> {
 mod tests {
     use super::*;
     use crate::tenant::block_io::BlockReaderRef;
+    use rand::{Rng, SeedableRng};
+    use std::io::Read;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         let temp_dir = tempfile::tempdir()?;
@@ -254,12 +256,13 @@ mod tests {
             let file = VirtualFile::create(&path)?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                offsets.push(wtr.size());
-                wtr.write_blob(blob).await?;
+                let offs = wtr.write_blob(blob).await?;
+                offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            wtr.write_blob(&vec![0; PAGE_SZ]).await?;
+            let offs = wtr.write_blob(&vec![0; PAGE_SZ]).await?;
+            println!("Writing final blob at offs={offs}");
             wtr.flush_buffer().await?;
         }
 
@@ -276,6 +279,11 @@ mod tests {
         Ok(())
     }
 
+    fn random_array(len: usize) -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        (0..len).map(|_| rng.gen()).collect::<_>()
+    }
+
     #[tokio::test]
     async fn test_one() -> Result<(), Error> {
         let blobs = &[vec![12, 21, 22]];
@@ -289,10 +297,47 @@ mod tests {
         let blobs = &[
             vec![0, 1, 2, 3],
             b"Hello, World!".to_vec(),
+            Vec::new(),
             b"foobar".to_vec(),
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_really_big_array() -> Result<(), Error> {
+        let blobs = &[
+            b"test".to_vec(),
+            random_array(10 * PAGE_SZ),
+            b"foobar".to_vec(),
+        ];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_inc() -> Result<(), Error> {
+        let blobs = (0..PAGE_SZ / 8)
+            .map(|v| random_array(v * 16))
+            .collect::<Vec<_>>();
+        round_trip_test::<false>(&blobs).await?;
+        round_trip_test::<true>(&blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_random_size() -> Result<(), Error> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let blobs = (0..1024)
+            .map(|_| {
+                let sz: u16 = rng.gen();
+                random_array(sz.into())
+            })
+            .collect::<Vec<_>>();
+        round_trip_test::<false>(&blobs).await?;
+        round_trip_test::<true>(&blobs).await?;
         Ok(())
     }
 }
