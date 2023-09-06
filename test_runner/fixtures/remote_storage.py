@@ -93,10 +93,10 @@ class S3Storage:
     bucket_region: str
     access_key: str
     secret_key: str
-    endpoint: Optional[str] = None
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
+    endpoint: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
         return {
@@ -236,9 +236,9 @@ class RemoteStorageKind(str, enum.Enum):
         session_token = os.getenv("AWS_SESSION_TOKEN")
 
         env_bucket_name = os.getenv("REMOTE_STORAGE_S3_BUCKET")
-        assert env_bucket_name is str, "no remote storage bucket name provided"
+        assert env_bucket_name is not None, "no remote storage bucket name provided"
         env_region = os.getenv("REMOTE_STORAGE_S3_REGION")
-        assert env_region is str, "no remote storage region provided"
+        assert env_region is not None, "no remote storage region provided"
 
         prefix_in_bucket = f"{run_id}/{test_name}/{user}"
 
