@@ -92,15 +92,8 @@ impl<'a> BlockCursor<'a> {
 pub struct BlobWriter<const BUFFERED: bool> {
     inner: VirtualFile,
     offset: u64,
-    /// A buffer to save on read calls
-    buf: [u8; PAGE_SZ],
-    /// The number of bytes already occupied in buf
-    /// In other words: pointer to the first unwritten byte in buf.
-    ///
-    /// After each `write_all` call concludes, we maintain the
-    /// invariant that buf_offs < buf.len(), so the buffer is
-    /// never completely full outside of the `write_all` function.
-    buf_offs: usize,
+    /// A buffer to save on write calls, only used if BUFFERED=true
+    buf: Vec<u8>,
 }
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
@@ -108,14 +101,15 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         Self {
             inner,
             offset: start_offset,
-            buf: [0; PAGE_SZ],
-            buf_offs: 0,
+            buf: Vec::with_capacity(Self::CAPACITY),
         }
     }
 
     pub fn size(&self) -> u64 {
         self.offset
     }
+
+    const CAPACITY: usize = if BUFFERED { PAGE_SZ } else { 0 };
 
     #[inline(always)]
     /// Writes the given buffer directly to the underlying `VirtualFile`.
@@ -130,19 +124,17 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     #[inline(always)]
     /// Flushes the internal buffer to the underlying `VirtualFile`.
     pub async fn flush_buffer(&mut self) -> Result<(), Error> {
-        self.inner.write_all(&self.buf[..self.buf_offs]).await?;
-        self.buf_offs = 0;
+        self.inner.write_all(&self.buf).await?;
+        self.buf.clear();
         Ok(())
     }
 
     #[inline(always)]
     /// Writes as much of `src_buf` into the internal buffer as it fits
     fn write_into_buffer(&mut self, src_buf: &[u8]) -> usize {
-        let unwritten_buf = &mut self.buf[self.buf_offs..];
-        let remaining = unwritten_buf.len();
+        let remaining = Self::CAPACITY - self.buf.len();
         let to_copy = src_buf.len().min(remaining);
-        unwritten_buf[..to_copy].copy_from_slice(&src_buf[..to_copy]);
-        self.buf_offs += to_copy;
+        self.buf.extend_from_slice(&src_buf[..to_copy]);
         self.offset += to_copy as u64;
         to_copy
     }
@@ -150,7 +142,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Internal, possibly buffered, write function
     async fn write_all(&mut self, mut src_buf: &[u8]) -> Result<(), Error> {
         if !BUFFERED {
-            if self.buf_offs > 0 {
+            if self.buf.len() > 0 {
                 // Flush the buffer. This creates a write call for
                 // potentially very small data, but there is no way
                 // we can unify it with the data we are writing below
@@ -160,14 +152,14 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             self.write_all_unbuffered(src_buf).await?;
             return Ok(());
         }
-        let remaining = self.buf.len() - self.buf_offs;
+        let remaining = Self::CAPACITY - self.buf.len();
         // First try to copy as much as we can into the buffer
         if remaining > 0 {
             let copied = self.write_into_buffer(src_buf);
             src_buf = &src_buf[copied..];
         }
         // Then, if the buffer is full, flush it out
-        if self.buf.len() == self.buf_offs {
+        if self.buf.len() == Self::CAPACITY {
             self.flush_buffer().await?;
         }
         // Finally, write the tail of src_buf:
@@ -175,8 +167,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         // completely filling it, then put it there.
         // If not, write it out directly.
         if !src_buf.is_empty() {
-            assert_eq!(self.buf_offs, 0);
-            if src_buf.len() < self.buf.len() {
+            assert_eq!(self.buf.len(), 0);
+            if src_buf.len() < Self::CAPACITY {
                 let copied = self.write_into_buffer(src_buf);
                 // We just verified above that src_buf fits into our internal buffer.
                 assert_eq!(copied, src_buf.len());
