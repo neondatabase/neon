@@ -11,6 +11,7 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::tenant::TENANTS_SEGMENT_NAME;
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom, Write};
@@ -235,7 +236,7 @@ impl VirtualFile {
         let parts = path_str.split('/').collect::<Vec<&str>>();
         let tenant_id;
         let timeline_id;
-        if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
+        if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
             tenant_id = parts[parts.len() - 4].to_string();
             timeline_id = parts[parts.len() - 2].to_string();
         } else {

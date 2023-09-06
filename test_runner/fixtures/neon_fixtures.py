@@ -415,6 +415,7 @@ class NeonEnvBuilder:
         pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
+        test_output_dir: Path,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -455,6 +456,8 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
+        self.scrub_on_exit = False
+        self.test_output_dir = test_output_dir
 
         assert test_name.startswith(
             "test_"
@@ -488,6 +491,23 @@ class NeonEnvBuilder:
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
+
+    def enable_scrub_on_exit(self):
+        """
+        Call this if you would like the fixture to automatically run
+        s3_scrubber at the end of the test, as a bidirectional test
+        that the scrubber is working properly, and that the code within
+        the test didn't produce any invalid remote state.
+        """
+
+        if not isinstance(self.remote_storage, S3Storage):
+            # The scrubber can't talk to e.g. LocalFS -- it needs
+            # an HTTP endpoint (mock is fine) to connect to.
+            raise RuntimeError(
+                "Cannot scrub with remote_storage={self.remote_storage}, require an S3 endpoint"
+            )
+
+        self.scrub_on_exit = True
 
     def enable_remote_storage(
         self,
@@ -721,11 +741,20 @@ class NeonEnvBuilder:
             self.env.pageserver.stop(immediate=True)
 
             cleanup_error = None
+
+            if self.scrub_on_exit:
+                try:
+                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                except Exception as e:
+                    log.error(f"Error during remote storage scrub: {e}")
+                    cleanup_error = e
+
             try:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
-                cleanup_error = e
+                if cleanup_error is not None:
+                    cleanup_error = e
 
             try:
                 self.cleanup_local_storage()
@@ -929,6 +958,7 @@ def _shared_simple_env(
     default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
+    test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
@@ -957,6 +987,7 @@ def _shared_simple_env(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         env = builder.init_start()
 
@@ -984,7 +1015,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 @pytest.fixture(scope="function")
 def neon_env_builder(
     pytestconfig: Config,
-    test_output_dir: str,
+    test_output_dir: Path,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
@@ -1022,6 +1053,7 @@ def neon_env_builder(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         yield builder
 
@@ -1728,7 +1760,10 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
+        base_path, _, _ = subprocess_capture(
+            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+        )
+        return base_path
 
 
 @pytest.fixture(scope="function")
@@ -2732,6 +2767,41 @@ class SafekeeperHttpClient(requests.Session):
                 (TenantId(match.group(1)), TimelineId(match.group(2)))
             ] = int(match.group(3))
         return metrics
+
+
+class S3Scrubber:
+    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+        self.env = env
+        self.log_dir = log_dir
+
+    def scrubber_cli(self, args, timeout):
+        assert isinstance(self.env.remote_storage, S3Storage)
+        s3_storage = self.env.remote_storage
+
+        env = {
+            "REGION": s3_storage.bucket_region,
+            "BUCKET": s3_storage.bucket_name,
+        }
+        env.update(s3_storage.access_env_vars())
+
+        if s3_storage.endpoint is not None:
+            env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
+
+        base_args = [self.env.neon_binpath / "s3_scrubber"]
+        args = base_args + args
+
+        (output_path, _, status_code) = subprocess_capture(
+            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
+        )
+        if status_code:
+            log.warning(f"Scrub command {args} failed")
+            log.warning(f"Scrub environment: {env}")
+            log.warning(f"Output at: {output_path}")
+
+            raise RuntimeError("Remote storage scrub failed")
+
+    def scan_metadata(self):
+        self.scrubber_cli(["scan-metadata"], timeout=30)
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:

@@ -3,11 +3,15 @@ from contextlib import closing
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.remote_storage import s3_storage
 
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_remote_storage(remote_storage_kind=s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
+
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_pageserver_restart")
@@ -109,6 +113,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
 def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_remote_storage(remote_storage_kind=s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
+
     env = neon_env_builder.init_start()
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.

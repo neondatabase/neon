@@ -88,6 +88,19 @@ def available_s3_storages() -> List[RemoteStorageKind]:
     return remote_storages
 
 
+def s3_storage() -> RemoteStorageKind:
+    """
+    For tests that require a remote storage impl that exposes an S3
+    endpoint, but don't want to parametrize over multiple storage types.
+
+    Use real S3 if available, else use MockS3
+    """
+    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
+        return RemoteStorageKind.REAL_S3
+    else:
+        return RemoteStorageKind.MOCK_S3
+
+
 @dataclass
 class LocalFsStorage:
     root: Path

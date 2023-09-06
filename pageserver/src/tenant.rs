@@ -141,6 +141,9 @@ pub use crate::tenant::metadata::save_metadata;
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
 
+/// The "tenants" part of `tenants/<tenant>/timelines...`
+pub const TENANTS_SEGMENT_NAME: &str = "tenants";
+
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
