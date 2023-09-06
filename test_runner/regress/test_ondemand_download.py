@@ -53,7 +53,7 @@ def test_ondemand_download_large_rel(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     # thinking about using a shared environment? the test assumes that global
@@ -155,7 +155,7 @@ def test_ondemand_download_timetravel(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     # thinking about using a shared environment? the test assumes that global
@@ -316,7 +316,7 @@ def test_download_remote_layers_api(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     ##### First start, insert data and upload it to the remote storage
@@ -477,7 +477,7 @@ def test_compaction_downloads_on_demand_without_image_creation(
     Create a few layers, then evict, then make sure compaction runs successfully.
     """
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     conf = {
@@ -564,7 +564,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
     directly test for it.
     """
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     conf = {
@@ -664,7 +664,7 @@ def test_ondemand_download_failure_to_replace(
     """
 
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     # disable gc and compaction via default tenant config because config is lost while detaching

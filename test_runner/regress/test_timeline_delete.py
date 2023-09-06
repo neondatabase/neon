@@ -347,7 +347,7 @@ def test_timeline_resurrection_on_attach(
     """
 
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     ##### First start, insert data and upload it to the remote storage
@@ -434,7 +434,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     """
 
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.MOCK_S3,
     )
 
     env = neon_env_builder.init_start()
@@ -553,7 +553,7 @@ def test_concurrent_timeline_delete_stuck_on(
     """
 
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.MOCK_S3,
     )
 
     env = neon_env_builder.init_start()
@@ -630,7 +630,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     This tests cancel safety up to the given failpoint.
     """
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.MOCK_S3,
     )
 
     env = neon_env_builder.init_start()
@@ -699,7 +699,7 @@ def test_timeline_delete_works_for_remote_smoke(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()
@@ -838,7 +838,7 @@ def test_timeline_delete_resumed_on_attach(
     pg_bin: PgBin,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)

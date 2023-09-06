@@ -45,7 +45,7 @@ def test_tenant_reattach(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     # Exercise retry code path by making all uploads and downloads fail for the
@@ -229,7 +229,7 @@ def test_tenant_reattach_while_busy(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
     env = neon_env_builder.init_start()
 
@@ -450,7 +450,7 @@ def test_detach_while_attaching(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     ##### First start, insert secret data and upload it to the remote storage
@@ -532,9 +532,7 @@ def test_detach_while_attaching(
 def test_ignored_tenant_reattach(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -604,7 +602,7 @@ def test_ignored_tenant_download_missing_layers(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -669,7 +667,7 @@ def test_ignored_tenant_stays_broken_without_metadata(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -712,7 +710,7 @@ def test_load_attach_negatives(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -756,7 +754,7 @@ def test_ignore_while_attaching(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()
@@ -859,7 +857,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()

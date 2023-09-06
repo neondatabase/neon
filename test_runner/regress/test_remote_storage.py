@@ -61,7 +61,7 @@ def test_remote_storage_backup_and_restore(
     neon_env_builder.safekeepers_id_start = 12
 
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     neon_env_builder.enable_generations = generations
@@ -225,7 +225,7 @@ def test_remote_storage_upload_queue_retries(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()
@@ -380,7 +380,7 @@ def test_remote_timeline_client_calls_started_metric(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     # thinking about using a shared environment? the test assumes that global
@@ -522,7 +522,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start(
@@ -639,7 +639,7 @@ def test_empty_branch_remote_storage_upload(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()
@@ -690,7 +690,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
     for it even though it gets 409 Conflict.
     """
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start()
@@ -787,7 +787,7 @@ def test_compaction_delete_before_upload(
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind,
     )
 
     env = neon_env_builder.init_start(
