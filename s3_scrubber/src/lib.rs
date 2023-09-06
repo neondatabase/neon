@@ -15,6 +15,7 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::{Client, Config};
 
 pub use s3_deletion::S3Deleter;
+use std::io::IsTerminal;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -139,6 +140,7 @@ pub fn init_logging(binary_name: &str, dry_run: bool, node_kind: &str) -> Worker
         .with_ansi(false)
         .with_writer(file_writer);
     let stdout_logs = fmt::Layer::new()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_target(false)
         .with_writer(std::io::stdout);
     tracing_subscriber::registry()
