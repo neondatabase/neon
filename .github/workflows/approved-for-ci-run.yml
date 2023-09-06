@@ -3,6 +3,8 @@ name: Handle `approved-for-ci-run` label
 
 on:
   pull_request:
+    branches:
+      - main
     types:
       # Default types that triggers a workflow ([1]):
       # - [1] https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
@@ -18,28 +20,33 @@ env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PR_NUMBER: ${{ github.event.pull_request.number }}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+
 jobs:
   remove-label:
     # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
     # The PR should be reviewed and labelled manually again.
 
-    runs-on: [ ubuntu-latest ]
-
     if: |
       contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
 
+    runs-on: ubuntu-latest
+    permissions: write-all
+
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
 
-  create-branch:
-    # Create a local branch for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
-
-    runs-on: [ ubuntu-latest ]
+  create-or-update-pr-for-ci-run:
+    # Create local PR for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
 
     if: |
       github.event.action == 'labeled' &&
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    runs-on: ubuntu-latest
+    permissions: write-all
 
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
@@ -53,3 +60,16 @@ jobs:
       - run: git checkout -b "ci-run/pr-${PR_NUMBER}"
 
       - run: git push --force origin "ci-run/pr-${PR_NUMBER}"
+
+      - name: Create a Pull Request for CI run (if required)
+        run: |
+          HEAD="ci-run/pr-${PR_NUMBER}"
+
+          ALREADY_CREATED=$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${HEAD}" --base main --json number --jq '.[].number')
+          if [ -z "${ALREADY_CREATED}" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" create  --title "[DO NOT MERGE] CI run for PR #${PR_NUMBER}" \
+                                                        --body "Ref #${PR_NUMBER}" \
+                                                        --head "${HEAD}" \
+                                                        --base main \
+                                                        --draft
+          fi
