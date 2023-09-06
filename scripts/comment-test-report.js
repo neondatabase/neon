@@ -139,7 +139,7 @@ const reportSummary = async (params) => {
     // Print test resuls from the newest to the oldest Postgres version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
         if (Object.keys(failedTests[pgVersion]).length > 0) {
-            summary += `#### Failures on Posgres ${pgVersion}\n\n`
+            summary += `#### Failures on Postgres ${pgVersion}\n\n`
             for (const [testName, tests] of Object.entries(failedTests[pgVersion])) {
                 const links = []
                 for (const test of tests) {
@@ -188,7 +188,7 @@ const reportSummary = async (params) => {
 }
 
 const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
-    let summary = `### Code coverage [full report](${coverageUrl})\n`
+    let summary = `\n### Code coverage ([full report](${coverageUrl}))\n`
 
     const coverage = await (await fetch(summaryJsonUrl)).json()
     for (const covType of Object.keys(coverage).sort()) {
