@@ -37,7 +37,7 @@ def subprocess_capture(
     capture_stdout=False,
     **kwargs: Any,
 ) -> Tuple[str, Optional[str], int]:
-    """Run a process and bifurcate its outout to files and log
+    """Run a process and bifurcate its output to files and the `log` logger
 
     stderr and stdout are always captured in files.  They are also optionally
     echoed to the log (echo_stderr, echo_stdout), and/or captured and returned

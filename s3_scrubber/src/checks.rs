@@ -195,15 +195,15 @@ pub async fn branch_cleanup_and_check_errors(
 
     if let Some(s3_active_branch) = s3_active_branch {
         info!(
-            "Checking console status for timeline for branch branch {:?}/{:?}",
+            "Checking console status for timeline for branch {:?}/{:?}",
             s3_active_branch.project_id, s3_active_branch.id
         );
         match console_branch {
-            Some(_) => {result.errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
+            Some(_) => {result.errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether it got removed during the check",
                 s3_active_branch.id, s3_active_branch.project_id))
             },
             None => {
-                result.errors.push(format!("Timeline has no branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
+                result.errors.push(format!("Timeline has no branch data in the console (id = {:?}, project_id = {:?}), recheck whether it got removed during the check",
             s3_active_branch.id, s3_active_branch.project_id))
             }
         };

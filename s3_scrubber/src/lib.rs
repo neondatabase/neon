@@ -129,9 +129,7 @@ impl Display for BucketConfig {
 
 impl BucketConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let sso_account_id = env::var("SSO_ACCOUNT_ID")
-            .context("'SSO_ACCOUNT_ID' param retrieval")
-            .ok();
+        let sso_account_id = env::var("SSO_ACCOUNT_ID").ok();
         let region = env::var("REGION").context("'REGION' param retrieval")?;
         let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
 
