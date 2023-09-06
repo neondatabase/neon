@@ -155,17 +155,19 @@ impl RemoteStorage for LocalFs {
         // the local filesystem we need a directory to start calling read_dir on.
         let mut initial_dir = full_path.clone();
         match fs::metadata(full_path.clone()).await {
-            Err(e) => {
-                // It's not a file that exists: strip the prefix back to the parent directory
-                if matches!(e.kind(), ErrorKind::NotFound) {
-                    initial_dir.pop();
-                }
-            }
             Ok(meta) => {
                 if !meta.is_dir() {
                     // It's not a directory: strip back to the parent
                     initial_dir.pop();
                 }
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // It's not a file that exists: strip the prefix back to the parent directory
+                initial_dir.pop();
+            }
+            Err(e) => {
+                // Unexpected I/O error
+                anyhow::bail!(e)
             }
         }
 
