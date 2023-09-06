@@ -58,7 +58,7 @@ macro_rules! for_all_postgres_versions {
 for_all_postgres_versions! { postgres_ffi }
 
 /// dispatch_pgversion
-/// 
+///
 /// Run a code block in a context where the postgres_ffi bindings for a
 /// specific (supported) PostgreSQL version are `use`-ed in scope under the pgv
 /// identifier.
@@ -67,7 +67,7 @@ for_all_postgres_versions! { postgres_ffi }
 /// the default handling instead).
 ///
 /// Use like
-/// 
+///
 /// dispatch_pgversion!(my_pgversion, { pgv::constants::XLOG_DBASE_CREATE })
 /// dispatch_pgversion!(my_pgversion, pgv::constants::XLOG_DBASE_CREATE)
 ///
