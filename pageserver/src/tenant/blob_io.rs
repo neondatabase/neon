@@ -244,7 +244,6 @@ mod tests {
     use super::*;
     use crate::tenant::block_io::BlockReaderRef;
     use rand::{Rng, SeedableRng};
-    use std::io::Read;
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         let temp_dir = tempfile::tempdir()?;
