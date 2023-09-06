@@ -17,7 +17,7 @@ on:
       - labeled
 
 env:
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
   PR_NUMBER: ${{ github.event.pull_request.number }}
 
 concurrency:
@@ -33,7 +33,6 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
 
     runs-on: ubuntu-latest
-    permissions: write-all
 
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
@@ -46,7 +45,6 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
 
     runs-on: ubuntu-latest
-    permissions: write-all
 
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
