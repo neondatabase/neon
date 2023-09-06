@@ -33,6 +33,14 @@ void		_PG_init(void);
 void
 _PG_init(void)
 {
+#if PG_VERSION_NUM >= 160000
+	void (*register_neon_rmgr)(void);
+	register_neon_rmgr = (void (*)(void)) load_external_function(
+		"$libdir/neon_rmgr", "register_neon_rmgr", true, NULL
+	);
+	register_neon_rmgr();
+#endif
+
 	pg_init_libpagestore();
 	pg_init_walproposer();
 
@@ -40,9 +48,9 @@ _PG_init(void)
 
 	pg_init_extension_server();
 
-        // Important: This must happen after other parts of the extension
-        // are loaded, otherwise any settings to GUCs that were set before
-        // the extension was loaded will be removed.
+	// Important: This must happen after other parts of the extension
+	// are loaded, otherwise any settings to GUCs that were set before
+	// the extension was loaded will be removed.
 	EmitWarningsOnPlaceholders("neon");
 }
 
