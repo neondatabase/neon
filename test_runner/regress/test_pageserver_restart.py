@@ -8,7 +8,9 @@ from fixtures.remote_storage import s3_storage
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("generations", [True, False])
+def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool):
+    neon_env_builder.enable_generations = generations
     neon_env_builder.enable_remote_storage(remote_storage_kind=s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 

@@ -205,6 +205,8 @@ pub struct PageServerConf {
     /// has it's initial logical size calculated. Not running background tasks for some seconds is
     /// not terrible.
     pub background_task_maximum_delay: Duration,
+
+    pub control_plane_api: Option<Url>,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -279,6 +281,8 @@ struct PageServerConfigBuilder {
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
 
     background_task_maximum_delay: BuilderValue<Duration>,
+
+    control_plane_api: BuilderValue<Option<Url>>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -341,6 +345,8 @@ impl Default for PageServerConfigBuilder {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+
+            control_plane_api: Set(None),
         }
     }
 }
@@ -469,6 +475,10 @@ impl PageServerConfigBuilder {
         self.background_task_maximum_delay = BuilderValue::Set(delay);
     }
 
+    pub fn control_plane_api(&mut self, api: Url) {
+        self.control_plane_api = BuilderValue::Set(Some(api))
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -554,6 +564,9 @@ impl PageServerConfigBuilder {
             background_task_maximum_delay: self
                 .background_task_maximum_delay
                 .ok_or(anyhow!("missing background_task_maximum_delay"))?,
+            control_plane_api: self
+                .control_plane_api
+                .ok_or(anyhow!("missing control_plane_api"))?,
         })
     }
 }
@@ -742,6 +755,7 @@ impl PageServerConf {
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
+                "control_plane_api" => builder.control_plane_api(parse_toml_string(key, item)?.parse().context("failed to parse control plane URL")?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -910,6 +924,7 @@ impl PageServerConf {
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
+            control_plane_api: None,
         }
     }
 }
@@ -1133,6 +1148,7 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: humantime::parse_duration(
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
+                control_plane_api: None
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1188,6 +1204,7 @@ background_task_maximum_delay = '334 s'
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
+                control_plane_api: None
             },
             "Should be able to parse all basic config values correctly"
         );

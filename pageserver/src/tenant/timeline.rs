@@ -1724,11 +1724,18 @@ impl Timeline {
                 for (name, decision) in decided {
                     let decision = match decision {
                         Ok(UseRemote { local, remote }) => {
-                            path.push(name.file_name());
-                            init::cleanup_local_file_for_remote(&path, &local, &remote)?;
-                            path.pop();
-
-                            UseRemote { local, remote }
+                            // Remote is authoritative, but we may still choose to retain
+                            // the local file if the contents appear to match
+                            if local.file_size() == remote.file_size() {
+                                // Use the local file, but take the remote metadata so that we pick up
+                                // the correct generation.
+                                UseLocal(remote)
+                            } else {
+                                path.push(name.file_name());
+                                init::cleanup_local_file_for_remote(&path, &local, &remote)?;
+                                path.pop();
+                                UseRemote { local, remote }
+                            }
                         }
                         Ok(decision) => decision,
                         Err(FutureLayer { local }) => {

@@ -52,9 +52,9 @@ from requests import ReadTimeout
 #
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+@pytest.mark.parametrize("generations", [True, False])
 def test_remote_storage_backup_and_restore(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind, generations: bool
 ):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
@@ -63,6 +63,8 @@ def test_remote_storage_backup_and_restore(
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
+
+    neon_env_builder.enable_generations = generations
 
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
@@ -154,7 +156,7 @@ def test_remote_storage_backup_and_restore(
     # background task to load the tenant. In that background task,
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
     assert tenant_info["attachment_status"] == {
@@ -164,7 +166,7 @@ def test_remote_storage_backup_and_restore(
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
-        client.tenant_attach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
@@ -182,7 +184,7 @@ def test_remote_storage_backup_and_restore(
     # Ensure that the pageserver remembers that the tenant was attaching, by
     # trying to attach it again. It should fail.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
-        client.tenant_attach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
     wait_until_tenant_active(
@@ -362,7 +364,7 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 
@@ -499,7 +501,7 @@ def test_remote_timeline_client_calls_started_metric(
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 

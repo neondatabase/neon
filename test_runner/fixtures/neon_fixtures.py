@@ -456,6 +456,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
+        self.enable_generations = False
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
@@ -740,6 +741,9 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
 
+            if self.env.attachment_service is not None:
+                self.env.attachment_service.stop(immediate=True)
+
             cleanup_error = None
 
             if self.scrub_on_exit:
@@ -802,6 +806,8 @@ class NeonEnv:
         the tenant id
     """
 
+    PAGESERVER_ID = 1
+
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
@@ -824,6 +830,14 @@ class NeonEnv:
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
+
+        if config.enable_generations:
+            attachment_service_port = self.port_distributor.get_port()
+            self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
+            self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
+        else:
+            self.control_plane_api = None
+            self.attachment_service = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -850,13 +864,20 @@ class NeonEnv:
         toml += textwrap.dedent(
             f"""
             [pageserver]
-            id=1
+            id={self.PAGESERVER_ID}
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
             pg_auth_type = '{pg_auth_type}'
             http_auth_type = '{http_auth_type}'
         """
         )
+
+        if self.control_plane_api is not None:
+            toml += textwrap.dedent(
+                f"""
+                control_plane_api = '{self.control_plane_api}'
+            """
+            )
 
         # Create a corresponding NeonPageserver object
         self.pageserver = NeonPageserver(
@@ -904,6 +925,9 @@ class NeonEnv:
     def start(self):
         # Start up broker, pageserver and all safekeepers
         self.broker.try_start()
+
+        if self.attachment_service is not None:
+            self.attachment_service.start()
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
@@ -1331,6 +1355,16 @@ class NeonCli(AbstractNeonCli):
             res.check_returncode()
             return res
 
+    def attachment_service_start(self):
+        cmd = ["attachment_service", "start"]
+        return self.raw_cli(cmd)
+
+    def attachment_service_stop(self, immediate: bool):
+        cmd = ["attachment_service", "stop"]
+        if immediate:
+            cmd.extend(["-m", "immediate"])
+        return self.raw_cli(cmd)
+
     def pageserver_start(
         self,
         overrides: Tuple[str, ...] = (),
@@ -1512,6 +1546,35 @@ class ComputeCtl(AbstractNeonCli):
     COMMAND = "compute_ctl"
 
 
+class NeonAttachmentService:
+    def __init__(self, env: NeonEnv):
+        self.env = env
+        self.running = False
+
+    def start(self):
+        assert not self.running
+        self.env.neon_cli.attachment_service_start()
+        self.running = True
+        return self
+
+    def stop(self, immediate: bool = False) -> "NeonAttachmentService":
+        if self.running:
+            self.env.neon_cli.attachment_service_stop(immediate)
+            self.running = False
+        return self
+
+    def __enter__(self) -> "NeonAttachmentService":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ):
+        self.stop(immediate=True)
+
+
 class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
@@ -1674,6 +1737,26 @@ class NeonPageserver(PgProtocol):
                 return line
 
         return None
+
+    def tenant_attach(
+        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+    ):
+        """
+        Tenant attachment passes through here to acquire a generation number before proceeding
+        to call into the pageserver HTTP client.
+        """
+        if self.env.attachment_service is not None:
+            response = requests.post(
+                f"{self.env.control_plane_api}/attach_hook",
+                json={"tenant_id": str(tenant_id), "pageserver_id": self.env.PAGESERVER_ID},
+            )
+            response.raise_for_status()
+            generation = response.json()["gen"]
+        else:
+            generation = None
+
+        client = self.env.pageserver.http_client()
+        return client.tenant_attach(tenant_id, config, config_null, generation=generation)
 
 
 def append_pageserver_param_overrides(

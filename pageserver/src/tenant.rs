@@ -3381,7 +3381,7 @@ pub mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
-        remote_storage: GenericRemoteStorage,
+        pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: PathBuf,
     }
 

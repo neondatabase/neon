@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::{DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest};
+use pageserver_api::models::{
+    DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest, TenantLoadRequest,
+};
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -32,11 +34,13 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
+use crate::tenant::timeline::Timeline;
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
     auth::JwtAuth,
+    generation::Generation,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
@@ -472,7 +476,7 @@ async fn tenant_attach_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
-    let tenant_conf = match maybe_body {
+    let tenant_conf = match &maybe_body {
         Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
         None => TenantConfOpt::default(),
     };
@@ -483,10 +487,13 @@ async fn tenant_attach_handler(
 
     let state = get_state(&request);
 
+    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
+
     if let Some(remote_storage) = &state.remote_storage {
         mgr::attach_tenant(
             state.conf,
             tenant_id,
+            generation,
             tenant_conf,
             state.broker_client.clone(),
             remote_storage.clone(),
@@ -538,7 +545,7 @@ async fn tenant_detach_handler(
 }
 
 async fn tenant_load_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
@@ -546,10 +553,18 @@ async fn tenant_load_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
+    let maybe_body: Option<TenantLoadRequest> = json_request_or_empty_body(&mut request).await?;
+
     let state = get_state(&request);
+
+    // The /load request is only usable when control_plane_api is not set.  Once it is set, callers
+    // should always use /attach instead.
+    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
+
     mgr::load_tenant(
         state.conf,
         tenant_id,
+        generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,
@@ -851,6 +866,21 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
     Ok(response)
 }
 
+/// Helper for requests that may take a generation, which is mandatory
+/// when control_plane_api is set, but otherwise defaults to Generation::none()
+fn get_request_generation(state: &State, req_gen: Option<u32>) -> Result<Generation, ApiError> {
+    if state.conf.control_plane_api.is_some() {
+        req_gen
+            .map(Generation::new)
+            .ok_or(ApiError::BadRequest(anyhow!(
+                "generation attribute missing"
+            )))
+    } else {
+        // Legacy mode: all tenants operate with no generation
+        Ok(Generation::none())
+    }
+}
+
 async fn tenant_create_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -867,14 +897,17 @@ async fn tenant_create_handler(
     let tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
     let state = get_state(&request);
+
+    let generation = get_request_generation(state, request_data.generation)?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let new_tenant = mgr::create_tenant(
         state.conf,
         tenant_conf,
         target_tenant_id,
+        generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,

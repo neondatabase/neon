@@ -11,6 +11,7 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
@@ -18,6 +19,7 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::control_plane_client::ControlPlaneClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -94,11 +96,20 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     resources: TenantSharedResources,
     init_order: InitializationOrder,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
 
     let mut tenants = HashMap::new();
+
+    // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
+    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
+        Some(client.re_attach().await?)
+    } else {
+        info!("Control plane API not configured, tenant generations are disabled");
+        None
+    };
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
         .await
@@ -149,9 +160,53 @@ pub async fn init_tenant_mgr(
                         continue;
                     }
 
+                    let tenant_id = match tenant_dir_path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TenantId>()
+                    {
+                        Ok(id) => id,
+                        Err(_) => {
+                            warn!(
+                                "Invalid tenant path (garbage in our repo directory?): {}",
+                                tenant_dir_path.display()
+                            );
+                            continue;
+                        }
+                    };
+
+                    let generation = if let Some(generations) = &tenant_generations {
+                        // We have a generation map: treat it as the authority for whether
+                        // this tenant is really attached.
+                        if let Some(gen) = generations.get(&tenant_id) {
+                            *gen
+                        } else {
+                            info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
+                            if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
+                                error!(
+                                    "Failed to remove detached tenant directory '{}': {:?}",
+                                    tenant_dir_path.display(),
+                                    e
+                                );
+                            }
+                            continue;
+                        }
+                    } else {
+                        // Legacy mode: no generation information, any tenant present
+                        // on local disk may activate
+                        info!(
+                            "Starting tenant {} in legacy mode, no generation",
+                            tenant_dir_path.display()
+                        );
+                        Generation::none()
+                    };
+
                     match schedule_local_tenant_processing(
                         conf,
+                        tenant_id,
                         &tenant_dir_path,
+                        generation,
                         resources.clone(),
                         Some(init_order.clone()),
                         &TENANTS,
@@ -185,9 +240,12 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
+    tenant_id: TenantId,
     tenant_path: &Path,
+    generation: Generation,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -208,15 +266,6 @@ pub(crate) fn schedule_local_tenant_processing(
         "Cannot load tenant from empty directory {tenant_path:?}"
     );
 
-    let tenant_id = tenant_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .parse::<TenantId>()
-        .with_context(|| {
-            format!("Could not parse tenant id out of the tenant dir name in path {tenant_path:?}")
-        })?;
-
     let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
     anyhow::ensure!(
         !conf.tenant_ignore_mark_file_path(&tenant_id).exists(),
@@ -229,7 +278,7 @@ pub(crate) fn schedule_local_tenant_processing(
             match Tenant::spawn_attach(
                 conf,
                 tenant_id,
-                Generation::none(),
+                generation,
                 resources.broker_client,
                 tenants,
                 remote_storage,
@@ -253,13 +302,7 @@ pub(crate) fn schedule_local_tenant_processing(
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
         Tenant::spawn_load(
-            conf,
-            tenant_id,
-            Generation::none(),
-            resources,
-            init_order,
-            tenants,
-            ctx,
+            conf, tenant_id, generation, resources, init_order, tenants, ctx,
         )
     };
     Ok(tenant)
@@ -383,6 +426,7 @@ pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
@@ -400,7 +444,8 @@ pub async fn create_tenant(
             remote_storage,
         };
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, tenant_resources, None, &TENANTS, ctx)?;
+            schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
+                generation, tenant_resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -548,6 +593,7 @@ async fn detach_tenant0(
 pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
@@ -564,7 +610,7 @@ pub async fn load_tenant(
             broker_client,
             remote_storage,
         };
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path,  resources, None,  &TENANTS, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, generation, resources, None,  &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -628,6 +674,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    generation: Generation,
     tenant_conf: TenantConfOpt,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
@@ -649,7 +696,7 @@ pub async fn attach_tenant(
             broker_client,
             remote_storage: Some(remote_storage),
         };
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
