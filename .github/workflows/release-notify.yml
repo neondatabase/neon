@@ -6,9 +6,8 @@ concurrency:
 
 on:
   pull_request:
-    # TODO: uncomment
-    # branches:
-    #   - release
+    branches:
+      - release
     types:
       # Default types that triggers a workflow:
       # - https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
