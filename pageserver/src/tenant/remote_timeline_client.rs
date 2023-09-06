@@ -1161,7 +1161,11 @@ impl RemoteTimelineClient {
                     // at info level at first, and only WARN if the operation fails repeatedly.
                     //
                     // (See similar logic for downloads in `download::download_retry`)
-                    if retries < FAILED_UPLOAD_WARN_THRESHOLD {
+
+                    let is_simulated = cfg!(feature = "testing")
+                        && e.root_cause().is::<remote_storage::SimulatedError>();
+
+                    if retries < FAILED_UPLOAD_WARN_THRESHOLD || is_simulated {
                         info!(
                             "failed to perform remote task {}, will retry (attempt {}): {:#}",
                             task.op, retries, e
