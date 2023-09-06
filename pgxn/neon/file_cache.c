@@ -99,7 +99,6 @@ static int   lfc_shrinking_factor; /* power of two by which local cache size wil
 
 void FileCacheMonitorMain(Datum main_arg);
 
-
 /*
  * Local file cache is mandatory and Neon can work without it.
  * In case of any any errors with this cache, we should disable it but to not throw error.
@@ -113,6 +112,10 @@ lfc_disable(char const* op)
 	FileCacheEntry* entry;
 
 	elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
+
+	if (lfc_desc > 0)
+		close(lfc_desc);
+
 	lfc_desc = -1;
 	lfc_size_limit = 0;
 
@@ -132,6 +135,22 @@ lfc_disable(char const* op)
 	dlist_init(&lfc_ctl->lru);
 
 	LWLockRelease(lfc_lock);
+}
+
+static bool
+lfc_ensure_openned(void)
+{
+	/* Open cache file if not done yet */
+	if (lfc_desc <= 0)
+	{
+		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
+
+		if (lfc_desc < 0) {
+			lfc_disable("open");
+			return false;
+		}
+	}
+	return false;
 }
 
 static void
@@ -492,21 +511,13 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	bool result = true;
 	uint32 hash;
 	uint64 generation;
+	uint32 entry_offset;
 
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
-	/* Open cache file if not done yet */
-	if (lfc_desc <= 0)
-	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
-
-		if (lfc_desc < 0) {
-			lfc_disable("open");
-			return false;
-		}
-	}
-
+	if (!lfc_ensure_openned())
+		return false;
 
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
@@ -525,9 +536,11 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (entry->access_count++ == 0)
 		dlist_delete(&entry->lru_node);
 	generation = lfc_ctl->generation;
+	entry_offset = entry->offset;
+
 	LWLockRelease(lfc_lock);
 
-	rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
+	rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry_offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 	if (rc != BLCKSZ)
 	{
 		lfc_disable("read");
@@ -568,15 +581,8 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
-	/* Open cache file if not done yet */
-	if (lfc_desc <= 0)
-	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
-		if (lfc_desc <= 0) {
-			lfc_disable("open");
-			return;
-		}
-	}
+	if (!lfc_ensure_openned())
+		return;
 
 	tag.rnode = rnode;
 	tag.forkNum = forkNum;
