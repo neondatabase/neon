@@ -18,7 +18,7 @@ pub struct UnreliableWrapper {
 }
 
 /// Used to identify retries of different unique operation.
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 enum RemoteOp {
     ListPrefixes(Option<RemotePath>),
     Upload(RemotePath),
@@ -59,13 +59,12 @@ impl UnreliableWrapper {
                     e.remove();
                     Ok(attempts_before_this)
                 } else {
-                    let error =
-                        anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
+                    let error = anyhow::anyhow!(SimulatedError(e.key().to_owned()));
                     Err(DownloadError::Other(error))
                 }
             }
             Entry::Vacant(e) => {
-                let error = anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
+                let error = anyhow::anyhow!(SimulatedError(e.key().to_owned()));
                 e.insert(1);
                 Err(DownloadError::Other(error))
             }
@@ -79,6 +78,17 @@ impl UnreliableWrapper {
         self.inner.delete(path).await
     }
 }
+
+#[derive(Debug)]
+pub struct SimulatedError(RemoteOp);
+
+impl std::fmt::Display for SimulatedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "simulated failure of remote operation {:?}", self.0)
+    }
+}
+
+impl std::error::Error for SimulatedError {}
 
 #[async_trait::async_trait]
 impl RemoteStorage for UnreliableWrapper {
