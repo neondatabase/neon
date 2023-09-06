@@ -444,31 +444,6 @@ async fn timeline_detail_handler(
     json_response(StatusCode::OK, timeline_info)
 }
 
-async fn walreceiver_detail_handler(
-    request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let walreceiver_info = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
-
-        let timeline = tenant
-            .get_timeline(timeline_id, false)
-            .map_err(|e| ApiError::NotFound(e.into()))?;
-
-        let walreceiver_status = timeline.walreceiver_status();
-
-        Ok::<_, ApiError>(walreceiver_status)
-    }
-    .instrument(info_span!("walreceiver_detail", %tenant_id, %timeline_id))
-    .await?;
-
-    json_response(StatusCode::OK, walreceiver_info)
-}
-
 async fn get_lsn_by_timestamp_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1449,10 +1424,6 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)
         })
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/walreceiver",
-            |r| api_handler(r, walreceiver_detail_handler),
-        )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
             |r| api_handler(r, get_lsn_by_timestamp_handler),
