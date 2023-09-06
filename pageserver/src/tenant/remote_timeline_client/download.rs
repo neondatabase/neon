@@ -305,16 +305,15 @@ pub(super) async fn download_index_part(
             tracing::debug!("Found index_part from previous generation");
             return Ok(index_part);
         }
-        Err(e) => {
-            if matches!(e, DownloadError::NotFound) {
-                tracing::debug!(
-                    "No index_part found from previous generation, falling back to listing"
-                );
-            } else {
-                return Err(e);
-            }
+        Err(DownloadError::NotFound) => {
+            tracing::debug!(
+                "No index_part found from previous generation, falling back to listing"
+            );
         }
-    };
+        Err(e) => {
+            return Err(e);
+        }
+    }
 
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
     // objects, and select the highest one with a generation < my_generation.
