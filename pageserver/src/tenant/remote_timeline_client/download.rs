@@ -281,11 +281,8 @@ pub(super) async fn download_index_part(
             tracing::debug!("Found index_part from current generation (this is a stale attachment) {my_generation:?}");
             return Ok(index_part);
         }
-        Err(e) => {
-            if !matches!(e, DownloadError::NotFound) {
-                return Err(e);
-            }
-        }
+        Err(DownloadError::NotFound) => {}
+        Err(e) => return Err(e),
     };
 
     // Typical case: the previous generation of this tenant was running healthily, and had uploaded
