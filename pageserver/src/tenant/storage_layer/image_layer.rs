@@ -27,7 +27,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::WriteBlobWriter;
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -43,7 +43,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::SeekFrom;
-use std::io::Write;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
@@ -511,7 +510,7 @@ struct ImageLayerWriterInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
-    blob_writer: WriteBlobWriter<VirtualFile>,
+    blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
@@ -544,7 +543,7 @@ impl ImageLayerWriterInner {
         )?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
-        let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -594,7 +593,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref())?;
+            file.write_all(buf.as_ref()).await?;
         }
 
         // Fill in the summary on blk 0
@@ -619,7 +618,7 @@ impl ImageLayerWriterInner {
             );
         }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf)?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()
