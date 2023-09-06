@@ -622,55 +622,6 @@ class NeonEnvBuilder:
         if isinstance(self.safekeepers_remote_storage, S3Storage):
             self.safekeepers_remote_storage.do_cleanup()
 
-        # # Making mypy happy with allowing only `S3Storage` further.
-        # # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
-        # # so this line effectively a no-op
-        # assert isinstance(self.remote_storage, S3Storage)
-        # assert self.remote_storage_client is not None
-
-        # if self.keep_remote_storage_contents:
-        #     log.info("keep_remote_storage_contents skipping remote storage cleanup")
-        #     return
-
-        # log.info(
-        #     "removing data from test s3 bucket %s by prefix %s",
-        #     self.remote_storage.bucket_name,
-        #     self.remote_storage_prefix,
-        # )
-        # paginator = self.remote_storage_client.get_paginator("list_objects_v2")
-        # pages = paginator.paginate(
-        #     Bucket=self.remote_storage.bucket_name,
-        #     Prefix=self.remote_storage_prefix,
-        # )
-
-        # # Using Any because DeleteTypeDef (from boto3-stubs) doesn't fit our case
-        # objects_to_delete: Any = {"Objects": []}
-        # cnt = 0
-        # for item in pages.search("Contents"):
-        #     # weirdly when nothing is found it returns [None]
-        #     if item is None:
-        #         break
-
-        #     objects_to_delete["Objects"].append({"Key": item["Key"]})
-
-        #     # flush once aws limit reached
-        #     if len(objects_to_delete["Objects"]) >= 1000:
-        #         self.remote_storage_client.delete_objects(
-        #             Bucket=self.remote_storage.bucket_name,
-        #             Delete=objects_to_delete,
-        #         )
-        #         objects_to_delete = {"Objects": []}
-        #         cnt += 1
-
-        # # flush rest
-        # if len(objects_to_delete["Objects"]):
-        #     self.remote_storage_client.delete_objects(
-        #         Bucket=self.remote_storage.bucket_name,
-        #         Delete=objects_to_delete,
-        #     )
-
-        # log.info(f"deleted {cnt} objects from remote storage")
-
     def __enter__(self) -> "NeonEnvBuilder":
         return self
 
