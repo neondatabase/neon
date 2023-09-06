@@ -438,6 +438,7 @@ impl ImageLayerInner {
         summary: Option<Summary>,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
+            .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0).await?;

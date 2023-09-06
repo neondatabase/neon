@@ -210,7 +210,7 @@ impl CrashsafeOverwriteError {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(path, OpenOptions::new().read(true))
     }
 

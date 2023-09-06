@@ -251,7 +251,7 @@ mod tests {
             wtr.flush_buffer().await?;
         }
 
-        let file = VirtualFile::open(&path)?;
+        let file = VirtualFile::open(&path).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
