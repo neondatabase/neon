@@ -23,7 +23,30 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
+  check-permissions:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Disallow PRs from forks
+      if: |
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository
+
+      run: |
+        if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
+          MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
+        else
+          MESSAGE="The PR should be reviewed and labelled with `approved-for-ci-run` to trigger a CI run"
+        fi
+
+        echo >&2 "We don't run CI for PRs from forks"
+        echo >&2 "${MESSAGE}"
+
+        exit 1
+
+
   tag:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
@@ -52,6 +75,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -84,6 +108,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -150,6 +175,7 @@ jobs:
         run: cargo deny check
 
   build-neon:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -347,12 +373,12 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
+    needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
-    needs: [ build-neon ]
     strategy:
       fail-fast: false
       matrix:
@@ -385,12 +411,12 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
+    needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
-    needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
@@ -417,12 +443,13 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks ]
+    if: ${{ !cancelled() }}
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests, coverage-report, benchmarks ]
-    if: ${{ !cancelled() }}
 
     steps:
       - uses: actions/checkout@v3
@@ -463,11 +490,12 @@ jobs:
             })
 
   coverage-report:
+    needs: [ check-permissions, regress-tests ]
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests ]
     strategy:
       fail-fast: false
       matrix:
@@ -582,11 +610,11 @@ jobs:
             })
 
   trigger-e2e-tests:
+    needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ promote-images, tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -627,8 +655,8 @@ jobs:
             }"
 
   neon-image:
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
@@ -675,7 +703,7 @@ jobs:
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
+    needs: [ check-permissions, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
@@ -720,13 +748,13 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: gcr.io/kaniko-project/executor:v1.9.2-debug
       # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
       # Should be prevented by https://github.com/neondatabase/neon/issues/4281
       options: --add-host=download.osgeo.org:140.211.15.30
-    needs: [ tag ]
     strategy:
       fail-fast: false
       matrix:
@@ -779,8 +807,8 @@ jobs:
         run: rm -rf ~/.ecr
 
   vm-compute-node-image:
+    needs: [ check-permissions, tag, compute-node-image ]
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
       matrix:
@@ -821,7 +849,7 @@ jobs:
           docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
-    needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
+    needs: [ check-permissions, tag, neon-image, compute-node-image, compute-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
 
     steps:
@@ -864,8 +892,8 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
+    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: [ self-hosted, gen3, small ]
-    needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
     # Don't add if-condition here.
     # The job should always be run because we have dependant other jobs that shouldn't be skipped
@@ -937,8 +965,8 @@ jobs:
         run: rm -rf ~/.ecr
 
   trigger-custom-extensions-build-and-wait:
+    needs: [ check-permissions, tag ]
     runs-on: ubuntu-latest
-    needs: [ tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -1011,10 +1039,11 @@ jobs:
           exit 1
 
   deploy:
+    needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
+    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
+
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
         run: |
@@ -1060,12 +1089,13 @@ jobs:
             })
 
   promote-compatibility-data:
+    needs: [ check-permissions, promote-images, tag, regress-tests ]
+    if: github.ref_name == 'release'
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ promote-images, tag, regress-tests ]
-    if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
         env:
