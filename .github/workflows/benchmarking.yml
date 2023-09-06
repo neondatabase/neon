@@ -476,7 +476,7 @@ jobs:
             ;;
         esac
 
-        CONNSTR_SECRET_NAME="BENCHMARK_${ENV_PLATFORM}_S${SCALE}_CONNSTR"
+        CONNSTR_SECRET_NAME="BENCHMARK_${ENV_PLATFORM}_S${TEST_OLAP_SCALE}_CONNSTR"
         echo "CONNSTR_SECRET_NAME=${CONNSTR_SECRET_NAME}" >> $GITHUB_ENV
 
     - name: Set up Connection String
