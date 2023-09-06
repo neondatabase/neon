@@ -169,7 +169,7 @@ pub async fn init_tenant_mgr(
                         Ok(id) => id,
                         Err(_) => {
                             warn!(
-                                "Invalid tenant path (garbage in our repo directory?): {0}",
+                                "Invalid tenant path (garbage in our repo directory?): {}",
                                 tenant_dir_path.display()
                             );
                             continue;
@@ -182,7 +182,7 @@ pub async fn init_tenant_mgr(
                         if let Some(gen) = generations.get(&tenant_id) {
                             *gen
                         } else {
-                            info!("Detaching tenant {0}, control plane omitted it in re-attach response", tenant_id);
+                            info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
                             if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
                                 error!(
                                     "Failed to remove detached tenant directory '{}': {:?}",

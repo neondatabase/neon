@@ -97,7 +97,7 @@ impl AttachmentService {
 
         let response = client.post(url).json(&request).send()?;
         if response.status() != StatusCode::OK {
-            return Err(anyhow!("Unexpected status {0}", response.status()));
+            return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
         let response = response.json::<AttachHookResponse>()?;

@@ -1431,7 +1431,7 @@ pub fn remote_index_path(
 }
 
 /// Given the key of an index, parse out the generation part of the name
-pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
+pub(crate) fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
     let file_name = match path.get_path().file_name() {
         Some(f) => f,
         None => {

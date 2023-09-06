@@ -112,7 +112,7 @@ impl PersistentState {
     async fn load_or_new(path: &Path) -> Self {
         match Self::load(path).await {
             Ok(s) => {
-                tracing::info!("Loaded state file at {0}", path.display());
+                tracing::info!("Loaded state file at {}", path.display());
                 s
             }
             Err(e)
@@ -120,7 +120,7 @@ impl PersistentState {
                     .map(|e| e.kind() == std::io::ErrorKind::NotFound)
                     .unwrap_or(false) =>
             {
-                tracing::info!("Will create state file at {0}", path.display());
+                tracing::info!("Will create state file at {}", path.display());
                 Self {
                     tenants: HashMap::new(),
                     path: path.to_owned(),

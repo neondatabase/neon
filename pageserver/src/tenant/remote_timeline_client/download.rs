@@ -316,7 +316,7 @@ pub(super) async fn download_index_part(
     }
 
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
-    // objects, and select the highest one with a generation < my_generation.
+    // objects, and select the highest one with a generation <= my_generation.
     let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
     let indices = backoff::retry(
         || async { storage.list_files(Some(&index_prefix)).await },
