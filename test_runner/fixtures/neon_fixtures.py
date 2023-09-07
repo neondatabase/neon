@@ -447,7 +447,6 @@ class NeonEnvBuilder:
         self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
-        self.remote_storage_prefix: Optional[str] = None
         self.keep_remote_storage_contents: bool = True
         self.neon_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
@@ -589,12 +588,6 @@ class NeonEnvBuilder:
                 directory_to_clean.rmdir()
 
     def cleanup_remote_storage(self):
-        # here wee check for true remote storage, no the local one
-        # local cleanup is not needed after test because in ci all env will be destroyed anyway
-        if self.remote_storage_prefix is None:
-            log.info("no remote storage was set up, skipping cleanup")
-            return
-
         # extensions are currently not cleaned up, disabled when creating
         for x in [self.pageserver_remote_storage, self.ext_remote_storage, self.sk_remote_storage]:
             if isinstance(x, S3Storage):
