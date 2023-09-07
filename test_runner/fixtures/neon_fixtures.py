@@ -598,11 +598,10 @@ class NeonEnvBuilder:
             log.info("no remote storage was set up, skipping cleanup")
             return
 
-        if isinstance(self.remote_storage, S3Storage):
-            self.remote_storage.do_cleanup()
-
-        if isinstance(self.sk_remote_storage, S3Storage):
-            self.sk_remote_storage.do_cleanup()
+        # extensions are currently not cleaned up, disabled when creating
+        for x in [self.pageserver_remote_storage, self.ext_remote_storage, self.sk_remote_storage]:
+            if isinstance(x, S3Storage):
+                x.do_cleanup()
 
     def __enter__(self) -> "NeonEnvBuilder":
         return self
