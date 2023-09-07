@@ -285,6 +285,8 @@ async fn build_timeline_info_common(
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
+    let walreceiver_status = timeline.walreceiver_status();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_id,
         timeline_id: timeline.timeline_id,
@@ -305,6 +307,8 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+
+        walreceiver_status,
     };
     Ok(info)
 }
