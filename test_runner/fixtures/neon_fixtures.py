@@ -460,9 +460,11 @@ class NeonEnvBuilder:
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
 
-    def init_configs(self) -> NeonEnv:
+    def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
+        if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
+            self.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
         self.env = NeonEnv(self)
         return self.env
 
@@ -470,8 +472,19 @@ class NeonEnvBuilder:
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self, initial_tenant_conf: Optional[Dict[str, str]] = None) -> NeonEnv:
-        env = self.init_configs()
+    def init_start(
+        self,
+        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        default_remote_storage_if_missing: bool = True,
+    ) -> NeonEnv:
+        """
+        Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
+
+        To avoid creating initial_tenant, call init_configs to setup the environment.
+
+        Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
+        """
+        env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
         self.start()
 
         # Prepare the default branch to start the postgres on later.
