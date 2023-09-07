@@ -599,7 +599,7 @@ impl Timeline {
         }
     }
 
-    pub fn walreceiver_status(&self) -> String {
+    pub(crate) fn walreceiver_status(&self) -> String {
         match &*self.walreceiver.lock().unwrap() {
             None => "stopping or stopped".to_string(),
             Some(walreceiver) => match walreceiver.status() {
