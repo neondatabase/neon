@@ -528,8 +528,15 @@ class NeonEnvBuilder:
         self.remote_storage_kind = remote_storage_kind
 
         if enable_remote_extensions:
-            # there is an assumption that REAL_S3 for extensions is never cleaned up
-            ext = self._configure_and_create_remote_storage(remote_storage_kind, "ext")
+            # there is an assumption that REAL_S3 for extensions is never
+            # cleaned up these are also special in that they have a hardcoded
+            # bucket and region, which is most likely the same as our normal
+            ext = self._configure_and_create_remote_storage(
+                remote_storage_kind,
+                "ext",
+                bucket_name="neon-dev-extensions-eu-central-1",
+                bucket_region="eu-central-1",
+            )
             assert isinstance(ext, S3Storage)
             ext.cleanup = False
             self.ext_remote_storage = ext
@@ -540,10 +547,20 @@ class NeonEnvBuilder:
         self.sk_remote_storage = self._configure_and_create_remote_storage(kind, "safekeeper")
 
     def _configure_and_create_remote_storage(
-        self, kind: RemoteStorageKind, user: str
+        self,
+        kind: RemoteStorageKind,
+        user: str,
+        bucket_name: Optional[str] = None,
+        bucket_region: Optional[str] = None,
     ) -> Optional[RemoteStorage]:
         ret = kind.configure(
-            self.repo_dir, self.mock_s3_server, str(self.run_id), self.test_name, user
+            self.repo_dir,
+            self.mock_s3_server,
+            str(self.run_id),
+            self.test_name,
+            user,
+            bucket_name=bucket_name,
+            bucket_region=bucket_region,
         )
 
         if kind == RemoteStorageKind.MOCK_S3:

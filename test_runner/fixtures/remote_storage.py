@@ -185,7 +185,14 @@ class RemoteStorageKind(str, enum.Enum):
     NOOP = "noop"
 
     def configure(
-        self, repo_dir: Path, mock_s3_server, run_id: str, test_name: str, user: str
+        self,
+        repo_dir: Path,
+        mock_s3_server,
+        run_id: str,
+        test_name: str,
+        user: str,
+        bucket_name: Optional[str] = None,
+        bucket_region: Optional[str] = None,
     ) -> Optional[RemoteStorage]:
         if self == RemoteStorageKind.NOOP:
             return None
@@ -251,24 +258,24 @@ class RemoteStorageKind(str, enum.Enum):
         # session token is needed for local runs with sso auth
         session_token = os.getenv("AWS_SESSION_TOKEN")
 
-        env_bucket_name = os.getenv("REMOTE_STORAGE_S3_BUCKET")
-        assert env_bucket_name is not None, "no remote storage bucket name provided"
-        env_region = os.getenv("REMOTE_STORAGE_S3_REGION")
-        assert env_region is not None, "no remote storage region provided"
+        bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
+        assert bucket_name is not None, "no remote storage bucket name provided"
+        bucket_region = bucket_region or os.getenv("REMOTE_STORAGE_S3_REGION")
+        assert bucket_region is not None, "no remote storage region provided"
 
         prefix_in_bucket = f"{run_id}/{test_name}/{user}"
 
         client = boto3.client(
             "s3",
-            region_name=env_region,
+            region_name=bucket_region,
             aws_access_key_id=env_access_key,
             aws_secret_access_key=env_secret_key,
             aws_session_token=session_token,
         )
 
         return S3Storage(
-            bucket_name="neon-dev-extensions-eu-central-1",
-            bucket_region="eu-central-1",
+            bucket_name=bucket_name,
+            bucket_region=bucket_region,
             access_key=env_access_key,
             secret_key=env_secret_key,
             prefix_in_bucket=prefix_in_bucket,
