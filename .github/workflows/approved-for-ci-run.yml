@@ -74,7 +74,7 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          ALREADY_CREATED="$(gh pr --repo '${GITHUB_REPOSITORY}' list --head '${HEAD}' --base 'main' --json 'number' --jq '.[].number')"
+          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${HEAD} --base main --json number --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
             gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
