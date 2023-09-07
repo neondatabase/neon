@@ -1318,7 +1318,7 @@ impl Tenant {
                             DeleteTimelineFlow::resume_deletion(
                                 Arc::clone(self),
                                 timeline_id,
-                                &local_metadata,
+                                &index_part.metadata,
                                 Some(remote_client),
                                 self.deletion_queue_client.clone(),
                                 init_order,
