@@ -1,6 +1,9 @@
+import shutil
+import time
 from contextlib import closing
 
-from fixtures.compare_fixtures import PgCompare
+from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.pg_version import PgVersion
 
 
 #
@@ -13,7 +16,7 @@ from fixtures.compare_fixtures import PgCompare
 # 3. Disk space used
 # 4. Peak memory usage
 #
-def test_bulk_insert(neon_with_baseline: PgCompare):
+def test_bulk_insert(neon_with_baseline: PgCompare, test_output_dir):
     env = neon_with_baseline
 
     with closing(env.pg.connect()) as conn:
@@ -28,3 +31,38 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
 
             env.report_peak_memory_use()
             env.report_size()
+
+    # When testing neon, also check how long it takes the pageserver to reingest the
+    # wal from safekeepers. If this number is close to total runtime, then the pageserver
+    # is the bottleneck.
+    if isinstance(env, NeonCompare):
+        measure_recovery_time(env, test_output_dir)
+
+
+def measure_recovery_time(env: NeonCompare, test_output_dir):
+    client = env.env.pageserver.http_client()
+    pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
+
+    def get_lsn():
+        return client.timeline_detail(env.tenant, env.timeline)["last_record_lsn"]
+
+    target_lsn = get_lsn()
+
+    # Stop pageserver and remove tenant data
+    env.env.pageserver.stop()
+    timeline_dir = (
+        test_output_dir / "repo" / "tenants" / str(env.tenant) / "timelines" / str(env.timeline)
+    )
+    shutil.rmtree(timeline_dir)
+
+    # Start pageserver
+    env.env.pageserver.start()
+
+    # Measure recovery time
+    with env.record_duration("wal_recovery"):
+        # Create the tenant, which will start walingest
+        client.timeline_create(pg_version, env.tenant, env.timeline)
+
+        # wait for lsn
+        while get_lsn() < target_lsn:
+            time.sleep(0.1)
