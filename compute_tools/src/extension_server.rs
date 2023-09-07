@@ -107,23 +107,23 @@ fn get_pg_config(argument: &str, pgbin: &str) -> String {
 
 pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
-    // such as "PostgreSQL 15.4". We parse this to v14/v15/v16, etc.
-    // NOTE: PostgreSQL minor version numbers can get up to x.20 (and higher),
-    // so just matching on the major version number will eventually break.
-    // This is why we match on "version.", so that we don't match the minor
-    // version.
+    // such as "PostgreSQL 15.4". We parse this to v14/v15
     let human_version = get_pg_config("--version", pgbin);
-    macro_rules! match_human {
-        ($($version:literal),+) => {$(
-            if (human_version.contains(concat!($version, ".")) ||
-                human_version.contains(concat!($version, "rc"))) {
-                return concat!("v", $version).to_string();
-            }
-        )*}
+    return parse_pg_version(&human_version).to_string();
+}
+
+fn parse_pg_version(human_version: &str) -> &str {
+    match Regex::new(r"(?<major>\d+)\.(?<minor>\d+)")
+        .unwrap()
+        .captures(human_version)
+    {
+        Some(captures) if captures.len() == 3 => match &captures["major"] {
+            "14" => return "v14",
+            "15" => return "v15",
+            _ => {}
+        },
+        _ => {}
     }
-
-    match_human!(14, 15, 16);
-
     panic!("Unsuported postgres version {human_version}");
 }
 
