@@ -208,6 +208,78 @@ impl CrashsafeOverwriteError {
     }
 }
 
+/// Helper macro internal to `VirtualFile` that looks up the underlying File,
+/// opens it and evicts some other File if necessary. The passed parameter is
+/// assumed to be a function available for the physical `File`.
+///
+/// We are doing it via a macro as Rust doesn't support async closures that
+/// take on parameters with lifetimes.
+macro_rules! with_file {
+    ($this:expr, $($body:tt)*) => {{ let r: Result<_, Error> = {
+        let open_files = get_open_files();
+
+        let mut handle_guard = {
+            // Read the cached slot handle, and see if the slot that it points to still
+            // contains our File.
+            //
+            // We only need to hold the handle lock while we read the current handle. If
+            // another thread closes the file and recycles the slot for a different file,
+            // we will notice that the handle we read is no longer valid and retry.
+            let mut handle = *$this.handle.read().await;
+            loop {
+                // Check if the slot contains our File
+                {
+                    let slot = &open_files.slots[handle.index];
+                    let slot_guard = slot.inner.read().await;
+                    if slot_guard.tag == handle.tag {
+                        #[allow(unused_mut)]
+                        if let Some(file) = &slot_guard.file {
+                            // Found a cached file descriptor.
+                            slot.recently_used.store(true, Ordering::Relaxed);
+                            let mut file: &File = file;
+                            return Ok(file.$($body)*?);
+                        }
+                    }
+                }
+
+                // The slot didn't contain our File. We will have to open it ourselves,
+                // but before that, grab a write lock on handle in the VirtualFile, so
+                // that no other thread will try to concurrently open the same file.
+                let handle_guard = $this.handle.write().await;
+
+                // If another thread changed the handle while we were not holding the lock,
+                // then the handle might now be valid again. Loop back to retry.
+                if *handle_guard != handle {
+                    handle = *handle_guard;
+                    continue;
+                }
+                break handle_guard;
+            }
+        };
+
+        // We need to open the file ourselves. The handle in the VirtualFile is
+        // now locked in write-mode. Find a free slot to put it in.
+        let (handle, mut slot_guard) = open_files.find_victim_slot().await;
+
+        // Open the physical file
+        #[allow(unused_mut)]
+        let mut file = STORAGE_IO_TIME
+            .with_label_values(&["open"])
+            .observe_closure_duration(|| $this.open_options.open(&$this.path))?;
+
+        // Perform the requested operation on it
+        let result = file.$($body)*?;
+
+        // Store the File in the slot and update the handle in the VirtualFile
+        // to point to it.
+        slot_guard.file.replace(file);
+
+        *handle_guard = handle;
+
+        Ok(result)
+    }; r}};
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
@@ -330,82 +402,11 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        self.with_file("fsync", |file| file.sync_all()).await?
+        with_file!(self, sync_all())
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file("metadata", |file| file.metadata()).await?
-    }
-
-    /// Helper function that looks up the underlying File for this VirtualFile,
-    /// opening it and evicting some other File if necessary. It calls 'func'
-    /// with the physical File.
-    async fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
-    where
-        F: FnMut(&File) -> R,
-    {
-        let open_files = get_open_files();
-
-        let mut handle_guard = {
-            // Read the cached slot handle, and see if the slot that it points to still
-            // contains our File.
-            //
-            // We only need to hold the handle lock while we read the current handle. If
-            // another thread closes the file and recycles the slot for a different file,
-            // we will notice that the handle we read is no longer valid and retry.
-            let mut handle = *self.handle.read().await;
-            loop {
-                // Check if the slot contains our File
-                {
-                    let slot = &open_files.slots[handle.index];
-                    let slot_guard = slot.inner.read().await;
-                    if slot_guard.tag == handle.tag {
-                        if let Some(file) = &slot_guard.file {
-                            // Found a cached file descriptor.
-                            slot.recently_used.store(true, Ordering::Relaxed);
-                            return Ok(STORAGE_IO_TIME
-                                .with_label_values(&[op])
-                                .observe_closure_duration(|| func(file)));
-                        }
-                    }
-                }
-
-                // The slot didn't contain our File. We will have to open it ourselves,
-                // but before that, grab a write lock on handle in the VirtualFile, so
-                // that no other thread will try to concurrently open the same file.
-                let handle_guard = self.handle.write().await;
-
-                // If another thread changed the handle while we were not holding the lock,
-                // then the handle might now be valid again. Loop back to retry.
-                if *handle_guard != handle {
-                    handle = *handle_guard;
-                    continue;
-                }
-                break handle_guard;
-            }
-        };
-
-        // We need to open the file ourselves. The handle in the VirtualFile is
-        // now locked in write-mode. Find a free slot to put it in.
-        let (handle, mut slot_guard) = open_files.find_victim_slot().await;
-
-        // Open the physical file
-        let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
-            .observe_closure_duration(|| self.open_options.open(&self.path))?;
-
-        // Perform the requested operation on it
-        let result = STORAGE_IO_TIME
-            .with_label_values(&[op])
-            .observe_closure_duration(|| func(&file));
-
-        // Store the File in the slot and update the handle in the VirtualFile
-        // to point to it.
-        slot_guard.file.replace(file);
-
-        *handle_guard = handle;
-
-        Ok(result)
+        with_file!(self, metadata())
     }
 
     pub fn remove(self) {
@@ -419,11 +420,7 @@ impl VirtualFile {
             SeekFrom::Start(offset) => {
                 self.pos = offset;
             }
-            SeekFrom::End(offset) => {
-                self.pos = self
-                    .with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))
-                    .await??
-            }
+            SeekFrom::End(offset) => self.pos = with_file!(self, seek(SeekFrom::End(offset)))?,
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
                 if pos < 0 {
@@ -510,9 +507,7 @@ impl VirtualFile {
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = self
-            .with_file("read", |file| file.read_at(buf, offset))
-            .await?;
+        let result = with_file!(self, read_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -522,9 +517,7 @@ impl VirtualFile {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = self
-            .with_file("write", |file| file.write_at(buf, offset))
-            .await?;
+        let result = with_file!(self, write_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
