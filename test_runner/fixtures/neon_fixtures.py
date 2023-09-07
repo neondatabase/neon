@@ -825,7 +825,11 @@ class NeonEnv:
         self.remote_storage = config.remote_storage
         self.remote_storage_users = config.remote_storage_users
         self.pg_version = config.pg_version
+        # Binary path for pageserver, safekeeper, etc
         self.neon_binpath = config.neon_binpath
+        # Binary path for neon_local test-specific binaries: may be overridden
+        # after construction for compat testing
+        self.neon_local_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.remote_storage_client = config.remote_storage_client
@@ -1157,6 +1161,7 @@ class AbstractNeonCli(abc.ABC):
         extra_env_vars: Optional[Dict[str, str]] = None,
         check_return_code=True,
         timeout=None,
+        local_binpath=False,
     ) -> "subprocess.CompletedProcess[str]":
         """
         Run the command with the specified arguments.
@@ -1170,12 +1175,19 @@ class AbstractNeonCli(abc.ABC):
         >>> log.info(result.stdout)
 
         If `check_return_code`, on non-zero exit code logs failure and raises.
+
+        If `local_binpath` is true, then we are invoking a test utility
         """
 
         assert type(arguments) == list
         assert type(self.COMMAND) == str
 
-        bin_neon = str(self.env.neon_binpath / self.COMMAND)
+        if local_binpath:
+            # Test utility
+            bin_neon = str(self.env.neon_local_binpath / self.COMMAND)
+        else:
+            # Normal binary
+            bin_neon = str(self.env.neon_binpath / self.COMMAND)
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
@@ -1228,6 +1240,10 @@ class NeonCli(AbstractNeonCli):
     """
 
     COMMAND = "neon_local"
+
+    def raw_cli(self, *args, **kwargs) -> subprocess.CompletedProcess[str]:
+        kwargs["local_binpath"] = True
+        return super().raw_cli(*args, **kwargs)
 
     def create_tenant(
         self,
