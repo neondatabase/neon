@@ -138,7 +138,7 @@ lfc_disable(char const* op)
 }
 
 static bool
-lfc_ensure_openned(void)
+lfc_ensure_opened(void)
 {
 	/* Open cache file if not done yet */
 	if (lfc_desc <= 0)
@@ -516,7 +516,7 @@ lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return false;
 
-	if (!lfc_ensure_openned())
+	if (!lfc_ensure_opened())
 		return false;
 
 	tag.rnode = rnode;
@@ -581,7 +581,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
 		return;
 
-	if (!lfc_ensure_openned())
+	if (!lfc_ensure_opened())
 		return;
 
 	tag.rnode = rnode;
