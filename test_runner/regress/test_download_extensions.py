@@ -10,7 +10,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage, available_s3_storages
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    S3Storage,
+    available_s3_storages,
+)
 
 
 # Cleaning up downloaded files is important for local tests
