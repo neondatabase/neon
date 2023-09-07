@@ -723,7 +723,7 @@ mod tests {
 
     async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
-        OF: Fn(&Path, &OpenOptions) -> FT,
+        OF: Fn(PathBuf, OpenOptions) -> FT,
         FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
@@ -731,8 +731,12 @@ mod tests {
 
         let path_a = testdir.join("file_a");
         let mut file_a = openfunc(
-            &path_a,
-            OpenOptions::new().write(true).create(true).truncate(true),
+            path_a.clone(),
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .to_owned(),
         )
         .await?;
         file_a.write_all(b"foobar").await?;
@@ -741,7 +745,7 @@ mod tests {
         let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(&path_a, OpenOptions::new().read(true)).await?;
+        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar").await.unwrap_err();
@@ -777,12 +781,13 @@ mod tests {
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
         let mut file_b = openfunc(
-            &path_b,
+            path_b.clone(),
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true),
+                .truncate(true)
+                .to_owned(),
         )
         .await?;
         file_b.write_all_at(b"BAR", 3).await?;
@@ -798,7 +803,8 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(&path_b, OpenOptions::new().read(true)).await?;
+            let mut vfile =
+                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
             assert_eq!("FOOBAR", vfile.read_string().await?);
             vfiles.push(vfile);
         }
