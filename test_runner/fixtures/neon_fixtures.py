@@ -514,11 +514,8 @@ class NeonEnvBuilder:
         remote_storage_kind: RemoteStorageKind,
     ):
         assert self.pageserver_remote_storage is None, "remote storage is enabled already"
-
         ret = self._configure_and_create_remote_storage(remote_storage_kind, "pageserver")
-
         self.pageserver_remote_storage = ret
-        self.pageserver_remote_storage_kind = remote_storage_kind
 
     def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
         assert self.ext_remote_storage is None, "already configured extensions remote storage"
