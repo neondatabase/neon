@@ -237,7 +237,7 @@ macro_rules! with_file {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
                             let mut file: &File = file;
-                            return Ok(file.$($body)*?);
+                            return file.$($body)*;
                         }
                     }
                 }
