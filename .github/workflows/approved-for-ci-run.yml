@@ -66,13 +66,37 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           HEAD="ci-run/pr-${PR_NUMBER}"
-          BODY="This Pull Request was create automatically to run CI pipeline for #${PR_NUMBER}.\n\nPlease do not alter or merge/close it.\n\nFeel free to comment the original PR."
+          cat << EOF > body.md
+            This Pull Request is created automatically to run the CI pipeline for #${PR_NUMBER}
 
-          ALREADY_CREATED=$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${HEAD}" --base "main" --json "number" --jq '.[].number')
+            Please do not alter or merge/close it.
+
+            Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
+          EOF
+
+          ALREADY_CREATED="$(gh pr --repo '${GITHUB_REPOSITORY}' list --head '${HEAD}' --base 'main' --json 'number' --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
-            gh pr --repo "${GITHUB_REPOSITORY}" create  --title "CI run for PR #${PR_NUMBER}" \
-                                                        --body "${BODY}" \
-                                                        --head "${HEAD}" \
-                                                        --base "main" \
-                                                        --draft
+            gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
+                                                       --body-file "body.md" \
+                                                       --head "${HEAD}" \
+                                                       --base "main" \
+                                                       --draft
+          fi
+
+  cleanup:
+    # Close PRs and delete branchs if the original PR is closed.
+
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - run: |
+          HEAD="ci-run/pr-${PR_NUMBER}"
+
+          CLOSED="$(gh pr --repo '${GITHUB_REPOSITORY}' list --head '${HEAD}' --json 'closed' --jq '.[].closed')"
+          if [ "${CLOSED}" != "false" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" close "ci-run/pr-${{ github.event.pull_request.number }}" --delete-branch
           fi
