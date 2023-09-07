@@ -604,7 +604,7 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::create(&path).await?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
@@ -732,7 +732,7 @@ impl DeltaLayerWriterInner {
         };
 
         // fsync the file
-        file.sync_all()?;
+        file.sync_all().await?;
         // Rename the file to its final name
         //
         // Note: This overwrites any existing file. There shouldn't be any.
@@ -851,6 +851,7 @@ impl DeltaLayerInner {
         summary: Option<Summary>,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
+            .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
 
