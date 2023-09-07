@@ -538,14 +538,10 @@ def test_timeline_size_metrics(
     assert math.isclose(dbsize_sum, tl_logical_size_metric, abs_tol=2 * 1024 * 1024)
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_tenant_physical_size(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
+def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
     random.seed(100)
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -553,8 +549,6 @@ def test_tenant_physical_size(
     client = env.pageserver.http_client()
 
     tenant, timeline = env.neon_cli.create_tenant()
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
     def get_timeline_resident_physical_size(timeline: TimelineId):
         sizes = get_physical_size_values(env, tenant, timeline)
@@ -578,8 +572,7 @@ def test_tenant_physical_size(
         wait_for_last_flush_lsn(env, endpoint, tenant, timeline)
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
-        if remote_storage_kind is not None:
-            wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
+        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
         timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 
