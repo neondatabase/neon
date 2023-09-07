@@ -36,7 +36,7 @@ jobs:
         if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
           MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
         else
-          MESSAGE="The PR should be reviewed and labelled with `approved-for-ci-run` to trigger a CI run"
+          MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
         fi
 
         echo >&2 "We don't run CI for PRs from forks"
