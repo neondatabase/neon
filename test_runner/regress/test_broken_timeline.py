@@ -145,8 +145,8 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
         _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
 
     # Restart the page server
-    env.neon_cli.pageserver_stop(immediate=True)
-    env.neon_cli.pageserver_start()
+    env.pageserver.stop(immediate=True)
+    env.pageserver.start()
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)

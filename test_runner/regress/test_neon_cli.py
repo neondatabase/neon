@@ -127,7 +127,7 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     # Stop default ps/sk
-    env.neon_cli.pageserver_stop()
+    env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
 
     # Default start
