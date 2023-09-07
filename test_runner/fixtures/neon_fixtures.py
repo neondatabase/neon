@@ -535,7 +535,9 @@ class NeonEnvBuilder:
             bucket_name="neon-dev-extensions-eu-central-1",
             bucket_region="eu-central-1",
         )
-        assert isinstance(ext, S3Storage), "unsure why, but only MOCK_S3 and REAL_S3 are currently supported for extensions"
+        assert isinstance(
+            ext, S3Storage
+        ), "unsure why, but only MOCK_S3 and REAL_S3 are currently supported for extensions"
         ext.cleanup = False
         self.ext_remote_storage = ext
 
