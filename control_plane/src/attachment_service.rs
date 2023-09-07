@@ -32,7 +32,7 @@ impl AttachmentService {
 
         // Makes no sense to construct this if pageservers aren't going to use it: assume
         // pageservers have control plane API set
-        let listen_url = env.pageserver.control_plane_api.clone().unwrap();
+        let listen_url = env.control_plane_api.clone().unwrap();
 
         let listen = format!(
             "{}:{}",
@@ -80,7 +80,6 @@ impl AttachmentService {
 
         let url = self
             .env
-            .pageserver
             .control_plane_api
             .clone()
             .unwrap()
