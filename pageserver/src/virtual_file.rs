@@ -706,8 +706,8 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| async {
-            let vf = VirtualFile::open_with_options(path, open_options).await?;
+        test_files("virtual_files", |path, open_options| async move {
+            let vf = VirtualFile::open_with_options(&path, &open_options).await?;
             Ok(MaybeVirtualFile::VirtualFile(vf))
         })
         .await
@@ -715,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_physical_files() -> Result<(), Error> {
-        test_files("physical_files", |path, open_options| async {
+        test_files("physical_files", |path, open_options| async move {
             Ok(MaybeVirtualFile::File(open_options.open(path)?))
         })
         .await
