@@ -4,9 +4,10 @@ import os
 import re
 import subprocess
 import tarfile
+import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeVar
 from urllib.parse import urlencode
 
 import allure
@@ -26,34 +27,100 @@ def get_self_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def subprocess_capture(capture_dir: Path, cmd: List[str], **kwargs: Any) -> str:
-    """Run a process and capture its output
+def subprocess_capture(
+    capture_dir: Path,
+    cmd: List[str],
+    *,
+    check=False,
+    echo_stderr=False,
+    echo_stdout=False,
+    capture_stdout=False,
+    **kwargs: Any,
+) -> Tuple[str, Optional[str], int]:
+    """Run a process and bifurcate its output to files and the `log` logger
 
-    Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
+    stderr and stdout are always captured in files.  They are also optionally
+    echoed to the log (echo_stderr, echo_stdout), and/or captured and returned
+    (capture_stdout).
+
+    File output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
     where "cmd" is the name of the program and NNN is an incrementing
     counter.
 
     If those files already exist, we will overwrite them.
-    Returns basepath for files with captured output.
+
+    Returns 3-tuple of:
+     - The base path for output files
+     - Captured stdout, or None
+     - The exit status of the process
     """
     assert isinstance(cmd, list)
-    base = f"{os.path.basename(cmd[0])}_{global_counter()}"
+    base_cmd = os.path.basename(cmd[0])
+    base = f"{base_cmd}_{global_counter()}"
     basepath = os.path.join(capture_dir, base)
     stdout_filename = f"{basepath}.stdout"
     stderr_filename = f"{basepath}.stderr"
 
+    # Since we will stream stdout and stderr concurrently, need to do it in a thread.
+    class OutputHandler(threading.Thread):
+        def __init__(self, in_file, out_file, echo: bool, capture: bool):
+            super().__init__()
+            self.in_file = in_file
+            self.out_file = out_file
+            self.echo = echo
+            self.capture = capture
+            self.captured = ""
+
+        def run(self):
+            for line in self.in_file:
+                # Only bother decoding if we are going to do something more than stream to a file
+                if self.echo or self.capture:
+                    string = line.decode(encoding="utf-8", errors="replace")
+
+                    if self.echo:
+                        log.info(string)
+
+                    if self.capture:
+                        self.captured += string
+
+                self.out_file.write(line)
+
+    captured = None
     try:
-        with open(stdout_filename, "w") as stdout_f:
-            with open(stderr_filename, "w") as stderr_f:
+        with open(stdout_filename, "wb") as stdout_f:
+            with open(stderr_filename, "wb") as stderr_f:
                 log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
-                subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+
+                p = subprocess.Popen(
+                    cmd,
+                    **kwargs,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                stdout_handler = OutputHandler(
+                    p.stdout, stdout_f, echo=echo_stdout, capture=capture_stdout
+                )
+                stdout_handler.start()
+                stderr_handler = OutputHandler(p.stderr, stderr_f, echo=echo_stderr, capture=False)
+                stderr_handler.start()
+
+                r = p.wait()
+
+                stdout_handler.join()
+                stderr_handler.join()
+
+                if check and r != 0:
+                    raise subprocess.CalledProcessError(r, " ".join(cmd))
+
+                if capture_stdout:
+                    captured = stdout_handler.captured
     finally:
         # Remove empty files if there is no output
         for filename in (stdout_filename, stderr_filename):
             if os.stat(filename).st_size == 0:
                 os.remove(filename)
 
-    return basepath
+    return (basepath, captured, r)
 
 
 _global_counter = 0

@@ -7,6 +7,7 @@
 // local installations.
 //
 
+pub mod attachment_service;
 mod background_process;
 pub mod broker;
 pub mod endpoint;

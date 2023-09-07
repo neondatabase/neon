@@ -585,15 +585,7 @@ impl Timeline {
             Err(e) => {
                 // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
                 drop(_timer);
-                let walreceiver_status = {
-                    match &*self.walreceiver.lock().unwrap() {
-                        None => "stopping or stopped".to_string(),
-                        Some(walreceiver) => match walreceiver.status() {
-                            Some(status) => status.to_human_readable_string(),
-                            None => "Not active".to_string(),
-                        },
-                    }
-                };
+                let walreceiver_status = self.walreceiver_status();
                 Err(anyhow::Error::new(e).context({
                     format!(
                         "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
@@ -604,6 +596,16 @@ impl Timeline {
                     )
                 }))
             }
+        }
+    }
+
+    pub(crate) fn walreceiver_status(&self) -> String {
+        match &*self.walreceiver.lock().unwrap() {
+            None => "stopping or stopped".to_string(),
+            Some(walreceiver) => match walreceiver.status() {
+                Some(status) => status.to_human_readable_string(),
+                None => "Not active".to_string(),
+            },
         }
     }
 
@@ -1724,11 +1726,18 @@ impl Timeline {
                 for (name, decision) in decided {
                     let decision = match decision {
                         Ok(UseRemote { local, remote }) => {
-                            path.push(name.file_name());
-                            init::cleanup_local_file_for_remote(&path, &local, &remote)?;
-                            path.pop();
-
-                            UseRemote { local, remote }
+                            // Remote is authoritative, but we may still choose to retain
+                            // the local file if the contents appear to match
+                            if local.file_size() == remote.file_size() {
+                                // Use the local file, but take the remote metadata so that we pick up
+                                // the correct generation.
+                                UseLocal(remote)
+                            } else {
+                                path.push(name.file_name());
+                                init::cleanup_local_file_for_remote(&path, &local, &remote)?;
+                                path.pop();
+                                UseRemote { local, remote }
+                            }
                         }
                         Ok(decision) => decision,
                         Err(FutureLayer { local }) => {
@@ -2747,9 +2756,7 @@ impl Timeline {
 
                 // update metrics
                 let sz = l.layer_desc().file_size;
-                self.metrics.resident_physical_size_gauge.add(sz);
-                self.metrics.num_persistent_files_created.inc_by(1);
-                self.metrics.persistent_bytes_written.inc_by(sz);
+                self.metrics.record_new_file_metrics(sz);
             }
 
             guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
@@ -3124,9 +3131,8 @@ impl Timeline {
                 LayerFileMetadata::new(metadata.len(), self.generation),
             );
 
-            self.metrics
-                .resident_physical_size_gauge
-                .add(metadata.len());
+            // update metrics
+            self.metrics.record_new_file_metrics(metadata.len());
             let l = Arc::new(l);
             l.access_stats().record_residence_event(
                 LayerResidenceStatus::Resident,
@@ -3808,10 +3814,8 @@ impl Timeline {
                 )?;
             }
 
-            // update the timeline's physical size
-            self.metrics
-                .resident_physical_size_gauge
-                .add(metadata.len());
+            // update metrics, including the timeline's physical size
+            self.metrics.record_new_file_metrics(metadata.len());
 
             new_layer_paths.insert(
                 new_delta_path,

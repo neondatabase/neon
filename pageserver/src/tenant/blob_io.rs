@@ -13,6 +13,7 @@
 //!
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
+use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
@@ -83,20 +84,24 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
+/// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
-/// An implementation of BlobWriter to write blobs to anything that
-/// implements std::io::Write.
-///
-pub struct WriteBlobWriter<W> {
-    inner: W,
+/// If a `BlobWriter` is dropped, the internal buffer will be
+/// discarded. You need to call [`flush_buffer`](Self::flush_buffer)
+/// manually before dropping.
+pub struct BlobWriter<const BUFFERED: bool> {
+    inner: VirtualFile,
     offset: u64,
+    /// A buffer to save on write calls, only used if BUFFERED=true
+    buf: Vec<u8>,
 }
 
-impl<W> WriteBlobWriter<W> {
-    pub fn new(inner: W, start_offset: u64) -> Self {
-        WriteBlobWriter {
+impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
+    pub fn new(inner: VirtualFile, start_offset: u64) -> Self {
+        Self {
             inner,
             offset: start_offset,
+            buf: Vec::with_capacity(Self::CAPACITY),
         }
     }
 
@@ -104,20 +109,70 @@ impl<W> WriteBlobWriter<W> {
         self.offset
     }
 
-    /// Access the underlying Write object.
-    ///
-    /// NOTE: WriteBlobWriter keeps track of the current write offset. If
-    /// you write something directly to the inner Write object, it makes the
-    /// internally tracked 'offset' to go out of sync. So don't do that.
-    pub fn into_inner(self) -> W {
-        self.inner
-    }
-}
+    const CAPACITY: usize = if BUFFERED { PAGE_SZ } else { 0 };
 
-impl<W> WriteBlobWriter<W>
-where
-    W: std::io::Write,
-{
+    #[inline(always)]
+    /// Writes the given buffer directly to the underlying `VirtualFile`.
+    /// You need to make sure that the internal buffer is empty, otherwise
+    /// data will be written in wrong order.
+    async fn write_all_unbuffered(&mut self, src_buf: &[u8]) -> Result<(), Error> {
+        self.inner.write_all(src_buf).await?;
+        self.offset += src_buf.len() as u64;
+        Ok(())
+    }
+
+    #[inline(always)]
+    /// Flushes the internal buffer to the underlying `VirtualFile`.
+    pub async fn flush_buffer(&mut self) -> Result<(), Error> {
+        self.inner.write_all(&self.buf).await?;
+        self.buf.clear();
+        Ok(())
+    }
+
+    #[inline(always)]
+    /// Writes as much of `src_buf` into the internal buffer as it fits
+    fn write_into_buffer(&mut self, src_buf: &[u8]) -> usize {
+        let remaining = Self::CAPACITY - self.buf.len();
+        let to_copy = src_buf.len().min(remaining);
+        self.buf.extend_from_slice(&src_buf[..to_copy]);
+        self.offset += to_copy as u64;
+        to_copy
+    }
+
+    /// Internal, possibly buffered, write function
+    async fn write_all(&mut self, mut src_buf: &[u8]) -> Result<(), Error> {
+        if !BUFFERED {
+            assert!(self.buf.is_empty());
+            self.write_all_unbuffered(src_buf).await?;
+            return Ok(());
+        }
+        let remaining = Self::CAPACITY - self.buf.len();
+        // First try to copy as much as we can into the buffer
+        if remaining > 0 {
+            let copied = self.write_into_buffer(src_buf);
+            src_buf = &src_buf[copied..];
+        }
+        // Then, if the buffer is full, flush it out
+        if self.buf.len() == Self::CAPACITY {
+            self.flush_buffer().await?;
+        }
+        // Finally, write the tail of src_buf:
+        // If it wholly fits into the buffer without
+        // completely filling it, then put it there.
+        // If not, write it out directly.
+        if !src_buf.is_empty() {
+            assert_eq!(self.buf.len(), 0);
+            if src_buf.len() < Self::CAPACITY {
+                let copied = self.write_into_buffer(src_buf);
+                // We just verified above that src_buf fits into our internal buffer.
+                assert_eq!(copied, src_buf.len());
+            } else {
+                self.write_all_unbuffered(src_buf).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
     pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
@@ -126,8 +181,7 @@ where
         if srcbuf.len() < 128 {
             // Short blob. Write a 1-byte length header
             let len_buf = srcbuf.len() as u8;
-            self.inner.write_all(&[len_buf])?;
-            self.offset += 1;
+            self.write_all(&[len_buf]).await?;
         } else {
             // Write a 4-byte length header
             if srcbuf.len() > 0x7fff_ffff {
@@ -138,11 +192,153 @@ where
             }
             let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
             len_buf[0] |= 0x80;
-            self.inner.write_all(&len_buf)?;
-            self.offset += 4;
+            self.write_all(&len_buf).await?;
         }
-        self.inner.write_all(srcbuf)?;
-        self.offset += srcbuf.len() as u64;
+        self.write_all(srcbuf).await?;
         Ok(offset)
+    }
+}
+
+impl BlobWriter<true> {
+    /// Access the underlying `VirtualFile`.
+    ///
+    /// This function flushes the internal buffer before giving access
+    /// to the underlying `VirtualFile`.
+    pub async fn into_inner(mut self) -> Result<VirtualFile, Error> {
+        self.flush_buffer().await?;
+        Ok(self.inner)
+    }
+
+    /// Access the underlying `VirtualFile`.
+    ///
+    /// Unlike [`into_inner`](Self::into_inner), this doesn't flush
+    /// the internal buffer before giving access.
+    pub fn into_inner_no_flush(self) -> VirtualFile {
+        self.inner
+    }
+}
+
+impl BlobWriter<false> {
+    /// Access the underlying `VirtualFile`.
+    pub fn into_inner(self) -> VirtualFile {
+        self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tenant::block_io::BlockReaderRef;
+    use rand::{Rng, SeedableRng};
+
+    async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("file");
+
+        // Write part (in block to drop the file)
+        let mut offsets = Vec::new();
+        {
+            let file = VirtualFile::create(&path)?;
+            let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
+            for blob in blobs.iter() {
+                let offs = wtr.write_blob(blob).await?;
+                offsets.push(offs);
+            }
+            // Write out one page worth of zeros so that we can
+            // read again with read_blk
+            let offs = wtr.write_blob(&vec![0; PAGE_SZ]).await?;
+            println!("Writing final blob at offs={offs}");
+            wtr.flush_buffer().await?;
+        }
+
+        let file = VirtualFile::open(&path)?;
+        let rdr = BlockReaderRef::VirtualFile(&file);
+        let rdr = BlockCursor::new(rdr);
+        for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
+            let blob_read = rdr.read_blob(*offset).await?;
+            assert_eq!(
+                blob, &blob_read,
+                "mismatch for idx={idx} at offset={offset}"
+            );
+        }
+        Ok(())
+    }
+
+    fn random_array(len: usize) -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        (0..len).map(|_| rng.gen()).collect::<_>()
+    }
+
+    #[tokio::test]
+    async fn test_one() -> Result<(), Error> {
+        let blobs = &[vec![12, 21, 22]];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_hello_simple() -> Result<(), Error> {
+        let blobs = &[
+            vec![0, 1, 2, 3],
+            b"Hello, World!".to_vec(),
+            Vec::new(),
+            b"foobar".to_vec(),
+        ];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_really_big_array() -> Result<(), Error> {
+        let blobs = &[
+            b"test".to_vec(),
+            random_array(10 * PAGE_SZ),
+            b"foobar".to_vec(),
+        ];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_inc() -> Result<(), Error> {
+        let blobs = (0..PAGE_SZ / 8)
+            .map(|v| random_array(v * 16))
+            .collect::<Vec<_>>();
+        round_trip_test::<false>(&blobs).await?;
+        round_trip_test::<true>(&blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_random_size() -> Result<(), Error> {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let blobs = (0..1024)
+            .map(|_| {
+                let mut sz: u16 = rng.gen();
+                // Make 50% of the arrays small
+                if rng.gen() {
+                    sz |= 63;
+                }
+                random_array(sz.into())
+            })
+            .collect::<Vec<_>>();
+        round_trip_test::<false>(&blobs).await?;
+        round_trip_test::<true>(&blobs).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_page_boundary() -> Result<(), Error> {
+        let blobs = &[
+            random_array(PAGE_SZ - 4),
+            random_array(PAGE_SZ - 4),
+            random_array(PAGE_SZ - 4),
+        ];
+        round_trip_test::<false>(blobs).await?;
+        round_trip_test::<true>(blobs).await?;
+        Ok(())
     }
 }

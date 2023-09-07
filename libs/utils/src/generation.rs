@@ -53,6 +53,7 @@ impl Generation {
         matches!(self, Self::None)
     }
 
+    #[track_caller]
     pub fn get_suffix(&self) -> String {
         match self {
             Self::Valid(v) => {
@@ -62,6 +63,30 @@ impl Generation {
             Self::Broken => {
                 panic!("Tried to use a broken generation");
             }
+        }
+    }
+
+    /// `suffix` is the part after "-" in a key
+    ///
+    /// Returns None if parsing was unsuccessful
+    pub fn parse_suffix(suffix: &str) -> Option<Generation> {
+        u32::from_str_radix(suffix, 16).map(Generation::new).ok()
+    }
+
+    #[track_caller]
+    pub fn previous(&self) -> Generation {
+        match self {
+            Self::Valid(n) => {
+                if *n == 0 {
+                    // Since a tenant may be upgraded from a pre-generations state, interpret the "previous" generation
+                    // to 0 as being "no generation".
+                    Self::None
+                } else {
+                    Self::Valid(n - 1)
+                }
+            }
+            Self::None => Self::None,
+            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 }

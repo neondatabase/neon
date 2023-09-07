@@ -139,7 +139,7 @@ const reportSummary = async (params) => {
     // Print test resuls from the newest to the oldest Postgres version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
         if (Object.keys(failedTests[pgVersion]).length > 0) {
-            summary += `#### Failures on Posgres ${pgVersion}\n\n`
+            summary += `#### Failures on Postgres ${pgVersion}\n\n`
             for (const [testName, tests] of Object.entries(failedTests[pgVersion])) {
                 const links = []
                 for (const test of tests) {
@@ -188,7 +188,7 @@ const reportSummary = async (params) => {
 }
 
 const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
-    let summary = `### Code coverage [full report](${coverageUrl})\n`
+    let summary = `\n### Code coverage ([full report](${coverageUrl}))\n`
 
     const coverage = await (await fetch(summaryJsonUrl)).json()
     for (const covType of Object.keys(coverage).sort()) {
@@ -205,8 +205,18 @@ const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
 }
 
 module.exports = async ({ github, context, fetch, report, coverage }) => {
+    // Which PR to comment (for ci-run/pr-* it will comment the parent PR, not the ci-run/pr-* PR)
+    let prToComment
+    const branchName = context.payload.pull_request.base.ref.replace(/^refs\/heads\//, "")
+    const match = branchName.match(/^ci-run\/pr-(?<prNumber>\d+)$/)?.groups
+    if (match) {
+        ({ prNumber } = match)
+        prToComment = parseInt(prNumber, 10)
+    } else {
+        prToComment = context.payload.number
+    }
     // Marker to find the comment in the subsequent runs
-    const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
+    const startMarker = `<!--AUTOMATIC COMMENT START #${prToComment}-->`
     // If we run the script in the PR or in the branch (main/release/...)
     const isPullRequest = !!context.payload.pull_request
     // Latest commit in PR or in the branch
@@ -267,7 +277,7 @@ module.exports = async ({ github, context, fetch, report, coverage }) => {
         listCommentsFn   = github.rest.issues.listComments
         updateCommentFn  = github.rest.issues.updateComment
         issueNumberOrSha = {
-            issue_number: context.payload.number,
+            issue_number: prToComment,
         }
     } else {
         updateCommentFn  = github.rest.repos.updateCommitComment

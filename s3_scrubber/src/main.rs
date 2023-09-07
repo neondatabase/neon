@@ -1,19 +1,18 @@
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::Context;
 use aws_sdk_s3::config::Region;
-use reqwest::Url;
 use s3_scrubber::cloud_admin_api::CloudAdminApiClient;
 use s3_scrubber::delete_batch_producer::DeleteBatchProducer;
+use s3_scrubber::scan_metadata::scan_metadata;
 use s3_scrubber::{
-    checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, RootTarget, S3Deleter,
-    S3Target, TraversingDepth,
+    checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, BucketConfig,
+    ConsoleConfig, RootTarget, S3Deleter, S3Target, TraversingDepth, CLI_NAME,
 };
-use tracing::{info, info_span, warn};
+use tracing::{info, warn};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -59,48 +58,7 @@ enum Command {
         #[arg(short, long, default_value_t = false)]
         skip_validation: bool,
     },
-}
-
-struct BucketConfig {
-    region: String,
-    bucket: String,
-    sso_account_id: String,
-}
-
-impl Display for BucketConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.sso_account_id, self.region, self.bucket)
-    }
-}
-
-impl BucketConfig {
-    fn from_env() -> anyhow::Result<Self> {
-        let sso_account_id =
-            env::var("SSO_ACCOUNT_ID").context("'SSO_ACCOUNT_ID' param retrieval")?;
-        let region = env::var("REGION").context("'REGION' param retrieval")?;
-        let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
-
-        Ok(Self {
-            region,
-            bucket,
-            sso_account_id,
-        })
-    }
-}
-
-struct ConsoleConfig {
-    admin_api_url: Url,
-}
-
-impl ConsoleConfig {
-    fn from_env() -> anyhow::Result<Self> {
-        let admin_api_url: Url = env::var("CLOUD_ADMIN_API_URL")
-            .context("'CLOUD_ADMIN_API_URL' param retrieval")?
-            .parse()
-            .context("'CLOUD_ADMIN_API_URL' param parsing")?;
-
-        Ok(Self { admin_api_url })
-    }
+    ScanMetadata {},
 }
 
 async fn tidy(
@@ -111,13 +69,24 @@ async fn tidy(
     depth: TraversingDepth,
     skip_validation: bool,
 ) -> anyhow::Result<()> {
-    let binary_name = env::args()
-        .next()
-        .context("binary name in not the first argument")?;
-
     let dry_run = !cli.delete;
-    let _guard = init_logging(&binary_name, dry_run, node_kind.as_str());
-    let _main_span = info_span!("tidy", binary = %binary_name, %dry_run).entered();
+    let file_name = if dry_run {
+        format!(
+            "{}_{}_{}__dry.log",
+            CLI_NAME,
+            node_kind,
+            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
+        )
+    } else {
+        format!(
+            "{}_{}_{}.log",
+            CLI_NAME,
+            node_kind,
+            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
+        )
+    };
+
+    let _guard = init_logging(&file_name);
 
     if dry_run {
         info!("Dry run, not removing items for real");
@@ -247,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bucket_config = BucketConfig::from_env()?;
 
-    match &cli.command {
+    match cli.command {
         Command::Tidy {
             node_kind,
             depth,
@@ -258,11 +227,25 @@ async fn main() -> anyhow::Result<()> {
                 &cli,
                 bucket_config,
                 console_config,
-                *node_kind,
-                *depth,
-                *skip_validation,
+                node_kind,
+                depth,
+                skip_validation,
             )
             .await
         }
+        Command::ScanMetadata {} => match scan_metadata(bucket_config).await {
+            Err(e) => {
+                tracing::error!("Failed: {e}");
+                Err(e)
+            }
+            Ok(summary) => {
+                println!("{}", summary.summary_string());
+                if summary.is_fatal() {
+                    Err(anyhow::anyhow!("Fatal scrub errors detected"))
+                } else {
+                    Ok(())
+                }
+            }
+        },
     }
 }
