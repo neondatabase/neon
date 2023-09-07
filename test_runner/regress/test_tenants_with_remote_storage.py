@@ -62,7 +62,7 @@ async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -114,7 +114,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
 def test_tenants_attached_after_download(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -228,7 +228,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     remote_storage_kind = RemoteStorageKind.LOCAL_FS
 
     # since we now store the layer file length metadata, we notice on startup that a layer file is of wrong size, and proceed to redownload it.
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

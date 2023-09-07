@@ -266,7 +266,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
 # Test that safekeepers push their info to the broker and learn peer status from it
 def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
@@ -312,7 +312,7 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.num_safekeepers = 2
     # to advance remote_consistent_lsn
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 

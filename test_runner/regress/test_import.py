@@ -81,7 +81,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     timeline = TimelineId.generate()
 
     # Set up pageserver for import
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
@@ -164,7 +164,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
 
 def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -186,7 +186,7 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 # @pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2255")
 def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")

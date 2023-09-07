@@ -94,7 +94,7 @@ def test_metric_collection(
         + "tenant_config={pitr_interval = '0 sec'}"
     )
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

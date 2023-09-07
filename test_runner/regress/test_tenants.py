@@ -242,7 +242,7 @@ def test_pageserver_metrics_removed_after_detach(
 ):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -302,7 +302,7 @@ def test_pageserver_metrics_removed_after_detach(
 def test_pageserver_with_empty_tenants(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

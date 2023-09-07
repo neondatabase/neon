@@ -60,7 +60,7 @@ def test_remote_storage_backup_and_restore(
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -224,7 +224,7 @@ def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -379,7 +379,7 @@ def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -521,7 +521,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -638,7 +638,7 @@ def test_empty_branch_remote_storage_upload(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -689,7 +689,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
     — the upload should be scheduled by load, and create_timeline should await
     for it even though it gets 409 Conflict.
     """
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -786,7 +786,7 @@ def test_compaction_delete_before_upload(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

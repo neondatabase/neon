@@ -191,7 +191,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    neon_env_builder.enable_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -346,7 +346,7 @@ def test_timeline_resurrection_on_attach(
     Original issue: https://github.com/neondatabase/neon/issues/3560
     """
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -433,7 +433,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     the deletion of the local state.
     """
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
@@ -552,7 +552,7 @@ def test_concurrent_timeline_delete_stuck_on(
     signalling to console that it should retry later.
     """
 
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
@@ -629,7 +629,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     This tests cancel safety up to the given failpoint.
     """
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
 
@@ -698,7 +698,7 @@ def test_timeline_delete_works_for_remote_smoke(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -773,7 +773,7 @@ def test_delete_orphaned_objects(
     pg_bin: PgBin,
 ):
     remote_storage_kind = RemoteStorageKind.LOCAL_FS
-    neon_env_builder.enable_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -837,7 +837,7 @@ def test_timeline_delete_resumed_on_attach(
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

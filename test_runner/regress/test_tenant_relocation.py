@@ -264,7 +264,7 @@ def test_tenant_relocation(
     method: str,
     with_load: str,
 ):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -524,7 +524,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 
@@ -680,7 +680,7 @@ def test_emergency_relocate_with_branches_createdb(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=remote_storage_kind,
     )
 

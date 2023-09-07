@@ -14,7 +14,7 @@ from fixtures.utils import wait_until
 
 @pytest.fixture
 def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
     )
     env = neon_env_builder.init_start()
@@ -36,7 +36,7 @@ class NegativeTests:
 
 @pytest.fixture
 def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, None, None]:
-    neon_env_builder.enable_remote_storage(
+    neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
     )
     env = neon_env_builder.init_start()

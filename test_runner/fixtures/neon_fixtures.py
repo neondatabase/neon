@@ -509,7 +509,7 @@ class NeonEnvBuilder:
 
         self.scrub_on_exit = True
 
-    def enable_remote_storage(
+    def enable_pageserver_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
     ):
