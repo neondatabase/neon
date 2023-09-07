@@ -513,7 +513,6 @@ class NeonEnvBuilder:
         self,
         remote_storage_kind: RemoteStorageKind,
         force_enable: bool = False,
-        enable_remote_extensions: bool = False,
     ):
         """
         Configure pageserver and possibly compute extension remote storage.
@@ -527,19 +526,19 @@ class NeonEnvBuilder:
         self.remote_storage = ret
         self.remote_storage_kind = remote_storage_kind
 
-        if enable_remote_extensions:
-            # there is an assumption that REAL_S3 for extensions is never
-            # cleaned up these are also special in that they have a hardcoded
-            # bucket and region, which is most likely the same as our normal
-            ext = self._configure_and_create_remote_storage(
-                remote_storage_kind,
-                "ext",
-                bucket_name="neon-dev-extensions-eu-central-1",
-                bucket_region="eu-central-1",
-            )
-            assert isinstance(ext, S3Storage)
-            ext.cleanup = False
-            self.ext_remote_storage = ext
+    def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
+        # there is an assumption that REAL_S3 for extensions is never
+        # cleaned up these are also special in that they have a hardcoded
+        # bucket and region, which is most likely the same as our normal
+        ext = self._configure_and_create_remote_storage(
+            kind,
+            "ext",
+            bucket_name="neon-dev-extensions-eu-central-1",
+            bucket_region="eu-central-1",
+        )
+        assert isinstance(ext, S3Storage), "unsure why, but only MOCK_S3 and REAL_S3 are currently supported for extensions"
+        ext.cleanup = False
+        self.ext_remote_storage = ext
 
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
         assert self.sk_remote_storage is None, "sk_remote_storage already configured"
