@@ -5,6 +5,7 @@ use clap::Subcommand;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
 use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
+use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::{page_cache, virtual_file};
 use pageserver::{
     repository::{Key, KEY_SIZE},
@@ -80,13 +81,13 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
 pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
     match cmd {
         LayerCmd::List { path } => {
-            for tenant in fs::read_dir(path.join("tenants"))? {
+            for tenant in fs::read_dir(path.join(TENANTS_SEGMENT_NAME))? {
                 let tenant = tenant?;
                 if !tenant.file_type()?.is_dir() {
                     continue;
                 }
                 println!("tenant {}", tenant.file_name().to_string_lossy());
-                for timeline in fs::read_dir(tenant.path().join("timelines"))? {
+                for timeline in fs::read_dir(tenant.path().join(TIMELINES_SEGMENT_NAME))? {
                     let timeline = timeline?;
                     if !timeline.file_type()?.is_dir() {
                         continue;
@@ -101,9 +102,9 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             timeline,
         } => {
             let timeline_path = path
-                .join("tenants")
+                .join(TENANTS_SEGMENT_NAME)
                 .join(tenant)
-                .join("timelines")
+                .join(TIMELINES_SEGMENT_NAME)
                 .join(timeline);
             let mut idx = 0;
             for layer in fs::read_dir(timeline_path)? {

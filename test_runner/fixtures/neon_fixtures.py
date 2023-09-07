@@ -415,6 +415,7 @@ class NeonEnvBuilder:
         pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
+        test_output_dir: Path,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -455,6 +456,9 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
+        self.enable_generations = False
+        self.scrub_on_exit = False
+        self.test_output_dir = test_output_dir
 
         assert test_name.startswith(
             "test_"
@@ -488,6 +492,23 @@ class NeonEnvBuilder:
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
+
+    def enable_scrub_on_exit(self):
+        """
+        Call this if you would like the fixture to automatically run
+        s3_scrubber at the end of the test, as a bidirectional test
+        that the scrubber is working properly, and that the code within
+        the test didn't produce any invalid remote state.
+        """
+
+        if not isinstance(self.remote_storage, S3Storage):
+            # The scrubber can't talk to e.g. LocalFS -- it needs
+            # an HTTP endpoint (mock is fine) to connect to.
+            raise RuntimeError(
+                "Cannot scrub with remote_storage={self.remote_storage}, require an S3 endpoint"
+            )
+
+        self.scrub_on_exit = True
 
     def enable_remote_storage(
         self,
@@ -720,12 +741,24 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
 
+            if self.env.attachment_service is not None:
+                self.env.attachment_service.stop(immediate=True)
+
             cleanup_error = None
+
+            if self.scrub_on_exit:
+                try:
+                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                except Exception as e:
+                    log.error(f"Error during remote storage scrub: {e}")
+                    cleanup_error = e
+
             try:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
-                cleanup_error = e
+                if cleanup_error is not None:
+                    cleanup_error = e
 
             try:
                 self.cleanup_local_storage()
@@ -773,6 +806,8 @@ class NeonEnv:
         the tenant id
     """
 
+    PAGESERVER_ID = 1
+
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
         self.rust_log_override = config.rust_log_override
@@ -795,6 +830,14 @@ class NeonEnv:
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
+
+        if config.enable_generations:
+            attachment_service_port = self.port_distributor.get_port()
+            self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
+            self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
+        else:
+            self.control_plane_api = None
+            self.attachment_service = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -821,13 +864,20 @@ class NeonEnv:
         toml += textwrap.dedent(
             f"""
             [pageserver]
-            id=1
+            id={self.PAGESERVER_ID}
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
             pg_auth_type = '{pg_auth_type}'
             http_auth_type = '{http_auth_type}'
         """
         )
+
+        if self.control_plane_api is not None:
+            toml += textwrap.dedent(
+                f"""
+                control_plane_api = '{self.control_plane_api}'
+            """
+            )
 
         # Create a corresponding NeonPageserver object
         self.pageserver = NeonPageserver(
@@ -875,6 +925,9 @@ class NeonEnv:
     def start(self):
         # Start up broker, pageserver and all safekeepers
         self.broker.try_start()
+
+        if self.attachment_service is not None:
+            self.attachment_service.start()
         self.pageserver.start()
 
         for safekeeper in self.safekeepers:
@@ -929,6 +982,7 @@ def _shared_simple_env(
     default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
+    test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
@@ -957,6 +1011,7 @@ def _shared_simple_env(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         env = builder.init_start()
 
@@ -984,7 +1039,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
 @pytest.fixture(scope="function")
 def neon_env_builder(
     pytestconfig: Config,
-    test_output_dir: str,
+    test_output_dir: Path,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
@@ -1022,6 +1077,7 @@ def neon_env_builder(
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
+        test_output_dir=test_output_dir,
     ) as builder:
         yield builder
 
@@ -1299,6 +1355,16 @@ class NeonCli(AbstractNeonCli):
             res.check_returncode()
             return res
 
+    def attachment_service_start(self):
+        cmd = ["attachment_service", "start"]
+        return self.raw_cli(cmd)
+
+    def attachment_service_stop(self, immediate: bool):
+        cmd = ["attachment_service", "stop"]
+        if immediate:
+            cmd.extend(["-m", "immediate"])
+        return self.raw_cli(cmd)
+
     def pageserver_start(
         self,
         overrides: Tuple[str, ...] = (),
@@ -1480,6 +1546,35 @@ class ComputeCtl(AbstractNeonCli):
     COMMAND = "compute_ctl"
 
 
+class NeonAttachmentService:
+    def __init__(self, env: NeonEnv):
+        self.env = env
+        self.running = False
+
+    def start(self):
+        assert not self.running
+        self.env.neon_cli.attachment_service_start()
+        self.running = True
+        return self
+
+    def stop(self, immediate: bool = False) -> "NeonAttachmentService":
+        if self.running:
+            self.env.neon_cli.attachment_service_stop(immediate)
+            self.running = False
+        return self
+
+    def __enter__(self) -> "NeonAttachmentService":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ):
+        self.stop(immediate=True)
+
+
 class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
@@ -1644,6 +1739,26 @@ class NeonPageserver(PgProtocol):
 
         return None
 
+    def tenant_attach(
+        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+    ):
+        """
+        Tenant attachment passes through here to acquire a generation number before proceeding
+        to call into the pageserver HTTP client.
+        """
+        if self.env.attachment_service is not None:
+            response = requests.post(
+                f"{self.env.control_plane_api}/attach_hook",
+                json={"tenant_id": str(tenant_id), "pageserver_id": self.env.PAGESERVER_ID},
+            )
+            response.raise_for_status()
+            generation = response.json()["gen"]
+        else:
+            generation = None
+
+        client = self.env.pageserver.http_client()
+        return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+
 
 def append_pageserver_param_overrides(
     params_to_update: List[str],
@@ -1729,7 +1844,10 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        return subprocess_capture(self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs)
+        base_path, _, _ = subprocess_capture(
+            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+        )
+        return base_path
 
 
 @pytest.fixture(scope="function")
@@ -2733,6 +2851,41 @@ class SafekeeperHttpClient(requests.Session):
                 (TenantId(match.group(1)), TimelineId(match.group(2)))
             ] = int(match.group(3))
         return metrics
+
+
+class S3Scrubber:
+    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+        self.env = env
+        self.log_dir = log_dir
+
+    def scrubber_cli(self, args, timeout):
+        assert isinstance(self.env.remote_storage, S3Storage)
+        s3_storage = self.env.remote_storage
+
+        env = {
+            "REGION": s3_storage.bucket_region,
+            "BUCKET": s3_storage.bucket_name,
+        }
+        env.update(s3_storage.access_env_vars())
+
+        if s3_storage.endpoint is not None:
+            env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
+
+        base_args = [self.env.neon_binpath / "s3_scrubber"]
+        args = base_args + args
+
+        (output_path, _, status_code) = subprocess_capture(
+            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
+        )
+        if status_code:
+            log.warning(f"Scrub command {args} failed")
+            log.warning(f"Scrub environment: {env}")
+            log.warning(f"Output at: {output_path}")
+
+            raise RuntimeError("Remote storage scrub failed")
+
+    def scan_metadata(self):
+        self.scrubber_cli(["scan-metadata"], timeout=30)
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:

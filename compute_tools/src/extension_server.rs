@@ -74,6 +74,7 @@ More specifically, here is an example ext_index.json
 use anyhow::Context;
 use anyhow::{self, Result};
 use compute_api::spec::RemoteExtSpec;
+use regex::Regex;
 use remote_storage::*;
 use serde_json;
 use std::io::Read;
@@ -124,6 +125,40 @@ pub fn get_pg_version(pgbin: &str) -> String {
     match_human!(14, 15, 16);
 
     panic!("Unsuported postgres version {human_version}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pg_version;
+
+    #[test]
+    fn test_parse_pg_version() {
+        assert_eq!(parse_pg_version("PostgreSQL 15.4"), "v15");
+        assert_eq!(parse_pg_version("PostgreSQL 15.14"), "v15");
+        assert_eq!(
+            parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"),
+            "v15"
+        );
+
+        assert_eq!(parse_pg_version("PostgreSQL 14.15"), "v14");
+        assert_eq!(parse_pg_version("PostgreSQL 14.0"), "v14");
+        assert_eq!(
+            parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
+            "v14"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_unsupported_version() {
+        parse_pg_version("PostgreSQL 13.14");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_incorrect_version_format() {
+        parse_pg_version("PostgreSQL 14");
+    }
 }
 
 // download the archive for a given extension,

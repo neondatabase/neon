@@ -22,6 +22,10 @@ serde_json.workspace = true
 serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
+async-stream.workspace = true
+tokio-stream.workspace = true
+futures-util.workspace = true
+itertools.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
@@ -30,10 +34,8 @@ aws-config = { workspace = true, default-features = false, features = ["rustls",
 
 pageserver = {path="../pageserver"}
 
-
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-
-atty = "0.2"
 tracing-appender = "0.2"
+histogram = "0.7"

@@ -8,7 +8,6 @@ use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
-use std::os::unix::fs::FileExt;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -72,11 +71,13 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReaderVirtual(&'a FileBlockReader),
+    FileBlockReader(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
+    #[cfg(test)]
+    VirtualFile(&'a VirtualFile),
 }
 
 impl<'a> BlockReaderRef<'a> {
@@ -84,11 +85,13 @@ impl<'a> BlockReaderRef<'a> {
     async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
-            FileBlockReaderVirtual(r) => r.read_blk(blknum).await,
+            FileBlockReader(r) => r.read_blk(blknum).await,
             EphemeralFile(r) => r.read_blk(blknum).await,
             Adapter(r) => r.read_blk(blknum).await,
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
+            #[cfg(test)]
+            VirtualFile(r) => r.read_blk(blknum).await,
         }
     }
 }
@@ -121,7 +124,7 @@ impl<'a> BlockCursor<'a> {
     // Needed by cli
     pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
-            reader: BlockReaderRef::FileBlockReaderVirtual(reader),
+            reader: BlockReaderRef::FileBlockReader(reader),
         }
     }
 
@@ -155,9 +158,11 @@ impl FileBlockReader {
     }
 
     /// Read a page from the underlying file into given buffer.
-    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
+    async fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
-        self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+        self.file
+            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .await
     }
     /// Read a block.
     ///
@@ -179,7 +184,7 @@ impl FileBlockReader {
                 ReadBufResult::Found(guard) => break Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
-                    self.fill_buffer(write_guard.deref_mut(), blknum)?;
+                    self.fill_buffer(write_guard.deref_mut(), blknum).await?;
                     write_guard.mark_valid();
 
                     // Swap for read lock
@@ -192,7 +197,7 @@ impl FileBlockReader {
 
 impl BlockReader for FileBlockReader {
     fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReaderVirtual(self))
+        BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }
 }
 
