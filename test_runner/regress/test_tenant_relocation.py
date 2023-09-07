@@ -264,7 +264,7 @@ def test_tenant_relocation(
     method: str,
     with_load: str,
 ):
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 

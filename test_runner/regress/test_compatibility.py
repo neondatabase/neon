@@ -22,6 +22,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -61,7 +62,7 @@ def test_create_snapshot(
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
