@@ -307,8 +307,8 @@ RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.2.0.tar.gz -O pgta
 FROM build-deps AS ip4r-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.1.tar.gz -O ip4r.tar.gz && \
-    echo "78b9f0c1ae45c22182768fe892a32d533c82281035e10914111400bf6301c726 ip4r.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz -O ip4r.tar.gz && \
+    echo "0f7b1f159974f49a47842a8ab6751aecca1ed1142b6d5e38d81b064b2ead1b4b ip4r.tar.gz" | sha256sum --check && \
     mkdir ip4r-src && cd ip4r-src && tar xvzf ../ip4r.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
