@@ -292,9 +292,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(
-        RemoteStorageKind.LOCAL_FS,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
@@ -336,9 +334,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(
-        RemoteStorageKind.LOCAL_FS,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)

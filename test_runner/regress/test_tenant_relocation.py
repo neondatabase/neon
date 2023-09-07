@@ -524,9 +524,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
@@ -680,9 +678,7 @@ def test_emergency_relocate_with_branches_createdb(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()

@@ -14,9 +14,7 @@ from fixtures.utils import wait_until
 
 @pytest.fixture
 def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
-    neon_env_builder.enable_pageserver_remote_storage(
-        RemoteStorageKind.LOCAL_FS,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     # eviction might be the first one after an attach to access the layers
@@ -36,9 +34,7 @@ class NegativeTests:
 
 @pytest.fixture
 def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, None, None]:
-    neon_env_builder.enable_pageserver_remote_storage(
-        RemoteStorageKind.LOCAL_FS,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 

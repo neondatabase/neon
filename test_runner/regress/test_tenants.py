@@ -300,9 +300,7 @@ def test_pageserver_metrics_removed_after_detach(
 def test_pageserver_with_empty_tenants(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
