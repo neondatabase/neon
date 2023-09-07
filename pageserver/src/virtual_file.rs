@@ -861,9 +861,10 @@ mod tests {
             .thread_name("test_vfile_concurrency thread")
             .build()
             .unwrap();
+        let mut hdls = Vec::new();
         for _threadno in 0..THREADS {
             let files = files.clone();
-            rt.spawn(async move {
+            let hdl = rt.spawn(async move {
                 let mut buf = [0u8; SIZE];
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
@@ -872,7 +873,12 @@ mod tests {
                     assert!(buf == SAMPLE);
                 }
             });
+            hdls.push(hdl);
         }
+        for hdl in hdls {
+            hdl.await?;
+        }
+        std::mem::forget(rt);
 
         Ok(())
     }
