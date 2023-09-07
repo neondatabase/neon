@@ -256,6 +256,11 @@ pub fn merge_local_remote_metadata<'a>(
     local: Option<&'a TimelineMetadata>,
     remote: Option<&'a TimelineMetadata>,
 ) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
+    if let Some(remote) = remote {
+        // always pick the remote to get crash-consistent layermaps via index_part.json updates
+        return Ok((remote, false));
+    }
+
     match (local, remote) {
         (None, None) => anyhow::bail!("we should have either local metadata or remote"),
         (Some(local), None) => Ok((local, true)),
