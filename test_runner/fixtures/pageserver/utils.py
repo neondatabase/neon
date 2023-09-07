@@ -47,7 +47,7 @@ def wait_for_upload(
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
-            log.info("wait finished")
+            log.info(f"wait finished: current remote consistent lsn {current_lsn}")
             return
         lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         log.info(
