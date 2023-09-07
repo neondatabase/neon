@@ -572,37 +572,6 @@ class NeonEnvBuilder:
 
         return ret
 
-    def enable_local_fs_remote_storage(self):
-        """
-        Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.
-        Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
-        """
-        self.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
-
-    def enable_mock_s3_remote_storage(
-        self,
-        enable_remote_extensions: bool = False,
-    ):
-        """
-        Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
-        Starts up the mock server, if that does not run yet.
-        Also creates the bucket for extensions, self.ext_remote_storage bucket
-        """
-        self.enable_remote_storage(
-            RemoteStorageKind.MOCK_S3, enable_remote_extensions=enable_remote_extensions
-        )
-
-    def enable_real_s3_remote_storage(
-        self,
-        enable_remote_extensions: bool = False,
-    ):
-        """
-        Sets up configuration to use real s3 endpoint without mock server
-        """
-        self.enable_remote_storage(
-            RemoteStorageKind.REAL_S3, enable_remote_extensions=enable_remote_extensions
-        )
-
     def cleanup_local_storage(self):
         if self.preserve_database_files:
             return
