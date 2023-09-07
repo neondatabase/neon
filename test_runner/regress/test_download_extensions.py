@@ -76,8 +76,8 @@ def upload_files(env):
 
             with open(full_path, "rb") as f:
                 log.info(f"UPLOAD {full_path} to ext/{full_path}")
-                assert isinstance(env.remote_storage, S3Storage)
-                env.remote_storage.client.upload_fileobj(
+                assert isinstance(env.pageserver_remote_storage, S3Storage)
+                env.pageserver_remote_storage.client.upload_fileobj(
                     f,
                     env.ext_remote_storage.bucket_name,
                     f"ext/{full_path}",

@@ -23,7 +23,7 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
     env.pageserver.allowed_errors.append(
         ".*unexpectedly on-demand downloading remote layer remote.* for task kind Eviction"
     )
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     return env
 
 
@@ -40,7 +40,7 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
     )
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
     (tenant_id, _) = env.neon_cli.create_tenant()

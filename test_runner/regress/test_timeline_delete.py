@@ -784,7 +784,7 @@ def test_delete_orphaned_objects(
         }
     )
 
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
 
@@ -795,7 +795,9 @@ def test_delete_orphaned_objects(
         last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
     # write orphaned file that is missing from the index
-    remote_timeline_path = env.remote_storage.timeline_path(env.initial_tenant, timeline_id)
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(
+        env.initial_tenant, timeline_id
+    )
     orphans = [remote_timeline_path / f"orphan_{i}" for i in range(3)]
     for orphan in orphans:
         orphan.write_text("I shouldnt be there")
@@ -826,7 +828,7 @@ def test_delete_orphaned_objects(
             f"deleting a file not referenced from index_part.json name={orphan.stem}"
         )
 
-    assert env.remote_storage.index_path(env.initial_tenant, timeline_id).exists()
+    assert env.pageserver_remote_storage.index_path(env.initial_tenant, timeline_id).exists()
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())

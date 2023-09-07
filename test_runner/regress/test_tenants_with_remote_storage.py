@@ -234,7 +234,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     env = neon_env_builder.init_start()
 
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     env.pageserver.allowed_errors.append(
         ".*removing local file .* because it has unexpected length.*"
@@ -278,7 +278,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     (path, expected_size) = local_layer_truncated
 
     # ensure the same size is found from the index_part.json
-    index_part = env.remote_storage.index_content(tenant_id, timeline_id)
+    index_part = env.pageserver_remote_storage.index_content(tenant_id, timeline_id)
     assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
 
     ## Start the pageserver. It will notice that the file size doesn't match, and
@@ -308,7 +308,9 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 
     # the remote side of local_layer_truncated
-    remote_layer_path = env.remote_storage.timeline_path(tenant_id, timeline_id) / path.name
+    remote_layer_path = (
+        env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / path.name
+    )
 
     # if the upload ever was ongoing, this check would be racy, but at least one
     # extra http request has been made in between so assume it's enough delay

@@ -412,7 +412,7 @@ class NeonEnvBuilder:
         pg_version: PgVersion,
         test_name: str,
         test_output_dir: Path,
-        remote_storage: Optional[RemoteStorage] = None,
+        pageserver_remote_storage: Optional[RemoteStorage] = None,
         pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -431,7 +431,7 @@ class NeonEnvBuilder:
         self.port_distributor = port_distributor
 
         # Pageserver remote storage
-        self.remote_storage = remote_storage
+        self.pageserver_remote_storage = pageserver_remote_storage
         # Extensions remote storage
         self.ext_remote_storage: Optional[S3Storage] = None
         # Safekeepers remote storage
@@ -500,11 +500,11 @@ class NeonEnvBuilder:
         the test didn't produce any invalid remote state.
         """
 
-        if not isinstance(self.remote_storage, S3Storage):
+        if not isinstance(self.pageserver_remote_storage, S3Storage):
             # The scrubber can't talk to e.g. LocalFS -- it needs
             # an HTTP endpoint (mock is fine) to connect to.
             raise RuntimeError(
-                "Cannot scrub with remote_storage={self.remote_storage}, require an S3 endpoint"
+                "Cannot scrub with remote_storage={self.pageserver_remote_storage}, require an S3 endpoint"
             )
 
         self.scrub_on_exit = True
@@ -513,19 +513,16 @@ class NeonEnvBuilder:
         self,
         remote_storage_kind: RemoteStorageKind,
     ):
-        """
-        Configure pageserver and possibly compute extension remote storage.
-
-        Does not configure safekeeper remote storage.
-        """
-        assert self.remote_storage is None, "remote storage is enabled already"
+        assert self.pageserver_remote_storage is None, "remote storage is enabled already"
 
         ret = self._configure_and_create_remote_storage(remote_storage_kind, "pageserver")
 
-        self.remote_storage = ret
-        self.remote_storage_kind = remote_storage_kind
+        self.pageserver_remote_storage = ret
+        self.pageserver_remote_storage_kind = remote_storage_kind
 
     def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
+        assert self.ext_remote_storage is None, "already configured extensions remote storage"
+
         # there is an assumption that REAL_S3 for extensions is never
         # cleaned up these are also special in that they have a hardcoded
         # bucket and region, which is most likely the same as our normal
@@ -700,11 +697,8 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
-        # Pagserver remote storage
-        self.remote_storage = config.remote_storage
-        # Compute extensions remote storage
+        self.pageserver_remote_storage = config.pageserver_remote_storage
         self.ext_remote_storage = config.ext_remote_storage
-        # Safekeeper remote storage
         self.safekeepers_remote_storage = config.sk_remote_storage
         self.pg_version = config.pg_version
         self.neon_binpath = config.neon_binpath
@@ -1221,17 +1215,17 @@ class NeonCli(AbstractNeonCli):
 
             cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
 
+            storage = self.env.pageserver_remote_storage
+
             append_pageserver_param_overrides(
                 params_to_update=cmd,
-                remote_storage=self.env.remote_storage,
+                remote_storage=storage,
                 pageserver_config_override=self.env.pageserver.config_override,
             )
 
             s3_env_vars = None
-            if self.env.remote_storage is not None and isinstance(
-                self.env.remote_storage, S3Storage
-            ):
-                s3_env_vars = self.env.remote_storage.access_env_vars()
+            if isinstance(storage, S3Storage):
+                s3_env_vars = storage.access_env_vars()
             res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
@@ -1252,14 +1246,15 @@ class NeonCli(AbstractNeonCli):
         extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", *overrides]
+        storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
-            remote_storage=self.env.remote_storage,
+            remote_storage=storage,
             pageserver_config_override=self.env.pageserver.config_override,
         )
 
-        if isinstance(self.env.remote_storage, S3Storage):
-            s3_env_vars = self.env.remote_storage.access_env_vars()
+        if isinstance(storage, S3Storage):
+            s3_env_vars = storage.access_env_vars()
             extra_env_vars = (extra_env_vars or {}) | s3_env_vars
 
         return self.raw_cli(start_args, extra_env_vars=extra_env_vars)
@@ -1365,9 +1360,10 @@ class NeonCli(AbstractNeonCli):
         if endpoint_id is not None:
             args.append(endpoint_id)
 
+        storage = self.env.ext_remote_storage
         s3_env_vars = None
-        if self.env.remote_storage is not None and isinstance(self.env.remote_storage, S3Storage):
-            s3_env_vars = self.env.remote_storage.access_env_vars()
+        if isinstance(storage, S3Storage):
+            s3_env_vars = storage.access_env_vars()
 
         res = self.raw_cli(args, extra_env_vars=s3_env_vars)
         res.check_returncode()
@@ -2737,8 +2733,8 @@ class S3Scrubber:
         self.log_dir = log_dir
 
     def scrubber_cli(self, args, timeout):
-        assert isinstance(self.env.remote_storage, S3Storage)
-        s3_storage = self.env.remote_storage
+        assert isinstance(self.env.pageserver_remote_storage, S3Storage)
+        s3_storage = self.env.pageserver_remote_storage
 
         env = {
             "REGION": s3_storage.bucket_region,

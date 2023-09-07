@@ -612,8 +612,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     assert not timeline_path.exists()
 
     # to please mypy
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    remote_timeline_path = env.remote_storage.timeline_path(tenant_id, timeline_id)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
     assert not list(remote_timeline_path.iterdir())
 
@@ -719,9 +719,9 @@ def test_empty_branch_remote_storage_upload_on_restart(
     local_metadata = env.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
     assert local_metadata.is_file()
 
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    new_branch_on_remote_storage = env.remote_storage.timeline_path(
+    new_branch_on_remote_storage = env.pageserver_remote_storage.timeline_path(
         env.initial_tenant, new_branch_timeline_id
     )
     assert (
