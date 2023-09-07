@@ -512,14 +512,13 @@ class NeonEnvBuilder:
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
-        force_enable: bool = False,
     ):
         """
         Configure pageserver and possibly compute extension remote storage.
 
         Does not configure safekeeper remote storage.
         """
-        assert force_enable or self.remote_storage is None, "remote storage is enabled already"
+        assert self.remote_storage is None, "remote storage is enabled already"
 
         ret = self._configure_and_create_remote_storage(remote_storage_kind, "pageserver")
 
