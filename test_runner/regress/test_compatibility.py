@@ -325,8 +325,8 @@ def prepare_snapshot(
 
     # For each pageserver config, edit it and rewrite
     for config_path, pageserver_config in path_to_config.items():
-        pageserver_config["remote_storage"]["local_path"] = LocalFsStorage.component_path(
-            repo_dir, RemoteStorageUser.PAGESERVER
+        pageserver_config["remote_storage"]["local_path"] = str(
+            LocalFsStorage.component_path(repo_dir, RemoteStorageUser.PAGESERVER)
         )
 
         for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
