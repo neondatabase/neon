@@ -73,7 +73,7 @@ pub mod defaults {
     /// Default built-in configuration file.
     ///
     pub const DEFAULT_CONFIG_FILE: &str = formatcp!(
-        r###"
+        r#"
 # Initial configuration file created by 'pageserver --init'
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
@@ -118,7 +118,7 @@ pub mod defaults {
 
 [remote_storage]
 
-"###
+"#
     );
 }
 
