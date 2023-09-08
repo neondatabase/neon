@@ -48,6 +48,7 @@ from fixtures.remote_storage import (
     MockS3Server,
     RemoteStorage,
     RemoteStorageKind,
+    RemoteStorageUser,
     S3Storage,
     remote_storage_to_toml_inline_table,
 )
@@ -513,7 +514,9 @@ class NeonEnvBuilder:
         remote_storage_kind: RemoteStorageKind,
     ):
         assert self.pageserver_remote_storage is None, "remote storage is enabled already"
-        ret = self._configure_and_create_remote_storage(remote_storage_kind, "pageserver")
+        ret = self._configure_and_create_remote_storage(
+            remote_storage_kind, RemoteStorageUser.PAGESERVER
+        )
         self.pageserver_remote_storage = ret
 
     def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
@@ -524,7 +527,7 @@ class NeonEnvBuilder:
         # bucket and region, which is most likely the same as our normal
         ext = self._configure_and_create_remote_storage(
             kind,
-            "ext",
+            RemoteStorageUser.EXTENSIONS,
             bucket_name="neon-dev-extensions-eu-central-1",
             bucket_region="eu-central-1",
         )
@@ -537,12 +540,14 @@ class NeonEnvBuilder:
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
         assert self.sk_remote_storage is None, "sk_remote_storage already configured"
 
-        self.sk_remote_storage = self._configure_and_create_remote_storage(kind, "safekeeper")
+        self.sk_remote_storage = self._configure_and_create_remote_storage(
+            kind, RemoteStorageUser.SAFEKEEPER
+        )
 
     def _configure_and_create_remote_storage(
         self,
         kind: RemoteStorageKind,
-        user: str,
+        user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
     ) -> Optional[RemoteStorage]:

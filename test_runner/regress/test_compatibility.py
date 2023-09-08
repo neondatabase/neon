@@ -22,7 +22,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import RemoteStorageKind
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, RemoteStorageUser
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -261,9 +261,8 @@ def prepare_snapshot(
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
-    # FIXME: this needs to be changed if the path changes
-    pageserver_config["remote_storage"]["local_path"] = str(
-        repo_dir / "local_fs_remote_storage" / "pageserver"
+    pageserver_config["remote_storage"]["local_path"] = LocalFsStorage.component_path(
+        repo_dir, RemoteStorageUser.PAGESERVER
     )
     for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
         pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])

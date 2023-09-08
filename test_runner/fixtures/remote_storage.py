@@ -17,6 +17,20 @@ from fixtures.types import TenantId, TimelineId
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 
 
+@enum.unique
+class RemoteStorageUser(str, enum.Enum):
+    """
+    Instead of using strings for the users, use a more strict enum.
+    """
+
+    PAGESERVER = "pageserver"
+    EXTENSIONS = "ext"
+    SAFEKEEPER = "safekeeper"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class MockS3Server:
     """
     Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
@@ -86,6 +100,10 @@ class LocalFsStorage:
     def cleanup(self):
         # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
         pass
+
+    @staticmethod
+    def component_path(repo_dir: Path, user: RemoteStorageUser) -> Path:
+        return repo_dir / "local_fs_remote_storage" / str(user)
 
 
 @dataclass
@@ -192,7 +210,7 @@ class RemoteStorageKind(str, enum.Enum):
         mock_s3_server,
         run_id: str,
         test_name: str,
-        user: str,
+        user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
     ) -> Optional[RemoteStorage]:
@@ -200,8 +218,7 @@ class RemoteStorageKind(str, enum.Enum):
             return None
 
         if self == RemoteStorageKind.LOCAL_FS:
-            # FIXME: test_compatibility.py expects needs this to be fixed
-            return LocalFsStorage(Path(repo_dir / "local_fs_remote_storage" / user))
+            return LocalFsStorage(LocalFsStorage.component_path(repo_dir, user))
 
         # real_s3 uses this as part of prefix, mock_s3 uses this as part of
         # bucket name, giving all users unique buckets because we have to
