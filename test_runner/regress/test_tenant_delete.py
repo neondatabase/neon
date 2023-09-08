@@ -1,7 +1,6 @@
 import enum
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -367,7 +366,7 @@ def test_tenant_delete_is_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.workdir / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

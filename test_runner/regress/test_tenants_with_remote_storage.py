@@ -179,7 +179,9 @@ def test_tenants_attached_after_download(
 
     env.pageserver.stop()
 
-    timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_dir = (
+        Path(env.pageserver.workdir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    )
     local_layer_deleted = False
     for path in Path.iterdir(timeline_dir):
         if path.name.startswith("00000"):

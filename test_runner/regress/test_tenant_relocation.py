@@ -561,7 +561,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # simpler than initializing a new one from scratch, but the effect on the single tenant
     # is the same.
     env.pageserver.stop(immediate=True)
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
+    shutil.rmtree(env.pageserver.workdir / "tenants" / str(tenant_id))
     env.pageserver.start()
 
     # This fail point will pause the WAL ingestion on the main branch, after the
@@ -709,7 +709,7 @@ def test_emergency_relocate_with_branches_createdb(
 
     # Kill the pageserver, remove the tenant directory, and restart
     env.pageserver.stop(immediate=True)
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
+    shutil.rmtree(env.pageserver.workdir / "tenants" / str(tenant_id))
     env.pageserver.start()
 
     # Wait before ingesting the WAL for CREATE DATABASE on the main branch. The original
