@@ -261,7 +261,10 @@ def prepare_snapshot(
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
-    pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
+    # FIXME: this needs to be changed if the path changes
+    pageserver_config["remote_storage"]["local_path"] = str(
+        repo_dir / "local_fs_remote_storage" / "pageserver"
+    )
     for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
         pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])
 

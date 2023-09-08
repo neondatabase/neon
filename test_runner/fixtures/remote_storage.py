@@ -200,6 +200,7 @@ class RemoteStorageKind(str, enum.Enum):
             return None
 
         if self == RemoteStorageKind.LOCAL_FS:
+            # FIXME: test_compatibility.py expects needs this to be fixed
             return LocalFsStorage(Path(repo_dir / "local_fs_remote_storage" / user))
 
         # real_s3 uses this as part of prefix, mock_s3 uses this as part of
