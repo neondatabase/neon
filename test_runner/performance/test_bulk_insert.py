@@ -1,5 +1,4 @@
 import shutil
-import time
 from contextlib import closing
 
 from fixtures.compare_fixtures import NeonCompare, PgCompare
@@ -43,11 +42,6 @@ def measure_recovery_time(env: NeonCompare):
     client = env.env.pageserver.http_client()
     pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
 
-    def get_lsn():
-        return client.timeline_detail(env.tenant, env.timeline)["last_record_lsn"]
-
-    target_lsn = get_lsn()
-
     # Stop pageserver and remove tenant data
     env.env.pageserver.stop()
     timeline_dir = env.env.timeline_dir(env.tenant, env.timeline)
@@ -61,8 +55,5 @@ def measure_recovery_time(env: NeonCompare):
         # Create the tenant, which will start walingest
         client.timeline_create(pg_version, env.tenant, env.timeline)
 
-        # wait for lsn
-        while get_lsn() < target_lsn:
-            time.sleep(0.1)
-
+        # Flush, which will also wait for lsn to catch up
         env.flush()
