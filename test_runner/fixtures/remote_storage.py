@@ -116,16 +116,18 @@ class S3Storage:
         )
 
     def to_toml_inline_table(self) -> str:
-        s = f"bucket_name='{self.bucket_name}',\
-            bucket_region='{self.bucket_region}'"
+        s = [
+            f"bucket_name='{self.bucket_name}'",
+            f"bucket_region='{self.bucket_region}'",
+        ]
 
         if self.prefix_in_bucket is not None:
-            s += f",prefix_in_bucket='{self.prefix_in_bucket}'"
+            s.append(f"prefix_in_bucket='{self.prefix_in_bucket}'")
 
         if self.endpoint is not None:
-            s += f",endpoint='{self.endpoint}'"
+            s.append(f"endpoint='{self.endpoint}'")
 
-        return s
+        return ",".join(s)
 
     def do_cleanup(self):
         if not self.cleanup:
@@ -213,7 +215,6 @@ class RemoteStorageKind(str, enum.Enum):
                 suffix = hashlib.sha256(test_name.encode()).hexdigest()[:32]
                 s = f"{prefix}-{suffix}"
                 assert len(s) == 63
-                return s
 
             return s
 
