@@ -320,11 +320,7 @@ def s3_storage() -> RemoteStorageKind:
 
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
-    if isinstance(remote_storage, LocalFsStorage):
-        remote_storage_config = remote_storage.to_toml_inline_table()
-    elif isinstance(remote_storage, S3Storage):
-        remote_storage_config = remote_storage.to_toml_inline_table()
-    else:
+    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
         raise Exception("invalid remote storage type")
 
-    return f"{{{remote_storage_config}}}"
+    return f"{{{remote_storage.to_toml_inline_table()}}}"
