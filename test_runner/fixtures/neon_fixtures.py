@@ -902,6 +902,8 @@ def _shared_simple_env(
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
      is set, this is shared by all tests using `neon_simple_env`.
+
+    This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
