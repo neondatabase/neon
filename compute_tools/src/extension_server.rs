@@ -114,12 +114,12 @@ pub fn get_pg_version(pgbin: &str) -> String {
 
 fn parse_pg_version(human_version: &str) -> &str {
 
-    // Normal releases have version strings like "PostgreSQL
-    // 15.4". But there are also pre-release versions like "PostgreSQL
-    // 17devel" or "PostgreSQL 16beta2" or "PostgreSQL 17rc1". And
-    // with the --with-extra-version configure option, you can tack
-    // any string to the version number, e.g. "PostgreSQL 15.4foobar".
-    match Regex::new(r"^PostgreSQL (?<major>\d+)")
+    // Normal releases have version strings like "PostgreSQL 15.4". But there
+    // are also pre-release versions like "PostgreSQL 17devel" or "PostgreSQL
+    // 16beta2" or "PostgreSQL 17rc1". And with the --with-extra-version
+    // configure option, you can tack any string to the version number,
+    // e.g. "PostgreSQL 15.4foobar".
+    match Regex::new(r"^PostgreSQL (?<major>\d+).+")
         .unwrap()
         .captures(human_version)
     {
