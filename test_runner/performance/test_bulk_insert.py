@@ -66,3 +66,5 @@ def measure_recovery_time(env: NeonCompare, test_output_dir):
         # wait for lsn
         while get_lsn() < target_lsn:
             time.sleep(0.1)
+
+        env.flush()
