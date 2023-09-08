@@ -48,7 +48,7 @@ jobs:
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:6121756427
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
@@ -78,7 +78,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       options: --init
 
     steps:
@@ -111,7 +111,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       options: --init
 
     steps:
@@ -178,7 +178,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       options: --init
     strategy:
       fail-fast: false
@@ -376,7 +376,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -414,7 +414,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -448,7 +448,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       options: --init
 
     steps:
@@ -494,7 +494,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
       options: --init
     strategy:
       fail-fast: false
@@ -613,7 +613,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:6121756427
       options: --init
     steps:
       - name: Set PR's status to pending and request a remote CI test
@@ -1094,7 +1094,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:6121756427
       options: --init
     steps:
       - name: Promote compatibility snapshot for the release
