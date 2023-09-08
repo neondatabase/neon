@@ -2539,9 +2539,11 @@ backpressure_throttling_impl(void)
 	? PrevProcessInterruptsCallback()
 	: false;
 
-	/* Don't throttle read only transactions and wal sender.
-	 * Concurrent build index is writting WAL outside transaction,
-	 * so check PROC_IN_SAFE_IC flag set in this case.
+	/*
+	 * Don't throttle read only transactions or wal sender.
+	 * Do throttle CREATE INDEX CONCURRENTLY, however. It performs some
+	 * stages outside a transaction, even though it writes a lot of WAL. 
+	 * Check PROC_IN_SAFE_IC flag to cover that case.
 	 */
 	if (am_walsender
 		|| (!(MyProc->statusFlags & PROC_IN_SAFE_IC)
