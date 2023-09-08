@@ -18,7 +18,7 @@ use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -208,76 +208,13 @@ impl CrashsafeOverwriteError {
     }
 }
 
-/// Helper macro internal to `VirtualFile` that looks up the underlying File,
-/// opens it and evicts some other File if necessary. The passed parameter is
-/// assumed to be a function available for the physical `File`.
-///
-/// We are doing it via a macro as Rust doesn't support async closures that
-/// take on parameters with lifetimes.
 macro_rules! with_file {
-    ($this:expr, $($body:tt)*) => {{ let r: Result<_, Error> = {
-        let open_files = get_open_files();
-
-        let mut handle_guard = {
-            // Read the cached slot handle, and see if the slot that it points to still
-            // contains our File.
-            //
-            // We only need to hold the handle lock while we read the current handle. If
-            // another thread closes the file and recycles the slot for a different file,
-            // we will notice that the handle we read is no longer valid and retry.
-            let mut handle = *$this.handle.read().await;
-            loop {
-                // Check if the slot contains our File
-                {
-                    let slot = &open_files.slots[handle.index];
-                    let slot_guard = slot.inner.read().await;
-                    if slot_guard.tag == handle.tag {
-                        #[allow(unused_mut)]
-                        if let Some(file) = &slot_guard.file {
-                            // Found a cached file descriptor.
-                            slot.recently_used.store(true, Ordering::Relaxed);
-                            let mut file: &File = file;
-                            return file.$($body)*;
-                        }
-                    }
-                }
-
-                // The slot didn't contain our File. We will have to open it ourselves,
-                // but before that, grab a write lock on handle in the VirtualFile, so
-                // that no other thread will try to concurrently open the same file.
-                let handle_guard = $this.handle.write().await;
-
-                // If another thread changed the handle while we were not holding the lock,
-                // then the handle might now be valid again. Loop back to retry.
-                if *handle_guard != handle {
-                    handle = *handle_guard;
-                    continue;
-                }
-                break handle_guard;
-            }
-        };
-
-        // We need to open the file ourselves. The handle in the VirtualFile is
-        // now locked in write-mode. Find a free slot to put it in.
-        let (handle, mut slot_guard) = open_files.find_victim_slot().await;
-
-        // Open the physical file
+    ($this:expr, $($body:tt)*) => {{
+        let sl = $this.lock_file().await?;
         #[allow(unused_mut)]
-        let mut file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
-            .observe_closure_duration(|| $this.open_options.open(&$this.path))?;
-
-        // Perform the requested operation on it
-        let result = file.$($body)*?;
-
-        // Store the File in the slot and update the handle in the VirtualFile
-        // to point to it.
-        slot_guard.file.replace(file);
-
-        *handle_guard = handle;
-
-        Ok(result)
-    }; r}};
+        let mut file: &File = sl.file.as_ref().unwrap();
+        file.$($body)*
+    }};
 }
 
 impl VirtualFile {
@@ -407,6 +344,69 @@ impl VirtualFile {
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
         with_file!(self, metadata())
+    }
+
+    /// Helper function internal to `VirtualFile` that looks up the underlying File,
+    /// opens it and evicts some other File if necessary. The passed parameter is
+    /// assumed to be a function available for the physical `File`.
+    ///
+    /// We are doing it via a macro as Rust doesn't support async closures that
+    /// take on parameters with lifetimes.
+    async fn lock_file(&self) -> Result<RwLockReadGuard<SlotInner>, Error> {
+        let open_files = get_open_files();
+
+        let mut handle_guard = {
+            // Read the cached slot handle, and see if the slot that it points to still
+            // contains our File.
+            //
+            // We only need to hold the handle lock while we read the current handle. If
+            // another thread closes the file and recycles the slot for a different file,
+            // we will notice that the handle we read is no longer valid and retry.
+            let mut handle = *self.handle.read().await;
+            loop {
+                // Check if the slot contains our File
+                {
+                    let slot = &open_files.slots[handle.index];
+                    let slot_guard = slot.inner.read().await;
+                    if slot_guard.tag == handle.tag && slot_guard.file.is_some() {
+                        // Found a cached file descriptor.
+                        slot.recently_used.store(true, Ordering::Relaxed);
+                        return Ok(slot_guard);
+                    }
+                }
+
+                // The slot didn't contain our File. We will have to open it ourselves,
+                // but before that, grab a write lock on handle in the VirtualFile, so
+                // that no other thread will try to concurrently open the same file.
+                let handle_guard = self.handle.write().await;
+
+                // If another thread changed the handle while we were not holding the lock,
+                // then the handle might now be valid again. Loop back to retry.
+                if *handle_guard != handle {
+                    handle = *handle_guard;
+                    continue;
+                }
+                break handle_guard;
+            }
+        };
+
+        // We need to open the file ourselves. The handle in the VirtualFile is
+        // now locked in write-mode. Find a free slot to put it in.
+        let (handle, mut slot_guard) = open_files.find_victim_slot().await;
+
+        // Open the physical file
+        #[allow(unused_mut)]
+        let mut file = STORAGE_IO_TIME
+            .with_label_values(&["open"])
+            .observe_closure_duration(|| self.open_options.open(&self.path))?;
+
+        // Store the File in the slot and update the handle in the VirtualFile
+        // to point to it.
+        slot_guard.file.replace(file);
+
+        *handle_guard = handle;
+
+        return Ok(slot_guard.downgrade());
     }
 
     pub fn remove(self) {
