@@ -343,10 +343,10 @@ impl VirtualFile {
     /// Helper function that looks up the underlying File for this VirtualFile,
     /// opening it and evicting some other File if necessary. It calls 'func'
     /// with the physical File.
-    async fn with_file<'a, F, R, FR>(&self, _op: &str, func: F) -> Result<R, Error>
+    async fn with_file<F, R, FR>(&self, _op: &str, func: F) -> Result<R, Error>
     where
-        F: FnOnce(&'a File) -> FR,
-        FR: Future<Output = R> + 'a,
+        F: FnOnce(&File) -> FR,
+        FR: Future<Output = R>,
     {
         let open_files = get_open_files();
 
