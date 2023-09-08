@@ -98,7 +98,7 @@ jobs:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats')
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6121756427
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     env:
