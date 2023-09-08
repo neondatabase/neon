@@ -74,7 +74,7 @@ impl Layer for RemoteLayer {
         _reconstruct_state: &mut ValueReconstructState,
         _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
-        bail!("layer {self} needs to be downloaded");
+        Err(anyhow::anyhow!("layer {self} needs to be downloaded"))
     }
 }
 

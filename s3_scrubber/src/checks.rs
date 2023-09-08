@@ -46,7 +46,10 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
             .push(active_branch);
 
         let Some(active_project) = s3_active_projects.get(&active_project_id) else {
-            error!("Branch {:?} for project {:?} has no such project in the active projects", active_branch_id, active_project_id);
+            error!(
+                "Branch {:?} for project {:?} has no such project in the active projects",
+                active_branch_id, active_project_id
+            );
             continue;
         };
 
