@@ -236,7 +236,7 @@ impl InMemoryLayer {
     ///
     /// Create a new, empty, in-memory layer
     ///
-    pub fn create(
+    pub async fn create(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -244,7 +244,7 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
 
         Ok(InMemoryLayer {
             conf,

@@ -210,17 +210,18 @@ impl CrashsafeOverwriteError {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true))
+    pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
+        Self::open_with_options(path, OpenOptions::new().read(true)).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
         )
+        .await
     }
 
     /// Open a file with given options.
@@ -228,7 +229,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
-    pub fn open_with_options(
+    pub async fn open_with_options(
         path: &Path,
         open_options: &OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
@@ -299,11 +300,13 @@ impl VirtualFile {
                 // we bail out instead of causing damage.
                 .create_new(true),
         )
+        .await
         .map_err(CrashsafeOverwriteError::CreateTempfile)?;
         file.write_all(content)
             .await
             .map_err(CrashsafeOverwriteError::WriteContents)?;
         file.sync_all()
+            .await
             .map_err(CrashsafeOverwriteError::SyncTempfile)?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
@@ -316,26 +319,28 @@ impl VirtualFile {
         // try_lock.
         let final_parent_dirfd =
             Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
+                .await
                 .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
         final_parent_dirfd
             .sync_all()
+            .await
             .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
         Ok(())
     }
 
     /// Call File::sync_all() on the underlying File.
-    pub fn sync_all(&self) -> Result<(), Error> {
-        self.with_file("fsync", |file| file.sync_all())?
+    pub async fn sync_all(&self) -> Result<(), Error> {
+        self.with_file("fsync", |file| file.sync_all()).await?
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file("metadata", |file| file.metadata())?
+        self.with_file("metadata", |file| file.metadata()).await?
     }
 
     /// Helper function that looks up the underlying File for this VirtualFile,
     /// opening it and evicting some other File if necessary. It calls 'func'
     /// with the physical File.
-    fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
+    async fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
     where
         F: FnMut(&File) -> R,
     {
@@ -415,7 +420,9 @@ impl VirtualFile {
                 self.pos = offset;
             }
             SeekFrom::End(offset) => {
-                self.pos = self.with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))??
+                self.pos = self
+                    .with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))
+                    .await??
             }
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
@@ -503,7 +510,9 @@ impl VirtualFile {
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+        let result = self
+            .with_file("read", |file| file.read_at(buf, offset))
+            .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -513,7 +522,9 @@ impl VirtualFile {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("write", |file| file.write_at(buf, offset))?;
+        let result = self
+            .with_file("write", |file| file.write_at(buf, offset))
+            .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
@@ -625,6 +636,7 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
+    use std::future::Future;
     use std::io::Write;
     use std::sync::Arc;
 
@@ -694,8 +706,8 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| {
-            let vf = VirtualFile::open_with_options(path, open_options)?;
+        test_files("virtual_files", |path, open_options| async move {
+            let vf = VirtualFile::open_with_options(&path, &open_options).await?;
             Ok(MaybeVirtualFile::VirtualFile(vf))
         })
         .await
@@ -703,31 +715,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_physical_files() -> Result<(), Error> {
-        test_files("physical_files", |path, open_options| {
+        test_files("physical_files", |path, open_options| async move {
             Ok(MaybeVirtualFile::File(open_options.open(path)?))
         })
         .await
     }
 
-    async fn test_files<OF>(testname: &str, openfunc: OF) -> Result<(), Error>
+    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
-        OF: Fn(&Path, &OpenOptions) -> Result<MaybeVirtualFile, std::io::Error>,
+        OF: Fn(PathBuf, OpenOptions) -> FT,
+        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
         let mut file_a = openfunc(
-            &path_a,
-            OpenOptions::new().write(true).create(true).truncate(true),
-        )?;
+            path_a.clone(),
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .to_owned(),
+        )
+        .await?;
         file_a.write_all(b"foobar").await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(&path_a, OpenOptions::new().read(true))?;
+        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar").await.unwrap_err();
@@ -763,13 +781,15 @@ mod tests {
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
         let mut file_b = openfunc(
-            &path_b,
+            path_b.clone(),
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true),
-        )?;
+                .truncate(true)
+                .to_owned(),
+        )
+        .await?;
         file_b.write_all_at(b"BAR", 3).await?;
         file_b.write_all_at(b"FOO", 0).await?;
 
@@ -783,7 +803,8 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(&path_b, OpenOptions::new().read(true))?;
+            let mut vfile =
+                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
             assert_eq!("FOOBAR", vfile.read_string().await?);
             vfiles.push(vfile);
         }
@@ -808,8 +829,8 @@ mod tests {
     /// Test using VirtualFiles from many threads concurrently. This tests both using
     /// a lot of VirtualFiles concurrently, causing evictions, and also using the same
     /// VirtualFile from multiple threads concurrently.
-    #[test]
-    fn test_vfile_concurrency() -> Result<(), Error> {
+    #[tokio::test]
+    async fn test_vfile_concurrency() -> Result<(), Error> {
         const SIZE: usize = 8 * 1024;
         const VIRTUAL_FILES: usize = 100;
         const THREADS: usize = 100;
@@ -828,7 +849,8 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))?;
+            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))
+                .await?;
             files.push(f);
         }
         let files = Arc::new(files);
@@ -839,9 +861,10 @@ mod tests {
             .thread_name("test_vfile_concurrency thread")
             .build()
             .unwrap();
+        let mut hdls = Vec::new();
         for _threadno in 0..THREADS {
             let files = files.clone();
-            rt.spawn(async move {
+            let hdl = rt.spawn(async move {
                 let mut buf = [0u8; SIZE];
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
@@ -850,7 +873,12 @@ mod tests {
                     assert!(buf == SAMPLE);
                 }
             });
+            hdls.push(hdl);
         }
+        for hdl in hdls {
+            hdl.await?;
+        }
+        std::mem::forget(rt);
 
         Ok(())
     }

@@ -238,7 +238,7 @@ mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(&path)?;
+            let file = VirtualFile::create(&path).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let offs = wtr.write_blob(blob).await?;
@@ -251,7 +251,7 @@ mod tests {
             wtr.flush_buffer().await?;
         }
 
-        let file = VirtualFile::open(&path)?;
+        let file = VirtualFile::open(&path).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {

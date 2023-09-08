@@ -2546,13 +2546,15 @@ impl Timeline {
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let layer = guard.get_layer_for_write(
-            lsn,
-            self.get_last_record_lsn(),
-            self.conf,
-            self.timeline_id,
-            self.tenant_id,
-        )?;
+        let layer = guard
+            .get_layer_for_write(
+                lsn,
+                self.get_last_record_lsn(),
+                self.conf,
+                self.timeline_id,
+                self.tenant_id,
+            )
+            .await?;
         Ok(layer)
     }
 
