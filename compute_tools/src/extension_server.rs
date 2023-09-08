@@ -113,7 +113,6 @@ pub fn get_pg_version(pgbin: &str) -> String {
 }
 
 fn parse_pg_version(human_version: &str) -> &str {
-
     // Normal releases have version strings like "PostgreSQL 15.4". But there
     // are also pre-release versions like "PostgreSQL 17devel" or "PostgreSQL
     // 16beta2" or "PostgreSQL 17rc1". And with the --with-extra-version
