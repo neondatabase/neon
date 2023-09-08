@@ -164,7 +164,6 @@ jobs:
       run: |
         matrix='{
           "platform": [
-            "neon-captest-reuse",
             "rds-aurora"
           ],
           "scale": [
