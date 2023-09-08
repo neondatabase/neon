@@ -22,6 +22,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, RemoteStorageUser
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -61,7 +62,7 @@ def test_create_snapshot(
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
@@ -260,7 +261,9 @@ def prepare_snapshot(
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
     pageserver_config = toml.load(pageserver_toml)
-    pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
+    pageserver_config["remote_storage"]["local_path"] = LocalFsStorage.component_path(
+        repo_dir, RemoteStorageUser.PAGESERVER
+    )
     for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
         pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])
 
@@ -338,6 +341,8 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
     config.remote_storage = None
+    config.ext_remote_storage = None
+    config.sk_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
