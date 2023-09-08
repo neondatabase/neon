@@ -479,8 +479,8 @@ RUN apt-get update && \
         libfreetype6-dev
 
 ENV PATH "/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
-RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_1.tar.gz -O rdkit.tar.gz && \
-    echo "db346afbd0ba52c843926a2a62f8a38c7b774ffab37eaf382d789a824f21996c rdkit.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
+    echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
     mkdir rdkit-src && cd rdkit-src && tar xvzf ../rdkit.tar.gz --strip-components=1 -C . && \
     cmake \
         -D RDK_BUILD_CAIRO_SUPPORT=OFF \
