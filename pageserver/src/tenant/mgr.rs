@@ -563,10 +563,13 @@ pub async fn detach_tenant(
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
     let tmp_path = detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await?;
+    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+    let task_tenant_id = None;
     task_mgr::spawn(
         task_mgr::BACKGROUND_RUNTIME.handle(),
         TaskKind::MgmtRequest,
-        None,
+        task_tenant_id,
         None,
         "tenant_files_delete",
         false,
