@@ -16,7 +16,7 @@ from fixtures.pg_version import PgVersion
 # 3. Disk space used
 # 4. Peak memory usage
 #
-def test_bulk_insert(neon_with_baseline: PgCompare, test_output_dir):
+def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
     with closing(env.pg.connect()) as conn:
@@ -36,10 +36,10 @@ def test_bulk_insert(neon_with_baseline: PgCompare, test_output_dir):
     # wal from safekeepers. If this number is close to total runtime, then the pageserver
     # is the bottleneck.
     if isinstance(env, NeonCompare):
-        measure_recovery_time(env, test_output_dir)
+        measure_recovery_time(env)
 
 
-def measure_recovery_time(env: NeonCompare, test_output_dir):
+def measure_recovery_time(env: NeonCompare):
     client = env.env.pageserver.http_client()
     pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
 
