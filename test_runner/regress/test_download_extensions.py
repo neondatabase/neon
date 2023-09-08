@@ -10,7 +10,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pg_version import PgVersion, skip_on_postgres
-from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import (
     RemoteStorageKind,
     S3Storage,
