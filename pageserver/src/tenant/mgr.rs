@@ -1,6 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -84,8 +85,13 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<PathB
             std::io::ErrorKind::InvalidInput,
             "Path must be absolute",
         ))?;
-
-    let tmp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    let rand_suffix = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect::<String>()
+        + TEMP_FILE_SUFFIX;
+    let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
     fs::rename(&path, &tmp_path).await?;
     fs::File::open(parent).await?.sync_all().await?;
     Ok(tmp_path)
