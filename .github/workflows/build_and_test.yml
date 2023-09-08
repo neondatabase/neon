@@ -444,7 +444,7 @@ jobs:
 
   create-test-report:
     needs: [ check-permissions, regress-tests, coverage-report, benchmarks ]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:

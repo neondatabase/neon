@@ -40,6 +40,54 @@ from pytest import FixtureRequest
 # - prepare_snapshot copies the snapshot, cleans it up and makes it ready for the current version of Neon (replaces paths and ports in config files).
 # - check_neon_works performs the test itself, feel free to add more checks there.
 #
+#
+# How to run `test_backward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Build current version of binaries
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#
+#    # Run backward compatibility test
+#    COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION} \
+#       ./scripts/pytest -k test_backward_compatibility
+#
+#
+# How to run `test_forward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and store them somewhere:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    mkdir -p neon_previous/target
+#    cp -a target/${BUILD_TYPE} ./neon_previous/target/${BUILD_TYPE}
+#    cp -a pg_install ./neon_previous/pg_install
+#
+#    # Build current version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Run forward compatibility test
+#    COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE} \
+#    COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install \
+#       ./scripts/pytest -k test_forward_compatibility
+#
 
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,

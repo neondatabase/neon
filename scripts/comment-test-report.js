@@ -268,7 +268,7 @@ module.exports = async ({ github, context, fetch, report, coverage }) => {
             commentBody += "```\n"
         }
     } else {
-        commentBody += `#### Test coverage report is not avaibale\n`
+        commentBody += `\n#### Test coverage report is not available\n`
     }
 
     commentBody += autoupdateNotice
