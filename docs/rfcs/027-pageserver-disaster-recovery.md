@@ -1,11 +1,11 @@
 # Name
 
-Created on: 2023-08-24
+Created on: 2023-09-08
 Author: Arpad Müller
 
 ## Summary
 
-Enable the pageserver to recover from data corruption disasters by implementing
+Enable the pageserver to recover from data corruption events by implementing
 a feature to re-apply historic WAL records in parallel to the already occurring
 WAL replay.
 
@@ -13,9 +13,9 @@ The feature is outside of the user-visible backup and history story, and only
 serves as a second-level backup for the case that there is a bug in the
 pageservers that corrupted the served pages.
 
-The pageserver can be triggered via an API endpoint to create a new copy of a
-timeline, applying the WAL of a different timeline, either from the start,
-right after initdb, or from a historic point.
+The RFC proposes an API endpoint for the pageserver that can be triggered
+to create a new copy of a timeline, applying the WAL of a different
+timeline, either from the start, right after initdb, or from a historic point.
 
 ## Motivation
 
@@ -23,18 +23,18 @@ The historic WAL is currently stored in S3 even after it has been replayed by
 the pageserver and thus been integrated into the pageserver's storage system.
 This is done to defend from data corruption failures inside the pageservers.
 
-However, application of this WAL is currently very manual and we could automate
-this to make it easier.
+However, application of this WAL is currently very manual and we want to
+automate this to make it easier.
 
 ### Use cases
 
 There are various use cases for this feature, like:
 
 * The main motivation is replaying in the instance of pageservers corrupting
-  data, which we already try to prevent, but it can occur.
+  data.
 * We might want to, beyond the user-visible history features, through our
-  support channels and upon customer request, recover historic versions beyond
-  the range of history that we officially support.
+  support channels and upon customer request, in select instances, recover
+  historic versions beyond the range of history that we officially support.
 * Running the recovery process in the background for random tenant timelines
   to figure out if there was a corruption of data (we would compare with what
   the pageserver stores for the "official" timeline).
@@ -54,7 +54,8 @@ goal of this endeavour is to achieve higher correctness than the pageserver.
 For the background process, we cannot afford a downtime of the timeline that is
 being cloned, as we don't want to restrict ourselves to offline tenants only.
 In the scenario where we want to recover from disasters or roll back to a
-historic lsn through support staff, downtimes are more affordable. Ideally, the
+historic lsn through support staff, downtimes are more affordable, and
+inevitable if the original had been subject to the corruption. Ideally, the
 two code paths would share code, so the solution would be designed for not
 requiring downtimes.
 
@@ -116,27 +117,41 @@ aspects like performance or space reduction are less important.
 ## Impacted components (e.g. pageserver, safekeeper, console, etc)
 
 Most changes would happen to the pageservers.
-We can implement many features on top of this one, in the console.
+For the higher level features, maybe other components like the console would
+be involved.
 
-There is some small billing impact: Due to the nature of many use cases, we
-might want to refrain from billing for the created shadow timelines.
+We need to make sure that the shadow timelines are not subject to the usual
+limits and billing we apply to existing timelines.
 
 ## Proposed implementation
 
 The first problem to keep in mind is the reproducability of `initdb`.
+So an initial step would be to upload `initdb` snapshots to S3,
+maybe deduplicating them by hash, for a given storage/postgres version
+combination.
 
-### Reliability, failure modes and corner cases (if relevant)
+After that, we'd have the endpoint spawn a background process which
+performs the replay of the WAL to that new timeline.
 
-### Interaction/Sequence diagram (if relevant)
+### Scalability
 
-### Scalability (if relevant)
+For now we want to run this entire process on a single node, and as
+it is by nature linear, it's hard to parallelize. However, for the
+verification workloads, we can easily start the WAL replay in parallel
+for different points in time. This is valuable especially for tenants
+with large WAL records.
 
-### Security implications (if relevant)
+Compare this with the tricks to make addition circuits execute with
+lower latency by making them perform the addition for both possible
+values of the carry bit, and then, in a second step, taking the
+result for the carry bit that was actually obtained.
+
+The other scalability dimension to consider is the WAL length, which
+is a growing question as tenants accumulate changes. There are
+possible approaches to this, including creating snapshots of the
+page files and uploading them to S3, but if we do this for every single
+branch, we lose the cheap branching property.
 
 ### Unresolved questions
 
-## Alternative implementation (if relevant)
-
-## Pros/cons of proposed approaches (if relevant)
-
-## Definition of Done (if relevant)
+none known (outside of the mentioned ones).
