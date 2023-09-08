@@ -205,10 +205,22 @@ const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
 }
 
 module.exports = async ({ github, context, fetch, report, coverage }) => {
-    // Marker to find the comment in the subsequent runs
-    const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
     // If we run the script in the PR or in the branch (main/release/...)
     const isPullRequest = !!context.payload.pull_request
+    // Which PR to comment (for ci-run/pr-* it will comment the parent PR, not the ci-run/pr-* PR)
+    let prToComment
+    if (isPullRequest) {
+        const branchName = context.payload.pull_request.base.ref.replace(/^refs\/heads\//, "")
+        const match = branchName.match(/ci-run\/pr-(?<prNumber>\d+)/)?.groups
+        if (match) {
+            ({ prNumber } = match)
+            prToComment = parseInt(prNumber, 10)
+        } else {
+            prToComment = context.payload.number
+        }
+    }
+    // Marker to find the comment in the subsequent runs
+    const startMarker = `<!--AUTOMATIC COMMENT START #${prToComment}-->`
     // Latest commit in PR or in the branch
     const commitSha = isPullRequest ? context.payload.pull_request.head.sha : context.sha
     // Let users know that the comment is updated automatically
@@ -267,7 +279,7 @@ module.exports = async ({ github, context, fetch, report, coverage }) => {
         listCommentsFn   = github.rest.issues.listComments
         updateCommentFn  = github.rest.issues.updateComment
         issueNumberOrSha = {
-            issue_number: context.payload.number,
+            issue_number: prToComment,
         }
     } else {
         updateCommentFn  = github.rest.repos.updateCommitComment

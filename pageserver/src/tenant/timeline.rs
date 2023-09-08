@@ -585,15 +585,7 @@ impl Timeline {
             Err(e) => {
                 // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
                 drop(_timer);
-                let walreceiver_status = {
-                    match &*self.walreceiver.lock().unwrap() {
-                        None => "stopping or stopped".to_string(),
-                        Some(walreceiver) => match walreceiver.status() {
-                            Some(status) => status.to_human_readable_string(),
-                            None => "Not active".to_string(),
-                        },
-                    }
-                };
+                let walreceiver_status = self.walreceiver_status();
                 Err(anyhow::Error::new(e).context({
                     format!(
                         "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
@@ -604,6 +596,16 @@ impl Timeline {
                     )
                 }))
             }
+        }
+    }
+
+    pub(crate) fn walreceiver_status(&self) -> String {
+        match &*self.walreceiver.lock().unwrap() {
+            None => "stopping or stopped".to_string(),
+            Some(walreceiver) => match walreceiver.status() {
+                Some(status) => status.to_human_readable_string(),
+                None => "Not active".to_string(),
+            },
         }
     }
 
@@ -2544,13 +2546,15 @@ impl Timeline {
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let layer = guard.get_layer_for_write(
-            lsn,
-            self.get_last_record_lsn(),
-            self.conf,
-            self.timeline_id,
-            self.tenant_id,
-        )?;
+        let layer = guard
+            .get_layer_for_write(
+                lsn,
+                self.get_last_record_lsn(),
+                self.conf,
+                self.timeline_id,
+                self.tenant_id,
+            )
+            .await?;
         Ok(layer)
     }
 

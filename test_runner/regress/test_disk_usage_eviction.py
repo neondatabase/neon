@@ -135,7 +135,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     log.info(f"setting up eviction_env for test {request.node.name}")
 
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # initial tenant will not be present on this pageserver
     env = neon_env_builder.init_configs()

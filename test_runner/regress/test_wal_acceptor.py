@@ -37,7 +37,6 @@ from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     RemoteStorageKind,
-    RemoteStorageUsers,
     available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -267,7 +266,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
 # Test that safekeepers push their info to the broker and learn peer status from it
 def test_broker(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
@@ -313,7 +312,7 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.num_safekeepers = 2
     # to advance remote_consistent_lsn
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 
@@ -436,12 +435,7 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
-
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
-
-    neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -488,11 +482,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
-
-    neon_env_builder.remote_storage_users = RemoteStorageUsers.SAFEKEEPER
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant

@@ -84,7 +84,7 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
 
 
 # This test sometimes runs for longer than the global 5 minute timeout.
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 def test_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()

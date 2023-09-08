@@ -48,7 +48,7 @@ async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     virtual_file::init(10);
     page_cache::init(100);
-    let file = FileBlockReader::new(VirtualFile::open(path)?);
+    let file = FileBlockReader::new(VirtualFile::open(path).await?);
     let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(

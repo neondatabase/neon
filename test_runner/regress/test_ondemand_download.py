@@ -52,9 +52,7 @@ def test_ondemand_download_large_rel(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # thinking about using a shared environment? the test assumes that global
     # metrics are for single tenant.
@@ -154,9 +152,7 @@ def test_ondemand_download_timetravel(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # thinking about using a shared environment? the test assumes that global
     # metrics are for single tenant.
@@ -315,9 +311,7 @@ def test_download_remote_layers_api(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start(
@@ -476,9 +470,7 @@ def test_compaction_downloads_on_demand_without_image_creation(
     """
     Create a few layers, then evict, then make sure compaction runs successfully.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     conf = {
         # Disable background GC & compaction
@@ -563,9 +555,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
     Due to current implementation, this will make image creation on-demand download layers, but we cannot really
     directly test for it.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     conf = {
         # Disable background GC & compaction
@@ -663,9 +653,7 @@ def test_ondemand_download_failure_to_replace(
     See: https://github.com/neondatabase/neon/issues/3533
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # disable gc and compaction via default tenant config because config is lost while detaching
     # so that compaction will not be the one to download the layer but the http handler is
