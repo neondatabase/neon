@@ -73,7 +73,11 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     )
 
     timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(parent_timeline_id)
+        env.pageserver.workdir
+        / "tenants"
+        / str(env.initial_tenant)
+        / "timelines"
+        / str(parent_timeline_id)
     )
 
     with pytest.raises(
@@ -86,7 +90,11 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     assert exc.value.status_code == 412
 
     timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
+        env.pageserver.workdir
+        / "tenants"
+        / str(env.initial_tenant)
+        / "timelines"
+        / str(leaf_timeline_id)
     )
     assert timeline_path.exists()
 
@@ -406,7 +414,7 @@ def test_timeline_resurrection_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -458,7 +466,11 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
     leaf_timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
+        env.pageserver.workdir
+        / "tenants"
+        / str(env.initial_tenant)
+        / "timelines"
+        / str(leaf_timeline_id)
     )
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
@@ -907,7 +919,7 @@ def test_timeline_delete_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

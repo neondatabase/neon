@@ -70,6 +70,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    pageserver_id: NodeId,
 }
 
 //
@@ -82,19 +83,16 @@ pub struct ComputeControlPlane {
     pub endpoints: BTreeMap<String, Arc<Endpoint>>,
 
     env: LocalEnv,
-    pageserver: Arc<PageServerNode>,
 }
 
 impl ComputeControlPlane {
     // Load current endpoints from the endpoints/ subdirectories
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
-        let pageserver = Arc::new(PageServerNode::from_env(&env));
-
         let mut endpoints = BTreeMap::default();
         for endpoint_dir in std::fs::read_dir(env.endpoints_path())
             .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env, &pageserver)?;
+            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env)?;
             endpoints.insert(ep.endpoint_id.clone(), Arc::new(ep));
         }
 
@@ -102,7 +100,6 @@ impl ComputeControlPlane {
             base_port: 55431,
             endpoints,
             env,
-            pageserver,
         })
     }
 
@@ -125,15 +122,18 @@ impl ComputeControlPlane {
         http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
+        pageserver_id: NodeId,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
+        let pageserver =
+            PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
             env: self.env.clone(),
-            pageserver: Arc::clone(&self.pageserver),
+            pageserver,
             timeline_id,
             mode,
             tenant_id,
@@ -159,6 +159,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates: true,
+                pageserver_id,
             })?,
         )?;
         std::fs::write(
@@ -193,18 +194,14 @@ pub struct Endpoint {
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
     pub env: LocalEnv,
-    pageserver: Arc<PageServerNode>,
+    pageserver: PageServerNode,
 
     // Optimizations
     skip_pg_catalog_updates: bool,
 }
 
 impl Endpoint {
-    fn from_dir_entry(
-        entry: std::fs::DirEntry,
-        env: &LocalEnv,
-        pageserver: &Arc<PageServerNode>,
-    ) -> Result<Endpoint> {
+    fn from_dir_entry(entry: std::fs::DirEntry, env: &LocalEnv) -> Result<Endpoint> {
         if !entry.file_type()?.is_dir() {
             anyhow::bail!(
                 "Endpoint::from_dir_entry failed: '{}' is not a directory",
@@ -220,12 +217,15 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
+        let pageserver =
+            PageServerNode::from_env(env, env.get_pageserver_conf(conf.pageserver_id)?);
+
         Ok(Endpoint {
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
             endpoint_id,
             env: env.clone(),
-            pageserver: Arc::clone(pageserver),
+            pageserver,
             timeline_id: conf.timeline_id,
             mode: conf.mode,
             tenant_id: conf.tenant_id,

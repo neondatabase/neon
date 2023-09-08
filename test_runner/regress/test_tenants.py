@@ -27,7 +27,7 @@ from prometheus_client.samples import Sample
 
 
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
-    tenants_dir = Path(neon_simple_env.repo_dir) / "tenants"
+    tenants_dir = Path(neon_simple_env.pageserver.workdir) / "tenants"
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
@@ -322,7 +322,10 @@ def test_pageserver_with_empty_tenants(
     files_in_timelines_dir = sum(
         1
         for _p in Path.iterdir(
-            Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines) / "timelines"
+            Path(env.pageserver.workdir)
+            / "tenants"
+            / str(tenant_with_empty_timelines)
+            / "timelines"
         )
     )
     assert (
@@ -334,7 +337,9 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.stop()
 
     tenant_without_timelines_dir = env.initial_tenant
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+    shutil.rmtree(
+        Path(env.pageserver.workdir) / "tenants" / str(tenant_without_timelines_dir) / "timelines"
+    )
 
     env.pageserver.start()
 

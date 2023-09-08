@@ -40,6 +40,54 @@ from pytest import FixtureRequest
 # - prepare_snapshot copies the snapshot, cleans it up and makes it ready for the current version of Neon (replaces paths and ports in config files).
 # - check_neon_works performs the test itself, feel free to add more checks there.
 #
+#
+# How to run `test_backward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Build current version of binaries
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#
+#    # Run backward compatibility test
+#    COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION} \
+#       ./scripts/pytest -k test_backward_compatibility
+#
+#
+# How to run `test_forward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and store them somewhere:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    mkdir -p neon_previous/target
+#    cp -a target/${BUILD_TYPE} ./neon_previous/target/${BUILD_TYPE}
+#    cp -a pg_install ./neon_previous/pg_install
+#
+#    # Build current version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Run forward compatibility test
+#    COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE} \
+#    COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install \
+#       ./scripts/pytest -k test_forward_compatibility
+#
 
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,
@@ -134,7 +182,6 @@ def test_backward_compatibility(
         prepare_snapshot(
             from_dir=compatibility_snapshot_dir,
             to_dir=test_output_dir / "compatibility_snapshot",
-            neon_binpath=neon_binpath,
             port_distributor=port_distributor,
         )
 
@@ -204,7 +251,6 @@ def test_forward_compatibility(
             from_dir=compatibility_snapshot_dir,
             to_dir=test_output_dir / "compatibility_snapshot",
             port_distributor=port_distributor,
-            neon_binpath=compatibility_neon_bin,
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
@@ -236,7 +282,6 @@ def prepare_snapshot(
     from_dir: Path,
     to_dir: Path,
     port_distributor: PortDistributor,
-    neon_binpath: Path,
     pg_distrib_dir: Optional[Path] = None,
 ):
     assert from_dir.exists(), f"Snapshot '{from_dir}' doesn't exist"
@@ -247,6 +292,9 @@ def prepare_snapshot(
     shutil.copytree(from_dir, to_dir)
 
     repo_dir = to_dir / "repo"
+
+    snapshot_config_toml = repo_dir / "config"
+    snapshot_config = toml.load(snapshot_config_toml)
 
     # Remove old logs to avoid confusion in test artifacts
     for logfile in repo_dir.glob("**/*.log"):
@@ -261,31 +309,53 @@ def prepare_snapshot(
     os.mkdir(repo_dir / "endpoints")
 
     # Update paths and ports in config files
-    pageserver_toml = repo_dir / "pageserver.toml"
-    pageserver_config = toml.load(pageserver_toml)
-    pageserver_config["remote_storage"]["local_path"] = LocalFsStorage.component_path(
-        repo_dir, RemoteStorageUser.PAGESERVER
-    )
-    for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
-        pageserver_config[param] = port_distributor.replace_with_new_port(pageserver_config[param])
+    legacy_pageserver_toml = repo_dir / "pageserver.toml"
+    legacy_bundle = os.path.exists(legacy_pageserver_toml)
 
-    # We don't use authentication in compatibility tests
-    # so just remove authentication related settings.
-    pageserver_config.pop("pg_auth_type", None)
-    pageserver_config.pop("http_auth_type", None)
-
-    if pg_distrib_dir:
-        pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
-
-    with pageserver_toml.open("w") as f:
-        toml.dump(pageserver_config, f)
-
-    snapshot_config_toml = repo_dir / "config"
-    snapshot_config = toml.load(snapshot_config_toml)
-    for param in ("listen_http_addr", "listen_pg_addr"):
-        snapshot_config["pageserver"][param] = port_distributor.replace_with_new_port(
-            snapshot_config["pageserver"][param]
+    path_to_config: dict[Path, dict[Any, Any]] = {}
+    if legacy_bundle:
+        os.mkdir(repo_dir / "pageserver_1")
+        path_to_config[repo_dir / "pageserver_1" / "pageserver.toml"] = toml.load(
+            legacy_pageserver_toml
         )
+        os.remove(legacy_pageserver_toml)
+        os.rename(repo_dir / "tenants", repo_dir / "pageserver_1" / "tenants")
+    else:
+        for ps_conf in snapshot_config["pageservers"]:
+            config_path = repo_dir / f"pageserver_{ps_conf['id']}" / "pageserver.toml"
+            path_to_config[config_path] = toml.load(config_path)
+
+    # For each pageserver config, edit it and rewrite
+    for config_path, pageserver_config in path_to_config.items():
+        pageserver_config["remote_storage"]["local_path"] = LocalFsStorage.component_path(
+            repo_dir, RemoteStorageUser.PAGESERVER
+        )
+
+        for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
+            pageserver_config[param] = port_distributor.replace_with_new_port(
+                pageserver_config[param]
+            )
+
+        # We don't use authentication in compatibility tests
+        # so just remove authentication related settings.
+        pageserver_config.pop("pg_auth_type", None)
+        pageserver_config.pop("http_auth_type", None)
+
+        if pg_distrib_dir:
+            pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
+
+        with config_path.open("w") as f:
+            toml.dump(pageserver_config, f)
+
+    # neon_local config doesn't have to be backward compatible.  If we're using a dump from before
+    # it supported multiple pageservers, fix it up.
+    if "pageservers" not in snapshot_config:
+        snapshot_config["pageservers"] = [snapshot_config["pageserver"]]
+        del snapshot_config["pageserver"]
+
+    for param in ("listen_http_addr", "listen_pg_addr"):
+        for pageserver in snapshot_config["pageservers"]:
+            pageserver[param] = port_distributor.replace_with_new_port(pageserver[param])
     snapshot_config["broker"]["listen_addr"] = port_distributor.replace_with_new_port(
         snapshot_config["broker"]["listen_addr"]
     )
@@ -349,6 +419,9 @@ def check_neon_works(
     # Use the "target" binaries to launch the storage nodes
     config_target = config
     config_target.neon_binpath = neon_target_binpath
+    # We are using maybe-old binaries for neon services, but want to use current
+    # binaries for test utilities like neon_local
+    config_target.neon_local_binpath = neon_current_binpath
     cli_target = NeonCli(config_target)
 
     # And the current binaries to launch computes
@@ -381,7 +454,7 @@ def check_neon_works(
     # loosely based on https://github.com/neondatabase/cloud/wiki/Recovery-from-WAL
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
-    pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
+    pageserver_port = snapshot_config["pageservers"][0]["listen_http_addr"].split(":")[-1]
     pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled

@@ -271,7 +271,7 @@ def _import(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
