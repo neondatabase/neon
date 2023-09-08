@@ -1714,7 +1714,7 @@ class NeonPageserver(PgProtocol):
 
     @property
     def workdir(self) -> Path:
-        return Path(os.path.join(self.env.repo_dir, f"pageserver_{self.id}"))
+        return self.env.repo_dir / f"pageserver_{self.id}"
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
