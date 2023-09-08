@@ -438,6 +438,7 @@ impl ImageLayerInner {
         summary: Option<Summary>,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
+            .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0).await?;
@@ -540,7 +541,8 @@ impl ImageLayerWriterInner {
         let mut file = VirtualFile::open_with_options(
             &path,
             std::fs::OpenOptions::new().write(true).create_new(true),
-        )?;
+        )
+        .await?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
@@ -645,7 +647,7 @@ impl ImageLayerWriterInner {
         };
 
         // fsync the file
-        file.sync_all()?;
+        file.sync_all().await?;
 
         // Rename the file to its final name
         //

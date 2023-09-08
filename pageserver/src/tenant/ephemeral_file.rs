@@ -28,7 +28,7 @@ pub struct EphemeralFile {
 }
 
 impl EphemeralFile {
-    pub fn create(
+    pub async fn create(
         conf: &PageServerConf,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -44,7 +44,8 @@ impl EphemeralFile {
         let file = VirtualFile::open_with_options(
             &filename,
             OpenOptions::new().read(true).write(true).create(true),
-        )?;
+        )
+        .await?;
 
         Ok(EphemeralFile {
             page_cache_file_id: page_cache::next_file_id(),
@@ -286,7 +287,7 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id) = harness("ephemeral_blobs")?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
 
         let pos_foo = file.write_blob(b"foo").await?;
         assert_eq!(

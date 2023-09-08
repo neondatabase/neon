@@ -4,10 +4,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::virtual_file::VirtualFile;
-
 fn fsync_path(path: &Path) -> io::Result<()> {
-    let file = VirtualFile::open(path)?;
+    // TODO use VirtualFile::fsync_all once we fully go async.
+    let file = std::fs::File::open(path)?;
     file.sync_all()
 }
 

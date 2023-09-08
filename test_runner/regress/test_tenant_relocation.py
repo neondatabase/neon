@@ -22,7 +22,11 @@ from fixtures.pageserver.utils import (
     wait_tenant_status_404,
 )
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    available_remote_storages,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     query_scalar,
@@ -264,7 +268,7 @@ def test_tenant_relocation(
     method: str,
     with_load: str,
 ):
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -278,8 +282,8 @@ def test_tenant_relocation(
     # Needed for detach polling.
     env.pageserver.allowed_errors.append(f".*NotFound: tenant {tenant_id}.*")
 
-    # create folder for remote storage mock
-    remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    remote_storage_mock_path = env.pageserver_remote_storage.root
 
     # we use two branches to check that they are both relocated
     # first branch is used for load, compute for second one is used to
@@ -524,9 +528,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
@@ -680,9 +682,7 @@ def test_emergency_relocate_with_branches_createdb(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()

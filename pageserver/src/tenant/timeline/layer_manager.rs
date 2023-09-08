@@ -87,7 +87,7 @@ impl LayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
     /// called within `get_layer_for_write`.
-    pub(crate) fn get_layer_for_write(
+    pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
         last_record_lsn: Lsn,
@@ -129,7 +129,7 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
