@@ -182,6 +182,7 @@ impl LocalEnv {
     pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
+        #[allow(clippy::manual_range_patterns)]
         match pg_version {
             14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
@@ -189,16 +190,10 @@ impl LocalEnv {
     }
 
     pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 | 15 | 16 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 | 15 | 16 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
     pub fn pageserver_bin(&self) -> PathBuf {
