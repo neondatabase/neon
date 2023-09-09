@@ -211,9 +211,7 @@ impl CrashsafeOverwriteError {
 macro_rules! with_file {
     ($this:expr, $($body:tt)*) => {{
         let sl = $this.lock_file().await?;
-        #[allow(unused_mut)]
-        let mut file: &File = sl.file.as_ref().unwrap();
-        file.$($body)*
+        sl.as_ref().$($body)*
     }};
 }
 
@@ -352,7 +350,7 @@ impl VirtualFile {
     ///
     /// We are doing it via a macro as Rust doesn't support async closures that
     /// take on parameters with lifetimes.
-    async fn lock_file(&self) -> Result<RwLockReadGuard<SlotInner>, Error> {
+    async fn lock_file(&self) -> Result<FileGuard<'_>, Error> {
         let open_files = get_open_files();
 
         let mut handle_guard = {
@@ -371,7 +369,7 @@ impl VirtualFile {
                     if slot_guard.tag == handle.tag && slot_guard.file.is_some() {
                         // Found a cached file descriptor.
                         slot.recently_used.store(true, Ordering::Relaxed);
-                        return Ok(slot_guard);
+                        return Ok(FileGuard { slot_guard });
                     }
                 }
 
@@ -406,7 +404,9 @@ impl VirtualFile {
 
         *handle_guard = handle;
 
-        return Ok(slot_guard.downgrade());
+        return Ok(FileGuard {
+            slot_guard: slot_guard.downgrade(),
+        });
     }
 
     pub fn remove(self) {
@@ -524,6 +524,18 @@ impl VirtualFile {
                 .add(size as i64);
         }
         result
+    }
+}
+
+struct FileGuard<'a> {
+    slot_guard: RwLockReadGuard<'a, SlotInner>,
+}
+
+impl<'a> AsRef<File> for FileGuard<'a> {
+    fn as_ref(&self) -> &File {
+        // This unwrap is safe because we only create `FileGuard`s
+        // if we know that the file is Some.
+        self.slot_guard.file.as_ref().unwrap()
     }
 }
 
