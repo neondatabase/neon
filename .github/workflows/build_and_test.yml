@@ -1081,11 +1081,25 @@ jobs:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
           script: |
-            github.rest.git.createRef({
+            await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
               sha: context.sha,
+            })
+
+      - name: Create GitHub release
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: "${{ needs.tag.outputs.build-tag }}",
+              generate_release_notes: true,
             })
 
   promote-compatibility-data:
