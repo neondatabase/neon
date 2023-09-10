@@ -1,0 +1,8 @@
+self-hosted-runner:
+  labels:
+    - gen3
+    - large
+    - small
+    - us-east-2
+config-variables:
+  - SLACK_UPCOMING_RELEASE_CHANNEL_ID
