@@ -254,10 +254,12 @@ jobs:
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
           fi
-          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
-          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
-          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
+          {
+            echo "cov_prefix=${cov_prefix}"
+            echo "CARGO_FEATURES=${CARGO_FEATURES}"
+            echo "CARGO_FLAGS=${CARGO_FLAGS}"
+            echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
+          } >> $GITHUB_ENV
 
       # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just
@@ -1009,7 +1011,7 @@ jobs:
 
           last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
 
-          for ((i=0; i <= $TIMEOUT; i+=$INTERVAL)); do
+          for ((i=0; i <= TIMEOUT; i+=INTERVAL)); do
             sleep $INTERVAL
 
             # Get statuses for the latest commit in the PR / branch
@@ -1081,11 +1083,25 @@ jobs:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
           script: |
-            github.rest.git.createRef({
+            await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
               sha: context.sha,
+            })
+
+      - name: Create GitHub release
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: "${{ needs.tag.outputs.build-tag }}",
+              generate_release_notes: true,
             })
 
   promote-compatibility-data:
