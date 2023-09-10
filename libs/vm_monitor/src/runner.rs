@@ -18,8 +18,9 @@ use tracing::{error, info, warn};
 use crate::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
-use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
-use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
+use crate::protocol::{self, InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
+use crate::sysinfo::{LoadAvg, MemInfo};
+use crate::{bytes_to_mebibytes, spawn_with_cancel, Args, MiB};
 
 /// Central struct that interacts with agent, dispatcher, and cgroup to handle
 /// signals from the agent.
@@ -103,7 +104,10 @@ impl Runner {
         };
 
         let mut file_cache_reserved_bytes = 0;
-        let mem = get_total_system_memory();
+        let mem = MemInfo::read()
+            .await
+            .context("failed to get memory info")?
+            .total_bytes;
 
         // We need to process file cache initialization before cgroup initialization, so that the memory
         // allocated to the file cache is appropriately taken into account when we decide the cgroup's
@@ -374,10 +378,34 @@ impl Runner {
                 warn!(error, id, "agent experienced an internal error");
                 Ok(None)
             }
+            InboundMsgKind::MetricsRequest {} => self
+                .fetch_metrics()
+                .await
+                .context("faied to fetch metrics")
+                .map(|metrics| {
+                    Some(OutboundMsg::new(
+                        OutboundMsgKind::MetricsResponse { metrics },
+                        id,
+                    ))
+                }),
             InboundMsgKind::HealthCheck {} => {
                 Ok(Some(OutboundMsg::new(OutboundMsgKind::HealthCheck {}, id)))
             }
         }
+    }
+
+    async fn fetch_metrics(&mut self) -> anyhow::Result<protocol::Metrics> {
+        let load_avg = LoadAvg::read().await?;
+        let mem_info = MemInfo::read().await?;
+
+        Ok(protocol::Metrics {
+            load_avg_1m: load_avg.one,
+            load_avg_5m: load_avg.five,
+
+            mem_total_bytes: mem_info.total_bytes,
+            mem_free_bytes: mem_info.free_bytes,
+            mem_buffcache_bytes: mem_info.buffers_bytes + mem_info.cached_bytes,
+        })
     }
 
     // TODO: don't propagate errors, probably just warn!?

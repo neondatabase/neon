@@ -87,10 +87,39 @@ pub enum OutboundMsgKind {
         #[serde(rename = "Status")]
         status: String,
     },
+    /// Returned to the agent after gathering available metrics
+    ///
+    /// This message is only valid in version v1.1 of the protocol and above.
+    MetricsResponse {
+        #[serde(flatten)]
+        metrics: Metrics,
+    },
     /// Part of the bidirectional heartbeat. The heartbeat is initiated by the
     /// agent.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     HealthCheck {},
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")] // rename to match idioms on the Go side
+pub struct Metrics {
+    /// 1-minute load average
+    pub load_avg_1m: f32,
+    /// 5-minute load average
+    pub load_avg_5m: f32,
+
+    /// Current total system memory in bytes, matching `MemTotal` from `/proc/sys/meminfo`.
+    ///
+    /// **NB:** This value is *after* taking out the memory that the kernel statically reserves
+    /// for itself, so it will not match the value observed from outside the VM.
+    pub mem_total_bytes: u64,
+    /// Current free system memory in bytes, matching `MemFree` from `/proc/sys/meminfo`.
+    ///
+    /// **NB:** This value does not include caches.
+    pub mem_free_bytes: u64,
+    /// Current system memory in use by kernel disk buffers and file cache, equivalent to
+    /// `Buffers + Cached` from `/proc/sys/meminfo`.
+    pub mem_buffcache_bytes: u64,
 }
 
 /// A message received form the agent.
@@ -119,6 +148,10 @@ pub enum InboundMsgKind {
     /// A request to reduce resource usage. We should response with a `DownscaleResult`,
     /// when done.
     DownscaleRequest { target: Resources },
+    /// A request for metrics
+    ///
+    /// This message is only valid in version v1.1 of the protocol and above.
+    MetricsRequest {},
     /// Part of the bidirectional heartbeat. The heartbeat is initiated by the
     /// agent.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
@@ -151,10 +184,15 @@ pub const PROTOCOL_MAX_VERSION: ProtocolVersion = ProtocolVersion::V1_0;
 pub struct ProtocolVersion(u8);
 
 impl ProtocolVersion {
-    /// Represents v1.0 of the agent<-> monitor protocol - the initial version
+    /// Represents v1.0 of the agent<->monitor protocol - the initial version
+    const V1_0: ProtocolVersion = ProtocolVersion(1);
+
+    /// Represents v1.1 of the agent <-> monitor protocol
+    ///
+    /// v1.1 adds the metrics request/response types.
     ///
     /// Currently the latest version.
-    const V1_0: ProtocolVersion = ProtocolVersion(1);
+    const V1_1: ProtocolVersion = ProtocolVersion(2);
 }
 
 impl fmt::Display for ProtocolVersion {
@@ -162,6 +200,7 @@ impl fmt::Display for ProtocolVersion {
         match *self {
             ProtocolVersion(0) => f.write_str("<invalid: zero>"),
             ProtocolVersion::V1_0 => f.write_str("v1.0"),
+            ProtocolVersion::V1_1 => f.write_str("v1.1"),
             other => write!(f, "<unknown: {other}>"),
         }
     }

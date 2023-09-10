@@ -9,7 +9,6 @@ use axum::{routing::get, Router, Server};
 use clap::Parser;
 use futures::Future;
 use std::{fmt::Debug, time::Duration};
-use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -23,6 +22,7 @@ pub mod protocol;
 pub mod cgroup;
 pub mod filecache;
 pub mod runner;
+pub mod sysinfo;
 
 /// The vm-monitor is an autoscaling component started by compute_ctl.
 ///
@@ -69,10 +69,6 @@ const MiB: u64 = 1 << 20;
 /// purposes. (Most calculations in this crate use bytes directly)
 pub fn bytes_to_mebibytes(bytes: u64) -> f32 {
     (bytes as f32) / (MiB as f32)
-}
-
-pub fn get_total_system_memory() -> u64 {
-    System::new_with_specifics(RefreshKind::new().with_memory()).total_memory()
 }
 
 /// Global app state for the Axum server
