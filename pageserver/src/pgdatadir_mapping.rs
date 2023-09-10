@@ -499,6 +499,19 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
+    pub async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        db_id: Oid,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let buf = self.get(aux_files_key(db_id), lsn, ctx).await?;
+        match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.files),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -1120,6 +1133,31 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub async fn put_file(
+        &mut self,
+        db_id: Oid,
+        path: &str,
+        content: &[u8],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let key = aux_files_key(db_id);
+        let buf = self.get(key.clone(), ctx).await?;
+        let mut dir = AuxFilesDirectory::des(&buf)?;
+        let path = path.to_string();
+        if content.len() == 0 {
+            dir.files.remove(&path);
+        } else {
+            dir.files.insert(path, Bytes::copy_from_slice(content));
+        }
+        self.put(
+            key,
+            Value::Image(Bytes::from(
+                AuxFilesDirectory::ser(&dir).context("serialize")?,
+            )),
+        );
+        Ok(())
+    }
+
     ///
     /// Flush changes accumulated so far to the underlying repository.
     ///
@@ -1255,6 +1293,11 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AuxFilesDirectory {
+    files: HashMap<String, Bytes>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelSizeEntry {
     nblocks: u32,
@@ -1307,6 +1350,8 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //    checkpoint
 //    pg_version
 //
+// 04 aux_files (replication slots, snapshots, mappings, ...)
+//
 // Below is a full list of the keyspace allocation:
 //
 // DbDir:
@@ -1344,6 +1389,10 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
+//
+// Aux-files:
+// 04 00000000 DBNODE 00000000 00   00000000
+
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1545,6 +1594,17 @@ fn twophase_key_range(xid: TransactionId) -> Range<Key> {
         field4: 0,
         field5: u8::from(overflowed),
         field6: next_xid,
+    }
+}
+
+fn aux_files_key(db_id: Oid) -> Key {
+    Key {
+        field1: 0x04,
+        field2: 0,
+        field3: db_id,
+        field4: 0,
+        field5: 0,
+        field6: 0,
     }
 }
 

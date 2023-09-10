@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
 use tokio::io;
@@ -180,6 +181,7 @@ where
             }
         }
 
+        let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
@@ -212,6 +214,23 @@ where
                     }
                     self.add_rel(rel, rel).await?;
                 }
+            }
+
+            for (path, content) in self
+                .timeline
+                .list_aux_files(self.lsn, dbnode, self.ctx)
+                .await?
+            {
+                let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                let restart_lsn = Lsn(u64::from_le_bytes(
+                    content[offs..offs + 8].try_into().unwrap(),
+                ));
+                min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                let header = new_tar_header(&path, 0)?;
+                self.ar
+                    .append(&header, &*content)
+                    .await
+                    .context("could not add aux file to basebackup tarball")?;
             }
         }
         for xid in self
