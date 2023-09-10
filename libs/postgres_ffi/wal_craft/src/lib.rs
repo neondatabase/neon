@@ -49,6 +49,7 @@ impl Conf {
     pub fn pg_distrib_dir(&self) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
+        #[allow(clippy::manual_range_patterns)]
         match self.pg_version {
             14 | 15 | 16 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
