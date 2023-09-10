@@ -137,11 +137,11 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
                                                    { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
     - name: Generate matrix for OLAP benchmarks
       id: olap-compare-matrix
@@ -153,11 +153,11 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres" },
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
                                                    { "platform": "rds-aurora"   }]')
         fi
 
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
     - name: Generate matrix for TPC-H benchmarks
       id: tpch-compare-matrix
@@ -172,11 +172,11 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
                                                    { "platform": "rds-aurora",   "scale": "10" }]')
         fi
 
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   pgbench-compare:
     needs: [ generate-matrices ]
@@ -254,7 +254,7 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         QUERY="SELECT version();"
-        if [ "${PLATFORM}" = "neon"* ]; then
+        if [[ "${PLATFORM}" = "neon"* ]]; then
           QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
         fi
         psql ${CONNSTR} -c "${QUERY}"
@@ -383,7 +383,7 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         QUERY="SELECT version();"
-        if [ "${PLATFORM}" = "neon"* ]; then
+        if [[ "${PLATFORM}" = "neon"* ]]; then
           QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
         fi
         psql ${CONNSTR} -c "${QUERY}"
@@ -487,7 +487,7 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         QUERY="SELECT version();"
-        if [ "${PLATFORM}" = "neon"* ]; then
+        if [[ "${PLATFORM}" = "neon"* ]]; then
           QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
         fi
         psql ${CONNSTR} -c "${QUERY}"
@@ -577,7 +577,7 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         QUERY="SELECT version();"
-        if [ "${PLATFORM}" = "neon"* ]; then
+        if [[ "${PLATFORM}" = "neon"* ]]; then
           QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
         fi
         psql ${CONNSTR} -c "${QUERY}"
