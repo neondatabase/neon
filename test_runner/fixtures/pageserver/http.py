@@ -159,8 +159,8 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
         return res_json
 
-    def tenant_list(self) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant")
+    def tenant_list(self, **kwargs) -> List[Dict[Any, Any]]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant", **kwargs)
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)

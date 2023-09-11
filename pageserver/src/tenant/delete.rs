@@ -511,6 +511,7 @@ impl DeleteTenantFlow {
         // tenant.shutdown
         // Its also bad that we're holding tenants.read here.
         // TODO relax set_stopping to be idempotent?
+        crate::failpoint_support::sleep_millis_async!("tenant-delete-before-shutdown-sleep");
         if tenant.shutdown(progress, false).await.is_err() {
             return Err(DeleteTenantError::Other(anyhow::anyhow!(
                 "tenant shutdown is already in progress"
