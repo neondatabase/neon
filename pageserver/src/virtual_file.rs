@@ -209,9 +209,12 @@ impl CrashsafeOverwriteError {
     }
 }
 
-macro_rules! with_file {
-    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
-        let $ident = $this.lock_file().await?;
+/// Observe duration for the given storage I/O operation
+///
+/// Unlike `observe_closure_duration`, this supports async,
+/// where "support" means that we measure wall clock time.
+macro_rules! observe_duration {
+    ($op:expr, $($body:tt)*) => {{
         let instant = Instant::now();
         let result = $($body)*;
         let elapsed = instant.elapsed().as_secs_f64();
@@ -219,6 +222,13 @@ macro_rules! with_file {
             .get($op)
             .observe(elapsed);
         result
+    }}
+}
+
+macro_rules! with_file {
+    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
+        let $ident = $this.lock_file().await?;
+        observe_duration!($op, $($body)*)
     }};
 }
 
@@ -260,9 +270,7 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
-        let file = STORAGE_IO_TIME_METRIC
-            .get(StorageIoOperation::Open)
-            .observe_closure_duration(|| open_options.open(path))?;
+        let file = observe_duration!(StorageIoOperation::Open, open_options.open(path))?;
 
         // Strip all options other than read and write.
         //
@@ -405,9 +413,7 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = STORAGE_IO_TIME_METRIC
-            .get(StorageIoOperation::Open)
-            .observe_closure_duration(|| self.open_options.open(&self.path))?;
+        let file = observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path))?;
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.
