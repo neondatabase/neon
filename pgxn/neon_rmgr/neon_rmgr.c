@@ -839,7 +839,7 @@ redo_neon_heap_multi_insert(XLogReaderState *record)
 			htup->t_infomask = xlhdr->t_infomask;
 			htup->t_hoff = xlhdr->t_hoff;
 			HeapTupleHeaderSetXmin(htup, XLogRecGetXid(record));
-			HeapTupleHeaderSetCmin(htup, xlhdr->t_cid);
+			HeapTupleHeaderSetCmin(htup, xlrec->t_cid);
 			ItemPointerSetBlockNumber(&htup->t_ctid, blkno);
 			ItemPointerSetOffsetNumber(&htup->t_ctid, offnum);
 
