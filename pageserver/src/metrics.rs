@@ -578,16 +578,6 @@ impl StorageIoOperation {
 }
 
 /// Tracks time taken by fs operations near VirtualFile.
-static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_io_operations_seconds",
-        "Time spent in IO operations",
-        &["operation"],
-        STORAGE_IO_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
-
 #[derive(Debug)]
 pub(crate) struct StorageIoTime {
     metrics: [Histogram; StorageIoOperation::COUNT],
@@ -595,9 +585,16 @@ pub(crate) struct StorageIoTime {
 
 impl StorageIoTime {
     fn new() -> Self {
+        let storage_io_histogram_vec = register_histogram_vec!(
+            "pageserver_io_operations_seconds",
+            "Time spent in IO operations",
+            &["operation"],
+            STORAGE_IO_TIME_BUCKETS.into()
+        )
+        .expect("failed to define a metric");
         let metrics = std::array::from_fn(|i| {
             let op = StorageIoOperation::from_repr(i).unwrap();
-            let metric = STORAGE_IO_TIME
+            let metric = storage_io_histogram_vec
                 .get_metric_with_label_values(&[op.as_str()])
                 .unwrap();
             metric
