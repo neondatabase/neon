@@ -11,7 +11,7 @@ from fixtures.remote_storage import s3_storage
 @pytest.mark.parametrize("generations", [True, False])
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool):
     neon_env_builder.enable_generations = generations
-    neon_env_builder.enable_remote_storage(remote_storage_kind=s3_storage())
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 
     env = neon_env_builder.init_start()
@@ -115,7 +115,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
 def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(remote_storage_kind=s3_storage())
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 
     env = neon_env_builder.init_start()

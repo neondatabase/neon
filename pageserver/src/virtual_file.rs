@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
@@ -156,8 +156,8 @@ impl OpenFiles {
         if let Some(old_file) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
-            STORAGE_IO_TIME
-                .with_label_values(&["close-by-replace"])
+            STORAGE_IO_TIME_METRIC
+                .get(StorageIoOperation::CloseByReplace)
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -210,13 +210,13 @@ impl CrashsafeOverwriteError {
 }
 
 macro_rules! with_file {
-    ($this:expr, $label:expr, $($body:tt)*) => {{
+    ($this:expr, $op:expr, $($body:tt)*) => {{
         let sl = $this.lock_file().await?;
         let instant = Instant::now();
         let result = sl.as_ref().$($body)*;
         let elapsed = instant.elapsed().as_secs_f64();
-        STORAGE_IO_TIME
-            .with_label_values(&[$label])
+        STORAGE_IO_TIME_METRIC
+            .get($op)
             .observe(elapsed);
         result
     }};
@@ -259,8 +259,9 @@ impl VirtualFile {
             timeline_id = "*".to_string();
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
-        let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -344,11 +345,11 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        with_file!(self, "fsync", sync_all())
+        with_file!(self, StorageIoOperation::Fsync, sync_all())
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        with_file!(self, "read", metadata())
+        with_file!(self, StorageIoOperation::Read, metadata())
     }
 
     /// Helper function internal to `VirtualFile` that looks up the underlying File,
@@ -400,9 +401,8 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        #[allow(unused_mut)]
-        let mut file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -428,7 +428,7 @@ impl VirtualFile {
                 self.pos = offset;
             }
             SeekFrom::End(offset) => {
-                self.pos = with_file!(self, "seek", seek(SeekFrom::End(offset)))?
+                self.pos = with_file!(self, StorageIoOperation::Seek, seek(SeekFrom::End(offset)))?
             }
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
@@ -516,7 +516,7 @@ impl VirtualFile {
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, "read", read_at(buf, offset));
+        let result = with_file!(self, StorageIoOperation::Read, read_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -526,7 +526,7 @@ impl VirtualFile {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, "write", write_at(buf, offset));
+        let result = with_file!(self, StorageIoOperation::Write, write_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
@@ -591,14 +591,16 @@ impl Drop for VirtualFile {
         // accessing it (and if it has been reassigned since, we don't
         // need to bother with dropping anyways).
         let slot = &get_open_files().slots[handle.index];
-        let Ok(mut slot_guard) = slot.inner.try_write() else { return };
+        let Ok(mut slot_guard) = slot.inner.try_write() else {
+            return;
+        };
 
         if slot_guard.tag == handle.tag {
             slot.recently_used.store(false, Ordering::Relaxed);
             // there is also operation "close-by-replace" for closes done on eviction for
             // comparison.
-            STORAGE_IO_TIME
-                .with_label_values(&["close"])
+            STORAGE_IO_TIME_METRIC
+                .get(StorageIoOperation::Close)
                 .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
     }

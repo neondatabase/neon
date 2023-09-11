@@ -306,7 +306,7 @@ def test_timeline_physical_size_init(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(remote_storage_kind)
+        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -347,7 +347,7 @@ def test_timeline_physical_size_post_checkpoint(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(remote_storage_kind)
+        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -367,10 +367,13 @@ def test_timeline_physical_size_post_checkpoint(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
-    )
+    def check():
+        assert_physical_size_invariants(
+            get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
+            remote_storage_kind,
+        )
+
+    wait_until(10, 1, check)
 
 
 @pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
@@ -378,7 +381,7 @@ def test_timeline_physical_size_post_compaction(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(remote_storage_kind)
+        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -431,7 +434,7 @@ def test_timeline_physical_size_post_gc(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(remote_storage_kind)
+        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -564,7 +567,7 @@ def test_tenant_physical_size(
     random.seed(100)
 
     if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(remote_storage_kind)
+        neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 

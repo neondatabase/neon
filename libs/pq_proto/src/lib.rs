@@ -959,7 +959,7 @@ mod tests {
         let make_params = |options| StartupMessageParams::new([("options", options)]);
 
         let params = StartupMessageParams::new([]);
-        assert!(matches!(params.options_escaped(), None));
+        assert!(params.options_escaped().is_none());
 
         let params = make_params("");
         assert!(split_options(&params).is_empty());
