@@ -764,6 +764,7 @@ mod test {
 
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
+        #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
         async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>> {
             unimplemented!()
         }
