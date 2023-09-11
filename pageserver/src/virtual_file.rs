@@ -210,10 +210,10 @@ impl CrashsafeOverwriteError {
 }
 
 macro_rules! with_file {
-    ($this:expr, $op:expr, $($body:tt)*) => {{
-        let sl = $this.lock_file().await?;
+    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
+        let $ident = $this.lock_file().await?;
         let instant = Instant::now();
-        let result = sl.as_ref().$($body)*;
+        let result = $($body)*;
         let elapsed = instant.elapsed().as_secs_f64();
         STORAGE_IO_TIME_METRIC
             .get($op)
@@ -345,11 +345,15 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        with_file!(self, StorageIoOperation::Fsync, sync_all())
+        with_file!(self, StorageIoOperation::Fsync, |file| file
+            .as_ref()
+            .sync_all())
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        with_file!(self, StorageIoOperation::Read, metadata())
+        with_file!(self, StorageIoOperation::Read, |file| file
+            .as_ref()
+            .metadata())
     }
 
     /// Helper function internal to `VirtualFile` that looks up the underlying File,
@@ -428,7 +432,9 @@ impl VirtualFile {
                 self.pos = offset;
             }
             SeekFrom::End(offset) => {
-                self.pos = with_file!(self, StorageIoOperation::Seek, seek(SeekFrom::End(offset)))?
+                self.pos = with_file!(self, StorageIoOperation::Seek, |file| file
+                    .as_ref()
+                    .seek(SeekFrom::End(offset)))?
             }
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
@@ -516,7 +522,9 @@ impl VirtualFile {
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Read, read_at(buf, offset));
+        let result = with_file!(self, StorageIoOperation::Read, |file| file
+            .as_ref()
+            .read_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -526,7 +534,9 @@ impl VirtualFile {
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Write, write_at(buf, offset));
+        let result = with_file!(self, StorageIoOperation::Write, |file| file
+            .as_ref()
+            .write_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
