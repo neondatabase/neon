@@ -351,7 +351,7 @@ impl VirtualFile {
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        with_file!(self, StorageIoOperation::Read, |file| file
+        with_file!(self, StorageIoOperation::Metadata, |file| file
             .as_ref()
             .metadata())
     }
@@ -610,9 +610,9 @@ impl Drop for VirtualFile {
         // cleaned up eventually.
         // Most of the time, the `try_lock` should succeed though,
         // as we have `&mut self` access. In other words, if the slot
-        // is still occupied by our file, we should be the only ones
-        // accessing it (and if it has been reassigned since, we don't
-        // need to bother with dropping anyways).
+        // is still occupied by our file, there should be no access from
+        // other I/O operations; the only other possible place to lock
+        // the slot is the lock algorithm looking for any free slots.
         let slot = &get_open_files().slots[handle.index];
         if let Ok(slot_guard) = slot.inner.try_write() {
             clean_slot(slot, slot_guard, handle.tag);
