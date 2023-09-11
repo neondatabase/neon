@@ -589,7 +589,7 @@ static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 #[derive(Debug)]
-struct StorageIoTime {
+pub(crate) struct StorageIoTime {
     metrics: [Histogram; StorageIoOperation::COUNT],
 }
 
@@ -605,8 +605,8 @@ impl StorageIoTime {
         Self { metrics }
     }
 
-    pub(crate) fn get(&self, op: StorageIoOperation) -> Histogram {
-        self.metrics[op as usize]
+    pub(crate) fn get(&self, op: StorageIoOperation) -> &Histogram {
+        &self.metrics[op as usize]
     }
 }
 
