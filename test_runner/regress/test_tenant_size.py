@@ -11,7 +11,10 @@ from fixtures.neon_fixtures import (
     wait_for_wal_insert_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import timeline_delete_wait_completed
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_until_tenant_active,
+)
 from fixtures.pg_version import PgVersion, xfail_on_postgres
 from fixtures.types import Lsn, TenantId, TimelineId
 
@@ -517,6 +520,8 @@ def test_single_branch_get_tenant_size_grows(
     env.pageserver.stop()
     env.pageserver.start()
 
+    wait_until_tenant_active(http_client, tenant_id)
+
     size_after = http_client.tenant_size(tenant_id)
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
@@ -623,6 +628,8 @@ def test_get_tenant_size_with_multiple_branches(
     main_endpoint.stop()
     env.pageserver.stop()
     env.pageserver.start()
+
+    wait_until_tenant_active(http_client, tenant_id)
 
     # chance of compaction and gc on startup might have an effect on the
     # tenant_size but so far this has been reliable, even though at least gc
