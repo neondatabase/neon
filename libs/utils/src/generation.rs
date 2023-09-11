@@ -90,6 +90,14 @@ impl Generation {
         }
     }
 
+    pub fn next(&self) -> Generation {
+        match self {
+            Self::Valid(n) => Self::Valid(*n + 1),
+            Self::None => Self::Valid(1),
+            Self::Broken => panic!("Attempted to use a broken generation"),
+        }
+    }
+
     pub fn into(self) -> Option<u32> {
         if let Self::Valid(v) = self {
             Some(v)
