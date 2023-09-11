@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
@@ -156,7 +156,7 @@ impl OpenFiles {
             // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
             STORAGE_IO_TIME
-                .with_label_values(&["close-by-replace"])
+                .with_label_values(&[StorageIoOperation::CloseByReplace.as_str()])
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -246,7 +246,7 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+            .with_label_values(&[StorageIoOperation::Open.as_str()])
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -330,11 +330,15 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        self.with_file("fsync", |file| file.sync_all()).await?
+        self.with_file(StorageIoOperation::Fsync.as_str(), |file| file.sync_all())
+            .await?
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file("metadata", |file| file.metadata()).await?
+        self.with_file(StorageIoOperation::Metadata.as_str(), |file| {
+            file.metadata()
+        })
+        .await?
     }
 
     /// Helper function that looks up the underlying File for this VirtualFile,
@@ -391,7 +395,7 @@ impl VirtualFile {
 
         // Open the physical file
         let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+            .with_label_values(&[StorageIoOperation::Open.as_str()])
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
@@ -421,7 +425,9 @@ impl VirtualFile {
             }
             SeekFrom::End(offset) => {
                 self.pos = self
-                    .with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))
+                    .with_file(StorageIoOperation::Seek.as_str(), |mut file| {
+                        file.seek(SeekFrom::End(offset))
+                    })
                     .await??
             }
             SeekFrom::Current(offset) => {
@@ -511,7 +517,9 @@ impl VirtualFile {
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self
-            .with_file("read", |file| file.read_at(buf, offset))
+            .with_file(StorageIoOperation::Read.as_str(), |file| {
+                file.read_at(buf, offset)
+            })
             .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
@@ -523,7 +531,9 @@ impl VirtualFile {
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
         let result = self
-            .with_file("write", |file| file.write_at(buf, offset))
+            .with_file(StorageIoOperation::Write.as_str(), |file| {
+                file.write_at(buf, offset)
+            })
             .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
@@ -577,7 +587,7 @@ impl Drop for VirtualFile {
             // there is also operation "close-by-replace" for closes done on eviction for
             // comparison.
             STORAGE_IO_TIME
-                .with_label_values(&["close"])
+                .with_label_values(&[StorageIoOperation::Close.as_str()])
                 .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
     }
