@@ -592,27 +592,37 @@ impl Drop for VirtualFile {
     fn drop(&mut self) {
         let handle = self.handle.get_mut();
 
-        // We don't have async drop so we cannot wait for the lock here.
-        // Instead, do a best-effort attempt at closing the underlying
-        // file descriptor by using `try_write`.
-        // This best-effort attempt should be quite good though
+        fn clean_slot(slot: &Slot, mut slot_guard: RwLockWriteGuard<'_, SlotInner>, tag: u64) {
+            if slot_guard.tag == tag {
+                slot.recently_used.store(false, Ordering::Relaxed);
+                // there is also operation "close-by-replace" for closes done on eviction for
+                // comparison.
+                STORAGE_IO_TIME_METRIC
+                    .get(StorageIoOperation::Close)
+                    .observe_closure_duration(|| drop(slot_guard.file.take()));
+            }
+        }
+
+        // We don't have async drop so we cannot directly await the lock here.
+        // Instead, first do a best-effort attempt at closing the underlying
+        // file descriptor by using `try_write`, and if that fails, spawn
+        // a tokio task to do it asynchronously: we just want it to be
+        // cleaned up eventually.
+        // Most of the time, the `try_lock` should succeed though,
         // as we have `&mut self` access. In other words, if the slot
         // is still occupied by our file, we should be the only ones
         // accessing it (and if it has been reassigned since, we don't
         // need to bother with dropping anyways).
         let slot = &get_open_files().slots[handle.index];
-        let Ok(mut slot_guard) = slot.inner.try_write() else {
-            return;
+        if let Ok(slot_guard) = slot.inner.try_write() {
+            clean_slot(slot, slot_guard, handle.tag);
+        } else {
+            let tag = handle.tag;
+            tokio::spawn(async move {
+                let slot_guard = slot.inner.write().await;
+                clean_slot(slot, slot_guard, tag);
+            });
         };
-
-        if slot_guard.tag == handle.tag {
-            slot.recently_used.store(false, Ordering::Relaxed);
-            // there is also operation "close-by-replace" for closes done on eviction for
-            // comparison.
-            STORAGE_IO_TIME_METRIC
-                .get(StorageIoOperation::Close)
-                .observe_closure_duration(|| drop(slot_guard.file.take()));
-        }
     }
 }
 
