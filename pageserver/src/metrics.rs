@@ -607,7 +607,7 @@ impl StorageIoTime {
     }
 }
 
-pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(|| StorageIoTime::new());
+pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
