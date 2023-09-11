@@ -593,6 +593,24 @@ pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[derive(Debug)]
+pub struct StorageIoTime {
+    metrics: [Histogram; StorageIoOperation::COUNT],
+}
+
+impl StorageIoTime {
+    fn new() -> Self {
+        let metrics = std::array::from_fn(|i| {
+            let op = StorageIoOperation::from_repr(i).unwrap();
+            let metric = STORAGE_IO_TIME
+                .get_metric_with_label_values(&[op.as_str()])
+                .unwrap();
+            metric
+        });
+        Self { metrics }
+    }
+}
+
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
 // Needed for the https://neonprod.grafana.net/d/5uK9tHL4k/picking-tenant-for-relocation?orgId=1
