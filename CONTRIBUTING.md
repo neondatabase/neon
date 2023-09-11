@@ -36,6 +36,7 @@ _An instruction for maintainers_
 - If and only if it looks **safe** (i.e. it doesn't contain any malicious code which could expose secrets or harm the CI), then:
     - Press the "Approve and run" button in GitHub UI
     - Add the `approved-for-ci-run` label to the PR
+
 Repeat all steps after any change to the PR.
 - When the changes are ready to get merged — merge the original PR (not the internal one)
 
