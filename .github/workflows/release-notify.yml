@@ -25,5 +25,5 @@ jobs:
       - uses: neondatabase/dev-actions/release-pr-notify@main
         with:
           slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          slack-channel-id: ${{ vars.SLACK_UPCOMING_RELEASE_CHANNEL_ID || 'C05QQ9J1BRC' }} # if not set, then `#test-release-notifications`
+          slack-channel-id: C05RVK043D2
           github-token: ${{ secrets.GITHUB_TOKEN }}
