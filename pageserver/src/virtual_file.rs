@@ -154,7 +154,7 @@ impl OpenFiles {
         // old file.
         //
         if let Some(old_file) = slot_guard.file.take() {
-            // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
+            // the normal path of dropping VirtualFile uses `Close`, use `CloseByReplace` here to
             // distinguish the two.
             STORAGE_IO_TIME_METRIC
                 .get(StorageIoOperation::CloseByReplace)
@@ -209,9 +209,12 @@ impl CrashsafeOverwriteError {
     }
 }
 
-macro_rules! with_file {
-    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
-        let $ident = $this.lock_file().await?;
+/// Observe duration for the given storage I/O operation
+///
+/// Unlike `observe_closure_duration`, this supports async,
+/// where "support" means that we measure wall clock time.
+macro_rules! observe_duration {
+    ($op:expr, $($body:tt)*) => {{
         let instant = Instant::now();
         let result = $($body)*;
         let elapsed = instant.elapsed().as_secs_f64();
@@ -219,6 +222,13 @@ macro_rules! with_file {
             .get($op)
             .observe(elapsed);
         result
+    }}
+}
+
+macro_rules! with_file {
+    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
+        let $ident = $this.lock_file().await?;
+        observe_duration!($op, $($body)*)
     }};
 }
 
@@ -260,9 +270,7 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
-        let file = STORAGE_IO_TIME_METRIC
-            .get(StorageIoOperation::Open)
-            .observe_closure_duration(|| open_options.open(path))?;
+        let file = observe_duration!(StorageIoOperation::Open, open_options.open(path))?;
 
         // Strip all options other than read and write.
         //
@@ -405,9 +413,7 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = STORAGE_IO_TIME_METRIC
-            .get(StorageIoOperation::Open)
-            .observe_closure_duration(|| self.open_options.open(&self.path))?;
+        let file = observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path))?;
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.
@@ -595,7 +601,7 @@ impl Drop for VirtualFile {
         fn clean_slot(slot: &Slot, mut slot_guard: RwLockWriteGuard<'_, SlotInner>, tag: u64) {
             if slot_guard.tag == tag {
                 slot.recently_used.store(false, Ordering::Relaxed);
-                // there is also operation "close-by-replace" for closes done on eviction for
+                // there is also the `CloseByReplace` operation for closes done on eviction for
                 // comparison.
                 STORAGE_IO_TIME_METRIC
                     .get(StorageIoOperation::Close)
