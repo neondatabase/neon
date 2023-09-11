@@ -537,7 +537,15 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-#[derive(Debug)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    IntoStaticStr,
+    strum_macros::EnumCount,
+    strum_macros::EnumIter,
+    strum_macros::FromRepr,
+)]
 pub enum StorageIoOperation {
     Open,
     Close,
