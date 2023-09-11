@@ -16,17 +16,29 @@ use crate::config::PageServerConf;
 
 /// The Pageserver's client for using the control plane API: this is a small subset
 /// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
-pub(crate) struct ControlPlaneClient {
+pub struct ControlPlaneClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
     cancel: CancellationToken,
 }
 
+#[async_trait::async_trait]
+pub trait ControlPlaneGenerationsApi {
+    async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>>;
+    async fn validate(
+        &self,
+        tenants: Vec<(TenantId, Generation)>,
+    ) -> anyhow::Result<HashMap<TenantId, bool>>;
+}
+
+unsafe impl Send for ControlPlaneClient {}
+unsafe impl Sync for ControlPlaneClient {}
+
 impl ControlPlaneClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub(crate) fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
+    pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
         let mut url = match conf.control_plane_api.as_ref() {
             Some(u) => u.clone(),
             None => return None,
@@ -96,9 +108,12 @@ impl ControlPlaneClient {
             Ok(r) => Ok(r),
         }
     }
+}
 
+#[async_trait::async_trait]
+impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response
-    pub(crate) async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>> {
+    async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
@@ -120,7 +135,7 @@ impl ControlPlaneClient {
             .collect::<HashMap<_, _>>());
     }
 
-    pub(crate) async fn validate(
+    async fn validate(
         &self,
         tenants: Vec<(TenantId, Generation)>,
     ) -> anyhow::Result<HashMap<TenantId, bool>> {
