@@ -27,3 +27,4 @@ jobs:
           slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
           slack-channel-id: C05RVK043D2
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
