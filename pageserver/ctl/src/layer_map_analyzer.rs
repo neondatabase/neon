@@ -3,6 +3,7 @@
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
 use anyhow::Result;
+use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -10,7 +11,7 @@ use std::{fs, path::Path, str};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
-use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
+use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
@@ -96,8 +97,8 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
-    let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+    let file = FileBlockReader::new(VirtualFile::open(path).await?);
+    let summary_blk = file.read_blk(0).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
@@ -142,12 +143,12 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
-    for tenant in fs::read_dir(storage_path.join("tenants"))? {
+    for tenant in fs::read_dir(storage_path.join(TENANTS_SEGMENT_NAME))? {
         let tenant = tenant?;
         if !tenant.file_type()?.is_dir() {
             continue;
         }
-        for timeline in fs::read_dir(tenant.path().join("timelines"))? {
+        for timeline in fs::read_dir(tenant.path().join(TIMELINES_SEGMENT_NAME))? {
             let timeline = timeline?;
             if !timeline.file_type()?.is_dir() {
                 continue;

@@ -3,13 +3,12 @@
 
 use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::block_io::{BlockLease, BlockReader};
+use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
-use std::os::unix::prelude::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
@@ -29,7 +28,7 @@ pub struct EphemeralFile {
 }
 
 impl EphemeralFile {
-    pub fn create(
+    pub async fn create(
         conf: &PageServerConf,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -45,7 +44,8 @@ impl EphemeralFile {
         let file = VirtualFile::open_with_options(
             &filename,
             OpenOptions::new().read(true).write(true).create(true),
-        )?;
+        )
+        .await?;
 
         Ok(EphemeralFile {
             page_cache_file_id: page_cache::next_file_id(),
@@ -59,6 +59,48 @@ impl EphemeralFile {
 
     pub(crate) fn len(&self) -> u64 {
         self.len
+    }
+
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
+        if flushed_blknums.contains(&(blknum as u64)) {
+            let cache = page_cache::get();
+            loop {
+                match cache
+                    .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .await
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            // order path before error because error is anyhow::Error => might have many contexts
+                            format!(
+                                "ephemeral file: read immutable page #{}: {}: {:#}",
+                                blknum,
+                                self.file.path.display(),
+                                e,
+                            ),
+                        )
+                    })? {
+                    page_cache::ReadBufResult::Found(guard) => {
+                        return Ok(BlockLease::PageReadGuard(guard))
+                    }
+                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                        let buf: &mut [u8] = write_guard.deref_mut();
+                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                        self.file
+                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                            .await?;
+                        write_guard.mark_valid();
+
+                        // Swap for read lock
+                        continue;
+                    }
+                };
+            }
+        } else {
+            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
+            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
+        }
     }
 
     pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
@@ -87,18 +129,26 @@ impl EphemeralFile {
                     self.off += n;
                     src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
-                        match self.ephemeral_file.file.write_all_at(
-                            &self.ephemeral_file.mutable_tail,
-                            self.blknum as u64 * PAGE_SZ as u64,
-                        ) {
+                        match self
+                            .ephemeral_file
+                            .file
+                            .write_all_at(
+                                &self.ephemeral_file.mutable_tail,
+                                self.blknum as u64 * PAGE_SZ as u64,
+                            )
+                            .await
+                        {
                             Ok(_) => {
                                 // Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.
                                 let cache = page_cache::get();
-                                match cache.read_immutable_buf(
-                                    self.ephemeral_file.page_cache_file_id,
-                                    self.blknum,
-                                ) {
+                                match cache
+                                    .read_immutable_buf(
+                                        self.ephemeral_file.page_cache_file_id,
+                                        self.blknum,
+                                    )
+                                    .await
+                                {
                                     Ok(page_cache::ReadBufResult::Found(_guard)) => {
                                         // This function takes &mut self, so, it shouldn't be possible to reach this point.
                                         unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);
@@ -181,9 +231,8 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 impl Drop for EphemeralFile {
     fn drop(&mut self) {
-        // drop all pages from page cache
-        let cache = page_cache::get();
-        cache.drop_buffers_for_immutable(self.page_cache_file_id);
+        // There might still be pages in the [`crate::page_cache`] for this file.
+        // We leave them there, [`crate::page_cache::PageCache::find_victim`] will evict them when needed.
 
         // unlink the file
         let res = std::fs::remove_file(&self.file.path);
@@ -204,51 +253,15 @@ impl Drop for EphemeralFile {
 }
 
 impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
-        let flushed_blknums = 0..self.len / PAGE_SZ as u64;
-        if flushed_blknums.contains(&(blknum as u64)) {
-            let cache = page_cache::get();
-            loop {
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum)
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.file.path.display(),
-                                e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)?;
-                        write_guard.mark_valid();
-
-                        // Swap for read lock
-                        continue;
-                    }
-                };
-            }
-        } else {
-            debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
-            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
-        }
+    fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
+        BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::block_io::BlockCursor;
+    use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
     use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
@@ -274,7 +287,7 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id) = harness("ephemeral_blobs")?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id)?;
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
 
         let pos_foo = file.write_blob(b"foo").await?;
         assert_eq!(
@@ -304,7 +317,7 @@ mod tests {
             blobs.push((pos, data));
         }
 
-        let cursor = BlockCursor::new(&file);
+        let cursor = BlockCursor::new(BlockReaderRef::EphemeralFile(&file));
         for (pos, expected) in blobs {
             let actual = cursor.read_blob(pos).await?;
             assert_eq!(actual, expected);

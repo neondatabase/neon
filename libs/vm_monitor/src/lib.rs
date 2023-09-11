@@ -39,6 +39,16 @@ pub struct Args {
     #[arg(short, long)]
     pub pgconnstr: Option<String>,
 
+    /// Flag to signal that the Postgres file cache is on disk (i.e. not in memory aside from the
+    /// kernel's page cache), and therefore should not count against available memory.
+    //
+    // NB: Ideally this flag would directly refer to whether the file cache is in memory (rather
+    // than a roundabout way, via whether it's on disk), but in order to be backwards compatible
+    // during the switch away from an in-memory file cache, we had to default to the previous
+    // behavior.
+    #[arg(long)]
+    pub file_cache_on_disk: bool,
+
     /// The address we should listen on for connection requests. For the
     /// agent, this is 0.0.0.0:10301. For the informant, this is 127.0.0.1:10369.
     #[arg(short, long)]
@@ -146,7 +156,7 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
 
 /// Handles incoming websocket connections.
 ///
-/// If we are already to connected to an informant, we kill that old connection
+/// If we are already to connected to an agent, we kill that old connection
 /// and accept the new one.
 #[tracing::instrument(name = "/monitor", skip_all, fields(?args))]
 pub async fn ws_handler(
@@ -168,14 +178,17 @@ pub async fn ws_handler(
 
 /// Starts the monitor. If startup fails or the monitor exits, an error will
 /// be logged and our internal state will be reset to allow for new connections.
-#[tracing::instrument(skip_all, fields(?args))]
+#[tracing::instrument(skip_all)]
 async fn start_monitor(
     ws: WebSocket,
     args: &Args,
     kill: broadcast::Receiver<()>,
     token: CancellationToken,
 ) {
-    info!("accepted new websocket connection -> starting monitor");
+    info!(
+        ?args,
+        "accepted new websocket connection -> starting monitor"
+    );
     let timeout = Duration::from_secs(4);
     let monitor = tokio::time::timeout(
         timeout,
@@ -196,10 +209,10 @@ async fn start_monitor(
             return;
         }
     };
-    info!("connected to informant");
+    info!("connected to agent");
 
     match monitor.run().await {
         Ok(()) => info!("monitor was killed due to new connection"),
-        Err(e) => error!(error = ?e, "monitor terminated by itself"),
+        Err(e) => error!(error = ?e, "monitor terminated unexpectedly"),
     }
 }

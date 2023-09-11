@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - ci-run/pr-*
   pull_request:
 
 defaults:

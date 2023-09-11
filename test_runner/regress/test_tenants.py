@@ -27,7 +27,7 @@ from prometheus_client.samples import Sample
 
 
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
-    tenants_dir = Path(neon_simple_env.repo_dir) / "tenants"
+    tenants_dir = Path(neon_simple_env.pageserver.workdir) / "tenants"
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
@@ -242,10 +242,7 @@ def test_pageserver_metrics_removed_after_detach(
 ):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_metrics_removed_after_detach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     neon_env_builder.num_safekeepers = 3
 
@@ -303,10 +300,7 @@ def test_pageserver_metrics_removed_after_detach(
 def test_pageserver_with_empty_tenants(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_with_empty_tenants",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -328,7 +322,10 @@ def test_pageserver_with_empty_tenants(
     files_in_timelines_dir = sum(
         1
         for _p in Path.iterdir(
-            Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines) / "timelines"
+            Path(env.pageserver.workdir)
+            / "tenants"
+            / str(tenant_with_empty_timelines)
+            / "timelines"
         )
     )
     assert (
@@ -340,7 +337,9 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.stop()
 
     tenant_without_timelines_dir = env.initial_tenant
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+    shutil.rmtree(
+        Path(env.pageserver.workdir) / "tenants" / str(tenant_without_timelines_dir) / "timelines"
+    )
 
     env.pageserver.start()
 

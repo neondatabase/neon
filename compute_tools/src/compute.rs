@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +27,7 @@ use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 
+use crate::checker::create_availability_check_data;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -172,6 +174,27 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             tenant_id,
             timeline_id,
         })
+    }
+}
+
+/// If we are a VM, returns a [`Command`] that will run in the `neon-postgres`
+/// cgroup. Otherwise returns the default `Command::new(cmd)`
+///
+/// This function should be used to start postgres, as it will start it in the
+/// neon-postgres cgroup if we are a VM. This allows autoscaling to control
+/// postgres' resource usage. The cgroup will exist in VMs because vm-builder
+/// creates it during the sysinit phase of its inittab.
+fn maybe_cgexec(cmd: &str) -> Command {
+    // The cplane sets this env var for autoscaling computes.
+    // use `var_os` so we don't have to worry about the variable being valid
+    // unicode. Should never be an concern . . . but just in case
+    if env::var_os("AUTOSCALING").is_some() {
+        let mut command = Command::new("cgexec");
+        command.args(["-g", "memory:neon-postgres"]);
+        command.arg(cmd);
+        command
+    } else {
+        Command::new(cmd)
     }
 }
 
@@ -451,7 +474,7 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let sync_handle = Command::new(&self.pgbin)
+        let sync_handle = maybe_cgexec(&self.pgbin)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
@@ -586,7 +609,7 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = Command::new(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.pgbin)
             .args(["-D", pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -614,7 +637,7 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = Command::new(&self.pgbin)
+        let mut pg = maybe_cgexec(&self.pgbin)
             .args(["-D", &self.pgdata])
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
@@ -674,6 +697,7 @@ impl ComputeNode {
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        create_availability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);
@@ -1056,7 +1080,8 @@ LIMIT 100",
 
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
-            let (ext_name, ext_path) = remote_extensions.get_ext(library, true)?;
+            let (ext_name, ext_path) =
+                remote_extensions.get_ext(library, true, &self.build_tag, &self.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

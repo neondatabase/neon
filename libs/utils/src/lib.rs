@@ -27,6 +27,9 @@ pub mod id;
 // http endpoint utils
 pub mod http;
 
+// definition of the Generation type for pageserver attachment APIs
+pub mod generation;
+
 // common log initialisation routine
 pub mod logging;
 
@@ -57,6 +60,8 @@ pub mod serde_percent;
 pub mod serde_regex;
 
 pub mod pageserver_feedback;
+
+pub mod postgres_client;
 
 pub mod tracing_span_assert;
 

@@ -1,10 +1,11 @@
-//! Exposes the `Runner`, which handles messages received from informant and
+//! Exposes the `Runner`, which handles messages received from agent and
 //! sends upscale requests.
 //!
 //! This is the "Monitor" part of the monitor binary and is the main entrypoint for
 //! all functionality.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{fmt::Debug, mem};
 
 use anyhow::{bail, Context};
@@ -21,8 +22,8 @@ use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
 use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
 
-/// Central struct that interacts with informant, dispatcher, and cgroup to handle
-/// signals from the informant.
+/// Central struct that interacts with agent, dispatcher, and cgroup to handle
+/// signals from the agent.
 #[derive(Debug)]
 pub struct Runner {
     config: Config,
@@ -35,6 +36,8 @@ pub struct Runner {
     /// **Note**: This counter is always odd, so that we avoid collisions between the IDs generated
     /// by us vs the autoscaler-agent.
     counter: usize,
+
+    last_upscale_request_at: Option<Instant>,
 
     /// A signal to kill the main thread produced by `self.run()`. This is triggered
     /// when the server receives a new connection. When the thread receives the
@@ -99,6 +102,7 @@ impl Runner {
             cgroup: None,
             dispatcher,
             counter: 1, // NB: must be odd, see the comment about the field for more.
+            last_upscale_request_at: None,
             kill,
         };
 
@@ -110,10 +114,10 @@ impl Runner {
         // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
-            let config: FileCacheConfig = Default::default();
-            if !config.in_memory {
-                panic!("file cache not in-memory implemented")
-            }
+            let config = match args.file_cache_on_disk {
+                true => FileCacheConfig::default_on_disk(),
+                false => FileCacheConfig::default_in_memory(),
+            };
 
             let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
@@ -140,7 +144,10 @@ impl Runner {
             if actual_size != new_size {
                 info!("file cache size actually got set to {actual_size}")
             }
-            file_cache_reserved_bytes = actual_size;
+            // Mark the resources given to the file cache as reserved, but only if it's in memory.
+            if !args.file_cache_on_disk {
+                file_cache_reserved_bytes = actual_size;
+            }
 
             state.filecache = Some(file_cache);
         }
@@ -227,18 +234,17 @@ impl Runner {
         let mut status = vec![];
         let mut file_cache_mem_usage = 0;
         if let Some(file_cache) = &mut self.filecache {
-            if !file_cache.config.in_memory {
-                panic!("file cache not in-memory unimplemented")
-            }
-
             let actual_usage = file_cache
                 .set_file_cache_size(expected_file_cache_mem_usage)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_mem_usage = actual_usage;
+            if file_cache.config.in_memory {
+                file_cache_mem_usage = actual_usage;
+            }
             let message = format!(
-                "set file cache size to {} MiB",
-                bytes_to_mebibytes(actual_usage)
+                "set file cache size to {} MiB (in memory = {})",
+                bytes_to_mebibytes(actual_usage),
+                file_cache.config.in_memory,
             );
             info!("downscale: {message}");
             status.push(message);
@@ -289,10 +295,6 @@ impl Runner {
         // Get the file cache's expected contribution to the memory usage
         let mut file_cache_mem_usage = 0;
         if let Some(file_cache) = &mut self.filecache {
-            if !file_cache.config.in_memory {
-                panic!("file cache not in-memory unimplemented");
-            }
-
             let expected_usage = file_cache.config.calculate_cache_size(usable_system_memory);
             info!(
                 target = bytes_to_mebibytes(expected_usage),
@@ -304,6 +306,9 @@ impl Runner {
                 .set_file_cache_size(expected_usage)
                 .await
                 .context("failed to set file cache size")?;
+            if file_cache.config.in_memory {
+                file_cache_mem_usage = actual_usage;
+            }
 
             if actual_usage != expected_usage {
                 warn!(
@@ -312,7 +317,6 @@ impl Runner {
                     bytes_to_mebibytes(actual_usage)
                 )
             }
-            file_cache_mem_usage = actual_usage;
         }
 
         if let Some(cgroup) = &self.cgroup {
@@ -371,7 +375,7 @@ impl Runner {
                 Ok(None)
             }
             InboundMsgKind::InternalError { error } => {
-                warn!(error, id, "informant experienced an internal error");
+                warn!(error, id, "agent experienced an internal error");
                 Ok(None)
             }
             InboundMsgKind::HealthCheck {} => {
@@ -397,6 +401,20 @@ impl Runner {
                     if request.is_none() {
                         bail!("failed to listen for upscale event from cgroup")
                     }
+
+                    // If it's been less than 1 second since the last time we requested upscaling,
+                    // ignore the event, to avoid spamming the agent (otherwise, this can happen
+                    // ~1k times per second).
+                    if let Some(t) = self.last_upscale_request_at {
+                        let elapsed = t.elapsed();
+                        if elapsed < Duration::from_secs(1) {
+                            info!(elapsed_millis = elapsed.as_millis(), "cgroup asked for upscale but too soon to forward the request, ignoring");
+                            continue;
+                        }
+                    }
+
+                    self.last_upscale_request_at = Some(Instant::now());
+
                     info!("cgroup asking for upscale; forwarding request");
                     self.counter += 2; // Increment, preserving parity (i.e. keep the
                                        // counter odd). See the field comment for more.
@@ -405,10 +423,12 @@ impl Runner {
                         .await
                         .context("failed to send message")?;
                 }
-                // there is a message from the informant
+                // there is a message from the agent
                 msg = self.dispatcher.source.next() => {
                     if let Some(msg) = msg {
-                        info!(message = ?msg, "received message");
+                        // Don't use 'message' as a key as the string also uses
+                        // that for its key
+                        info!(?msg, "received message");
                         match msg {
                             Ok(msg) => {
                                 let message: InboundMsg = match msg {
@@ -417,8 +437,10 @@ impl Runner {
                                     }
                                     other => {
                                         warn!(
-                                            message = ?other,
-                                            "informant should only send text messages but received different type"
+                                            // Don't use 'message' as a key as the
+                                            // string also uses that for its key
+                                            msg = ?other,
+                                            "agent should only send text messages but received different type"
                                         );
                                         continue
                                     },
@@ -429,7 +451,7 @@ impl Runner {
                                     Ok(None) => continue,
                                     Err(e) => {
                                         let error = e.to_string();
-                                        warn!(%error, "error handling message");
+                                        warn!(?error, "error handling message");
                                         OutboundMsg::new(
                                             OutboundMsgKind::InternalError {
                                                 error

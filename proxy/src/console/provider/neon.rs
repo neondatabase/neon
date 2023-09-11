@@ -8,6 +8,7 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use std::net::SocketAddr;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -16,12 +17,21 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     caches: &'static ApiCaches,
+    jwt: String,
 }
 
 impl Api {
     /// Construct an API object containing the auth parameters.
     pub fn new(endpoint: http::Endpoint, caches: &'static ApiCaches) -> Self {
-        Self { endpoint, caches }
+        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
+            Ok(v) => v,
+            Err(_) => "".to_string(),
+        };
+        Self {
+            endpoint,
+            caches,
+            jwt,
+        }
     }
 
     pub fn url(&self) -> &str {
@@ -39,6 +49,7 @@ impl Api {
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", &self.jwt)
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
@@ -83,6 +94,7 @@ impl Api {
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", &self.jwt)
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
@@ -106,7 +118,7 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
@@ -183,9 +195,9 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(&str, u16)> {
-    let (host, port) = input.split_once(':')?;
-    Some((host, port.parse().ok()?))
+fn parse_host_port(input: &str) -> Option<(String, u16)> {
+    let parsed: SocketAddr = input.parse().ok()?;
+    Some((parsed.ip().to_string(), parsed.port()))
 }
 
 #[cfg(test)]

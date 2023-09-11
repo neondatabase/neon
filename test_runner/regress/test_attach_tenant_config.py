@@ -14,17 +14,14 @@ from fixtures.utils import wait_until
 
 @pytest.fixture
 def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_attach_tenant_config",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     # eviction might be the first one after an attach to access the layers
     env.pageserver.allowed_errors.append(
         ".*unexpectedly on-demand downloading remote layer remote.* for task kind Eviction"
     )
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     return env
 
 
@@ -37,12 +34,9 @@ class NegativeTests:
 
 @pytest.fixture
 def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, None, None]:
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_attach_tenant_config",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
     (tenant_id, _) = env.neon_cli.create_tenant()

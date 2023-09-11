@@ -2,10 +2,12 @@
 //! Low-level Block-oriented I/O functions
 //!
 
+use super::ephemeral_file::EphemeralFile;
+use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
+use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
-use std::os::unix::fs::FileExt;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -14,31 +16,19 @@ use std::os::unix::fs::FileExt;
 /// below.
 pub trait BlockReader {
     ///
-    /// Read a block. Returns a "lease" object that can be used to
-    /// access to the contents of the page. (For the page cache, the
-    /// lease object represents a lock on the buffer.)
-    ///
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error>;
-
-    ///
     /// Create a new "cursor" for reading from this reader.
     ///
     /// A cursor caches the last accessed page, allowing for faster
     /// access if the same block is accessed repeatedly.
-    fn block_cursor(&self) -> BlockCursor<&Self>
-    where
-        Self: Sized,
-    {
-        BlockCursor::new(self)
-    }
+    fn block_cursor(&self) -> BlockCursor<'_>;
 }
 
 impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        (*self).read_blk(blknum)
+    fn block_cursor(&self) -> BlockCursor<'_> {
+        (*self).block_cursor()
     }
 }
 
@@ -47,7 +37,7 @@ pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
-    Rc(std::rc::Rc<[u8; PAGE_SZ]>),
+    Arc(std::sync::Arc<[u8; PAGE_SZ]>),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -57,9 +47,9 @@ impl From<PageReadGuard<'static>> for BlockLease<'static> {
 }
 
 #[cfg(test)]
-impl<'a> From<std::rc::Rc<[u8; PAGE_SZ]>> for BlockLease<'a> {
-    fn from(value: std::rc::Rc<[u8; PAGE_SZ]>) -> Self {
-        BlockLease::Rc(value)
+impl<'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+    fn from(value: std::sync::Arc<[u8; PAGE_SZ]>) -> Self {
+        BlockLease::Arc(value)
     }
 }
 
@@ -71,7 +61,37 @@ impl<'a> Deref for BlockLease<'a> {
             BlockLease::PageReadGuard(v) => v.deref(),
             BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
-            BlockLease::Rc(v) => v.deref(),
+            BlockLease::Arc(v) => v.deref(),
+        }
+    }
+}
+
+/// Provides the ability to read blocks from different sources,
+/// similar to using traits for this purpose.
+///
+/// Unlike traits, we also support the read function to be async though.
+pub(crate) enum BlockReaderRef<'a> {
+    FileBlockReader(&'a FileBlockReader),
+    EphemeralFile(&'a EphemeralFile),
+    Adapter(Adapter<&'a DeltaLayerInner>),
+    #[cfg(test)]
+    TestDisk(&'a super::disk_btree::tests::TestDisk),
+    #[cfg(test)]
+    VirtualFile(&'a VirtualFile),
+}
+
+impl<'a> BlockReaderRef<'a> {
+    #[inline(always)]
+    async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        use BlockReaderRef::*;
+        match self {
+            FileBlockReader(r) => r.read_blk(blknum).await,
+            EphemeralFile(r) => r.read_blk(blknum).await,
+            Adapter(r) => r.read_blk(blknum).await,
+            #[cfg(test)]
+            TestDisk(r) => r.read_blk(blknum),
+            #[cfg(test)]
+            VirtualFile(r) => r.read_blk(blknum).await,
         }
     }
 }
@@ -85,7 +105,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// ```no_run
 /// # use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
-/// # let reader: FileBlockReader<std::fs::File> = unimplemented!("stub");
+/// # let reader: FileBlockReader = unimplemented!("stub");
 /// let cursor = reader.block_cursor();
 /// let buf = cursor.read_blk(1);
 /// // do stuff with 'buf'
@@ -93,23 +113,29 @@ impl<'a> Deref for BlockLease<'a> {
 /// // do stuff with 'buf'
 /// ```
 ///
-pub struct BlockCursor<R>
-where
-    R: BlockReader,
-{
-    reader: R,
+pub struct BlockCursor<'a> {
+    reader: BlockReaderRef<'a>,
 }
 
-impl<R> BlockCursor<R>
-where
-    R: BlockReader,
-{
-    pub fn new(reader: R) -> Self {
+impl<'a> BlockCursor<'a> {
+    pub(crate) fn new(reader: BlockReaderRef<'a>) -> Self {
         BlockCursor { reader }
     }
+    // Needed by cli
+    pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
+        BlockCursor {
+            reader: BlockReaderRef::FileBlockReader(reader),
+        }
+    }
 
-    pub fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum)
+    /// Read a block.
+    ///
+    /// Returns a "lease" object that can be used to
+    /// access to the contents of the page. (For the page cache, the
+    /// lease object represents a lock on the buffer.)
+    #[inline(always)]
+    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum).await
     }
 }
 
@@ -117,39 +143,38 @@ where
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
-pub struct FileBlockReader<F> {
-    pub file: F,
+pub struct FileBlockReader {
+    pub file: VirtualFile,
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
 }
 
-impl<F> FileBlockReader<F>
-where
-    F: FileExt,
-{
-    pub fn new(file: F) -> Self {
+impl FileBlockReader {
+    pub fn new(file: VirtualFile) -> Self {
         let file_id = page_cache::next_file_id();
 
         FileBlockReader { file_id, file }
     }
 
     /// Read a page from the underlying file into given buffer.
-    fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
+    async fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
-        self.file.read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+        self.file
+            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .await
     }
-}
-
-impl<F> BlockReader for FileBlockReader<F>
-where
-    F: FileExt,
-{
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    /// Read a block.
+    ///
+    /// Returns a "lease" object that can be used to
+    /// access to the contents of the page. (For the page cache, the
+    /// lease object represents a lock on the buffer.)
+    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache
                 .read_immutable_buf(self.file_id, blknum)
+                .await
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -159,7 +184,7 @@ where
                 ReadBufResult::Found(guard) => break Ok(guard.into()),
                 ReadBufResult::NotFound(mut write_guard) => {
                     // Read the page from disk into the buffer
-                    self.fill_buffer(write_guard.deref_mut(), blknum)?;
+                    self.fill_buffer(write_guard.deref_mut(), blknum).await?;
                     write_guard.mark_valid();
 
                     // Swap for read lock
@@ -167,6 +192,12 @@ where
                 }
             };
         }
+    }
+}
+
+impl BlockReader for FileBlockReader {
+    fn block_cursor(&self) -> BlockCursor<'_> {
+        BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }
 }
 

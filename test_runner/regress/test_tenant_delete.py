@@ -1,7 +1,6 @@
 import enum
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -41,10 +40,7 @@ def test_tenant_delete_smoke(
 ):
     neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_tenant_delete_smoke",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -177,9 +173,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if simulate_failures:
         neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_tenant_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -192,7 +186,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # We may leave some upload tasks in the queue. They're likely deletes.
             # For uploads we explicitly wait with `last_flush_lsn_upload` below.
             # So by ignoring these instead of waiting for empty upload queue
@@ -298,10 +292,7 @@ def test_tenant_delete_is_resumed_on_attach(
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -338,7 +329,7 @@ def test_tenant_delete_is_resumed_on_attach(
             # From deletion polling
             f".*NotFound: tenant {env.initial_tenant}.*",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
@@ -375,7 +366,7 @@ def test_tenant_delete_is_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.workdir / "tenants"
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

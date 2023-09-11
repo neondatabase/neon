@@ -31,10 +31,11 @@ use storage_broker::Streaming;
 use tokio::select;
 use tracing::*;
 
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::PgConnectionConfig;
 use utils::backoff::{
     exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::postgres_client::wal_stream_connection_config;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -879,33 +880,6 @@ impl ReconnectReason {
     }
 }
 
-fn wal_stream_connection_config(
-    TenantTimelineId {
-        tenant_id,
-        timeline_id,
-    }: TenantTimelineId,
-    listen_pg_addr_str: &str,
-    auth_token: Option<&str>,
-    availability_zone: Option<&str>,
-) -> anyhow::Result<PgConnectionConfig> {
-    let (host, port) =
-        parse_host_port(listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
-    let port = port.unwrap_or(5432);
-    let mut connstr = PgConnectionConfig::new_host_port(host, port)
-        .extend_options([
-            "-c".to_owned(),
-            format!("timeline_id={}", timeline_id),
-            format!("tenant_id={}", tenant_id),
-        ])
-        .set_password(auth_token.map(|s| s.to_owned()));
-
-    if let Some(availability_zone) = availability_zone {
-        connstr = connstr.extend_options([format!("availability_zone={}", availability_zone)]);
-    }
-
-    Ok(connstr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,6 +895,7 @@ mod tests {
             timeline: SafekeeperTimelineInfo {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
+                term: 0,
                 last_log_term: 0,
                 flush_lsn: 0,
                 commit_lsn,
@@ -929,6 +904,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
+                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
             },
             latest_update,

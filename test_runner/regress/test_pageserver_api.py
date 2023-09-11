@@ -17,13 +17,13 @@ from fixtures.utils import wait_until
 def test_pageserver_init_node_id(
     neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
 ):
-    repo_dir = neon_simple_env.repo_dir
-    pageserver_config = repo_dir / "pageserver.toml"
+    workdir = neon_simple_env.pageserver.workdir
+    pageserver_config = workdir / "pageserver.toml"
     pageserver_bin = neon_binpath / "pageserver"
 
     def run_pageserver(args):
         return subprocess.run(
-            [str(pageserver_bin), "-D", str(repo_dir), *args],
+            [str(pageserver_bin), "-D", str(workdir), *args],
             check=False,
             universal_newlines=True,
             stdout=subprocess.PIPE,

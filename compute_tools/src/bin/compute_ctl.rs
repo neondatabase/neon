@@ -20,9 +20,10 @@
 //! - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
 //!   last activity requests.
 //!
-//! If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
-//! compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
-//! downscaling and (eventually) will request immediate upscaling under resource pressure.
+//! If `AUTOSCALING` environment variable is set, `compute_ctl` will start the
+//! `vm-monitor` located in [`neon/libs/vm_monitor`]. For VM compute nodes,
+//! `vm-monitor` communicates with the VM autoscaling system. It coordinates
+//! downscaling and requests immediate upscaling under resource pressure.
 //!
 //! Usage example:
 //! ```sh
@@ -278,8 +279,9 @@ fn main() -> Result<()> {
             use tokio_util::sync::CancellationToken;
             use tracing::warn;
             let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
-            let cgroup = matches.get_one::<String>("filecache-connstr");
-            let file_cache_connstr = matches.get_one::<String>("cgroup");
+            let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
+            let cgroup = matches.get_one::<String>("cgroup");
+            let file_cache_on_disk = matches.get_flag("file-cache-on-disk");
 
             // Only make a runtime if we need to.
             // Note: it seems like you can make a runtime in an inner scope and
@@ -312,6 +314,7 @@ fn main() -> Result<()> {
                         cgroup: cgroup.cloned(),
                         pgconnstr: file_cache_connstr.cloned(),
                         addr: vm_monitor_addr.cloned().unwrap(),
+                        file_cache_on_disk,
                     })),
                     token.clone(),
                 ))
@@ -481,6 +484,11 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("file-cache-on-disk")
+                .long("file-cache-on-disk")
+                .action(clap::ArgAction::SetTrue),
         )
 }
 

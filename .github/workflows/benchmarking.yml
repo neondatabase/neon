@@ -117,6 +117,7 @@ jobs:
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
       olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
+      tpch-compare-matrix: ${{ steps.tpch-compare-matrix.outputs.matrix }}
 
     steps:
     - name: Generate matrix for pgbench benchmark
@@ -136,11 +137,11 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
                                                    { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
     - name: Generate matrix for OLAP benchmarks
       id: olap-compare-matrix
@@ -152,11 +153,30 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres" },
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
                                                    { "platform": "rds-aurora"   }]')
         fi
 
-        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
+    - name: Generate matrix for TPC-H benchmarks
+      id: tpch-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse"
+          ],
+          "scale": [
+            "10"
+          ]
+        }'
+
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
+                                                   { "platform": "rds-aurora",   "scale": "10" }]')
+        fi
+
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   pgbench-compare:
     needs: [ generate-matrices ]
@@ -233,7 +253,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [[ "${PLATFORM}" = "neon"* ]]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -358,7 +382,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [[ "${PLATFORM}" = "neon"* ]]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -372,6 +400,7 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        TEST_OLAP_SCALE: 10
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
@@ -398,7 +427,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.tpch-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -407,6 +436,7 @@ jobs:
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
+      TEST_OLAP_SCALE: ${{ matrix.scale }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -428,18 +458,17 @@ jobs:
         ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
-    - name: Set up Connection String
-      id: set-up-connstr
+    - name: Get Connstring Secret Name
       run: |
         case "${PLATFORM}" in
           neon-captest-reuse)
-            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_TPCH_S10_CONNSTR }}
+            ENV_PLATFORM=CAPTEST_TPCH
             ;;
           rds-aurora)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_TPCH_S10_CONNSTR }}
+            ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           rds-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
+            ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           *)
             echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
@@ -447,9 +476,21 @@ jobs:
             ;;
         esac
 
+        CONNSTR_SECRET_NAME="BENCHMARK_${ENV_PLATFORM}_S${TEST_OLAP_SCALE}_CONNSTR"
+        echo "CONNSTR_SECRET_NAME=${CONNSTR_SECRET_NAME}" >> $GITHUB_ENV
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        CONNSTR=${{ secrets[env.CONNSTR_SECRET_NAME] }}
+
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [[ "${PLATFORM}" = "neon"* ]]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -463,6 +504,7 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        TEST_OLAP_SCALE: ${{ matrix.scale }}
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
@@ -534,7 +576,11 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        psql ${CONNSTR} -c "SELECT version();"
+        QUERY="SELECT version();"
+        if [[ "${PLATFORM}" = "neon"* ]]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set

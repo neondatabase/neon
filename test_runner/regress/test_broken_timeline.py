@@ -44,14 +44,14 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     log.info(f"Timeline {tenant0}/{timeline0} is left intact")
 
     (tenant1, timeline1, pg1) = tenant_timelines[1]
-    metadata_path = f"{env.repo_dir}/tenants/{tenant1}/timelines/{timeline1}/metadata"
+    metadata_path = f"{env.pageserver.workdir}/tenants/{tenant1}/timelines/{timeline1}/metadata"
     f = open(metadata_path, "w")
     f.write("overwritten with garbage!")
     f.close()
     log.info(f"Timeline {tenant1}/{timeline1} got its metadata spoiled")
 
     (tenant2, timeline2, pg2) = tenant_timelines[2]
-    timeline_path = f"{env.repo_dir}/tenants/{tenant2}/timelines/{timeline2}/"
+    timeline_path = f"{env.pageserver.workdir}/tenants/{tenant2}/timelines/{timeline2}/"
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
             # Looks like a layer file. Remove it
@@ -61,7 +61,7 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     )
 
     (tenant3, timeline3, pg3) = tenant_timelines[3]
-    timeline_path = f"{env.repo_dir}/tenants/{tenant3}/timelines/{timeline3}/"
+    timeline_path = f"{env.pageserver.workdir}/tenants/{tenant3}/timelines/{timeline3}/"
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
             # Looks like a layer file. Corrupt it
@@ -122,8 +122,8 @@ def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
             future.result()
 
 
-def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(
@@ -133,9 +133,9 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
         ]
     )
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
 
-    timelines_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines"
+    timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
@@ -145,8 +145,8 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
         _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
 
     # Restart the page server
-    env.neon_cli.pageserver_stop(immediate=True)
-    env.neon_cli.pageserver_start()
+    env.pageserver.stop(immediate=True)
+    env.pageserver.start()
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
@@ -160,13 +160,13 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
 
-    timelines_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines"
+    timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 

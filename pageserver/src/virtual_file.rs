@@ -10,14 +10,16 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+use crate::tenant::TENANTS_SEGMENT_NAME;
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::time::Instant;
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -109,7 +111,7 @@ impl OpenFiles {
     ///
     /// On return, we hold a lock on the slot, and its 'tag' has been updated
     /// recently_used has been set. It's all ready for reuse.
-    fn find_victim_slot(&self) -> (SlotHandle, RwLockWriteGuard<SlotInner>) {
+    async fn find_victim_slot(&self) -> (SlotHandle, RwLockWriteGuard<SlotInner>) {
         //
         // Run the clock algorithm to find a slot to replace.
         //
@@ -141,7 +143,7 @@ impl OpenFiles {
                 }
                 retries += 1;
             } else {
-                slot_guard = slot.inner.write().unwrap();
+                slot_guard = slot.inner.write().await;
                 index = next;
                 break;
             }
@@ -154,8 +156,8 @@ impl OpenFiles {
         if let Some(old_file) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
-            STORAGE_IO_TIME
-                .with_label_values(&["close-by-replace"])
+            STORAGE_IO_TIME_METRIC
+                .get(StorageIoOperation::CloseByReplace)
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -172,19 +174,68 @@ impl OpenFiles {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CrashsafeOverwriteError {
+    #[error("final path has no parent dir")]
+    FinalPathHasNoParentDir,
+    #[error("remove tempfile: {0}")]
+    RemovePreviousTempfile(#[source] std::io::Error),
+    #[error("create tempfile: {0}")]
+    CreateTempfile(#[source] std::io::Error),
+    #[error("write tempfile: {0}")]
+    WriteContents(#[source] std::io::Error),
+    #[error("sync tempfile: {0}")]
+    SyncTempfile(#[source] std::io::Error),
+    #[error("rename tempfile to final path: {0}")]
+    RenameTempfileToFinalPath(#[source] std::io::Error),
+    #[error("open final path parent dir: {0}")]
+    OpenFinalPathParentDir(#[source] std::io::Error),
+    #[error("sync final path parent dir: {0}")]
+    SyncFinalPathParentDir(#[source] std::io::Error),
+}
+impl CrashsafeOverwriteError {
+    /// Returns true iff the new contents are durably stored.
+    pub fn are_new_contents_durable(&self) -> bool {
+        match self {
+            Self::FinalPathHasNoParentDir => false,
+            Self::RemovePreviousTempfile(_) => false,
+            Self::CreateTempfile(_) => false,
+            Self::WriteContents(_) => false,
+            Self::SyncTempfile(_) => false,
+            Self::RenameTempfileToFinalPath(_) => false,
+            Self::OpenFinalPathParentDir(_) => false,
+            Self::SyncFinalPathParentDir(_) => true,
+        }
+    }
+}
+
+macro_rules! with_file {
+    ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
+        let $ident = $this.lock_file().await?;
+        let instant = Instant::now();
+        let result = $($body)*;
+        let elapsed = instant.elapsed().as_secs_f64();
+        STORAGE_IO_TIME_METRIC
+            .get($op)
+            .observe(elapsed);
+        result
+    }};
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true))
+    pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
+        Self::open_with_options(path, OpenOptions::new().read(true)).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn create(path: &Path) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
         )
+        .await
     }
 
     /// Open a file with given options.
@@ -192,7 +243,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
-    pub fn open_with_options(
+    pub async fn open_with_options(
         path: &Path,
         open_options: &OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
@@ -200,16 +251,17 @@ impl VirtualFile {
         let parts = path_str.split('/').collect::<Vec<&str>>();
         let tenant_id;
         let timeline_id;
-        if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
+        if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
             tenant_id = parts[parts.len() - 4].to_string();
             timeline_id = parts[parts.len() - 2].to_string();
         } else {
             tenant_id = "*".to_string();
             timeline_id = "*".to_string();
         }
-        let (handle, mut slot_guard) = get_open_files().find_victim_slot();
-        let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+        let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
+
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -236,22 +288,81 @@ impl VirtualFile {
         Ok(vfile)
     }
 
+    /// Writes a file to the specified `final_path` in a crash safe fasion
+    ///
+    /// The file is first written to the specified tmp_path, and in a second
+    /// step, the tmp path is renamed to the final path. As renames are
+    /// atomic, a crash during the write operation will never leave behind a
+    /// partially written file.
+    pub async fn crashsafe_overwrite(
+        final_path: &Path,
+        tmp_path: &Path,
+        content: &[u8],
+    ) -> Result<(), CrashsafeOverwriteError> {
+        let Some(final_path_parent) = final_path.parent() else {
+            return Err(CrashsafeOverwriteError::FinalPathHasNoParentDir);
+        };
+        match std::fs::remove_file(tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
+        }
+        let mut file = Self::open_with_options(
+            tmp_path,
+            OpenOptions::new()
+                .write(true)
+                // Use `create_new` so that, if we race with ourselves or something else,
+                // we bail out instead of causing damage.
+                .create_new(true),
+        )
+        .await
+        .map_err(CrashsafeOverwriteError::CreateTempfile)?;
+        file.write_all(content)
+            .await
+            .map_err(CrashsafeOverwriteError::WriteContents)?;
+        file.sync_all()
+            .await
+            .map_err(CrashsafeOverwriteError::SyncTempfile)?;
+        drop(file); // before the rename, that's important!
+                    // renames are atomic
+        std::fs::rename(tmp_path, final_path)
+            .map_err(CrashsafeOverwriteError::RenameTempfileToFinalPath)?;
+        // Only open final path parent dirfd now, so that this operation only
+        // ever holds one VirtualFile fd at a time.  That's important because
+        // the current `find_victim_slot` impl might pick the same slot for both
+        // VirtualFile., and it eventually does a blocking write lock instead of
+        // try_lock.
+        let final_parent_dirfd =
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
+                .await
+                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
+        final_parent_dirfd
+            .sync_all()
+            .await
+            .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
+        Ok(())
+    }
+
     /// Call File::sync_all() on the underlying File.
-    pub fn sync_all(&self) -> Result<(), Error> {
-        self.with_file("fsync", |file| file.sync_all())?
+    pub async fn sync_all(&self) -> Result<(), Error> {
+        with_file!(self, StorageIoOperation::Fsync, |file| file
+            .as_ref()
+            .sync_all())
     }
 
-    pub fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file("metadata", |file| file.metadata())?
+    pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
+        with_file!(self, StorageIoOperation::Metadata, |file| file
+            .as_ref()
+            .metadata())
     }
 
-    /// Helper function that looks up the underlying File for this VirtualFile,
-    /// opening it and evicting some other File if necessary. It calls 'func'
-    /// with the physical File.
-    fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
-    where
-        F: FnMut(&File) -> R,
-    {
+    /// Helper function internal to `VirtualFile` that looks up the underlying File,
+    /// opens it and evicts some other File if necessary. The passed parameter is
+    /// assumed to be a function available for the physical `File`.
+    ///
+    /// We are doing it via a macro as Rust doesn't support async closures that
+    /// take on parameters with lifetimes.
+    async fn lock_file(&self) -> Result<FileGuard<'_>, Error> {
         let open_files = get_open_files();
 
         let mut handle_guard = {
@@ -261,27 +372,23 @@ impl VirtualFile {
             // We only need to hold the handle lock while we read the current handle. If
             // another thread closes the file and recycles the slot for a different file,
             // we will notice that the handle we read is no longer valid and retry.
-            let mut handle = *self.handle.read().unwrap();
+            let mut handle = *self.handle.read().await;
             loop {
                 // Check if the slot contains our File
                 {
                     let slot = &open_files.slots[handle.index];
-                    let slot_guard = slot.inner.read().unwrap();
-                    if slot_guard.tag == handle.tag {
-                        if let Some(file) = &slot_guard.file {
-                            // Found a cached file descriptor.
-                            slot.recently_used.store(true, Ordering::Relaxed);
-                            return Ok(STORAGE_IO_TIME
-                                .with_label_values(&[op])
-                                .observe_closure_duration(|| func(file)));
-                        }
+                    let slot_guard = slot.inner.read().await;
+                    if slot_guard.tag == handle.tag && slot_guard.file.is_some() {
+                        // Found a cached file descriptor.
+                        slot.recently_used.store(true, Ordering::Relaxed);
+                        return Ok(FileGuard { slot_guard });
                     }
                 }
 
                 // The slot didn't contain our File. We will have to open it ourselves,
                 // but before that, grab a write lock on handle in the VirtualFile, so
                 // that no other thread will try to concurrently open the same file.
-                let handle_guard = self.handle.write().unwrap();
+                let handle_guard = self.handle.write().await;
 
                 // If another thread changed the handle while we were not holding the lock,
                 // then the handle might now be valid again. Loop back to retry.
@@ -295,17 +402,12 @@ impl VirtualFile {
 
         // We need to open the file ourselves. The handle in the VirtualFile is
         // now locked in write-mode. Find a free slot to put it in.
-        let (handle, mut slot_guard) = open_files.find_victim_slot();
+        let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = STORAGE_IO_TIME
-            .with_label_values(&["open"])
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
-
-        // Perform the requested operation on it
-        let result = STORAGE_IO_TIME
-            .with_label_values(&[op])
-            .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.
@@ -313,7 +415,9 @@ impl VirtualFile {
 
         *handle_guard = handle;
 
-        Ok(result)
+        return Ok(FileGuard {
+            slot_guard: slot_guard.downgrade(),
+        });
     }
 
     pub fn remove(self) {
@@ -321,60 +425,16 @@ impl VirtualFile {
         drop(self);
         std::fs::remove_file(path).expect("failed to remove the virtual file");
     }
-}
 
-impl Drop for VirtualFile {
-    /// If a VirtualFile is dropped, close the underlying file if it was open.
-    fn drop(&mut self) {
-        let handle = self.handle.get_mut().unwrap();
-
-        // We could check with a read-lock first, to avoid waiting on an
-        // unrelated I/O.
-        let slot = &get_open_files().slots[handle.index];
-        let mut slot_guard = slot.inner.write().unwrap();
-        if slot_guard.tag == handle.tag {
-            slot.recently_used.store(false, Ordering::Relaxed);
-            // there is also operation "close-by-replace" for closes done on eviction for
-            // comparison.
-            STORAGE_IO_TIME
-                .with_label_values(&["close"])
-                .observe_closure_duration(|| drop(slot_guard.file.take()));
-        }
-    }
-}
-
-impl Read for VirtualFile {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-        let pos = self.pos;
-        let n = self.read_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for VirtualFile {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let pos = self.pos;
-        let n = self.write_at(buf, pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        // flush is no-op for File (at least on unix), so we don't need to do
-        // anything here either.
-        Ok(())
-    }
-}
-
-impl Seek for VirtualFile {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
         match pos {
             SeekFrom::Start(offset) => {
                 self.pos = offset;
             }
             SeekFrom::End(offset) => {
-                self.pos = self.with_file("seek", |mut file| file.seek(SeekFrom::End(offset)))??
+                self.pos = with_file!(self, StorageIoOperation::Seek, |file| file
+                    .as_ref()
+                    .seek(SeekFrom::End(offset)))?
             }
             SeekFrom::Current(offset) => {
                 let pos = self.pos as i128 + offset as i128;
@@ -392,11 +452,79 @@ impl Seek for VirtualFile {
         }
         Ok(self.pos)
     }
-}
 
-impl FileExt for VirtualFile {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("read", |file| file.read_at(buf, offset))?;
+    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
+    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.read_at(buf, offset).await {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to fill whole buffer",
+                    ))
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
+    pub async fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.write_at(buf, offset).await {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn write_all(&mut self, mut buf: &[u8]) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match self.write(buf).await {
+                Ok(0) => {
+                    return Err(Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        let pos = self.pos;
+        let n = self.write_at(buf, pos).await?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+        let result = with_file!(self, StorageIoOperation::Read, |file| file
+            .as_ref()
+            .read_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
@@ -405,14 +533,96 @@ impl FileExt for VirtualFile {
         result
     }
 
-    fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = self.with_file("write", |file| file.write_at(buf, offset))?;
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+        let result = with_file!(self, StorageIoOperation::Write, |file| file
+            .as_ref()
+            .write_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
                 .add(size as i64);
         }
         result
+    }
+}
+
+struct FileGuard<'a> {
+    slot_guard: RwLockReadGuard<'a, SlotInner>,
+}
+
+impl<'a> AsRef<File> for FileGuard<'a> {
+    fn as_ref(&self) -> &File {
+        // This unwrap is safe because we only create `FileGuard`s
+        // if we know that the file is Some.
+        self.slot_guard.file.as_ref().unwrap()
+    }
+}
+
+#[cfg(test)]
+impl VirtualFile {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+    ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
+        use crate::page_cache::PAGE_SZ;
+        let mut buf = [0; PAGE_SZ];
+        self.read_exact_at(&mut buf, blknum as u64 * (PAGE_SZ as u64))
+            .await?;
+        Ok(std::sync::Arc::new(buf).into())
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        loop {
+            let mut tmp = [0; 128];
+            match self.read_at(&mut tmp, self.pos).await {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    self.pos += n as u64;
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for VirtualFile {
+    /// If a VirtualFile is dropped, close the underlying file if it was open.
+    fn drop(&mut self) {
+        let handle = self.handle.get_mut();
+
+        fn clean_slot(slot: &Slot, mut slot_guard: RwLockWriteGuard<'_, SlotInner>, tag: u64) {
+            if slot_guard.tag == tag {
+                slot.recently_used.store(false, Ordering::Relaxed);
+                // there is also operation "close-by-replace" for closes done on eviction for
+                // comparison.
+                STORAGE_IO_TIME_METRIC
+                    .get(StorageIoOperation::Close)
+                    .observe_closure_duration(|| drop(slot_guard.file.take()));
+            }
+        }
+
+        // We don't have async drop so we cannot directly await the lock here.
+        // Instead, first do a best-effort attempt at closing the underlying
+        // file descriptor by using `try_write`, and if that fails, spawn
+        // a tokio task to do it asynchronously: we just want it to be
+        // cleaned up eventually.
+        // Most of the time, the `try_lock` should succeed though,
+        // as we have `&mut self` access. In other words, if the slot
+        // is still occupied by our file, there should be no access from
+        // other I/O operations; the only other possible place to lock
+        // the slot is the lock algorithm looking for free slots.
+        let slot = &get_open_files().slots[handle.index];
+        if let Ok(slot_guard) = slot.inner.try_write() {
+            clean_slot(slot, slot_guard, handle.tag);
+        } else {
+            let tag = handle.tag;
+            tokio::spawn(async move {
+                let slot_guard = slot.inner.write().await;
+                clean_slot(slot, slot_guard, tag);
+            });
+        };
     }
 }
 
@@ -469,33 +679,69 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
+    use std::future::Future;
+    use std::io::Write;
     use std::sync::Arc;
-    use std::thread;
 
-    // Helper function to slurp contents of a file, starting at the current position,
-    // into a string
-    fn read_string<FD>(vfile: &mut FD) -> Result<String, Error>
-    where
-        FD: Read,
-    {
-        let mut buf = String::new();
-        vfile.read_to_string(&mut buf)?;
-        Ok(buf)
+    enum MaybeVirtualFile {
+        VirtualFile(VirtualFile),
+        File(File),
     }
 
-    // Helper function to slurp a portion of a file into a string
-    fn read_string_at<FD>(vfile: &mut FD, pos: u64, len: usize) -> Result<String, Error>
-    where
-        FD: FileExt,
-    {
-        let mut buf = Vec::new();
-        buf.resize(len, 0);
-        vfile.read_exact_at(&mut buf, pos)?;
-        Ok(String::from_utf8(buf).unwrap())
+    impl MaybeVirtualFile {
+        async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+            match self {
+                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset).await,
+                MaybeVirtualFile::File(file) => file.read_exact_at(buf, offset),
+            }
+        }
+        async fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+            match self {
+                MaybeVirtualFile::VirtualFile(file) => file.write_all_at(buf, offset).await,
+                MaybeVirtualFile::File(file) => file.write_all_at(buf, offset),
+            }
+        }
+        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+            match self {
+                MaybeVirtualFile::VirtualFile(file) => file.seek(pos).await,
+                MaybeVirtualFile::File(file) => file.seek(pos),
+            }
+        }
+        async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+            match self {
+                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
+                MaybeVirtualFile::File(file) => file.write_all(buf),
+            }
+        }
+
+        // Helper function to slurp contents of a file, starting at the current position,
+        // into a string
+        async fn read_string(&mut self) -> Result<String, Error> {
+            use std::io::Read;
+            let mut buf = String::new();
+            match self {
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await?;
+                    return Ok(String::from_utf8(buf).unwrap());
+                }
+                MaybeVirtualFile::File(file) => {
+                    file.read_to_string(&mut buf)?;
+                }
+            }
+            Ok(buf)
+        }
+
+        // Helper function to slurp a portion of a file into a string
+        async fn read_string_at(&mut self, pos: u64, len: usize) -> Result<String, Error> {
+            let mut buf = vec![0; len];
+            self.read_exact_at(&mut buf, pos).await?;
+            Ok(String::from_utf8(buf).unwrap())
+        }
     }
 
-    #[test]
-    fn test_virtual_files() -> Result<(), Error> {
+    #[tokio::test]
+    async fn test_virtual_files() -> Result<(), Error> {
         // The real work is done in the test_files() helper function. This
         // allows us to run the same set of tests against a native File, and
         // VirtualFile. We trust the native Files and wouldn't need to test them,
@@ -503,95 +749,106 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| {
-            VirtualFile::open_with_options(path, open_options)
+        test_files("virtual_files", |path, open_options| async move {
+            let vf = VirtualFile::open_with_options(&path, &open_options).await?;
+            Ok(MaybeVirtualFile::VirtualFile(vf))
         })
+        .await
     }
 
-    #[test]
-    fn test_physical_files() -> Result<(), Error> {
-        test_files("physical_files", |path, open_options| {
-            open_options.open(path)
+    #[tokio::test]
+    async fn test_physical_files() -> Result<(), Error> {
+        test_files("physical_files", |path, open_options| async move {
+            Ok(MaybeVirtualFile::File(open_options.open(path)?))
         })
+        .await
     }
 
-    fn test_files<OF, FD>(testname: &str, openfunc: OF) -> Result<(), Error>
+    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
-        FD: Read + Write + Seek + FileExt,
-        OF: Fn(&Path, &OpenOptions) -> Result<FD, std::io::Error>,
+        OF: Fn(PathBuf, OpenOptions) -> FT,
+        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
         let mut file_a = openfunc(
-            &path_a,
-            OpenOptions::new().write(true).create(true).truncate(true),
-        )?;
-        file_a.write_all(b"foobar")?;
+            path_a.clone(),
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .to_owned(),
+        )
+        .await?;
+        file_a.write_all(b"foobar").await?;
 
         // cannot read from a file opened in write-only mode
-        assert!(read_string(&mut file_a).is_err());
+        let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(&path_a, OpenOptions::new().read(true))?;
+        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        assert!(file_a.write(b"bar").is_err());
+        let _ = file_a.write_all(b"bar").await.unwrap_err();
 
         // Try simple read
-        assert_eq!("foobar", read_string(&mut file_a)?);
+        assert_eq!("foobar", file_a.read_string().await?);
 
         // It's positioned at the EOF now.
-        assert_eq!("", read_string(&mut file_a)?);
+        assert_eq!("", file_a.read_string().await?);
 
         // Test seeks.
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
-        assert_eq!("oobar", read_string(&mut file_a)?);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
+        assert_eq!("oobar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::End(-2))?, 4);
-        assert_eq!("ar", read_string(&mut file_a)?);
+        assert_eq!(file_a.seek(SeekFrom::End(-2)).await?, 4);
+        assert_eq!("ar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
-        assert_eq!(file_a.seek(SeekFrom::Current(2))?, 3);
-        assert_eq!("bar", read_string(&mut file_a)?);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Current(2)).await?, 3);
+        assert_eq!("bar", file_a.read_string().await?);
 
-        assert_eq!(file_a.seek(SeekFrom::Current(-5))?, 1);
-        assert_eq!("oobar", read_string(&mut file_a)?);
+        assert_eq!(file_a.seek(SeekFrom::Current(-5)).await?, 1);
+        assert_eq!("oobar", file_a.read_string().await?);
 
         // Test erroneous seeks to before byte 0
-        assert!(file_a.seek(SeekFrom::End(-7)).is_err());
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
-        assert!(file_a.seek(SeekFrom::Current(-2)).is_err());
+        file_a.seek(SeekFrom::End(-7)).await.unwrap_err();
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
+        file_a.seek(SeekFrom::Current(-2)).await.unwrap_err();
 
         // the erroneous seek should have left the position unchanged
-        assert_eq!("oobar", read_string(&mut file_a)?);
+        assert_eq!("oobar", file_a.read_string().await?);
 
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
         let mut file_b = openfunc(
-            &path_b,
+            path_b.clone(),
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true),
-        )?;
-        file_b.write_all_at(b"BAR", 3)?;
-        file_b.write_all_at(b"FOO", 0)?;
+                .truncate(true)
+                .to_owned(),
+        )
+        .await?;
+        file_b.write_all_at(b"BAR", 3).await?;
+        file_b.write_all_at(b"FOO", 0).await?;
 
-        assert_eq!(read_string_at(&mut file_b, 2, 3)?, "OBA");
+        assert_eq!(file_b.read_string_at(2, 3).await?, "OBA");
 
         // Open a lot of files, enough to cause some evictions. (Or to be precise,
         // open the same file many times. The effect is the same.)
         //
         // leave file_a positioned at offset 1 before we start
-        assert_eq!(file_a.seek(SeekFrom::Start(1))?, 1);
+        assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(&path_b, OpenOptions::new().read(true))?;
-            assert_eq!("FOOBAR", read_string(&mut vfile)?);
+            let mut vfile =
+                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
+            assert_eq!("FOOBAR", vfile.read_string().await?);
             vfiles.push(vfile);
         }
 
@@ -600,13 +857,13 @@ mod tests {
 
         // The underlying file descriptor for 'file_a' should be closed now. Try to read
         // from it again. We left the file positioned at offset 1 above.
-        assert_eq!("oobar", read_string(&mut file_a)?);
+        assert_eq!("oobar", file_a.read_string().await?);
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
         vfiles.as_mut_slice().shuffle(&mut thread_rng());
         for vfile in vfiles.iter_mut() {
-            assert_eq!("OOBAR", read_string_at(vfile, 1, 5)?);
+            assert_eq!("OOBAR", vfile.read_string_at(1, 5).await?);
         }
 
         Ok(())
@@ -615,8 +872,8 @@ mod tests {
     /// Test using VirtualFiles from many threads concurrently. This tests both using
     /// a lot of VirtualFiles concurrently, causing evictions, and also using the same
     /// VirtualFile from multiple threads concurrently.
-    #[test]
-    fn test_vfile_concurrency() -> Result<(), Error> {
+    #[tokio::test]
+    async fn test_vfile_concurrency() -> Result<(), Error> {
         const SIZE: usize = 8 * 1024;
         const VIRTUAL_FILES: usize = 100;
         const THREADS: usize = 100;
@@ -635,35 +892,36 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))?;
+            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))
+                .await?;
             files.push(f);
         }
         let files = Arc::new(files);
 
         // Launch many threads, and use the virtual files concurrently in random order.
-        let mut threads = Vec::new();
-        for threadno in 0..THREADS {
-            let builder =
-                thread::Builder::new().name(format!("test_vfile_concurrency thread {}", threadno));
-
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(THREADS)
+            .thread_name("test_vfile_concurrency thread")
+            .build()
+            .unwrap();
+        let mut hdls = Vec::new();
+        for _threadno in 0..THREADS {
             let files = files.clone();
-            let thread = builder
-                .spawn(move || {
-                    let mut buf = [0u8; SIZE];
-                    let mut rng = rand::thread_rng();
-                    for _ in 1..1000 {
-                        let f = &files[rng.gen_range(0..files.len())];
-                        f.read_exact_at(&mut buf, 0).unwrap();
-                        assert!(buf == SAMPLE);
-                    }
-                })
-                .unwrap();
-            threads.push(thread);
+            let hdl = rt.spawn(async move {
+                let mut buf = [0u8; SIZE];
+                let mut rng = rand::rngs::OsRng;
+                for _ in 1..1000 {
+                    let f = &files[rng.gen_range(0..files.len())];
+                    f.read_exact_at(&mut buf, 0).await.unwrap();
+                    assert!(buf == SAMPLE);
+                }
+            });
+            hdls.push(hdl);
         }
-
-        for thread in threads {
-            thread.join().unwrap();
+        for hdl in hdls {
+            hdl.await?;
         }
+        std::mem::forget(rt);
 
         Ok(())
     }

@@ -8,14 +8,13 @@
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self};
 
-use anyhow::{bail, ensure, Context};
-use serde::{Deserialize, Serialize};
+use anyhow::{ensure, Context};
+use serde::{de::Error, Deserialize, Serialize, Serializer};
 use thiserror::Error;
-use tracing::info_span;
 use utils::bin_ser::SerializeError;
+use utils::crashsafe::path_with_suffix_extension;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
@@ -24,6 +23,7 @@ use utils::{
 
 use crate::config::PageServerConf;
 use crate::virtual_file::VirtualFile;
+use crate::TEMP_FILE_SUFFIX;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
@@ -230,41 +230,61 @@ impl TimelineMetadata {
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
     }
+
+    // Checksums make it awkward to build a valid instance by hand.  This helper
+    // provides a TimelineMetadata with a valid checksum in its header.
+    #[cfg(test)]
+    pub fn example() -> Self {
+        let instance = Self::new(
+            "0/16960E8".parse::<Lsn>().unwrap(),
+            None,
+            None,
+            Lsn::from_hex("00000000").unwrap(),
+            Lsn::from_hex("00000000").unwrap(),
+            Lsn::from_hex("00000000").unwrap(),
+            0,
+        );
+        let bytes = instance.to_bytes().unwrap();
+        Self::from_bytes(&bytes).unwrap()
+    }
+}
+
+impl<'de> Deserialize<'de> for TimelineMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
+    }
+}
+
+impl Serialize for TimelineMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = self
+            .to_bytes()
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
+        bytes.serialize(serializer)
+    }
 }
 
 /// Save timeline metadata to file
-pub fn save_metadata(
+#[tracing::instrument(skip_all, fields(%tenant_id, %timeline_id))]
+pub async fn save_metadata(
     conf: &'static PageServerConf,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     data: &TimelineMetadata,
-    first_save: bool,
 ) -> anyhow::Result<()> {
-    let _enter = info_span!("saving metadata").entered();
     let path = conf.metadata_path(tenant_id, timeline_id);
-    // use OpenOptions to ensure file presence is consistent with first_save
-    let mut file = VirtualFile::open_with_options(
-        &path,
-        OpenOptions::new().write(true).create_new(first_save),
-    )
-    .context("open_with_options")?;
-
-    let metadata_bytes = data.to_bytes().context("Failed to get metadata bytes")?;
-
-    if file.write(&metadata_bytes)? != metadata_bytes.len() {
-        bail!("Could not write all the metadata bytes in a single call");
-    }
-    file.sync_all()?;
-
-    // fsync the parent directory to ensure the directory entry is durable
-    if first_save {
-        let timeline_dir = File::open(
-            path.parent()
-                .expect("Metadata should always have a parent dir"),
-        )?;
-        timeline_dir.sync_all()?;
-    }
-
+    let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    let metadata_bytes = data.to_bytes().context("serialize metadata")?;
+    VirtualFile::crashsafe_overwrite(&path, &temp_path, &metadata_bytes)
+        .await
+        .context("write metadata")?;
     Ok(())
 }
 

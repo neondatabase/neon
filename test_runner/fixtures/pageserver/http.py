@@ -186,18 +186,25 @@ class PageserverHttpClient(requests.Session):
         return TenantId(new_tenant_id)
 
     def tenant_attach(
-        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+        self,
+        tenant_id: TenantId,
+        config: None | Dict[str, Any] = None,
+        config_null: bool = False,
+        generation: Optional[int] = None,
     ):
         if config_null:
             assert config is None
-            body = "null"
+            body: Any = None
         else:
             # null-config is prohibited by the API
             config = config or {}
-            body = json.dumps({"config": config})
+            body = {"config": config}
+            if generation is not None:
+                body.update({"generation": generation})
+
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach",
-            data=body,
+            data=json.dumps(body),
             headers={"Content-Type": "application/json"},
         )
         self.verbose_error(res)

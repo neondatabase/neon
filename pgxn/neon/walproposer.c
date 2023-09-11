@@ -2539,8 +2539,15 @@ backpressure_throttling_impl(void)
 	? PrevProcessInterruptsCallback()
 	: false;
 
-	/* Don't throttle read only transactions and wal sender. */
-	if (am_walsender || !TransactionIdIsValid(GetCurrentTransactionIdIfAny()))
+	/*
+	 * Don't throttle read only transactions or wal sender.
+	 * Do throttle CREATE INDEX CONCURRENTLY, however. It performs some
+	 * stages outside a transaction, even though it writes a lot of WAL. 
+	 * Check PROC_IN_SAFE_IC flag to cover that case.
+	 */
+	if (am_walsender
+		|| (!(MyProc->statusFlags & PROC_IN_SAFE_IC)
+			&& !TransactionIdIsValid(GetCurrentTransactionIdIfAny())))
 		return retry;
 
 	/* Calculate replicas lag */
