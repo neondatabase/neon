@@ -612,7 +612,7 @@ impl Drop for VirtualFile {
         // as we have `&mut self` access. In other words, if the slot
         // is still occupied by our file, there should be no access from
         // other I/O operations; the only other possible place to lock
-        // the slot is the lock algorithm looking for any free slots.
+        // the slot is the lock algorithm looking for free slots.
         let slot = &get_open_files().slots[handle.index];
         if let Ok(slot_guard) = slot.inner.try_write() {
             clean_slot(slot, slot_guard, handle.tag);
