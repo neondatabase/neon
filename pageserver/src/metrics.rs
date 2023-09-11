@@ -537,7 +537,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-/// Tracks time taken by fs operations near VirtualFile.
+/// VirtualFile fs operation variants.
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
@@ -593,6 +593,7 @@ impl From<&str> for StorageIoOperation {
     }
 }
 
+/// Tracks time taken by fs operations near VirtualFile.
 static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
