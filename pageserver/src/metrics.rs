@@ -577,22 +577,6 @@ impl StorageIoOperation {
     }
 }
 
-impl From<&str> for StorageIoOperation {
-    fn from(v: &str) -> Self {
-        match v {
-            "open" => StorageIoOperation::Open,
-            "close" => StorageIoOperation::Close,
-            "close-by-replace" => StorageIoOperation::CloseByReplace,
-            "read" => StorageIoOperation::Read,
-            "write" => StorageIoOperation::Write,
-            "seek" => StorageIoOperation::Seek,
-            "fsync" => StorageIoOperation::Fsync,
-            "metadata" => StorageIoOperation::Metadata,
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// Tracks time taken by fs operations near VirtualFile.
 static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(

@@ -331,21 +331,19 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        self.with_file(StorageIoOperation::Fsync.as_str(), |file| file.sync_all())
+        self.with_file(StorageIoOperation::Fsync, |file| file.sync_all())
             .await?
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        self.with_file(StorageIoOperation::Metadata.as_str(), |file| {
-            file.metadata()
-        })
-        .await?
+        self.with_file(StorageIoOperation::Metadata, |file| file.metadata())
+            .await?
     }
 
     /// Helper function that looks up the underlying File for this VirtualFile,
     /// opening it and evicting some other File if necessary. It calls 'func'
     /// with the physical File.
-    async fn with_file<F, R>(&self, op: &str, mut func: F) -> Result<R, Error>
+    async fn with_file<F, R>(&self, op: StorageIoOperation, mut func: F) -> Result<R, Error>
     where
         F: FnMut(&File) -> R,
     {
@@ -369,7 +367,7 @@ impl VirtualFile {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
                             return Ok(STORAGE_IO_TIME_METRIC
-                                .get(op.into())
+                                .get(op)
                                 .observe_closure_duration(|| func(file)));
                         }
                     }
@@ -401,7 +399,7 @@ impl VirtualFile {
 
         // Perform the requested operation on it
         let result = STORAGE_IO_TIME_METRIC
-            .get(op.into())
+            .get(op)
             .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -426,7 +424,7 @@ impl VirtualFile {
             }
             SeekFrom::End(offset) => {
                 self.pos = self
-                    .with_file(StorageIoOperation::Seek.as_str(), |mut file| {
+                    .with_file(StorageIoOperation::Seek, |mut file| {
                         file.seek(SeekFrom::End(offset))
                     })
                     .await??
@@ -518,9 +516,7 @@ impl VirtualFile {
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
         let result = self
-            .with_file(StorageIoOperation::Read.as_str(), |file| {
-                file.read_at(buf, offset)
-            })
+            .with_file(StorageIoOperation::Read, |file| file.read_at(buf, offset))
             .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
@@ -532,9 +528,7 @@ impl VirtualFile {
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
         let result = self
-            .with_file(StorageIoOperation::Write.as_str(), |file| {
-                file.write_at(buf, offset)
-            })
+            .with_file(StorageIoOperation::Write, |file| file.write_at(buf, offset))
             .await?;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
