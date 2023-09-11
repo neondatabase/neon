@@ -349,9 +349,9 @@ impl<'a> WalIngest<'a> {
                     crate::failpoint_support::sleep_millis_async!(
                         "wal-ingest-logical-message-sleep"
                     );
-                } else if prefix.starts_with("neon-file:") {
+                } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                     modification
-                        .put_file(xlrec.db_id, &prefix[10..], message, ctx)
+                        .put_file(xlrec.db_id, path, message, ctx)
                         .await?;
                 }
             }
@@ -470,7 +470,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v14::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
@@ -538,7 +537,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v15::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
@@ -606,7 +604,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v16::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }

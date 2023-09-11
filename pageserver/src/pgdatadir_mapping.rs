@@ -1141,10 +1141,10 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let key = aux_files_key(db_id);
-        let buf = self.get(key.clone(), ctx).await?;
+        let buf = self.get(key, ctx).await?;
         let mut dir = AuxFilesDirectory::des(&buf)?;
         let path = path.to_string();
-        if content.len() == 0 {
+        if content.is_empty() {
             dir.files.remove(&path);
         } else {
             dir.files.insert(path, Bytes::copy_from_slice(content));
