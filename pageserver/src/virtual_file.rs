@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME};
+use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
@@ -155,8 +155,8 @@ impl OpenFiles {
         if let Some(old_file) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
-            STORAGE_IO_TIME
-                .with_label_values(&[StorageIoOperation::CloseByReplace.as_str()])
+            STORAGE_IO_TIME_METRIC
+                .get(StorageIoOperation::CloseByReplace)
                 .observe_closure_duration(|| drop(old_file));
         }
 
@@ -245,8 +245,9 @@ impl VirtualFile {
             timeline_id = "*".to_string();
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
-        let file = STORAGE_IO_TIME
-            .with_label_values(&[StorageIoOperation::Open.as_str()])
+
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| open_options.open(path))?;
 
         // Strip all options other than read and write.
@@ -367,8 +368,8 @@ impl VirtualFile {
                         if let Some(file) = &slot_guard.file {
                             // Found a cached file descriptor.
                             slot.recently_used.store(true, Ordering::Relaxed);
-                            return Ok(STORAGE_IO_TIME
-                                .with_label_values(&[op])
+                            return Ok(STORAGE_IO_TIME_METRIC
+                                .get(op.into())
                                 .observe_closure_duration(|| func(file)));
                         }
                     }
@@ -394,13 +395,13 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot();
 
         // Open the physical file
-        let file = STORAGE_IO_TIME
-            .with_label_values(&[StorageIoOperation::Open.as_str()])
+        let file = STORAGE_IO_TIME_METRIC
+            .get(StorageIoOperation::Open)
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
-        let result = STORAGE_IO_TIME
-            .with_label_values(&[op])
+        let result = STORAGE_IO_TIME_METRIC
+            .get(op.into())
             .observe_closure_duration(|| func(&file));
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -586,8 +587,8 @@ impl Drop for VirtualFile {
             slot.recently_used.store(false, Ordering::Relaxed);
             // there is also operation "close-by-replace" for closes done on eviction for
             // comparison.
-            STORAGE_IO_TIME
-                .with_label_values(&[StorageIoOperation::Close.as_str()])
+            STORAGE_IO_TIME_METRIC
+                .get(StorageIoOperation::Close)
                 .observe_closure_duration(|| drop(slot_guard.file.take()));
         }
     }

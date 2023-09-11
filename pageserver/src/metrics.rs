@@ -537,16 +537,21 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
+/// Tracks time taken by fs operations near VirtualFile.
+///
+/// Operations:
+/// - open ([`std::fs::OpenOptions::open`])
+/// - close (dropping [`std::fs::File`])
+/// - close-by-replace (close by replacement algorithm)
+/// - read (`read_at`)
+/// - write (`write_at`)
+/// - seek (modify internal position or file length query)
+/// - fsync ([`std::fs::File::sync_all`])
+/// - metadata ([`std::fs::File::metadata`])
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    IntoStaticStr,
-    strum_macros::EnumCount,
-    strum_macros::EnumIter,
-    strum_macros::FromRepr,
+    Debug, Clone, Copy, strum_macros::EnumCount, strum_macros::EnumIter, strum_macros::FromRepr,
 )]
-pub enum StorageIoOperation {
+pub(crate) enum StorageIoOperation {
     Open,
     Close,
     CloseByReplace,
@@ -572,18 +577,23 @@ impl StorageIoOperation {
     }
 }
 
-/// Tracks time taken by fs operations near VirtualFile.
-///
-/// Operations:
-/// - open ([`std::fs::OpenOptions::open`])
-/// - close (dropping [`std::fs::File`])
-/// - close-by-replace (close by replacement algorithm)
-/// - read (`read_at`)
-/// - write (`write_at`)
-/// - seek (modify internal position or file length query)
-/// - fsync ([`std::fs::File::sync_all`])
-/// - metadata ([`std::fs::File::metadata`])
-pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+impl From<&str> for StorageIoOperation {
+    fn from(v: &str) -> Self {
+        match v {
+            "open" => StorageIoOperation::Open,
+            "close" => StorageIoOperation::Close,
+            "close-by-replace" => StorageIoOperation::CloseByReplace,
+            "read" => StorageIoOperation::Read,
+            "write" => StorageIoOperation::Write,
+            "seek" => StorageIoOperation::Seek,
+            "fsync" => StorageIoOperation::Fsync,
+            "metadata" => StorageIoOperation::Metadata,
+            _ => unreachable!(),
+        }
+    }
+}
+
+static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_io_operations_seconds",
         "Time spent in IO operations",
@@ -594,7 +604,7 @@ pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 #[derive(Debug)]
-pub struct StorageIoTime {
+struct StorageIoTime {
     metrics: [Histogram; StorageIoOperation::COUNT],
 }
 
@@ -609,7 +619,13 @@ impl StorageIoTime {
         });
         Self { metrics }
     }
+
+    pub(crate) fn get(&self, op: StorageIoOperation) -> Histogram {
+        self.metrics[op as usize]
+    }
 }
+
+pub(crate) const STORAGE_IO_TIME_METRIC: StorageIoTime = StorageIoTime::new();
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
