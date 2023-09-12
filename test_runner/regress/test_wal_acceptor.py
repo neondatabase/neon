@@ -260,7 +260,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
             else:
                 failed_node.start()
                 failed_node = None
-    assert query_scalar(cur, "SELECT sum(key) FROM t") == (n_inserts * (n_inserts + 1)) // 2
+    assert query_scalar(cur, "SELECT sum(key) FROM t") == 500500
 
 
 # Test that safekeepers push their info to the broker and learn peer status from it

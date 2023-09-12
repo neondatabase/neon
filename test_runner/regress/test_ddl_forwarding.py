@@ -42,11 +42,12 @@ def handle_role(dbs, roles, operation):
         raise ValueError("Invalid op")
 
 
-def ddl_forward_handler(
-    request: Request, dbs: Dict[str, str], roles: Dict[str, str], ddl: "DdlForwardingContext"
-) -> Response:
+fail = False
+
+
+def ddl_forward_handler(request: Request, dbs: Dict[str, str], roles: Dict[str, str]) -> Response:
     log.info(f"Received request with data {request.get_data(as_text=True)}")
-    if ddl.fail:
+    if fail:
         log.info("FAILING")
         return Response(status=500, response="Failed just cuz")
     if request.json is None:
@@ -71,7 +72,6 @@ class DdlForwardingContext:
         self.port = port
         self.dbs: Dict[str, str] = {}
         self.roles: Dict[str, str] = {}
-        self.fail = False
         endpoint = "/management/api/v2/roles_and_databases"
         ddl_url = f"http://{host}:{port}{endpoint}"
         self.pg.configure(
@@ -82,7 +82,7 @@ class DdlForwardingContext:
         )
         log.info(f"Listening on {ddl_url}")
         self.server.expect_request(endpoint, method="PATCH").respond_with_handler(
-            lambda request: ddl_forward_handler(request, self.dbs, self.roles, self)
+            lambda request: ddl_forward_handler(request, self.dbs, self.roles)
         )
 
     def __enter__(self):
@@ -102,9 +102,6 @@ class DdlForwardingContext:
 
     def wait(self, timeout=3):
         self.server.wait(timeout=timeout)
-
-    def failures(self, bool):
-        self.fail = bool
 
     def send_and_wait(self, query: str, timeout=3) -> List[Tuple[Any, ...]]:
         res = self.send(query)
@@ -206,9 +203,9 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     assert ddl.dbs == {"stork": "cork"}
 
     with pytest.raises(psycopg2.InternalError):
-        ddl.failures(True)
+        global fail
+        fail = True
         cur.execute("CREATE DATABASE failure WITH OWNER=cork")
         ddl.wait()
 
-    ddl.failures(False)
     conn.close()
