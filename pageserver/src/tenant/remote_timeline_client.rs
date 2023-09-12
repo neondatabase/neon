@@ -434,10 +434,11 @@ impl RemoteTimelineClient {
     pub fn remote_consistent_lsn_visible(&self) -> Option<Lsn> {
         match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
-            UploadQueue::Initialized(q) => q.get_last_remote_consistent_lsn_visible(),
-            UploadQueue::Stopped(q) => q
-                .upload_queue_for_deletion
-                .get_last_remote_consistent_lsn_visible(),
+            UploadQueue::Initialized(q) => Some(q.get_last_remote_consistent_lsn_visible()),
+            UploadQueue::Stopped(q) => Some(
+                q.upload_queue_for_deletion
+                    .get_last_remote_consistent_lsn_visible(),
+            ),
         }
     }
 
@@ -1227,10 +1228,10 @@ impl RemoteTimelineClient {
                     upload_queue.projected_remote_consistent_lsn = Some(lsn);
                     if self.generation.is_none() {
                         // Legacy mode: skip validating generation
-                        upload_queue.visible_remote_consistent_lsn = Some(lsn);
+                        upload_queue.visible_remote_consistent_lsn.store(lsn);
                         None
                     } else {
-                        Some((lsn, upload_queue.visible_remote_consistent_lsn_tx.clone()))
+                        Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
                     }
                 }
                 UploadOp::Delete(_) => {
@@ -1245,14 +1246,14 @@ impl RemoteTimelineClient {
             lsn_update
         };
 
-        if let Some((lsn, tx)) = lsn_update {
+        if let Some((lsn, slot)) = lsn_update {
             self.deletion_queue_client
                 .update_remote_consistent_lsn(
                     self.tenant_id,
                     self.timeline_id,
                     self.generation,
                     lsn,
-                    tx,
+                    slot,
                 )
                 .await;
         }
@@ -1340,17 +1341,15 @@ impl RemoteTimelineClient {
                     // In-place replace of Initialized to Stopped can be done with the help of https://github.com/Sgeo/take_mut
                     // but for this use case it doesnt really makes sense to bring unsafe code only for this usage point.
                     // Deletion is not really perf sensitive so there shouldnt be any problems with cloning a fraction of it.
-                    let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
-                        tokio::sync::mpsc::channel(16);
                     let upload_queue_for_deletion = UploadQueueInitialized {
                         task_counter: 0,
                         latest_files: initialized.latest_files.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
                         latest_metadata: initialized.latest_metadata.clone(),
-                        projected_remote_consistent_lsn: initialized.visible_remote_consistent_lsn,
-                        visible_remote_consistent_lsn: initialized.visible_remote_consistent_lsn,
-                        visible_remote_consistent_lsn_tx,
-                        visible_remote_consistent_lsn_rx,
+                        projected_remote_consistent_lsn: None,
+                        visible_remote_consistent_lsn: initialized
+                            .visible_remote_consistent_lsn
+                            .clone(),
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,

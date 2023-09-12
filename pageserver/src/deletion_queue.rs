@@ -24,6 +24,7 @@ use tracing::Instrument;
 use tracing::{self, debug, error};
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
+use utils::lsn::AtomicLsn;
 use utils::lsn::Lsn;
 
 use self::backend::BackendQueueWorker;
@@ -374,7 +375,7 @@ impl std::fmt::Display for DeletionList {
 
 struct PendingLsn {
     projected: Lsn,
-    result_tx: tokio::sync::mpsc::Sender<Lsn>,
+    result_slot: Arc<AtomicLsn>,
 }
 
 struct TenantLsnState {
@@ -382,10 +383,6 @@ struct TenantLsnState {
 
     // In what generation was the most recent update proposed?
     generation: Generation,
-
-    // Any timelines' LSNs projected since this flag was last cleared?
-    // (optimization so that reader doesn't have to walk timelines)
-    dirty: bool,
 }
 
 struct VisibleLsnUpdates {
@@ -465,7 +462,7 @@ impl DeletionQueueClient {
         timeline_id: TimelineId,
         current_generation: Generation,
         lsn: Lsn,
-        result_tx: tokio::sync::mpsc::Sender<Lsn>,
+        result_slot: Arc<AtomicLsn>,
     ) {
         let mut locked = self
             .lsn_table
@@ -475,7 +472,6 @@ impl DeletionQueueClient {
         let tenant_entry = locked.tenants.entry(tenant_id).or_insert(TenantLsnState {
             timelines: HashMap::new(),
             generation: current_generation,
-            dirty: true,
         });
 
         if tenant_entry.generation != current_generation {
@@ -485,13 +481,11 @@ impl DeletionQueueClient {
             tenant_entry.generation = current_generation;
         }
 
-        tenant_entry.dirty = true;
-
         tenant_entry.timelines.insert(
             timeline_id,
             PendingLsn {
                 projected: lsn,
-                result_tx,
+                result_slot,
             },
         );
     }

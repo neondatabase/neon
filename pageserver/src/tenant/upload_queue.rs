@@ -9,6 +9,7 @@ use std::fmt::Debug;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
 use tracing::info;
+use utils::lsn::AtomicLsn;
 
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
@@ -58,11 +59,9 @@ pub(crate) struct UploadQueueInitialized {
     /// Safekeeper can rely on it to make decisions for WAL storage.
     ///
     /// visible_remote_consistent_lsn is only updated after our generation has been validated with
-    /// the control plane: this is coordinated via the channel defined below.
+    /// the control plane.
     pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
-    pub(crate) visible_remote_consistent_lsn: Option<Lsn>,
-    pub(crate) visible_remote_consistent_lsn_rx: tokio::sync::mpsc::Receiver<Lsn>,
-    pub(crate) visible_remote_consistent_lsn_tx: tokio::sync::mpsc::Sender<Lsn>,
+    pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
@@ -86,12 +85,8 @@ impl UploadQueueInitialized {
         self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
     }
 
-    pub(super) fn get_last_remote_consistent_lsn_visible(&mut self) -> Option<Lsn> {
-        while let Ok(lsn) = self.visible_remote_consistent_lsn_rx.try_recv() {
-            self.visible_remote_consistent_lsn = Some(lsn);
-        }
-
-        self.visible_remote_consistent_lsn
+    pub(super) fn get_last_remote_consistent_lsn_visible(&mut self) -> Lsn {
+        self.visible_remote_consistent_lsn.load()
     }
 
     pub(super) fn get_last_remote_consistent_lsn_projected(&mut self) -> Option<Lsn> {
@@ -125,18 +120,13 @@ impl UploadQueue {
 
         info!("initializing upload queue for empty remote");
 
-        let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
-            tokio::sync::mpsc::channel(16);
-
         let state = UploadQueueInitialized {
             // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
             projected_remote_consistent_lsn: None,
-            visible_remote_consistent_lsn: None,
-            visible_remote_consistent_lsn_tx,
-            visible_remote_consistent_lsn_rx,
+            visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -174,16 +164,14 @@ impl UploadQueue {
             index_part.metadata.disk_consistent_lsn()
         );
 
-        let (visible_remote_consistent_lsn_tx, visible_remote_consistent_lsn_rx) =
-            tokio::sync::mpsc::channel(16);
         let state = UploadQueueInitialized {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
             projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
-            visible_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
-            visible_remote_consistent_lsn_tx,
-            visible_remote_consistent_lsn_rx,
+            visible_remote_consistent_lsn: Arc::new(
+                index_part.metadata.disk_consistent_lsn().into(),
+            ),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,

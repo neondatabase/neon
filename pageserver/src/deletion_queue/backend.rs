@@ -161,7 +161,7 @@ impl BackendQueueWorker {
                 for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
                     // Drop result of send: it is legal for the Timeline to have been dropped along
                     // with its queue receiver while we were doing validation.
-                    drop(pending_lsn.result_tx.send(pending_lsn.projected).await);
+                    pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
