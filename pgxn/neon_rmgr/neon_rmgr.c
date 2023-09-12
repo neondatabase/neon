@@ -18,6 +18,7 @@
 #include "neon_rmgr.h"
 
 PG_MODULE_MAGIC;
+void		_PG_init(void);
 
 static void neon_rm_redo(XLogReaderState *record);
 static void neon_rm_startup(void);
@@ -41,14 +42,14 @@ const static RmgrData NeonRmgr = {
 	.rm_decode = neon_rm_decode,
 };
 
-void register_neon_rmgr(void)
+void
+_PG_init(void)
 {
-	if (!process_shared_preload_libraries_in_progress && !am_wal_redo_postgres)
+	if (!process_shared_preload_libraries_in_progress)
 		return;
 
 	RegisterCustomRmgr(RM_NEON_ID, &NeonRmgr);
 }
-
 
 static void
 neon_rm_redo(XLogReaderState *record)

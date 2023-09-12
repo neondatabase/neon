@@ -33,12 +33,12 @@ void		_PG_init(void);
 void
 _PG_init(void)
 {
+	/*
+	 * Also load 'neon_rmgr'. This makes it unnecessary to list both 'neon'
+	 * and 'neon_rmgr' in shared_preload_libraries.
+	 */
 #if PG_VERSION_NUM >= 160000
-	void (*register_neon_rmgr)(void);
-	register_neon_rmgr = (void (*)(void)) load_external_function(
-		"$libdir/neon_rmgr", "register_neon_rmgr", true, NULL
-	);
-	register_neon_rmgr();
+	load_file("$libdir/neon_rmgr", false);
 #endif
 
 	pg_init_libpagestore();

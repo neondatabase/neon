@@ -199,9 +199,6 @@ WalRedoMain(int argc, char *argv[])
 #ifdef HAVE_LIBSECCOMP
 	bool		enable_seccomp;
 #endif
-#if PG_VERSION_NUM >= 160000
-	void (*register_neon_rmgr)(void);
-#endif
 
 	am_wal_redo_postgres = true;
 
@@ -220,12 +217,9 @@ WalRedoMain(int argc, char *argv[])
 	smgr_init_hook = smgr_init_inmem;
 
 #if PG_VERSION_NUM >= 160000
-	register_neon_rmgr = (void (*)(void)) load_external_function(
-		"$libdir/neon_rmgr", "register_neon_rmgr", true, NULL
-	);
 	/* make rmgr registry believe we can register the resource manager */
 	process_shared_preload_libraries_in_progress = true;
-	register_neon_rmgr();
+	load_file("$libdir/neon_rmgr", false);
 	process_shared_preload_libraries_in_progress = false;
 #endif
 
