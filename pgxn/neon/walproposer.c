@@ -386,10 +386,13 @@ WalProposerPoll(void)
 {
 	while (true)
 	{
-		Safekeeper *sk;
-		bool		wait_timeout;
-		WaitEvent	event;
+		Safekeeper *sk = NULL;
+		bool		wait_timeout = false;
+		bool		late_cv_trigger = false;
+		WaitEvent	event = {0};
+		int			rc = 0;
 		TimestampTz now = GetCurrentTimestamp();
+		long		timeout = TimeToReconnect(now);
 
 #if PG_MAJORVERSION_NUM >= 16
 		if (WalSndCtl != NULL)
@@ -403,51 +406,44 @@ WalProposerPoll(void)
 		 *     * PG15-: We got woken up by a process triggering the WalSender
 		 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
 		 */
-		if (WaitEventSetWait(waitEvents, TimeToReconnect(now),
-							 &event, 1, WAIT_EVENT_WAL_SENDER_MAIN) == 1)
-		{
-			/*
-			 * If wait is terminated by latch set (walsenders' latch is set on
-			 * each wal flush), then exit loop. (no need for pm death check due to
-			 * WL_EXIT_ON_PM_DEATH)
-			 */
-			if (event.events & WL_LATCH_SET)
-			{
-				/* Reset our latch */
-				ResetLatch(MyLatch);
-
+		rc = WaitEventSetWait(waitEvents, timeout,
+							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
 #if PG_MAJORVERSION_NUM >= 16
-				if (WalSndCtl != NULL)
-					ConditionVariableCancelSleep();
+		if (WalSndCtl != NULL)
+			late_cv_trigger = ConditionVariableCancelSleep();
 #endif
-				break;
-			}
 
-			/*
-			 * If the event contains something that one of our safekeeper states
-			 * was waiting for, we'll advance its state.
-			 */
-			if (event.events & (WL_SOCKET_MASK))
-			{
-				sk = (Safekeeper *) event.user_data;
-				AdvancePollState(sk, event.events);
-			}
-			else
-				pg_unreachable();
+		/*
+		 * If wait is terminated by latch set (walsenders' latch is set on
+		 * each wal flush), then exit loop. (no need for pm death check due to
+		 * WL_EXIT_ON_PM_DEATH)
+		 */
+		if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
+		{
+			/* Reset our latch */
+			ResetLatch(MyLatch);
+
+			break;
 		}
-		else /* timeout expired */
+		
+		/*
+		 * If the event contains something that one of our safekeeper states
+		 * was waiting for, we'll advance its state.
+		 */
+		if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
 		{
-#if PG_MAJORVERSION_NUM >= 16
-			/* First, cancel sleep - we might do some complex stuff after this */
-			if (WalSndCtl != NULL)
-				ConditionVariableCancelSleep();
-#endif
+			sk = (Safekeeper *) event.user_data;
+			AdvancePollState(sk, event.events);
+		}
 
-			/*
-			 * If the timeout expired, attempt to reconnect to any safekeepers
-			 * that we dropped
-			 */
-			ReconnectSafekeepers();
+		/*
+		 * If the timeout expired, attempt to reconnect to any safekeepers
+		 * that we dropped
+		 */
+		ReconnectSafekeepers();
+
+		if (rc == 0) /* timeout expired */
+		{
 			wait_timeout = true;
 
 			/*
@@ -463,13 +459,13 @@ WalProposerPoll(void)
 #else
 				flushed = GetFlushRecPtr(NULL);
 #endif
-				if (flushed != availableLsn)
+				if (flushed > availableLsn)
 					break;
 			}
 		}
 
 		now = GetCurrentTimestamp();
-		if (wait_timeout || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
+		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
 
