@@ -384,8 +384,12 @@ impl DeletionQueueClient {
         }
     }
 
-    async fn do_push(&self, msg: FrontendQueueMessage) -> Result<(), DeletionQueueError> {
-        match self.tx.send(msg).await {
+    async fn do_push<T>(
+        &self,
+        queue: &tokio::sync::mpsc::Sender<T>,
+        msg: T,
+    ) -> Result<(), DeletionQueueError> {
+        match queue.send(msg).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 // This shouldn't happen, we should shut down all tenants before
@@ -401,9 +405,10 @@ impl DeletionQueueClient {
         &self,
         attached_tenants: HashMap<TenantId, Generation>,
     ) -> Result<(), DeletionQueueError> {
-        self.do_push(FrontendQueueMessage::Recover(RecoverOp {
-            attached_tenants,
-        }))
+        self.do_push(
+            &self.tx,
+            FrontendQueueMessage::Recover(RecoverOp { attached_tenants }),
+        )
         .await
     }
 
@@ -481,22 +486,26 @@ impl DeletionQueueClient {
         }
 
         DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
-        self.do_push(FrontendQueueMessage::Delete(DeletionOp {
-            tenant_id,
-            timeline_id,
-            layers,
-            generation: current_generation,
-            objects: Vec::new(),
-        }))
+        self.do_push(
+            &self.tx,
+            FrontendQueueMessage::Delete(DeletionOp {
+                tenant_id,
+                timeline_id,
+                layers,
+                generation: current_generation,
+                objects: Vec::new(),
+            }),
+        )
         .await
     }
 
-    async fn do_flush(
+    async fn do_flush<T>(
         &self,
-        msg: FrontendQueueMessage,
+        queue: &tokio::sync::mpsc::Sender<T>,
+        msg: T,
         rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), DeletionQueueError> {
-        self.do_push(msg).await?;
+        self.do_push(queue, msg).await?;
         if rx.await.is_err() {
             // This shouldn't happen if tenants are shut down before deletion queue.  If we
             // encounter a bug like this, then a flusher will incorrectly believe it has flushed
@@ -511,7 +520,7 @@ impl DeletionQueueClient {
     /// Wait until all previous deletions are persistent (either executed, or written to a DeletionList)
     pub async fn flush(&self) -> Result<(), DeletionQueueError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        self.do_flush(FrontendQueueMessage::Flush(FlushOp { tx }), rx)
+        self.do_flush(&self.tx, FrontendQueueMessage::Flush(FlushOp { tx }), rx)
             .await
     }
 
@@ -521,11 +530,27 @@ impl DeletionQueueClient {
         // Flush any buffered work to deletion lists
         self.flush().await?;
 
-        // Flush execution of deletion lists
+        // Flush the backend into the executor of deletion lists
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        debug!("flush_execute: flushing backend...");
+        self.do_flush(
+            &self.tx,
+            FrontendQueueMessage::FlushExecute(FlushOp { tx }),
+            rx,
+        )
+        .await?;
+        debug!("flush_execute: finished flushing backend...");
+
+        // Flush any immediate-mode deletions (the above backend flush will only flush
+        // the executor if deletions had flowed through the backend)
         debug!("flush_execute: flushing execution...");
-        self.do_flush(FrontendQueueMessage::FlushExecute(FlushOp { tx }), rx)
-            .await?;
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        self.do_flush(
+            &self.executor_tx,
+            ExecutorMessage::Flush(FlushOp { tx }),
+            rx,
+        )
+        .await?;
         debug!("flush_execute: finished flushing execution...");
         Ok(())
     }

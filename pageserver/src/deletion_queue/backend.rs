@@ -241,54 +241,64 @@ impl BackendQueueWorker {
         Ok(())
     }
 
-    pub async fn flush(&mut self) {
+    pub async fn flush(&mut self) -> Result<(), DeletionQueueError> {
+        tracing::debug!("Flushing with {} pending lists", self.pending_lists.len());
+
         // Issue any required generation validation calls to the control plane
-        if let Err(DeletionQueueError::ShuttingDown) = self.validate().await {
-            warn!("Shutting down");
-            return;
-        }
+        self.validate().await?;
 
         // After successful validation, nothing is pending: any lists that
         // made it through validation will be in validated_lists.
         assert!(self.pending_lists.is_empty());
         self.pending_key_count = 0;
 
-        // Return quickly if we have no validated lists to execute.
+        tracing::debug!(
+            "Validation complete, have {} validated lists",
+            self.validated_lists.len()
+        );
+
+        // Return quickly if we have no validated lists to execute.  This avoids flushing the
+        // executor when an idle backend hits its autoflush interval
         if self.validated_lists.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Drain `validated_lists` into the executor
         let mut executing_lists = Vec::new();
         for mut list in self.validated_lists.drain(..) {
             let objects = list.drain_paths();
-            if let Err(_e) = self.tx.send(ExecutorMessage::Delete(objects)).await {
-                warn!("Shutting down");
-                return;
-            };
-
+            self.tx
+                .send(ExecutorMessage::Delete(objects))
+                .await
+                .map_err(|_| DeletionQueueError::ShuttingDown)?;
             executing_lists.push(list);
         }
 
+        self.flush_executor().await?;
+
+        // Erase the deletion lists whose keys have all be deleted from remote storage
+        self.cleanup_lists(executing_lists).await;
+
+        Ok(())
+    }
+
+    async fn flush_executor(&mut self) -> Result<(), DeletionQueueError> {
         // Flush the executor, so that all the keys referenced by these deletion lists
         // are actually removed from remote storage.  This is a precondition to deleting
         // the deletion lists themselves.
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let flush_op = FlushOp { tx };
-        if let Err(_e) = self.tx.send(ExecutorMessage::Flush(flush_op)).await {
-            warn!("Shutting down");
-            return;
-        };
-        if rx.await.is_err() {
-            warn!("Shutting down");
-            return;
-        }
+        self.tx
+            .send(ExecutorMessage::Flush(flush_op))
+            .await
+            .map_err(|_| DeletionQueueError::ShuttingDown)?;
 
-        // Erase the deletion lists whose keys have all be deleted from remote storage
-        self.cleanup_lists(executing_lists).await;
+        rx.await.map_err(|_| DeletionQueueError::ShuttingDown)
     }
 
     pub async fn background(&mut self) {
+        tracing::info!("Started deletion backend worker");
+
         while !self.cancel.is_cancelled() {
             let msg = match tokio::time::timeout(AUTOFLUSH_INTERVAL, self.rx.recv()).await {
                 Ok(Some(m)) => m,
@@ -299,8 +309,9 @@ impl BackendQueueWorker {
                 }
                 Err(_) => {
                     // Timeout, we hit deadline to execute whatever we have in hand.  These functions will
-                    // return immediately if no work is pending
-                    self.flush().await;
+                    // return immediately if no work is pending.
+                    // Drop result, because it' a background flush and we don't care whether it really worked.
+                    drop(self.flush().await);
 
                     continue;
                 }
@@ -316,13 +327,15 @@ impl BackendQueueWorker {
                     }
 
                     if self.pending_key_count > AUTOFLUSH_KEY_COUNT {
-                        self.flush().await;
+                        // Drop possible shutdown error, because we will just fall out of loop if that happens
+                        drop(self.flush().await);
                     }
                 }
                 BackendQueueMessage::Flush(op) => {
-                    self.flush().await;
-
-                    op.fire();
+                    if let Ok(()) = self.flush().await {
+                        // If we fail due to shutting down, we will just drop `op` to propagate that status.
+                        op.fire();
+                    }
                 }
             }
         }
