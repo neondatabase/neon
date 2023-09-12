@@ -272,7 +272,7 @@ Currently, a pageserver with a stale generation number will continue to
 upload layers, but be prevented from completing deletions. This is safe, but inefficient: layers uploaded by this stale generation
 will not be read back by future generations of pageservers.
 
-The _AttachedStale_ state simply disables S3 uploads. The stale pageserver
+The _AttachedStale_ state disables S3 uploads. The stale pageserver
 will continue to ingest the WAL and write layers to local disk, but not to
 do any uploads to S3.
 
@@ -280,12 +280,38 @@ A node may enter AttachedStale in two ways:
 
 - Explicitly, when control plane calls into the node at the start of a migration.
 - Implicitly, when the node tries to validate some deletions and discovers
-  that its generation is tale.
+  that its generation is stale.
 
-Over long periods of time, a node in AttachedStale will accumulate data
+The AttachedStale state also disables sending consumption metrics from
+that location: it is interpreted as an indication that some other pageserver
+is already attached or is about to be attached, and that new pageserver will
+be responsible for sending consumption metrics.
+
+#### Disk Pressure & AttachedStale
+
+Over long periods of time, a tenant location in AttachedStale will accumulate data
 on local disk, as it cannot evict any layers written since it entered the
 AttachStale state. We rely on the control plane to revert the location to
 Secondary or Detached at the end of a migration.
+
+This scenario is particularly noteworthy when evacuating all tenants on a pageserver:
+since _all_ the attached tenants will go into AttachedStale, we will be doing no
+uploads at all, therefore ingested data will cause disk usage to increase continuously.
+Under nominal conditions, the available disk space on pageservers should be sufficient
+to complete the evacuation before this becomes a problem, but we must also handle
+the case where we hit a low disk situation while in this state.
+
+The concept of disk pressure already exists in the pageserver: the `disk_usage_eviction_task`
+touches each Tenant when it determines that a low-disk condition requires
+some layer eviction. Having selected layers for eviction, the eviction
+task calls `Timeline::evict_layers`.
+
+If evict_layers is called while in AttachedStale state, and some of the to-be-evicted
+layers are not yet uploaded to S3, then the block on uploads will be lifted. This
+will result in leaking some objects once a migration is complete, but will enable
+the node to manage its disk space properly: if a node is left with some tenants
+in AttachedStale indefinitely due to a network partition or control plane bug,
+these tenants will not cause a full disk condition.
 
 ### Warm secondary updates
 
