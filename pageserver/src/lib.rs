@@ -50,7 +50,7 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
-#[tracing::instrument(skip(deletion_queue))]
+#[tracing::instrument(skip_all, fields(%exit_code))]
 pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
