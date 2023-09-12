@@ -210,7 +210,7 @@ module.exports = async ({ github, context, fetch, report, coverage }) => {
     // Which PR to comment (for ci-run/pr-* it will comment the parent PR, not the ci-run/pr-* PR)
     let prToComment
     if (isPullRequest) {
-        const branchName = context.payload.pull_request.base.ref.replace(/^refs\/heads\//, "")
+        const branchName = context.payload.pull_request.head.ref.replace(/^refs\/heads\//, "")
         const match = branchName.match(/ci-run\/pr-(?<prNumber>\d+)/)?.groups
         if (match) {
             ({ prNumber } = match)

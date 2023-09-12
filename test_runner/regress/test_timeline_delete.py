@@ -128,6 +128,8 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
 
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
     with pytest.raises(
         PageserverApiException,
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",

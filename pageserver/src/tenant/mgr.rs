@@ -1,9 +1,10 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
@@ -70,6 +71,11 @@ impl TenantsMap {
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
 async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let tmp_path = safe_rename_tenant_dir(path).await?;
+    fs::remove_dir_all(tmp_path).await
+}
+
+async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let parent = path
         .as_ref()
         .parent()
@@ -79,11 +85,16 @@ async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<(
             std::io::ErrorKind::InvalidInput,
             "Path must be absolute",
         ))?;
-
-    let tmp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    let rand_suffix = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect::<String>()
+        + TEMP_FILE_SUFFIX;
+    let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
     fs::rename(&path, &tmp_path).await?;
     fs::File::open(parent).await?.sync_all().await?;
-    fs::remove_dir_all(tmp_path).await
+    Ok(tmp_path)
 }
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
@@ -551,7 +562,24 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
-    detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await
+    let tmp_path = detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await?;
+    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+    let task_tenant_id = None;
+    task_mgr::spawn(
+        task_mgr::BACKGROUND_RUNTIME.handle(),
+        TaskKind::MgmtRequest,
+        task_tenant_id,
+        None,
+        "tenant_files_delete",
+        false,
+        async move {
+            fs::remove_dir_all(tmp_path.as_path())
+                .await
+                .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+        },
+    );
+    Ok(())
 }
 
 async fn detach_tenant0(
@@ -559,20 +587,16 @@ async fn detach_tenant0(
     tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
-) -> Result<(), TenantStateError> {
-    let local_files_cleanup_operation = |tenant_id_to_clean| async move {
+) -> Result<PathBuf, TenantStateError> {
+    let tenant_dir_rename_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
-        safe_remove_tenant_dir_all(&local_tenant_directory)
+        safe_rename_tenant_dir(&local_tenant_directory)
             .await
-            .with_context(|| {
-                format!("local tenant directory {local_tenant_directory:?} removal")
-            })?;
-        Ok(())
+            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))
     };
 
     let removal_result =
-        remove_tenant_from_memory(tenants, tenant_id, local_files_cleanup_operation(tenant_id))
-            .await;
+        remove_tenant_from_memory(tenants, tenant_id, tenant_dir_rename_operation(tenant_id)).await;
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
@@ -580,10 +604,10 @@ async fn detach_tenant0(
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
             info!("Detaching an ignored tenant");
-            local_files_cleanup_operation(tenant_id)
+            let tmp_path = tenant_dir_rename_operation(tenant_id)
                 .await
-                .with_context(|| format!("Ignored tenant {tenant_id} local files cleanup"))?;
-            return Ok(());
+                .with_context(|| format!("Ignored tenant {tenant_id} local directory rename"))?;
+            return Ok(tmp_path);
         }
     }
 

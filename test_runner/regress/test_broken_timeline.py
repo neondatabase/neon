@@ -122,8 +122,8 @@ def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
             future.result()
 
 
-def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(
@@ -133,7 +133,7 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
         ]
     )
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
@@ -160,11 +160,11 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)

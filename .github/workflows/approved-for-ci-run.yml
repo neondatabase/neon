@@ -54,6 +54,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           ref: main
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - run: gh pr checkout "${PR_NUMBER}"
 
@@ -96,7 +97,7 @@ jobs:
       - run: |
           HEAD="ci-run/pr-${PR_NUMBER}"
 
-          CLOSED="$(gh pr --repo '${GITHUB_REPOSITORY}' list --head '${HEAD}' --json 'closed' --jq '.[].closed')"
+          CLOSED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${HEAD} --json 'closed' --jq '.[].closed')"
           if [ "${CLOSED}" != "false" ]; then
             gh pr --repo "${GITHUB_REPOSITORY}" close "ci-run/pr-${{ github.event.pull_request.number }}" --delete-branch
           fi

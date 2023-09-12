@@ -154,16 +154,17 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(10):
+    for i in range(100):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
-        log.info(
-            "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
+        if i % 10 == 0:
+            log.info(
+                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    lsn, current_lsn, i + 1
+                )
             )
-        )
-        time.sleep(1)
+        time.sleep(0.1)
     raise Exception(
         "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
     )
