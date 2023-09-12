@@ -503,6 +503,8 @@ pub enum GetTenantError {
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
+///
+/// This method is cancel-safe.
 pub async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
