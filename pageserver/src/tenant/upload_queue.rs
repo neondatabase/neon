@@ -85,11 +85,11 @@ impl UploadQueueInitialized {
         self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
     }
 
-    pub(super) fn get_last_remote_consistent_lsn_visible(&mut self) -> Lsn {
+    pub(super) fn get_last_remote_consistent_lsn_visible(&self) -> Lsn {
         self.visible_remote_consistent_lsn.load()
     }
 
-    pub(super) fn get_last_remote_consistent_lsn_projected(&mut self) -> Option<Lsn> {
+    pub(super) fn get_last_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         self.projected_remote_consistent_lsn
     }
 }
