@@ -32,7 +32,7 @@ chrono = { workspace = true, default-features = false, features = ["clock", "ser
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
 aws-config = { workspace = true, default-features = false, features = ["rustls", "credentials-sso"] }
 
-pageserver = {path="../pageserver"}
+pageserver = { path = "../pageserver" }
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

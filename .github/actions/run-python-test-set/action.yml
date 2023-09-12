@@ -70,6 +70,9 @@ runs:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         path: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         prefix: latest
+        # The lack of compatibility snapshot (for example, for the new Postgres version)
+        # shouldn't fail the whole job. Only relevant test should fail.
+        skip-if-does-not-exist: true
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
