@@ -21,7 +21,7 @@ def test_threshold_based_eviction(
     pg_bin: PgBin,
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Start with metrics collection enabled, so that the eviction task
     # imitates its accesses. We'll use a non-existent endpoint to make it fail.

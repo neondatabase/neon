@@ -154,16 +154,17 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(10):
+    for i in range(100):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
-        log.info(
-            "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
+        if i % 10 == 0:
+            log.info(
+                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    lsn, current_lsn, i + 1
+                )
             )
-        )
-        time.sleep(1)
+        time.sleep(0.1)
     raise Exception(
         "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
     )
@@ -260,15 +261,11 @@ def list_prefix(
     Note that this function takes into account prefix_in_bucket.
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    assert neon_env_builder.remote_storage_kind in (
-        RemoteStorageKind.MOCK_S3,
-        RemoteStorageKind.REAL_S3,
-    )
-    # For mypy
-    assert isinstance(neon_env_builder.remote_storage, S3Storage)
-    assert neon_env_builder.remote_storage_client is not None
+    remote = neon_env_builder.pageserver_remote_storage
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+    assert remote.client is not None
 
-    prefix_in_bucket = neon_env_builder.remote_storage.prefix_in_bucket or ""
+    prefix_in_bucket = remote.prefix_in_bucket or ""
     if not prefix:
         prefix = prefix_in_bucket
     else:
@@ -277,9 +274,9 @@ def list_prefix(
         prefix = "/".join((prefix_in_bucket, prefix))
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
+    response = remote.client.list_objects_v2(
         Delimiter="/",
-        Bucket=neon_env_builder.remote_storage.bucket_name,
+        Bucket=remote.bucket_name,
         Prefix=prefix,
     )
     return response

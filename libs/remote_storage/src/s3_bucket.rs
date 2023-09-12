@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn relative_path() {
-        let all_paths = vec!["", "some/path", "some/path/"];
+        let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
             .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
