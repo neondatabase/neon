@@ -90,9 +90,9 @@ neon_rm_desc(StringInfo buf, XLogReaderState *record)
 		infobits_desc(buf, xlrec->infobits_set, "infobits");
 		appendStringInfo(buf, ", flags: 0x%02X", xlrec->flags);
 	}
-	else if (info == XLOG_HEAP_UPDATE)
+	else if (info == XLOG_NEON_HEAP_UPDATE)
 	{
-		xl_heap_update *xlrec = (xl_heap_update *) rec;
+		xl_neon_heap_update *xlrec = (xl_neon_heap_update *) rec;
 
 		appendStringInfo(buf, "old_xmax: %u, old_off: %u, ",
 						 xlrec->old_xmax, xlrec->old_offnum);
@@ -100,9 +100,9 @@ neon_rm_desc(StringInfo buf, XLogReaderState *record)
 		appendStringInfo(buf, ", flags: 0x%02X, new_xmax: %u, new_off: %u",
 						 xlrec->flags, xlrec->new_xmax, xlrec->new_offnum);
 	}
-	else if (info == XLOG_HEAP_HOT_UPDATE)
+	else if (info == XLOG_NEON_HEAP_HOT_UPDATE)
 	{
-		xl_heap_update *xlrec = (xl_heap_update *) rec;
+		xl_neon_heap_update *xlrec = (xl_neon_heap_update *) rec;
 
 		appendStringInfo(buf, "old_xmax: %u, old_off: %u, ",
 						 xlrec->old_xmax, xlrec->old_offnum);
@@ -110,36 +110,14 @@ neon_rm_desc(StringInfo buf, XLogReaderState *record)
 		appendStringInfo(buf, ", flags: 0x%02X, new_xmax: %u, new_off: %u",
 						 xlrec->flags, xlrec->new_xmax, xlrec->new_offnum);
 	}
-	else if (info == XLOG_HEAP_TRUNCATE)
+	else if (info == XLOG_NEON_HEAP_LOCK)
 	{
-		xl_heap_truncate *xlrec = (xl_heap_truncate *) rec;
-
-		truncate_flags_desc(buf, xlrec->flags);
-		appendStringInfo(buf, ", nrelids: %u", xlrec->nrelids);
-		appendStringInfoString(buf, ", relids:");
-		array_desc(buf, xlrec->relids, sizeof(Oid), xlrec->nrelids,
-				   &oid_elem_desc, NULL);
-	}
-	else if (info == XLOG_HEAP_CONFIRM)
-	{
-		xl_heap_confirm *xlrec = (xl_heap_confirm *) rec;
-
-		appendStringInfo(buf, "off: %u", xlrec->offnum);
-	}
-	else if (info == XLOG_HEAP_LOCK)
-	{
-		xl_heap_lock *xlrec = (xl_heap_lock *) rec;
+		xl_neon_heap_lock *xlrec = (xl_neon_heap_lock *) rec;
 
 		appendStringInfo(buf, "xmax: %u, off: %u, ",
 						 xlrec->xmax, xlrec->offnum);
 		infobits_desc(buf, xlrec->infobits_set, "infobits");
 		appendStringInfo(buf, ", flags: 0x%02X", xlrec->flags);
-	}
-	else if (info == XLOG_HEAP_INPLACE)
-	{
-		xl_heap_inplace *xlrec = (xl_heap_inplace *) rec;
-
-		appendStringInfo(buf, "off: %u", xlrec->offnum);
 	}
 	else if (info == XLOG_NEON_HEAP_MULTI_INSERT)
 	{
