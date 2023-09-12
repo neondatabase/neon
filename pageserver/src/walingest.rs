@@ -771,6 +771,7 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
+                    pg_constants::XLOG_NEON_HEAP_LOCK => { /* XLOG_NEON_HEAP_LOCK doesn't need special care */ }
                     info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
                 }
             }
