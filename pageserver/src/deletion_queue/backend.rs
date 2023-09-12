@@ -34,13 +34,16 @@ pub(super) enum BackendQueueMessage {
     Delete(DeletionList),
     Flush(FlushOp),
 }
-pub(super) struct BackendQueueWorker {
+pub(super) struct BackendQueueWorker<C>
+where
+    C: ControlPlaneGenerationsApi,
+{
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
     tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
 
     // Client for calling into control plane API for validation of deletes
-    control_plane_client: Option<Arc<dyn ControlPlaneGenerationsApi + Send + Sync>>,
+    control_plane_client: Option<C>,
 
     // DeletionLists which are waiting generation validation.  Not safe to
     // execute until [`validate`] has processed them.
@@ -60,12 +63,15 @@ pub(super) struct BackendQueueWorker {
     cancel: CancellationToken,
 }
 
-impl BackendQueueWorker {
+impl<C> BackendQueueWorker<C>
+where
+    C: ControlPlaneGenerationsApi,
+{
     pub(super) fn new(
         conf: &'static PageServerConf,
         rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
-        control_plane_client: Option<Arc<dyn ControlPlaneGenerationsApi + Send + Sync>>,
+        control_plane_client: Option<C>,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
         cancel: CancellationToken,
     ) -> Self {

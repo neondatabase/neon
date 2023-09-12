@@ -81,13 +81,19 @@ pub struct DeletionQueue {
 
 /// Opaque wrapper around individual worker tasks, to avoid making the
 /// worker objects themselves public
-pub struct DeletionQueueWorkers {
+pub struct DeletionQueueWorkers<C>
+where
+    C: ControlPlaneGenerationsApi + Send + Sync,
+{
     frontend: FrontendQueueWorker,
-    backend: BackendQueueWorker,
+    backend: BackendQueueWorker<C>,
     executor: ExecutorWorker,
 }
 
-impl DeletionQueueWorkers {
+impl<C> DeletionQueueWorkers<C>
+where
+    C: ControlPlaneGenerationsApi + Send + Sync + 'static,
+{
     pub fn spawn_with(mut self, runtime: &tokio::runtime::Handle) -> tokio::task::JoinHandle<()> {
         let jh_frontend = runtime.spawn(async move {
             self.frontend
@@ -629,11 +635,14 @@ impl DeletionQueue {
     /// we don't spawn those inside new() so that the caller can use their runtime/spans of choice.
     ///
     /// If remote_storage is None, then the returned workers will also be None.
-    pub fn new(
+    pub fn new<C>(
         remote_storage: Option<GenericRemoteStorage>,
-        control_plane_client: Option<Arc<dyn ControlPlaneGenerationsApi + Send + Sync>>,
+        control_plane_client: Option<C>,
         conf: &'static PageServerConf,
-    ) -> (Self, Option<DeletionQueueWorkers>) {
+    ) -> (Self, Option<DeletionQueueWorkers<C>>)
+    where
+        C: ControlPlaneGenerationsApi + Send + Sync,
+    {
         // Deep channel: it consumes deletions from all timelines and we do not want to block them
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
 
@@ -759,7 +768,7 @@ mod test {
         harness: TenantHarness,
         remote_fs_dir: PathBuf,
         storage: GenericRemoteStorage,
-        mock_control_plane: Arc<MockControlPlane>,
+        mock_control_plane: MockControlPlane,
         deletion_queue: DeletionQueue,
         worker_join: JoinHandle<()>,
     }
@@ -820,14 +829,15 @@ mod test {
         }
     }
 
+    #[derive(Debug, Clone)]
     struct MockControlPlane {
-        pub latest_generation: std::sync::Mutex<HashMap<TenantId, Generation>>,
+        pub latest_generation: std::sync::Arc<std::sync::Mutex<HashMap<TenantId, Generation>>>,
     }
 
     impl MockControlPlane {
         fn new() -> Self {
             Self {
-                latest_generation: std::sync::Mutex::new(HashMap::new()),
+                latest_generation: Arc::new(std::sync::Mutex::new(HashMap::new())),
             }
         }
     }
@@ -882,7 +892,7 @@ mod test {
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
 
-        let mock_control_plane = Arc::new(MockControlPlane::new());
+        let mock_control_plane = MockControlPlane::new();
 
         let (deletion_queue, worker) = DeletionQueue::new(
             Some(storage.clone()),

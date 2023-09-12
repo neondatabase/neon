@@ -32,9 +32,6 @@ pub trait ControlPlaneGenerationsApi {
     ) -> anyhow::Result<HashMap<TenantId, bool>>;
 }
 
-unsafe impl Send for ControlPlaneClient {}
-unsafe impl Sync for ControlPlaneClient {}
-
 impl ControlPlaneClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
