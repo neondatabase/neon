@@ -27,3 +27,28 @@ your patch's fault. Help to fix the root cause if something else has
 broken the CI, before pushing.
 
 *Happy Hacking!*
+
+# How to run a CI pipeline on Pull Requests from external contributors
+_An instruction for maintainers_
+
+## TL;DR:
+- Review the PR
+- If and only if it looks **safe** (i.e. it doesn't contain any malicious code which could expose secrets or harm the CI), then:
+    - Press the "Approve and run" button in GitHub UI
+    - Add the `approved-for-ci-run` label to the PR
+
+Repeat all steps after any change to the PR.
+- When the changes are ready to get merged — merge the original PR (not the internal one)
+
+## Longer version:
+
+GitHub Actions triggered by the `pull_request` event don't share repository secrets with the forks (for security reasons).
+So, passing the CI pipeline on Pull Requests from external contributors is impossible.
+
+We're using the following approach to make it work:
+- After the review, assign the `approved-for-ci-run` label to the PR if changes look safe
+- A GitHub Action will create an internal branch and a new PR with the same changes (for example, for a PR `#1234`, it'll be a branch `ci-run/pr-1234`)
+- Because the PR is created from the internal branch, it is able to access repository secrets (that's why it's crucial to make sure that the PR doesn't contain any malicious code that could expose our secrets or intentionally harm the CI)
+- The label gets removed automatically, so to run CI again with new changes, the label should be added again (after the review)
+
+For details see [`approved-for-ci-run.yml`](.github/workflows/approved-for-ci-run.yml)
