@@ -415,7 +415,6 @@ RUN case "${PG_VERSION}" in \
         export PG_HINT_PLAN_CHECKSUM=564cbbf4820973ffece63fbf76e3c0af62c4ab23543142c7caaa682bc48918be \
         ;; \
       "v16") \
-        echo "Not yet supported, please look for releases of pg_hint_plan" && exit 0;; \
         export PG_HINT_PLAN_VERSION=16_1_6_0 \
         export PG_HINT_PLAN_CHECKSUM=ce6a8040c78012000f5da7240caf6a971401412f41d33f930f09291e6c304b99 \
         ;; \
