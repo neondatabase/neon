@@ -552,7 +552,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/0.3.6.tar.gz -O pg_embedding.tar.gz && \
-    echo "4cde1cc643f40d3742b362b0052c17dca368fdc2ee74eb03c7ec415009209150 pg_embedding.tar.gz" | sha256sum --check && \
+    echo "b2e2b359335d26987778c7fae0c9bcc8ebc3530fc214113be1ddbc8a136e52ac pg_embedding.tar.gz" | sha256sum --check && \
     mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
