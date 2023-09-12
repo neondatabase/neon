@@ -37,15 +37,17 @@ at scale, in several contexts:
 3. Restarting pageservers for upgrades and maintenance
 
 The current situation steps for migration are:
-* detach from old node; skip if old node is dead; (the [skip part is still WIP](https://github.com/neondatabase/cloud/issues/5426)).
-* attach to new node
-* re-configure endpoints to use the new node
+
+- detach from old node; skip if old node is dead; (the [skip part is still WIP](https://github.com/neondatabase/cloud/issues/5426)).
+- attach to new node
+- re-configure endpoints to use the new node
 
 Once [generation numbers](025-generation-numbers.md) are implemented,
 the detach step is no longer critical for correctness. So, we can
-* attach to a new node,
-* re-configure endpoints to use the new node, and then
-* detach from the old node.
+
+- attach to a new node,
+- re-configure endpoints to use the new node, and then
+- detach from the old node.
 
 However, this still does not meet our seamless/fast/efficient goals:
 
@@ -65,12 +67,16 @@ The user expectations for availability are:
 
 ## Non Goals
 
-- We do not aim to have the pageservers fail over if the
-  control plane is unavailable.
-- On unplanned migrations (node failures), we do not aim to prevent a small, bounded window of
-  read unavailability of very recent LSNs (because postgres
-  page cache usually contains such pages, we do not expect
-  them to be read frequently from the pageserver).
+- Defining service tiers with different storage strategies: the same
+  level of HA & overhead will apply to all tenants. This doesn't rule out
+  adding such tiers in future.
+- Enabling pageserver failover in the absence of a control plane: the control
+  plane will remain the source of truth for what should be attached where.
+- Totally avoiding availability gaps on unplanned migrations during
+  a failure (we expect a small, bounded window of
+  read unavailability of very recent LSNs)
+- Workload balancing: this RFC defines the mechanism for moving tenants
+  around, not the higher level logic for deciding who goes where.
 
 ## Impacted components
 
@@ -95,11 +101,13 @@ Pageserver, control plane
 To enable faster migrations, we will identify at least one _secondary location_
 for each tenant. This secondary location will keep a warm cache of layers
 for the tenant, so that if it is later attached, it can catch up with the
-latest LSN quickly.
+latest LSN quickly: rather than downloading everything, it only has to replay
+the recent part of the WAL to advance from the remote_consistent_offset to the
+most recent LSN in the WAL.
 
 The control plane is responsible for selecting secondary locations, and
-calling into pageservers to instruct them as to which tenants they are
-to act as a secondary location for.
+calling into pageservers to configure tenants into a secondary mode at this
+new location, as well as attaching the tenant in its existing primary location.
 
 The attached pageserver for a tenant will publish a [layer heatmap](#layer-heatmap)
 to advise secondaries of which layers should be downloaded.
@@ -122,8 +130,7 @@ clear in later sections:
 - **Secondary**: keep local state on disk, periodically update from S3.
 - **Detached**: equivalent to existing detached state.
 
-To control these finer grained states, a new `tenant/<tenant id>/configure`
-pageserver API will be introduced.
+To control these finer grained states, a new pageserver API endpoint will be added.
 
 ### Cutover procedure
 
@@ -137,7 +144,7 @@ the pageservers' APIs:
 1. Call to Node A requesting it to flush to S3 and enter AttachedStale state
 2. Increment generation, and call to Node B requesting it to enter AttachedMulti
    state with the new generation.
-3. Call to Node B, requesting it to download the latest image layers.
+3. Call to Node B, requesting it to download the latest image layers from remote storage.
 4. Wait for Node B's WAL ingestion to catch up with node A's
 5. Update endpoints to use node B instead of node A
 6. Call to node B requesting it to enter state AttachedSingle.
@@ -155,14 +162,38 @@ The following table summarizes how the state of the system advances:
 |       6       | AttachedStale  | AttachedSingle |           B            |
 |  7 (_final_)  |   Secondary    | AttachedSingle |           B            |
 
-This procedure readily applies to other migration cases:
+The procedure described for a clean handover from a live node to a secondary
+is also used for failure cases and for migrations to a location that is not
+configured as a secondary, by simply skipping irrelevant steps, as described in
+the following sections.
 
-- **Node failures**: if node A is unavailable, then all calls into
-  node A are skipped and we don't wait for B to catch up before
-  switching updating the endpoints to use B.
-- **Migration without a secondary location**: if node A is initially
-  in Detached state, the procedure is idential, but waiting for Node B
-  to download layers and catch up with WAL will take much longer.
+#### Migration from an unresponsive node
+
+If node A is unavailable, then all calls into
+node A are skipped and we don't wait for B to catch up before
+switching updating the endpoints to use B.
+
+#### Migration to a location that is not a secondary
+
+If node A is initially in Detached state, the procedure is identical. Since Node B
+is coming from a Detached state rather than Secondary, the download of layers and
+catch up with WAL will take much longer.
+
+We might do this if:
+
+- Attached and secondary locations are both critically low on disk, and we need
+  to migrate to a third node with more resources available.
+- We are migrating a tenant which does not use secondary locations to save on cost.
+
+#### Permanent migration away from a node
+
+In the final step of the migration, we generally request the original node to enter a Secondary
+state. This is typical if we are doing a planned migration during maintenance, or to
+balance CPU/network load away from a node.
+
+One might also want to permanently migrate away: this can be done by simply removing the secondary
+location after the migration is complete, or as an optimization by substituting the Detached state
+for the Secondary state in the final step.
 
 #### Cutover diagram
 
@@ -279,7 +310,12 @@ uploads a serialized heat map to S3. It may skip this if there
 is no change since the last time it uploaded (e.g. if the tenant
 is totally idle).
 
-#### Secondary pageserver behavior
+Additionally, when the tenant is configured into AttachedStale with
+flush=True (via [location configuration API](#location-configuration-api)]),
+the heatmap is written out. This enables a future attached pageserver
+to get an up to date view when deciding which layers to download.
+
+#### Secondary location behavior
 
 Secondary warm locations run a simple loop, implemented separately from
 the main `Tenant` type, which represents attached tenants:
@@ -290,12 +326,26 @@ the main `Tenant` type, which represents attached tenants:
 - Download layers
 - Download the latest index_part.json
 - Check if any layers currently on disk are no longer referenced by
-  the tenant's metadata & delete them
+  IndexPart & delete them
+
+Note that the heatmap is only advisory: if a secondary location has plenty
+of disk space, it may choose to retain layers that aren't referenced
+by the heatmap, as long as they are still referenced by the IndexPart. Conversely,
+if a node is very low on disk space, it might opt to raise the heat threshold required
+to both downloading a layer, until more disk space is available.
 
 ### Location configuration API
 
+Currently, the `/tenant/<tenant_id>/config` API defines various
+tunables like compaction settings, which apply to the tenant irrespective
+of which pageserver it is running on.
+
+A new "location config" structure will be introduced, which defines
+configuration which is per-tenant, but local to a particular pageserver,
+such as the attachment mode and whether it is a secondary.
+
 The pageserver will expose a new per-tenant API for setting
-the state: `/tenant/<tenant_id>/configure`.
+the state: `/tenant/<tenant_id>/location/config`.
 
 Body content:
 
@@ -309,14 +359,16 @@ Body content:
 ```
 
 Existing `/attach` and `/detach` endpoint will have the same
-behavior as calling `/configure` with `AttachedSingle` and `Detached`
-states respectively.
+behavior as calling `/location/config` with `AttachedSingle` and `Detached`
+states respectively. These endpoints will be deprecated and later
+removed.
 
 The generation attribute is mandatory for entering `AttachedSingle` or
 `AttachedMulti`.
 
 The configuration attribute is mandatory when entering any state other
-than `Detached`.
+than `Detached`. This configuration is the same as the body for
+the existing `/tenant/<tenant_id>/config` endpoint.
 
 The `flush` argument indicates whether the pageservers should flush
 to S3 before proceeding: this only has any effect if the node is
@@ -389,6 +441,22 @@ be updated that way. The reconciliation will only be needed
 if the node was unavailable but still running.
 
 ## Alternatives considered
+
+### Only enabling secondary locations for tenants on a higher service tier
+
+This will make sense in future, especially for tiny databases that may be
+downloaded from S3 in milliseconds when needed.
+
+However, it is not wise to do it immediately, because pageservers contain
+a mixture of higher and lower tier workloads. If we had 1 tenant with
+a secondary location and 9 without, then those other 9 tenants will do
+a lot of I/O as they try to recover from S3, which may degrade the
+service of the tenant which had a secondary location.
+
+Until we segregate tenant on different service tiers on different pageserver
+nodes, or implement & test QoS to ensure that tenants with secondaries are
+not harmed by tenants without, we should use the same failover approach
+for all the tenants.
 
 ### Hot secondary locations (continuous WAL replay)
 
