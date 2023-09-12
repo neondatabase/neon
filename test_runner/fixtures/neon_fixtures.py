@@ -1583,6 +1583,7 @@ class NeonPageserver(PgProtocol):
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
+            '.*registered custom resource manager "neon".*',
         ]
 
     def start(

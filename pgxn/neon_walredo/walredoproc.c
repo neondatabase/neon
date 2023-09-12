@@ -43,6 +43,8 @@
 
 #include "postgres.h"
 
+#include "../neon/neon_pgversioncompat.h"
+
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -61,8 +63,10 @@
 #include <malloc.h>
 #endif
 
+#if PG_MAJORVERSION_NUM < 16
 #ifndef HAVE_GETRUSAGE
 #include "rusagestub.h"
+#endif
 #endif
 
 #include "access/clog.h"
@@ -187,7 +191,7 @@ enter_seccomp_mode(void)
  * backend processes. Some initialization was done in CallExtMain
  * already.
  */
-void
+PGDLLEXPORT void
 WalRedoMain(int argc, char *argv[])
 {
 	int			firstchar;
@@ -200,7 +204,7 @@ WalRedoMain(int argc, char *argv[])
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
-	 * DropRelFileNodeAllLocalBuffers() is proportional to the number of
+	 * DropRelationAllLocalBuffers() is proportional to the number of
 	 * buffers. So let's keep it small (default value is 1024)
 	 */
 	num_temp_buffers = 4;
@@ -212,6 +216,12 @@ WalRedoMain(int argc, char *argv[])
 	smgr_hook = smgr_inmem;
 	smgr_init_hook = smgr_init_inmem;
 
+#if PG_VERSION_NUM >= 160000
+	/* make rmgr registry believe we can register the resource manager */
+	process_shared_preload_libraries_in_progress = true;
+	load_file("$libdir/neon_rmgr", false);
+	process_shared_preload_libraries_in_progress = false;
+#endif
 
 	/* Initialize MaxBackends (if under postmaster, was done already) */
 	MaxConnections = 1;
@@ -300,6 +310,9 @@ WalRedoMain(int argc, char *argv[])
 	 */
 	MemoryContextSwitchTo(MessageContext);
 	initStringInfo(&input_message);
+#if PG_MAJORVERSION_NUM >= 16
+	MyBackendType = B_BACKEND;
+#endif
 
 	for (;;)
 	{
@@ -534,16 +547,16 @@ CreateFakeSharedMemoryAndSemaphores()
 
 /* Version compatility wrapper for ReadBufferWithoutRelcache */
 static inline Buffer
-NeonRedoReadBuffer(RelFileNode rnode,
+NeonRedoReadBuffer(NRelFileInfo rinfo,
 		   ForkNumber forkNum, BlockNumber blockNum,
 		   ReadBufferMode mode)
 {
 #if PG_VERSION_NUM >= 150000
-	return ReadBufferWithoutRelcache(rnode, forkNum, blockNum, mode,
+	return ReadBufferWithoutRelcache(rinfo, forkNum, blockNum, mode,
 									 NULL, /* no strategy */
 									 true); /* WAL redo is only performed on permanent rels */
 #else
-	return ReadBufferWithoutRelcache(rnode, forkNum, blockNum, mode,
+	return ReadBufferWithoutRelcache(rinfo, forkNum, blockNum, mode,
 									 NULL); /* no strategy */
 #endif
 }
@@ -647,7 +660,7 @@ ReadRedoCommand(StringInfo inBuf)
 static void
 BeginRedoForBlock(StringInfo input_message)
 {
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber forknum;
 	BlockNumber blknum;
 	SMgrRelation reln;
@@ -662,22 +675,26 @@ BeginRedoForBlock(StringInfo input_message)
 	 * BlockNumber
 	 */
 	forknum = pq_getmsgbyte(input_message);
-	rnode.spcNode = pq_getmsgint(input_message, 4);
-	rnode.dbNode = pq_getmsgint(input_message, 4);
-	rnode.relNode = pq_getmsgint(input_message, 4);
+#if PG_MAJORVERSION_NUM < 16
+	rinfo.spcNode = pq_getmsgint(input_message, 4);
+	rinfo.dbNode = pq_getmsgint(input_message, 4);
+	rinfo.relNode = pq_getmsgint(input_message, 4);
+#else
+	rinfo.spcOid = pq_getmsgint(input_message, 4);
+	rinfo.dbOid = pq_getmsgint(input_message, 4);
+	rinfo.relNumber = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 	wal_redo_buffer = InvalidBuffer;
 
-	INIT_BUFFERTAG(target_redo_tag, rnode, forknum, blknum);
+	InitBufferTag(&target_redo_tag, &rinfo, forknum, blknum);
 
 	elog(TRACE, "BeginRedoForBlock %u/%u/%u.%d blk %u",
-		 target_redo_tag.rnode.spcNode,
-		 target_redo_tag.rnode.dbNode,
-		 target_redo_tag.rnode.relNode,
+		 RelFileInfoFmt(rinfo),
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
-	reln = smgropen(rnode, InvalidBackendId, RELPERSISTENCE_PERMANENT);
+	reln = smgropen(rinfo, InvalidBackendId, RELPERSISTENCE_PERMANENT);
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{
@@ -691,7 +708,7 @@ BeginRedoForBlock(StringInfo input_message)
 static void
 PushPage(StringInfo input_message)
 {
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber forknum;
 	BlockNumber blknum;
 	const char *content;
@@ -709,13 +726,19 @@ PushPage(StringInfo input_message)
 	 * 8k page content
 	 */
 	forknum = pq_getmsgbyte(input_message);
-	rnode.spcNode = pq_getmsgint(input_message, 4);
-	rnode.dbNode = pq_getmsgint(input_message, 4);
-	rnode.relNode = pq_getmsgint(input_message, 4);
+#if PG_MAJORVERSION_NUM < 16
+	rinfo.spcNode = pq_getmsgint(input_message, 4);
+	rinfo.dbNode = pq_getmsgint(input_message, 4);
+	rinfo.relNode = pq_getmsgint(input_message, 4);
+#else
+	rinfo.spcOid = pq_getmsgint(input_message, 4);
+	rinfo.dbOid = pq_getmsgint(input_message, 4);
+	rinfo.relNumber = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 	content = pq_getmsgbytes(input_message, BLCKSZ);
 
-	buf = NeonRedoReadBuffer(rnode, forknum, blknum, RBM_ZERO_AND_LOCK);
+	buf = NeonRedoReadBuffer(rinfo, forknum, blknum, RBM_ZERO_AND_LOCK);
 	wal_redo_buffer = buf;
 	page = BufferGetPage(buf);
 	memcpy(page, content, BLCKSZ);
@@ -831,7 +854,7 @@ ApplyRecord(StringInfo input_message)
 	 */
 	if (BufferIsInvalid(wal_redo_buffer))
 	{
-		wal_redo_buffer = NeonRedoReadBuffer(target_redo_tag.rnode,
+		wal_redo_buffer = NeonRedoReadBuffer(BufTagGetNRelFileInfo(target_redo_tag),
 											 target_redo_tag.forkNum,
 											 target_redo_tag.blockNum,
 											 RBM_NORMAL);
@@ -878,26 +901,29 @@ static bool
 redo_block_filter(XLogReaderState *record, uint8 block_id)
 {
 	BufferTag	target_tag;
+	NRelFileInfo rinfo;
 
 #if PG_VERSION_NUM >= 150000
 	XLogRecGetBlockTag(record, block_id,
-					   &target_tag.rnode, &target_tag.forkNum, &target_tag.blockNum);
+					   &rinfo, &target_tag.forkNum, &target_tag.blockNum);
 #else
 	if (!XLogRecGetBlockTag(record, block_id,
-							&target_tag.rnode, &target_tag.forkNum, &target_tag.blockNum))
+							&rinfo, &target_tag.forkNum, &target_tag.blockNum))
 	{
 		/* Caller specified a bogus block_id */
 		elog(PANIC, "failed to locate backup block with ID %d", block_id);
 	}
 #endif
+	CopyNRelFileInfoToBufTag(target_tag, rinfo);
 
 	/*
 	 * Can a WAL redo function ever access a relation other than the one that
 	 * it modifies? I don't see why it would.
+	 * Custom RMGRs may be affected by this.
 	 */
-	if (!RelFileNodeEquals(target_tag.rnode, target_redo_tag.rnode))
+	if (!RelFileInfoEquals(rinfo, BufTagGetNRelFileInfo(target_redo_tag)))
 		elog(WARNING, "REDO accessing unexpected page: %u/%u/%u.%u blk %u",
-			 target_tag.rnode.spcNode, target_tag.rnode.dbNode, target_tag.rnode.relNode, target_tag.forkNum, target_tag.blockNum);
+			 RelFileInfoFmt(rinfo), target_tag.forkNum, target_tag.blockNum);
 
 	/*
 	 * If this block isn't one we are currently restoring, then return 'true'
@@ -914,7 +940,7 @@ redo_block_filter(XLogReaderState *record, uint8 block_id)
 static void
 GetPage(StringInfo input_message)
 {
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber forknum;
 	BlockNumber blknum;
 	Buffer		buf;
@@ -931,14 +957,20 @@ GetPage(StringInfo input_message)
 	 * BlockNumber
 	 */
 	forknum = pq_getmsgbyte(input_message);
-	rnode.spcNode = pq_getmsgint(input_message, 4);
-	rnode.dbNode = pq_getmsgint(input_message, 4);
-	rnode.relNode = pq_getmsgint(input_message, 4);
+#if PG_MAJORVERSION_NUM < 16
+	rinfo.spcNode = pq_getmsgint(input_message, 4);
+	rinfo.dbNode = pq_getmsgint(input_message, 4);
+	rinfo.relNode = pq_getmsgint(input_message, 4);
+#else
+	rinfo.spcOid = pq_getmsgint(input_message, 4);
+	rinfo.dbOid = pq_getmsgint(input_message, 4);
+	rinfo.relNumber = pq_getmsgint(input_message, 4);
+#endif
 	blknum = pq_getmsgint(input_message, 4);
 
 	/* FIXME: check that we got a BeginRedoForBlock message or this earlier */
 
-	buf = NeonRedoReadBuffer(rnode, forknum, blknum, RBM_NORMAL);
+	buf = NeonRedoReadBuffer(rinfo, forknum, blknum, RBM_NORMAL);
 	Assert(buf == wal_redo_buffer);
 	page = BufferGetPage(buf);
 	/* single thread, so don't bother locking the page */
@@ -961,7 +993,7 @@ GetPage(StringInfo input_message)
 	} while (tot_written < BLCKSZ);
 
 	ReleaseBuffer(buf);
-	DropRelFileNodeAllLocalBuffers(rnode);
+	DropRelationAllLocalBuffers(rinfo);
 	wal_redo_buffer = InvalidBuffer;
 
 	elog(TRACE, "Page sent back for block %u", blknum);

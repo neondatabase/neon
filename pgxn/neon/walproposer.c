@@ -51,6 +51,9 @@
 #include "libpq/pqformat.h"
 #include "replication/slot.h"
 #include "replication/walreceiver.h"
+#if PG_VERSION_NUM >= 160000
+#include "replication/walsender_private.h"
+#endif
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
@@ -73,10 +76,10 @@
 
 static bool syncSafekeepers = false;
 
-char	   *wal_acceptors_list;
-int			wal_acceptor_reconnect_timeout;
-int			wal_acceptor_connection_timeout;
-bool		am_wal_proposer;
+char	   *wal_acceptors_list = "";
+int			wal_acceptor_reconnect_timeout = 1000;
+int			wal_acceptor_connection_timeout = 10000;
+bool		am_wal_proposer = false;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
@@ -191,7 +194,7 @@ pg_init_walproposer(void)
 /*
  * Entry point for `postgres --sync-safekeepers`.
  */
-void
+PGDLLEXPORT void
 WalProposerSync(int argc, char *argv[])
 {
 	struct stat stat_buf;
@@ -315,7 +318,7 @@ nwp_shmem_startup_hook(void)
 /*
  * WAL proposer bgworker entry point.
  */
-void
+PGDLLEXPORT void
 WalProposerMain(Datum main_arg)
 {
 #if PG_VERSION_NUM >= 150000
@@ -384,40 +387,89 @@ WalProposerPoll(void)
 	while (true)
 	{
 		Safekeeper *sk;
-		int			rc;
+		bool		wait_timeout;
 		WaitEvent	event;
 		TimestampTz now = GetCurrentTimestamp();
 
-		rc = WaitEventSetWait(waitEvents, TimeToReconnect(now),
-							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
-		sk = (Safekeeper *) event.user_data;
+#if PG_MAJORVERSION_NUM >= 16
+		if (WalSndCtl != NULL)
+			ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+#endif
 
 		/*
-		 * If the event contains something that one of our safekeeper states
-		 * was waiting for, we'll advance its state.
+		 * Wait for a wait event to happen, or timeout:
+		 *  - Safekeeper socket can become available for READ or WRITE
+		 *  - Our latch got set, because
+		 *     * PG15-: We got woken up by a process triggering the WalSender
+		 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
 		 */
-		if (rc != 0 && (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)))
-			AdvancePollState(sk, event.events);
-
-		/*
-		 * If the timeout expired, attempt to reconnect to any safekeepers
-		 * that we dropped
-		 */
-		ReconnectSafekeepers();
-
-		/*
-		 * If wait is terminated by latch set (walsenders' latch is set on
-		 * each wal flush), then exit loop. (no need for pm death check due to
-		 * WL_EXIT_ON_PM_DEATH)
-		 */
-		if (rc != 0 && (event.events & WL_LATCH_SET))
+		if (WaitEventSetWait(waitEvents, TimeToReconnect(now),
+							 &event, 1, WAIT_EVENT_WAL_SENDER_MAIN) == 1)
 		{
-			ResetLatch(MyLatch);
-			break;
+			/*
+			 * If wait is terminated by latch set (walsenders' latch is set on
+			 * each wal flush), then exit loop. (no need for pm death check due to
+			 * WL_EXIT_ON_PM_DEATH)
+			 */
+			if (event.events & WL_LATCH_SET)
+			{
+				/* Reset our latch */
+				ResetLatch(MyLatch);
+
+#if PG_MAJORVERSION_NUM >= 16
+				if (WalSndCtl != NULL)
+					ConditionVariableCancelSleep();
+#endif
+				break;
+			}
+
+			/*
+			 * If the event contains something that one of our safekeeper states
+			 * was waiting for, we'll advance its state.
+			 */
+			if (event.events & (WL_SOCKET_MASK))
+			{
+				sk = (Safekeeper *) event.user_data;
+				AdvancePollState(sk, event.events);
+			}
+			else
+				pg_unreachable();
+		}
+		else /* timeout expired */
+		{
+#if PG_MAJORVERSION_NUM >= 16
+			/* First, cancel sleep - we might do some complex stuff after this */
+			if (WalSndCtl != NULL)
+				ConditionVariableCancelSleep();
+#endif
+
+			/*
+			 * If the timeout expired, attempt to reconnect to any safekeepers
+			 * that we dropped
+			 */
+			ReconnectSafekeepers();
+			wait_timeout = true;
+
+			/*
+			 * Ensure flushrecptr is set to a recent value. This fixes a case
+			 * where we've not been notified of new WAL records when we were
+			 * planning on consuming them.
+			 */
+			if (!syncSafekeepers) {
+				XLogRecPtr flushed;
+
+#if PG_MAJORVERSION_NUM < 15
+				flushed = GetFlushRecPtr();
+#else
+				flushed = GetFlushRecPtr(NULL);
+#endif
+				if (flushed != availableLsn)
+					break;
+			}
 		}
 
 		now = GetCurrentTimestamp();
-		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
+		if (wait_timeout || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
 
@@ -611,7 +663,8 @@ UpdateEventSet(Safekeeper *sk, uint32 events)
 	ModifyWaitEvent(waitEvents, sk->eventPos, events, NULL);
 }
 
-/* Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
+/*
+ * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
  *
  * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
  */
@@ -1408,7 +1461,12 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 			elog(FATAL, "could not append password to the safekeeper connection string");
 	}
 
+#if PG_MAJORVERSION_NUM < 16
 	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
+#else
+	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
+#endif
+
 	if (!wrconn)
 	{
 		ereport(WARNING,
@@ -2242,9 +2300,10 @@ HandleSafekeeperResponse(void)
 			if (synced)
 				n_synced++;
 		}
+
 		if (n_synced >= quorum)
 		{
-			/* All safekeepers synced! */
+			/* A quorum of safekeepers has been synced! */
 			
 			/*
 			 * Send empty message to broadcast latest truncateLsn to all safekeepers.

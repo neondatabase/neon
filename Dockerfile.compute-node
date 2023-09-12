@@ -371,12 +371,21 @@ RUN wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.4.0.tar.gz 
 FROM build-deps AS timescaledb-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+ARG PG_VERSION
 ENV PATH "/usr/local/pgsql/bin:$PATH"
 
-RUN apt-get update && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        export TIMESCALEDB_VERSION=2.10.1 \
+        export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
+        ;; \
+      *) \
+        echo "TimescaleDB not supported on this PostgreSQL version. See https://github.com/timescale/timescaledb/issues/5752" && exit 0;; \
+    esac && \
+    apt-get update && \
     apt-get install -y cmake && \
-    wget https://github.com/timescale/timescaledb/archive/refs/tags/2.10.1.tar.gz -O timescaledb.tar.gz && \
-    echo "6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 timescaledb.tar.gz" | sha256sum --check && \
+    wget https://github.com/timescale/timescaledb/archive/refs/tags/${TIMESCALEDB_VERSION}.tar.gz -O timescaledb.tar.gz && \
+    echo "${TIMESCALEDB_CHECKSUM} timescaledb.tar.gz" | sha256sum --check && \
     mkdir timescaledb-src && cd timescaledb-src && tar xvzf ../timescaledb.tar.gz --strip-components=1 -C . && \
     ./bootstrap -DSEND_TELEMETRY_DEFAULT:BOOL=OFF -DUSE_TELEMETRY:BOOL=OFF -DAPACHE_ONLY:BOOL=ON -DCMAKE_BUILD_TYPE=Release && \
     cd build && \
@@ -404,6 +413,10 @@ RUN case "${PG_VERSION}" in \
       "v15") \
         export PG_HINT_PLAN_VERSION=15_1_5_0 \
         export PG_HINT_PLAN_CHECKSUM=564cbbf4820973ffece63fbf76e3c0af62c4ab23543142c7caaa682bc48918be \
+        ;; \
+      "v16") \
+        export PG_HINT_PLAN_VERSION=16_1_6_0 \
+        export PG_HINT_PLAN_CHECKSUM=ce6a8040c78012000f5da7240caf6a971401412f41d33f930f09291e6c304b99 \
         ;; \
       *) \
         echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
@@ -551,8 +564,16 @@ FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
-RUN wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/0.3.5.tar.gz -O pg_embedding.tar.gz && \
-    echo "0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 pg_embedding.tar.gz" | sha256sum --check && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        export PG_EMBEDDING_VERSION=0.3.5 \
+        export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
+        ;; \
+      *) \
+        echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
+    esac && \
+    wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/${PG_EMBEDDING_VERSION}.tar.gz -O pg_embedding.tar.gz && \
+    echo "${PG_EMBEDDING_CHECKSUM} pg_embedding.tar.gz" | sha256sum --check && \
     mkdir pg_embedding-src && cd pg_embedding-src && tar xvzf ../pg_embedding.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -584,6 +605,10 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
 #
+# FIXME: This needs to be updated to latest version of 'pgrx' (it was renamed from
+# 'pgx' to 'pgrx') for PostgreSQL 16. And that in turn requires bumping the pgx
+# dependency on all the rust extension that depend on it, too.
+#
 #########################################################################################
 FROM build-deps AS rust-extensions-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -598,7 +623,17 @@ USER nonroot
 WORKDIR /home/nonroot
 ARG PG_VERSION
 
-RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        ;; \
+      "v16") \
+        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
+	;; \
+      *) \
+        echo "unexpected PostgreSQL version ${PG_VERSION}" && exit 1 \
+        ;; \
+    esac && \
+    curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
@@ -615,10 +650,21 @@ USER root
 #########################################################################################
 
 FROM rust-extensions-build AS pg-jsonschema-pg-build
+ARG PG_VERSION
 
 # caeab60d70b2fd3ae421ec66466a3abbb37b7ee6 made on 06/03/2023
 # there is no release tag yet, but we need it due to the superuser fix in the control file, switch to git tag after release >= 0.1.5
-RUN wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421ec66466a3abbb37b7ee6.tar.gz -O pg_jsonschema.tar.gz && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        ;; \
+      "v16") \
+        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
+	;; \
+      *) \
+        echo "unexpected PostgreSQL version \"${PG_VERSION}\"" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421ec66466a3abbb37b7ee6.tar.gz -O pg_jsonschema.tar.gz && \
     echo "54129ce2e7ee7a585648dbb4cef6d73f795d94fe72f248ac01119992518469a4 pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xvzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgx = "0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
@@ -633,12 +679,23 @@ RUN wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421e
 #########################################################################################
 
 FROM rust-extensions-build AS pg-graphql-pg-build
+ARG PG_VERSION
 
 # b4988843647450a153439be367168ed09971af85 made on 22/02/2023 (from remove-pgx-contrib-spiext branch)
 # Currently pgx version bump to >= 0.7.2  causes "call to unsafe function" compliation errors in
 # pgx-contrib-spiext. There is a branch that removes that dependency, so use it. It is on the
 # same 1.1 version we've used before.
-RUN wget https://github.com/yrashk/pg_graphql/archive/b4988843647450a153439be367168ed09971af85.tar.gz -O pg_graphql.tar.gz && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        ;; \
+      "v16") \
+        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
+	;; \
+      *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/yrashk/pg_graphql/archive/b4988843647450a153439be367168ed09971af85.tar.gz -O pg_graphql.tar.gz && \
     echo "0c7b0e746441b2ec24187d0e03555faf935c2159e2839bddd14df6dafbc8c9bd pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xvzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgx = "~0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
@@ -656,9 +713,20 @@ RUN wget https://github.com/yrashk/pg_graphql/archive/b4988843647450a153439be367
 #########################################################################################
 
 FROM rust-extensions-build AS pg-tiktoken-pg-build
+ARG PG_VERSION
 
 # 801f84f08c6881c8aa30f405fafbf00eec386a72 made on 10/03/2023
-RUN wget https://github.com/kelvich/pg_tiktoken/archive/801f84f08c6881c8aa30f405fafbf00eec386a72.tar.gz -O pg_tiktoken.tar.gz && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        ;; \
+      "v16") \
+        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
+	;; \
+      *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/kelvich/pg_tiktoken/archive/801f84f08c6881c8aa30f405fafbf00eec386a72.tar.gz -O pg_tiktoken.tar.gz && \
     echo "52f60ac800993a49aa8c609961842b611b6b1949717b69ce2ec9117117e16e4a pg_tiktoken.tar.gz" | sha256sum --check && \
     mkdir pg_tiktoken-src && cd pg_tiktoken-src && tar xvzf ../pg_tiktoken.tar.gz --strip-components=1 -C . && \
     cargo pgx install --release && \
@@ -672,8 +740,19 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/801f84f08c6881c8aa30f405
 #########################################################################################
 
 FROM rust-extensions-build AS pg-pgx-ulid-build
+ARG PG_VERSION
 
-RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -O pgx_ulid.tar.gz && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        ;; \
+      "v16") \
+        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
+	;; \
+      *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -O pgx_ulid.tar.gz && \
     echo "908b7358e6f846e87db508ae5349fb56a88ee6305519074b12f3d5b0ff09f791 pgx_ulid.tar.gz" | sha256sum --check && \
     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xvzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgx        = "=0.7.3"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \

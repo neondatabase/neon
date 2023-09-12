@@ -163,6 +163,20 @@ pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
 pub const RM_LOGICALMSG_ID: u8 = 21;
 
+// from neon_rmgr.h
+pub const RM_NEON_ID: u8 = 134;
+
+pub const XLOG_NEON_HEAP_INIT_PAGE: u8 = 0x80;
+
+pub const XLOG_NEON_HEAP_INSERT: u8 = 0x00;
+pub const XLOG_NEON_HEAP_DELETE: u8 = 0x10;
+pub const XLOG_NEON_HEAP_UPDATE: u8 = 0x20;
+pub const XLOG_NEON_HEAP_HOT_UPDATE: u8 = 0x30;
+pub const XLOG_NEON_HEAP_LOCK: u8 = 0x40;
+pub const XLOG_NEON_HEAP_MULTI_INSERT: u8 = 0x50;
+
+pub const XLOG_NEON_HEAP_VISIBLE: u8 = 0x40;
+
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
 pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
