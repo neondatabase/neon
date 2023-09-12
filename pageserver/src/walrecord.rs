@@ -7,7 +7,7 @@ use bytes::{Buf, Bytes};
 use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
+use postgres_ffi::{BlockNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
@@ -455,90 +455,6 @@ impl XlDropDatabase {
         }
 
         rec
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapInsert {
-    pub offnum: OffsetNumber,
-    pub flags: u8,
-}
-
-impl XlHeapInsert {
-    pub fn decode(buf: &mut Bytes) -> XlHeapInsert {
-        XlHeapInsert {
-            offnum: buf.get_u16_le(),
-            flags: buf.get_u8(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapMultiInsert {
-    pub flags: u8,
-    pub _padding: u8,
-    pub ntuples: u16,
-}
-
-impl XlHeapMultiInsert {
-    pub fn decode(buf: &mut Bytes) -> XlHeapMultiInsert {
-        XlHeapMultiInsert {
-            flags: buf.get_u8(),
-            _padding: buf.get_u8(),
-            ntuples: buf.get_u16_le(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapDelete {
-    pub xmax: TransactionId,
-    pub offnum: OffsetNumber,
-    pub _padding: u16,
-    pub t_cid: u32,
-    pub infobits_set: u8,
-    pub flags: u8,
-}
-
-impl XlHeapDelete {
-    pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
-        XlHeapDelete {
-            xmax: buf.get_u32_le(),
-            offnum: buf.get_u16_le(),
-            _padding: buf.get_u16_le(),
-            t_cid: buf.get_u32_le(),
-            infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapUpdate {
-    pub old_xmax: TransactionId,
-    pub old_offnum: OffsetNumber,
-    pub old_infobits_set: u8,
-    pub flags: u8,
-    pub t_cid: u32,
-    pub new_xmax: TransactionId,
-    pub new_offnum: OffsetNumber,
-}
-
-impl XlHeapUpdate {
-    pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
-        XlHeapUpdate {
-            old_xmax: buf.get_u32_le(),
-            old_offnum: buf.get_u16_le(),
-            old_infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
-            t_cid: buf.get_u32(),
-            new_xmax: buf.get_u32_le(),
-            new_offnum: buf.get_u16_le(),
-        }
     }
 }
 

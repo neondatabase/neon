@@ -756,7 +756,7 @@ impl<'a> WalIngest<'a> {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_MULTI_INSERT => {
-                        let xlrec = XlHeapMultiInsert::decode(buf);
+                        let xlrec = v16::rm_neon::XlNeonHeapMultiInsert::decode(buf);
 
                         let offset_array_len =
                             if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
