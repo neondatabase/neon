@@ -194,33 +194,44 @@ impl Debug for Download {
 #[derive(Debug)]
 pub enum DownloadError {
     /// Validation or other error happened due to user input.
+    ///
+    /// This is only used by LOCAL_FS.
     BadInput(anyhow::Error),
+
     /// The file was not found in the remote storage.
+    ///
+    /// This can only happen during download, never during delete.
     NotFound,
-    /// The file was found in the remote storage, but the download failed.
+
+    /// The file was found in the remote storage, but the operation failed.
+    ///
+    /// The error should have context already describing the real failed operation.
     Other(anyhow::Error),
 }
 
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use DownloadError::*;
         match self {
-            DownloadError::BadInput(e) => {
-                write!(f, "Failed to download a remote file due to user input: {e}")
-            }
-            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
-            DownloadError::Other(e) => {
-                write!(f, "Failed to download a remote file: ")?;
-                if f.alternate() {
-                    write!(f, "{e:#}")
-                } else {
-                    write!(f, "{e}")
-                }
-            }
+            NotFound => write!(f, "No file found for the remote object id given"),
+            // this is same as thiserror error(transparent); it handles {} and {:#}
+            Other(e) | BadInput(e) => std::fmt::Display::fmt(e, f),
         }
     }
 }
 
-impl std::error::Error for DownloadError {}
+impl std::error::Error for DownloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        use DownloadError::*;
+        match self {
+            NotFound => None,
+            Other(_) | BadInput(_) => {
+                // TODO: these are anyhow, cannot return here
+                None
+            }
+        }
+    }
+}
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
