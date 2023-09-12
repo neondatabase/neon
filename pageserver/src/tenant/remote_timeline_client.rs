@@ -706,8 +706,11 @@ impl RemoteTimelineClient {
                 self.schedule_index_upload(upload_queue, metadata);
             }
 
+            for (name, gen) in &with_generations {
+                info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
+            }
+
             // schedule the actual deletions
-            info!("scheduling {} layer file deletions", with_generations.len());
             let op = UploadOp::Delete(Delete {
                 layers: with_generations,
             });
