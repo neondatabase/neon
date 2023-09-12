@@ -880,4 +880,7 @@ redo_neon_heap_multi_insert(XLogReaderState *record)
 		XLogRecordPageWithFreeSpace(rlocator, blkno, freespace);
 }
 
+#else
+/* safeguard for older PostgreSQL versions */
+PG_MODULE_MAGIC;
 #endif
