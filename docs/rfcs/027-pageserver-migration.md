@@ -77,6 +77,11 @@ The user expectations for availability are:
   read unavailability of very recent LSNs)
 - Workload balancing: this RFC defines the mechanism for moving tenants
   around, not the higher level logic for deciding who goes where.
+- Defining all possible configuration flows for tenants: the migration process
+  defined in this RFC demonstrates the sufficiency of the pageserver API, but
+  is not the only kind of configuration change the control plane will ever do.
+  The APIs defined here should let the control plane move tenants around in
+  whatever way is needed while preserving data safety and read availability.
 
 ## Impacted components
 
@@ -258,13 +263,21 @@ lead to a loss of availability for the endpoint when reading from the previous
 generation pageserver.
 
 The _AttachedMulti_ state simply disables deletions. These will be enqueued
-until the control plane eventually transitions the node into AttachedSingle,
-which unblocks deletions.
+in `RemoteTimelineClient` until the control plane transitions the
+node into AttachedSingle, which unblocks deletions.
 
 AttachedMulti is not required for data safety, only to preserve availability
 on pageservers running with stale generations.
 
-A node enters AttachedMulti only when explicitly asked to by the control plane.
+A node enters AttachedMulti only when explicitly asked to by the control plane. It should
+only remain in this state for the duration of a migration.
+
+If a control plane bug leaves
+the node in AttachedMulti for a long time, then we must avoid unbounded memory use from enqueued
+deletions. This may be accomplished simply, by dropping enqueued deletions when some modest
+threshold of delayed deletions (e.g. 10k layers per tenant) is reached. As with all deletions,
+it is safe to skip them, and the leaked objects will be eventually cleaned up by scrub or
+by timeline deletion.
 
 #### AttachedStale
 
@@ -306,7 +319,7 @@ touches each Tenant when it determines that a low-disk condition requires
 some layer eviction. Having selected layers for eviction, the eviction
 task calls `Timeline::evict_layers`.
 
-If evict_layers is called while in AttachedStale state, and some of the to-be-evicted
+**Safety**: If evict_layers is called while in AttachedStale state, and some of the to-be-evicted
 layers are not yet uploaded to S3, then the block on uploads will be lifted. This
 will result in leaking some objects once a migration is complete, but will enable
 the node to manage its disk space properly: if a node is left with some tenants
