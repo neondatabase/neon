@@ -317,21 +317,11 @@ async fn collect_metrics_iteration(
             tenant_resident_size += timeline.resident_physical_size();
         }
 
-        current_metrics
-            .push(MetricsKey::remote_storage_size(tenant_id).at(Utc::now(), tenant.remote_size()));
-
-        current_metrics
-            .push(MetricsKey::resident_size(tenant_id).at(Utc::now(), tenant_resident_size));
-
-        // Note that this metric is calculated in a separate bgworker
-        // Here we only use cached value, which may lag behind the real latest one
-        let synthetic_size = tenant.cached_synthetic_size();
-
-        if synthetic_size != 0 {
-            // only send non-zeroes because otherwise these show up as errors in logs
-            current_metrics
-                .push(MetricsKey::synthetic_size(tenant_id).at(Utc::now(), synthetic_size));
-        }
+        TenantSnapshot::collect(&tenant, tenant_resident_size).to_metrics(
+            tenant_id,
+            Utc::now(),
+            &mut current_metrics,
+        );
     }
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
@@ -419,6 +409,53 @@ async fn collect_metrics_iteration(
                 }
             }
         }
+    }
+}
+
+/// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
+struct TenantSnapshot {
+    resident_size: u64,
+    remote_size: u64,
+    synthetic_size: u64,
+}
+
+impl TenantSnapshot {
+    /// Collect tenant status to have metrics created out of it.
+    ///
+    /// `resident_size` is calculated of the timelines we had access to for other metrics, so we
+    /// cannot just list timelines here.
+    fn collect(t: &Arc<crate::tenant::Tenant>, resident_size: u64) -> Self {
+        TenantSnapshot {
+            resident_size,
+            remote_size: t.remote_size(),
+            // Note that this metric is calculated in a separate bgworker
+            // Here we only use cached value, which may lag behind the real latest one
+            synthetic_size: t.cached_synthetic_size(),
+        }
+    }
+
+    fn to_metrics(
+        &self,
+        tenant_id: TenantId,
+        now: DateTime<Utc>,
+        metrics: &mut Vec<(MetricsKey, (EventType, u64))>,
+    ) {
+        let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
+
+        let resident_size = MetricsKey::resident_size(tenant_id).at(now, self.resident_size);
+
+        let synthetic_size = if self.synthetic_size != 0 {
+            // only send non-zeroes because otherwise these show up as errors in logs
+            Some(MetricsKey::synthetic_size(tenant_id).at(now, self.synthetic_size))
+        } else {
+            None
+        };
+
+        metrics.extend(
+            [Some(remote_size), Some(resident_size), synthetic_size]
+                .into_iter()
+                .flatten(),
+        );
     }
 }
 
