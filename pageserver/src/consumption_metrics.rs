@@ -9,6 +9,7 @@ use crate::tenant::{mgr, LogicalSizeCalculationCause};
 use anyhow;
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
+use futures::stream::StreamExt;
 use pageserver_api::models::TenantState;
 use reqwest::Url;
 use serde::Serialize;
@@ -271,7 +272,6 @@ async fn collect_metrics_iteration(
     ctx: &RequestContext,
     send_cached: bool,
 ) {
-    let mut current_metrics: Vec<RawMetric> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
@@ -286,59 +286,18 @@ async fn collect_metrics_iteration(
         }
     };
 
-    // iterate through list of Active tenants and collect metrics
-    for (tenant_id, tenant_state) in tenants {
-        if tenant_state != TenantState::Active {
-            continue;
+    let tenants = futures::stream::iter(tenants).filter_map(|(id, state)| async move {
+        if state != TenantState::Active {
+            None
+        } else {
+            mgr::get_tenant(id, true)
+                .await
+                .ok()
+                .map(|tenant| (id, tenant))
         }
+    });
 
-        let tenant = match mgr::get_tenant(tenant_id, true).await {
-            Ok(tenant) => tenant,
-            Err(err) => {
-                // It is possible that tenant was deleted between
-                // `list_tenants` and `get_tenant`, so just warn about it.
-                warn!("failed to get tenant {tenant_id:?}: {err:?}");
-                continue;
-            }
-        };
-
-        let mut tenant_resident_size = 0;
-
-        // iterate through list of timelines in tenant
-        for timeline in tenant.list_timelines() {
-            // collect per-timeline metrics only for active timelines
-
-            let timeline_id = timeline.timeline_id;
-
-            match TimelineSnapshot::collect(&timeline, ctx) {
-                Ok(Some(snap)) => {
-                    snap.to_metrics(
-                        tenant_id,
-                        timeline_id,
-                        Utc::now(),
-                        &mut current_metrics,
-                        cached_metrics,
-                    );
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    error!(
-                        "failed to get metrics values for tenant {tenant_id} timeline {}: {e:#?}",
-                        timeline.timeline_id
-                    );
-                    continue;
-                }
-            }
-
-            tenant_resident_size += timeline.resident_physical_size();
-        }
-
-        TenantSnapshot::collect(&tenant, tenant_resident_size).to_metrics(
-            tenant_id,
-            Utc::now(),
-            &mut current_metrics,
-        );
-    }
+    let mut current_metrics = collect(tenants, &cached_metrics, ctx).await;
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
     // See: https://github.com/neondatabase/neon/issues/3485
@@ -426,6 +385,60 @@ async fn collect_metrics_iteration(
             }
         }
     }
+}
+
+async fn collect<S>(
+    tenants: S,
+    cached_metrics: &HashMap<MetricsKey, (EventType, u64)>,
+    ctx: &RequestContext,
+) -> Vec<(MetricsKey, (EventType, u64))>
+where
+    S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
+{
+    let mut current_metrics: Vec<(MetricsKey, (EventType, u64))> = Vec::new();
+
+    let mut tenants = std::pin::pin!(tenants);
+
+    while let Some((tenant_id, tenant)) = tenants.next().await {
+        let mut tenant_resident_size = 0;
+
+        // iterate through list of timelines in tenant
+        for timeline in tenant.list_timelines() {
+            // collect per-timeline metrics only for active timelines
+
+            let timeline_id = timeline.timeline_id;
+
+            match TimelineSnapshot::collect(&timeline, ctx) {
+                Ok(Some(snap)) => {
+                    snap.to_metrics(
+                        tenant_id,
+                        timeline_id,
+                        Utc::now(),
+                        &mut current_metrics,
+                        cached_metrics,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!(
+                        "failed to get metrics values for tenant {tenant_id} timeline {}: {e:#?}",
+                        timeline.timeline_id
+                    );
+                    continue;
+                }
+            }
+
+            tenant_resident_size += timeline.resident_physical_size();
+        }
+
+        TenantSnapshot::collect(&tenant, tenant_resident_size).to_metrics(
+            tenant_id,
+            Utc::now(),
+            &mut current_metrics,
+        );
+    }
+
+    current_metrics
 }
 
 /// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
