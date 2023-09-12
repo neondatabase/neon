@@ -7,11 +7,14 @@ on:
 
 jobs:
   create_release_branch:
-    runs-on: [ubuntu-latest]
+    runs-on: [ ubuntu-latest ]
+
+    permissions:
+      contents: write # for `git push`
 
     steps:
     - name: Check out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         ref: main
 
