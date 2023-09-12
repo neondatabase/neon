@@ -5,6 +5,7 @@ mod frontend;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
@@ -71,6 +72,9 @@ use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 #[derive(Clone)]
 pub struct DeletionQueue {
     client: DeletionQueueClient,
+
+    // Parent cancellation token for the tokens passed into background workers
+    cancel: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -570,7 +574,6 @@ impl DeletionQueue {
         remote_storage: Option<GenericRemoteStorage>,
         control_plane_client: Option<Arc<dyn ControlPlaneGenerationsApi + Send + Sync>>,
         conf: &'static PageServerConf,
-        cancel: CancellationToken,
     ) -> (
         Self,
         Option<FrontendQueueWorker>,
@@ -589,6 +592,11 @@ impl DeletionQueue {
 
         let lsn_table = Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new()));
 
+        // The deletion queue has an independent cancellation token to
+        // the general pageserver shutdown token, because it stays alive a bit
+        // longer to flush after Tenants have all been torn down.
+        let cancel = CancellationToken::new();
+
         let remote_storage = match remote_storage {
             None => {
                 return (
@@ -598,6 +606,7 @@ impl DeletionQueue {
                             executor_tx,
                             lsn_table: lsn_table.clone(),
                         },
+                        cancel,
                     },
                     None,
                     None,
@@ -614,6 +623,7 @@ impl DeletionQueue {
                     executor_tx: executor_tx.clone(),
                     lsn_table: lsn_table.clone(),
                 },
+                cancel: cancel.clone(),
             },
             Some(FrontendQueueWorker::new(
                 conf,
@@ -635,6 +645,32 @@ impl DeletionQueue {
                 cancel.clone(),
             )),
         )
+    }
+
+    pub async fn shutdown(&mut self, timeout: Duration) {
+        self.cancel.cancel();
+
+        match tokio::time::timeout(timeout, self.client.flush()).await {
+            Ok(flush_r) => {
+                match flush_r {
+                    Ok(()) => {
+                        tracing::info!("Deletion queue flushed successfully on shutdown")
+                    }
+                    Err(e) => {
+                        match e {
+                            DeletionQueueError::ShuttingDown => {
+                                // This is not harmful for correctness, but is unexpected: the deletion
+                                // queue's workers should stay alive as long as there are any client handles instantiated.
+                                tracing::warn!("Deletion queue stopped prematurely");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Timed out flushing deletion queue on shutdown ({e})")
+            }
+        }
     }
 }
 
@@ -692,7 +728,6 @@ mod test {
                 Some(self.storage.clone()),
                 Some(self.mock_control_plane.clone()),
                 self.harness.conf,
-                CancellationToken::new(),
             );
 
             self.deletion_queue = deletion_queue;
@@ -815,7 +850,6 @@ mod test {
             Some(storage.clone()),
             Some(mock_control_plane.clone()),
             harness.conf,
-            CancellationToken::new(),
         );
 
         let mut fe_worker = fe_worker.unwrap();

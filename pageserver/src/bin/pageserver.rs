@@ -365,12 +365,7 @@ fn start_pageserver(
 
     // Set up deletion queue
     let (deletion_queue, deletion_frontend, deletion_backend, deletion_executor) =
-        DeletionQueue::new(
-            remote_storage.clone(),
-            control_plane_client,
-            conf,
-            shutdown_pageserver.clone(),
-        );
+        DeletionQueue::new(remote_storage.clone(), control_plane_client, conf);
     if let Some(mut deletion_frontend) = deletion_frontend {
         BACKGROUND_RUNTIME.spawn(async move {
             deletion_frontend
@@ -656,8 +651,9 @@ fn start_pageserver(
             // The plan is to change that over time.
             shutdown_pageserver.take();
             let bg_remote_storage = remote_storage.clone();
+            let bg_deletion_queue = deletion_queue.clone();
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
-                bg_remote_storage.map(|_| deletion_queue.new_client()),
+                bg_remote_storage.map(|_| bg_deletion_queue),
                 0,
             ));
             unreachable!()

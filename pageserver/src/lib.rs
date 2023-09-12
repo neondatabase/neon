@@ -27,8 +27,8 @@ pub mod failpoint_support;
 
 use std::path::Path;
 
-use crate::{deletion_queue::DeletionQueueError, task_mgr::TaskKind};
-use deletion_queue::DeletionQueueClient;
+use crate::task_mgr::TaskKind;
+use deletion_queue::DeletionQueue;
 use tracing::info;
 
 /// Current storage format version
@@ -50,11 +50,8 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
-#[tracing::instrument]
-pub async fn shutdown_pageserver(
-    deletion_queue_client: Option<DeletionQueueClient>,
-    exit_code: i32,
-) {
+#[tracing::instrument(skip(deletion_queue))]
+pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -83,28 +80,8 @@ pub async fn shutdown_pageserver(
     .await;
 
     // Best effort to persist any outstanding deletions, to avoid leaking objects
-    if let Some(deletion_queue_client) = deletion_queue_client {
-        match tokio::time::timeout(Duration::from_secs(5), deletion_queue_client.flush()).await {
-            Ok(flush_r) => {
-                match flush_r {
-                    Ok(()) => {
-                        info!("Deletion queue flushed successfully on shutdown")
-                    }
-                    Err(e) => {
-                        match e {
-                            DeletionQueueError::ShuttingDown => {
-                                // This is not harmful for correctness, but is unexpected: the deletion
-                                // queue's workers should stay alive as long as there are any client handles instantiated.
-                                tracing::warn!("Deletion queue stopped prematurely");
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Timed out flushing deletion queue on shutdown ({e})")
-            }
-        }
+    if let Some(mut deletion_queue) = deletion_queue {
+        deletion_queue.shutdown(Duration::from_secs(5)).await;
     }
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
