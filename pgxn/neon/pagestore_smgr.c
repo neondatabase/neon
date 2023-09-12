@@ -504,11 +504,6 @@ prefetch_wait_for(uint64 ring_index)
 	{
 		entry = GetPrfSlot(MyPState->ring_receive);
 
-#if PG_MAJORVERSION_NUM >= 16
-		/* ensure the log is actually flushed up to the request point */
-		XLogFlush(entry->actual_request_lsn);
-#endif
-
 		Assert(entry->status == PRFS_REQUESTED);
 		if (!prefetch_read(entry))
 			return false;
