@@ -394,6 +394,6 @@ def test_http_pool_begin(static_proxy: NeonProxy):
             expected_code=status,
         )
 
-    query(200, "http", "BEGIN;")
-    query(400, "http", "garbage-lol(&(&(&(&")  # Intentional error to break the transaction
-    query(200, "http", "SELECT 1;")  # Query that should succeed regardless of the transaction
+    query(200, "BEGIN;")
+    query(400, "garbage-lol(&(&(&(&")  # Intentional error to break the transaction
+    query(200, "SELECT 1;")  # Query that should succeed regardless of the transaction
