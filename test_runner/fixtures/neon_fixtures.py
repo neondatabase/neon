@@ -2136,6 +2136,28 @@ class NeonProxy(PgProtocol):
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
+    def http_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"query": query, "params": args}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+        )
+
+        if expected_code is not None:
+            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+        return response.json()
+
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
         request_result.raise_for_status()
