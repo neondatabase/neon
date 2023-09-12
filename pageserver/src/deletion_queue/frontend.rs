@@ -69,7 +69,7 @@ pub(super) enum FrontendQueueMessage {
     Recover(RecoverOp),
 }
 
-pub struct FrontendQueueWorker {
+pub(super) struct FrontendQueueWorker {
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
@@ -315,7 +315,7 @@ impl FrontendQueueWorker {
 
     /// This is the front-end ingest, where we bundle up deletion requests into DeletionList
     /// and write them out, for later validation by the backend and execution by the executor.
-    pub async fn background(&mut self) {
+    pub(super) async fn background(&mut self) {
         info!("Started deletion frontend worker");
 
         // Synchronous, but we only do it once per process lifetime so it's tolerable

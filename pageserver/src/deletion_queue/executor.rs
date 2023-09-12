@@ -21,7 +21,7 @@ pub(super) enum ExecutorMessage {
 
 /// Non-persistent deletion queue, for coalescing multiple object deletes into
 /// larger DeleteObjects requests.
-pub struct ExecutorWorker {
+pub(super) struct ExecutorWorker {
     // Accumulate up to 1000 keys for the next deletion operation
     accumulator: Vec<RemotePath>,
 
@@ -46,7 +46,7 @@ impl ExecutorWorker {
     }
 
     /// Wrap the remote `delete_objects` with a failpoint
-    pub async fn remote_delete(&self) -> Result<(), anyhow::Error> {
+    async fn remote_delete(&self) -> Result<(), anyhow::Error> {
         fail::fail_point!("deletion-queue-before-execute", |_| {
             info!("Skipping execution, failpoint set");
             DELETION_QUEUE_ERRORS
@@ -59,7 +59,7 @@ impl ExecutorWorker {
     }
 
     /// Block until everything in accumulator has been executed
-    pub async fn flush(&mut self) -> Result<(), DeletionQueueError> {
+    async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         while !self.accumulator.is_empty() && !self.cancel.is_cancelled() {
             match self.remote_delete().await {
                 Ok(()) => {
@@ -91,7 +91,7 @@ impl ExecutorWorker {
         }
     }
 
-    pub async fn background(&mut self) -> Result<(), DeletionQueueError> {
+    pub(super) async fn background(&mut self) -> Result<(), DeletionQueueError> {
         self.accumulator.reserve(MAX_KEYS_PER_DELETE);
 
         loop {

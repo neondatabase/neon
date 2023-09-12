@@ -34,7 +34,7 @@ pub(super) enum BackendQueueMessage {
     Delete(DeletionList),
     Flush(FlushOp),
 }
-pub struct BackendQueueWorker {
+pub(super) struct BackendQueueWorker {
     conf: &'static PageServerConf,
     rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
     tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
@@ -103,7 +103,7 @@ impl BackendQueueWorker {
     ///
     /// Valid LSN updates propagate back to their result channel immediately, valid DeletionLists
     /// go into the queue of ready-to-execute lists.
-    pub async fn validate(&mut self) -> Result<(), DeletionQueueError> {
+    async fn validate(&mut self) -> Result<(), DeletionQueueError> {
         let mut tenant_generations = HashMap::new();
         for list in &self.pending_lists {
             for (tenant_id, tenant_list) in &list.tenants {
@@ -241,7 +241,7 @@ impl BackendQueueWorker {
         Ok(())
     }
 
-    pub async fn flush(&mut self) -> Result<(), DeletionQueueError> {
+    async fn flush(&mut self) -> Result<(), DeletionQueueError> {
         tracing::debug!("Flushing with {} pending lists", self.pending_lists.len());
 
         // Issue any required generation validation calls to the control plane
@@ -296,7 +296,7 @@ impl BackendQueueWorker {
         rx.await.map_err(|_| DeletionQueueError::ShuttingDown)
     }
 
-    pub async fn background(&mut self) {
+    pub(super) async fn background(&mut self) {
         tracing::info!("Started deletion backend worker");
 
         while !self.cancel.is_cancelled() {

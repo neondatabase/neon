@@ -364,31 +364,10 @@ fn start_pageserver(
     };
 
     // Set up deletion queue
-    let (deletion_queue, deletion_frontend, deletion_backend, deletion_executor) =
+    let (deletion_queue, deletion_workers) =
         DeletionQueue::new(remote_storage.clone(), control_plane_client, conf);
-    if let Some(mut deletion_frontend) = deletion_frontend {
-        BACKGROUND_RUNTIME.spawn(async move {
-            deletion_frontend
-                .background()
-                .instrument(info_span!(parent:None, "deletion frontend"))
-                .await
-        });
-    }
-    if let Some(mut deletion_backend) = deletion_backend {
-        BACKGROUND_RUNTIME.spawn(async move {
-            deletion_backend
-                .background()
-                .instrument(info_span!(parent: None, "deletion backend"))
-                .await
-        });
-    }
-    if let Some(mut deletion_executor) = deletion_executor {
-        BACKGROUND_RUNTIME.spawn(async move {
-            deletion_executor
-                .background()
-                .instrument(info_span!(parent: None, "deletion executor"))
-                .await
-        });
+    if let Some(deletion_workers) = deletion_workers {
+        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
