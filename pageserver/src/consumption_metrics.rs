@@ -664,53 +664,47 @@ impl TimelineSnapshot {
 }
 
 /// Caclculate synthetic size for each active tenant
-pub async fn calculate_synthetic_size_worker(
+async fn calculate_synthetic_size_worker(
     synthetic_size_calculation_interval: Duration,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
 
+    // reminder: this ticker is ready right away
     let mut ticker = tokio::time::interval(synthetic_size_calculation_interval);
+    let cause = LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 
     loop {
-        tokio::select! {
-            _ = task_mgr::shutdown_watcher() => {
-                return Ok(());
-            },
-            tick_at = ticker.tick() => {
+        let tick_at = tokio::select! {
+            _ = task_mgr::shutdown_watcher() => return Ok(()),
+            tick_at = ticker.tick() => tick_at,
+        };
 
-                let tenants = match mgr::list_tenants().await {
-                    Ok(tenants) => tenants,
-                    Err(e) => {
-                        warn!("cannot get tenant list: {e:#}");
-                        continue;
-                    }
-                };
-                // iterate through list of Active tenants and collect metrics
-                for (tenant_id, tenant_state) in tenants {
+        let tenants = match mgr::list_tenants().await {
+            Ok(tenants) => tenants,
+            Err(e) => {
+                warn!("cannot get tenant list: {e:#}");
+                continue;
+            }
+        };
 
-                    if tenant_state != TenantState::Active {
-                        continue;
-                    }
+        for (tenant_id, tenant_state) in tenants {
+            if tenant_state != TenantState::Active {
+                continue;
+            }
 
-                    if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
-                    {
-                        if let Err(e) = tenant.calculate_synthetic_size(
-                            LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize,
-                            ctx).await {
-                            error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
-                        }
-                    }
-
+            if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await {
+                if let Err(e) = tenant.calculate_synthetic_size(cause, ctx).await {
+                    error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
-
-                crate::tenant::tasks::warn_when_period_overrun(
-                    tick_at.elapsed(),
-                    synthetic_size_calculation_interval,
-                    "consumption_metrics_synthetic_size_worker",
-                );
             }
         }
+
+        crate::tenant::tasks::warn_when_period_overrun(
+            tick_at.elapsed(),
+            synthetic_size_calculation_interval,
+            "consumption_metrics_synthetic_size_worker",
+        );
     }
 }
 
