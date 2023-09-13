@@ -153,7 +153,7 @@ lfc_ensure_opened(void)
 			return false;
 		}
 	}
-	return false;
+	return true;
 }
 
 static void
@@ -640,6 +640,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 	if (rc != BLCKSZ)
 	{
+		LWLockRelease(lfc_lock);
 		lfc_disable("write");
 	}
 	else
@@ -650,9 +651,8 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
 
 		entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
+		LWLockRelease(lfc_lock);
 	}
-
-	LWLockRelease(lfc_lock);
 }
 
 /*
