@@ -225,11 +225,13 @@ pub mod v14 {
             }
         }
     }
+
     #[repr(C)]
     #[derive(Debug)]
     pub struct XlHeapLock {
         pub xmax: TransactionId,
         pub offnum: OffsetNumber,
+        pub t_cid: u32,
         pub infobits_set: u8,
         pub flags: u8,
     }
@@ -239,6 +241,7 @@ pub mod v14 {
             XlHeapLock {
                 xmax: buf.get_u32_le(),
                 offnum: buf.get_u16_le(),
+                t_cid: buf.get_u32(),
                 infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
             }
@@ -247,7 +250,7 @@ pub mod v14 {
 }
 
 pub mod v15 {
-    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate};
+    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert};
 }
 
 pub mod v16 {
@@ -293,6 +296,26 @@ pub mod v16 {
                 flags: buf.get_u8(),
                 new_xmax: buf.get_u32_le(),
                 new_offnum: buf.get_u16_le(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapLock {
+        pub xmax: TransactionId,
+        pub offnum: OffsetNumber,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapLock {
+        pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+            XlHeapLock {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
             }
         }
     }
