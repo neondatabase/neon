@@ -16,7 +16,7 @@ use crate::config::PageServerConf;
 
 /// The Pageserver's client for using the control plane API: this is a small subset
 /// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
-pub struct ControlPlaneClient {
+pub(crate) struct ControlPlaneClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
@@ -24,7 +24,7 @@ pub struct ControlPlaneClient {
 }
 
 #[async_trait::async_trait]
-pub trait ControlPlaneGenerationsApi {
+pub(crate) trait ControlPlaneGenerationsApi {
     async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>>;
     async fn validate(
         &self,
