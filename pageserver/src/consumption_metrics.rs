@@ -389,7 +389,7 @@ async fn collect_metrics_iteration(
 
 async fn collect<S>(
     tenants: S,
-    cached_metrics: &HashMap<MetricsKey, (EventType, u64)>,
+    cache: &HashMap<MetricsKey, (EventType, u64)>,
     ctx: &RequestContext,
 ) -> Vec<(MetricsKey, (EventType, u64))>
 where
@@ -415,7 +415,7 @@ where
                         timeline_id,
                         Utc::now(),
                         &mut current_metrics,
-                        cached_metrics,
+                        cache,
                     );
                 }
                 Ok(None) => {}
