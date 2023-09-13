@@ -591,6 +591,114 @@ pub async fn set_new_tenant_config(
     Ok(())
 }
 
+#[instrument(skip_all, fields(tenant_id, new_location_config))]
+pub(crate) async fn upsert_location(
+    conf: &'static PageServerConf,
+    tenant_id: TenantId,
+    new_location_config: LocationConf,
+    broker_client: storage_broker::BrokerClientChannel,
+    remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue_client: DeletionQueueClient,
+    ctx: &RequestContext,
+) -> Result<(), anyhow::Error> {
+    info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
+
+    let mut existing_tenant = match get_tenant(tenant_id, false).await {
+        Ok(t) => Some(t),
+        Err(GetTenantError::NotFound(_)) => None,
+        Err(e) => anyhow::bail!(e),
+    };
+
+    // If we need to shut down a Tenant, do that first
+    let shutdown_tenant = match (&new_location_config.mode, &existing_tenant) {
+        (LocationMode::Secondary(_), Some(t)) => Some(t),
+        (LocationMode::Attached(attach_conf), Some(t)) => {
+            if attach_conf.generation != t.generation {
+                Some(t)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    // TODO: currently we risk concurrent operations interfering with the tenant
+    // while we await shutdown, but we also should not hold the TenantsMap lock
+    // across the whole operation.  Before we start using this function in production,
+    // a follow-on change will revise how concurrency is handled in TenantsMap.
+    // (https://github.com/neondatabase/neon/issues/5378)
+
+    if let Some(tenant) = shutdown_tenant {
+        let (_guard, progress) = utils::completion::channel();
+        info!("Shutting down attached tenant");
+        match tenant.shutdown(progress, false).await {
+            Ok(()) => {}
+            Err(barrier) => {
+                info!("Shutdown already in progress, waiting for it to complete");
+                barrier.wait().await;
+            }
+        }
+        existing_tenant = None;
+    }
+
+    if let Some(tenant) = existing_tenant {
+        // Update the existing tenant
+        Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+            .await
+            .map_err(SetNewTenantConfigError::Persist)?;
+        tenant.set_new_location_config(new_location_config);
+    } else {
+        // Upsert a fresh TenantSlot into TenantsMap.  Do it within the map write lock,
+        // and re-check that the state of anything we are replacing is as expected.
+        tenant_map_upsert_slot(tenant_id, |old_value| async move {
+            if let Some(TenantSlot::Attached(t)) = old_value {
+                if !matches!(t.current_state(), TenantState::Stopping { .. }) {
+                    anyhow::bail!("Tenant state changed during location configuration update");
+                }
+            }
+
+            let new_slot = match &new_location_config.mode {
+                LocationMode::Secondary(_) => TenantSlot::Secondary,
+                LocationMode::Attached(_attach_config) => {
+                    // Do a schedule_local_tenant_processing
+                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
+                    // we have the same problem in load_tenant/attach_tenant.  Probably
+                    // need a lock in TenantSlot to fix this.
+                    Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+                        .await
+                        .map_err(SetNewTenantConfigError::Persist)?;
+                    let tenant_path = conf.tenant_path(&tenant_id);
+                    let resources = TenantSharedResources {
+                        broker_client,
+                        remote_storage,
+                        deletion_queue_client,
+                    };
+                    let new_tenant = schedule_local_tenant_processing(
+                        conf,
+                        tenant_id,
+                        &tenant_path,
+                        new_location_config,
+                        resources,
+                        None,
+                        &TENANTS,
+                        ctx,
+                    )
+                    .with_context(|| {
+                        format!("Failed to schedule tenant processing in path {tenant_path:?}")
+                    })?;
+
+                    TenantSlot::Attached(new_tenant)
+                }
+            };
+
+            Ok(new_slot)
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GetTenantError {
     #[error("Tenant {0} not found")]
@@ -890,6 +998,30 @@ where
             }
             Err(e) => Err(TenantMapInsertError::Closure(e)),
         },
+    }
+}
+
+async fn tenant_map_upsert_slot<'a, F, R>(
+    tenant_id: TenantId,
+    upsert_fn: F,
+) -> Result<(), TenantMapInsertError>
+where
+    F: FnOnce(Option<TenantSlot>) -> R,
+    R: std::future::Future<Output = anyhow::Result<TenantSlot>>,
+{
+    let mut guard = TENANTS.write().await;
+    let m = match &mut *guard {
+        TenantsMap::Initializing => return Err(TenantMapInsertError::StillInitializing),
+        TenantsMap::ShuttingDown(_) => return Err(TenantMapInsertError::ShuttingDown),
+        TenantsMap::Open(m) => m,
+    };
+
+    match upsert_fn(m.remove(&tenant_id)).await {
+        Ok(upsert_val) => {
+            m.insert(tenant_id, upsert_val);
+            Ok(())
+        }
+        Err(e) => Err(TenantMapInsertError::Closure(e)),
     }
 }
 

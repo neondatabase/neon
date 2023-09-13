@@ -196,6 +196,55 @@ impl LocationConf {
     }
 }
 
+impl TryFrom<&'_ models::LocationConfig> for LocationConf {
+    type Error = anyhow::Error;
+
+    fn try_from(conf: &'_ models::LocationConfig) -> Result<Self, Self::Error> {
+        let tenant_conf = TenantConfOpt::try_from(&conf.tenant_conf)?;
+
+        fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
+            conf.generation
+                .ok_or_else(|| anyhow::anyhow!("Generation must be set when attaching"))
+        }
+
+        let mode = match &conf.mode {
+            models::LocationConfigMode::AttachedMulti => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Multi,
+                })
+            }
+            models::LocationConfigMode::AttachedSingle => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Single,
+                })
+            }
+            models::LocationConfigMode::AttachedStale => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Stale,
+                })
+            }
+            models::LocationConfigMode::Secondary => {
+                let warm = conf
+                    .secondary_conf
+                    .as_ref()
+                    .map(|c| c.warm)
+                    .unwrap_or(false);
+                LocationMode::Secondary(SecondaryLocationConfig { warm })
+            }
+            models::LocationConfigMode::Detached => {
+                // Should not have been called: API code should translate this mode
+                // into a detach rather than trying to decode it as a LocationConf
+                return Err(anyhow::anyhow!("Cannot decode a Detached configuration"));
+            }
+        };
+
+        Ok(Self { mode, tenant_conf })
+    }
+}
+
 impl Default for LocationConf {
     // TODO: this should be removed once tenant loading can guarantee that we are never
     // loading from a directory without a configuration.

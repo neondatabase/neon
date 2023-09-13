@@ -10,6 +10,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use strum_macros;
 use utils::{
     completion,
+    generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
@@ -218,6 +219,8 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
+/// An alternative representation of `pageserver::tenant::TenantConf` with
+/// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
@@ -243,6 +246,39 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
 }
 
+/// A flattened analog of a `pagesever::tenant::LocationMode`, which
+/// lists out all possible states (and the virtual "Detached" state)
+/// in a flat form rather than using rust-style enums.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LocationConfigMode {
+    AttachedSingle,
+    AttachedMulti,
+    AttachedStale,
+    Secondary,
+    Detached,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfigSecondary {
+    pub warm: bool,
+}
+
+/// An alternative representation of `pageserver::tenant::LocationConf`,
+/// for use in external-facing APIs.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfig {
+    pub mode: LocationConfigMode,
+    /// If attaching, in what generation?
+    #[serde(default)]
+    pub generation: Option<Generation>,
+    #[serde(default)]
+    pub secondary_conf: Option<LocationConfigSecondary>,
+
+    // If requesting mode `Secondary`, configuration for that.
+    // Custom storage configuration for the tenant, if any
+    pub tenant_conf: TenantConfig,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
@@ -251,6 +287,16 @@ pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub TenantId)
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigRequest {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 #[serde_as]

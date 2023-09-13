@@ -2215,6 +2215,17 @@ impl Tenant {
         }
     }
 
+    pub(crate) fn set_new_location_config(&self, new_conf: LocationConf) {
+        *self.tenant_conf.write().unwrap() = new_conf;
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.list_timelines();
+        for timeline in timelines {
+            timeline.tenant_conf_updated();
+        }
+    }
+
     /// Helper function to create a new Timeline struct.
     ///
     /// The returned Timeline is in Loading state. The caller is responsible for
