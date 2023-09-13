@@ -90,7 +90,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::config::{LocationConf, TenantConf};
 use super::debug_assert_current_span_has_tenant_and_timeline_id;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -149,7 +149,7 @@ pub struct TimelineResources {
 
 pub struct Timeline {
     conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+    tenant_conf: Arc<RwLock<LocationConf>>,
 
     myself: Weak<Self>,
 
@@ -158,6 +158,9 @@ pub struct Timeline {
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
     /// Never changes for the lifetime of this [`Timeline`] object.
+    ///  
+    /// This duplicates the generation stored in LocationConf, but that structure is mutable:
+    /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
 
     pub pg_version: u32,
@@ -1355,42 +1358,42 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
@@ -1406,7 +1409,7 @@ impl Timeline {
     }
 
     fn get_gc_feedback(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_feedback
             .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
@@ -1419,7 +1422,7 @@ impl Timeline {
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &self.tenant_conf.read().unwrap(),
+                &self.tenant_conf.read().unwrap().tenant_conf,
                 &self.conf.default_tenant_conf,
             );
             let tenant_id_str = self.tenant_id.to_string();
@@ -1438,7 +1441,7 @@ impl Timeline {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         conf: &'static PageServerConf,
-        tenant_conf: Arc<RwLock<TenantConfOpt>>,
+        tenant_conf: Arc<RwLock<LocationConf>>,
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
@@ -1461,7 +1464,7 @@ impl Timeline {
 
         let evictions_low_residence_duration_metric_threshold =
             Self::get_evictions_low_residence_duration_metric_threshold(
-                &tenant_conf_guard,
+                &tenant_conf_guard.tenant_conf,
                 &conf.default_tenant_conf,
             );
         drop(tenant_conf_guard);
@@ -1626,12 +1629,15 @@ impl Timeline {
 
         let tenant_conf_guard = self.tenant_conf.read().unwrap();
         let wal_connect_timeout = tenant_conf_guard
+            .tenant_conf
             .walreceiver_connect_timeout
             .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
         let lagging_wal_timeout = tenant_conf_guard
+            .tenant_conf
             .lagging_wal_timeout
             .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
         let max_lsn_wal_lag = tenant_conf_guard
+            .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);

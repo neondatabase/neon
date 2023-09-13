@@ -300,11 +300,17 @@ pub async fn init_tenant_mgr(
                         Generation::none()
                     };
 
+                    // Apply the generation to the LocationConf and ensure it is in
+                    // attached mode.
+                    let mut location_conf = location_conf.unwrap_or(LocationConf::default());
+                    location_conf.update_generation(generation);
+                    Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
+
                     match schedule_local_tenant_processing(
                         conf,
                         tenant_id,
                         &tenant_dir_path,
-                        generation,
+                        location_conf,
                         resources.clone(),
                         Some(init_order.clone()),
                         &TENANTS,
@@ -343,7 +349,7 @@ pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_path: &Path,
-    generation: Generation,
+    location_conf: LocationConf,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -380,7 +386,7 @@ pub(crate) fn schedule_local_tenant_processing(
                 "attaching mark file present but no remote storage configured".to_string(),
             )
         } else {
-            match Tenant::spawn_attach(conf, tenant_id, generation, resources, tenants, ctx) {
+            match Tenant::spawn_attach(conf, tenant_id, resources, location_conf, tenants, ctx) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -392,7 +398,13 @@ pub(crate) fn schedule_local_tenant_processing(
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
         Tenant::spawn_load(
-            conf, tenant_id, generation, resources, init_order, tenants, ctx,
+            conf,
+            tenant_id,
+            location_conf,
+            resources,
+            init_order,
+            tenants,
+            ctx,
         )
     };
     Ok(tenant)
@@ -536,13 +548,13 @@ pub async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+        let tenant_directory = super::create_tenant_files(conf, location_conf.clone(), &tenant_id, CreateTenantFilesMode::Create).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
             schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                generation, resources, None, &TENANTS, ctx)?;
+                location_conf, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -572,9 +584,7 @@ pub async fn set_new_tenant_config(
     let tenant = get_tenant(tenant_id, true).await?;
 
     let location_conf = LocationConf::new(new_tenant_conf, tenant.generation);
-    let legacy_config_path = conf.tenant_config_path(&tenant_id);
-    let config_path = conf.tenant_location_config_path(&tenant_id);
-    Tenant::persist_tenant_config(&tenant_id, &config_path, &legacy_config_path, location_conf)
+    Tenant::persist_tenant_config(conf, &tenant_id, &location_conf)
         .await
         .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
@@ -726,7 +736,12 @@ pub async fn load_tenant(
             remote_storage,
             deletion_queue_client
         };
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, generation, resources, None,  &TENANTS, ctx)
+
+        let mut location_conf = Tenant::load_tenant_config(conf, &tenant_id).ok().unwrap_or(LocationConf::default());
+        location_conf.update_generation(generation);
+        Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
+
+        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, location_conf, resources, None,  &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -800,7 +815,7 @@ pub async fn attach_tenant(
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
         let location_conf = LocationConf::new(tenant_conf, generation);
-        let tenant_dir = create_tenant_files(conf, location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
+        let tenant_dir = create_tenant_files(conf, location_conf.clone(), &tenant_id, CreateTenantFilesMode::Attach).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -811,8 +826,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-
-        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, location_conf, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

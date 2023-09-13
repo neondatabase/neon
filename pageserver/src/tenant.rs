@@ -180,12 +180,15 @@ pub struct Tenant {
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
     // This is necessary to allow global config updates.
-    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+    tenant_conf: Arc<RwLock<LocationConf>>,
 
     tenant_id: TenantId,
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
+    ///  
+    /// This duplicates the generation stored in LocationConf, but that structure is mutable:
+    /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
 
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
@@ -529,14 +532,13 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        generation: Generation,
         resources: TenantSharedResources,
+        location_conf: LocationConf,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
-        let location_conf =
-            Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
+        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
 
         let TenantSharedResources {
             broker_client,
@@ -544,14 +546,12 @@ impl Tenant {
             deletion_queue_client,
         } = resources;
 
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
-            location_conf.tenant_conf,
+            location_conf,
             wal_redo_manager,
             tenant_id,
-            generation,
             remote_storage.clone(),
             deletion_queue_client,
         ));
@@ -862,10 +862,9 @@ impl Tenant {
                 backtrace: String::new(),
             },
             conf,
-            TenantConfOpt::default(),
+            LocationConf::default(),
             wal_redo_manager,
             tenant_id,
-            Generation::broken(),
             None,
             DeletionQueueClient::broken(),
         ))
@@ -884,21 +883,13 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        generation: Generation,
+        location_conf: LocationConf,
         resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         span::debug_assert_current_span_has_tenant_id();
-
-        let tenant_conf = match Self::load_tenant_config(conf, &tenant_id) {
-            Ok(conf) => conf,
-            Err(e) => {
-                error!("load tenant config failed: {:?}", e);
-                return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
-            }
-        };
 
         let broker_client = resources.broker_client;
         let remote_storage = resources.remote_storage;
@@ -907,10 +898,9 @@ impl Tenant {
         let tenant = Tenant::new(
             TenantState::Loading,
             conf,
-            tenant_conf.tenant_conf,
+            location_conf,
             wal_redo_manager,
             tenant_id,
-            generation,
             remote_storage.clone(),
             resources.deletion_queue_client.clone(),
         );
@@ -2112,7 +2102,7 @@ where
 
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
-        *self.tenant_conf.read().unwrap()
+        self.tenant_conf.read().unwrap().tenant_conf
     }
 
     pub fn effective_config(&self) -> TenantConf {
@@ -2121,84 +2111,84 @@ impl Tenant {
     }
 
     pub fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     pub fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     pub fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     pub fn get_compaction_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_period
             .unwrap_or(self.conf.default_tenant_conf.compaction_period)
     }
 
     pub fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_horizon
             .unwrap_or(self.conf.default_tenant_conf.gc_horizon)
     }
 
     pub fn get_gc_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_period
             .unwrap_or(self.conf.default_tenant_conf.gc_period)
     }
 
     pub fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     pub fn get_pitr_interval(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .pitr_interval
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .trace_read_requests
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .min_resident_size_override
             .or(self.conf.default_tenant_conf.min_resident_size_override)
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
-        *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2268,10 +2258,9 @@ impl Tenant {
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
-        tenant_conf: TenantConfOpt,
+        tenant_conf: LocationConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
-        generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
@@ -2328,6 +2317,11 @@ impl Tenant {
                 }
             }
         });
+
+        let generation = match &tenant_conf.mode {
+            LocationMode::Attached(attach_conf) => attach_conf.generation,
+            _ => panic!("Tried to construct a Tenant in non-attached state, this is a bug"),
+        };
 
         Tenant {
             tenant_id,
@@ -2411,16 +2405,28 @@ impl Tenant {
 
     #[tracing::instrument(skip_all, fields(%tenant_id))]
     pub(super) async fn persist_tenant_config(
+        conf: &'static PageServerConf,
+        tenant_id: &TenantId,
+        location_conf: &LocationConf,
+    ) -> anyhow::Result<()> {
+        let legacy_config_path = conf.tenant_config_path(tenant_id);
+        let config_path = conf.tenant_location_config_path(tenant_id);
+        Self::persist_tenant_config_at(tenant_id, &config_path, &legacy_config_path, location_conf)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    pub(super) async fn persist_tenant_config_at(
         tenant_id: &TenantId,
         config_path: &Path,
         legacy_config_path: &Path,
-        location_conf: LocationConf,
+        location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
         // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
         Self::persist_tenant_config_legacy(
             tenant_id,
             legacy_config_path,
-            location_conf.tenant_conf,
+            &location_conf.tenant_conf,
         )
         .await?;
 
@@ -2462,7 +2468,7 @@ impl Tenant {
     async fn persist_tenant_config_legacy(
         tenant_id: &TenantId,
         target_config_path: &Path,
-        tenant_conf: TenantConfOpt,
+        tenant_conf: &TenantConfOpt,
     ) -> anyhow::Result<()> {
         // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
@@ -3275,11 +3281,11 @@ async fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(
+    Tenant::persist_tenant_config_at(
         tenant_id,
         &temporary_tenant_config_path,
         &temporary_legacy_tenant_config_path,
-        location_conf,
+        &location_conf,
     )
     .await?;
 
@@ -3567,10 +3573,9 @@ pub mod harness {
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
                 self.conf,
-                TenantConfOpt::from(self.tenant_conf),
+                LocationConf::new(TenantConfOpt::from(self.tenant_conf), self.generation),
                 walredo_mgr,
                 self.tenant_id,
-                self.generation,
                 Some(self.remote_storage.clone()),
                 self.deletion_queue.new_client(),
             ));
