@@ -25,7 +25,7 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::{LocationConf, TenantConfOpt};
+use crate::tenant::config::{LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
@@ -86,12 +86,23 @@ pub(crate) enum TenantsMap {
 }
 
 impl TenantsMap {
+    /// Convenience function for typical usage, where we want to get a `Tenant` object, for
+    /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
+    /// None is returned.
     pub(crate) fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 m.get(tenant_id).and_then(TenantSlot::get_attached)
             }
+        }
+    }
+
+    /// Get the contents of the map at this tenant ID, even if it is in secondary state.
+    pub(crate) fn get_slot(&self, tenant_id: &TenantId) -> Option<&TenantSlot> {
+        match self {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.get(tenant_id),
         }
     }
     pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
@@ -243,19 +254,39 @@ pub async fn init_tenant_mgr(
                         }
                     };
 
+                    // Try loading the location configuration
+                    let location_conf = Tenant::load_tenant_config(conf, &tenant_id).ok();
+
                     let generation = if let Some(generations) = &tenant_generations {
                         // We have a generation map: treat it as the authority for whether
                         // this tenant is really attached.
                         if let Some(gen) = generations.get(&tenant_id) {
                             *gen
                         } else {
-                            info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
-                            if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                                error!(
-                                    "Failed to remove detached tenant directory '{}': {:?}",
-                                    tenant_dir_path.display(),
-                                    e
-                                );
+                            let is_secondary = location_conf
+                                .map(|c| matches!(c.mode, LocationMode::Secondary(_)))
+                                .unwrap_or(false);
+
+                            if is_secondary {
+                                // We do not require the control plane's permission to re-activate secondary
+                                // mode tenants on restart, because they do no remote writes and require no
+                                // generation number
+                                info!("Loaded tenant {tenant_id} in secondary mode");
+                                tenants.insert(tenant_id, TenantSlot::Secondary);
+                            } else {
+                                // TODO: augment re-attach API to enable the control plane to
+                                // instruct us about secondary attachments.  That way, instead of throwing
+                                // away local state, we can gracefully fall back to secondary here, if the control
+                                // plane tells us so.
+                                // (https://github.com/neondatabase/neon/issues/5377)
+                                info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
+                                if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
+                                    error!(
+                                        "Failed to remove detached tenant directory '{}': {:?}",
+                                        tenant_dir_path.display(),
+                                        e
+                                    );
+                                }
                             }
                             continue;
                         }
@@ -867,28 +898,35 @@ where
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
     let tenant = {
-        tenants
+        match tenants
             .write()
             .await
-            .get(&tenant_id)
-            .cloned()
+            .get_slot(&tenant_id)
             .ok_or(TenantStateError::NotFound(tenant_id))?
+        {
+            TenantSlot::Attached(t) => Some(t.clone()),
+            TenantSlot::Secondary => None,
+        }
     };
 
     // allow pageserver shutdown to await for our completion
     let (_guard, progress) = completion::channel();
 
-    // whenever we remove a tenant from memory, we don't want to flush and wait for upload
-    let freeze_and_flush = false;
+    // If the tenant was attached, shut it down gracefully.  For secondary
+    // locations this part is not necessary
+    if let Some(attached_tenant) = tenant {
+        // whenever we remove a tenant from memory, we don't want to flush and wait for upload
+        let freeze_and_flush = false;
 
-    // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
-    // that we can continue safely to cleanup.
-    match tenant.shutdown(progress, freeze_and_flush).await {
-        Ok(()) => {}
-        Err(_other) => {
-            // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
-            // wait for it but return an error right away because these are distinct requests.
-            return Err(TenantStateError::IsStopping(tenant_id));
+        // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+        // that we can continue safely to cleanup.
+        match attached_tenant.shutdown(progress, freeze_and_flush).await {
+            Ok(()) => {}
+            Err(_other) => {
+                // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
+                // wait for it but return an error right away because these are distinct requests.
+                return Err(TenantStateError::IsStopping(tenant_id));
+            }
         }
     }
 
