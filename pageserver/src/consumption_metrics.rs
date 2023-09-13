@@ -325,7 +325,7 @@ async fn collect_metrics_iteration(
     // Split into chunks of 1000 metrics to avoid exceeding the max request size
     let chunks = current_metrics.chunks(CHUNK_SIZE);
 
-    let mut chunk_to_send: Vec<Event<Ids>> = Vec::with_capacity(CHUNK_SIZE);
+    let mut chunk_to_send: Vec<Event<Ids, &'static str>> = Vec::with_capacity(CHUNK_SIZE);
 
     let node_id = node_id.to_string();
 
