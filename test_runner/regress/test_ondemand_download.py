@@ -301,6 +301,7 @@ def test_ondemand_download_timetravel(
         # they are present only in the remote storage, only locally, or both.
         # It should not change.
         assert filled_current_physical == get_api_current_physical_size()
+        endpoint_old.stop()
 
 
 #

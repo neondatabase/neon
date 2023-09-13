@@ -3,9 +3,9 @@
 # Use mock HTTP server to receive metrics and verify that they look sane.
 #
 
-import time
 from pathlib import Path
-from typing import Iterator
+from queue import SimpleQueue
+from typing import Any, Iterator, Set
 
 import pytest
 from fixtures.log_helper import log
@@ -18,55 +18,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TenantId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
-
-# ==============================================================================
-# Storage metrics tests
-# ==============================================================================
-
-initial_tenant = TenantId.generate()
-remote_uploaded = 0
-checks = {
-    "written_size": lambda value: value > 0,
-    "resident_size": lambda value: value >= 0,
-    # >= 0 check here is to avoid race condition when we receive metrics before
-    # remote_uploaded is updated
-    "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
-    # logical size may lag behind the actual size, so allow 0 here
-    "timeline_logical_size": lambda value: value >= 0,
-}
-
-metric_kinds_checked = set([])
-
-
-#
-# verify that metrics look minilally sane
-#
-def metrics_handler(request: Request) -> Response:
-    if request.json is None:
-        return Response(status=400)
-
-    events = request.json["events"]
-    log.info("received events:")
-    log.info(events)
-
-    for event in events:
-        assert event["tenant_id"] == str(
-            initial_tenant
-        ), "Expecting metrics only from the initial tenant"
-        metric_name = event["metric"]
-
-        check = checks.get(metric_name)
-        # calm down mypy
-        if check is not None:
-            assert check(event["value"]), f"{metric_name} isn't valid"
-            global metric_kinds_checked
-            metric_kinds_checked.add(metric_name)
-
-    return Response(status=200)
 
 
 @pytest.mark.parametrize(
@@ -81,6 +35,18 @@ def test_metric_collection(
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
 
+    metric_kinds_checked: Set[str] = set([])
+
+    uploads: SimpleQueue[Any] = SimpleQueue()
+
+    def metrics_handler(request: Request) -> Response:
+        if request.json is None:
+            return Response(status=400)
+
+        events = request.json["events"]
+        uploads.put(events)
+        return Response(status=200)
+
     # Require collecting metrics frequently, since we change
     # the timeline and want something to be logged about it.
     #
@@ -90,6 +56,7 @@ def test_metric_collection(
         f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
+        cached_metric_collection_interval="0s"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
     )
@@ -98,9 +65,6 @@ def test_metric_collection(
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
-    # Set initial tenant of the test, that we expect the logs from
-    global initial_tenant
-    initial_tenant = neon_env_builder.initial_tenant
     # mock http server that returns OK for the metrics
     httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
         metrics_handler
@@ -108,8 +72,7 @@ def test_metric_collection(
 
     # spin up neon,  after http server is ready
     env = neon_env_builder.init_start()
-    # Order of fixtures shutdown is not specified, and if http server gets down
-    # before pageserver, pageserver log might contain such errors in the end.
+    # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_metric_collection")
@@ -141,29 +104,74 @@ def test_metric_collection(
             total += sample[2]
         return int(total)
 
+    remote_uploaded = 0
+
     # upload some data to remote storage
     if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
         pageserver_http = env.pageserver.http_client()
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
-        global remote_uploaded
+
         remote_uploaded = get_num_remote_ops("index", "upload")
         assert remote_uploaded > 0
 
-    # wait longer than collecting interval and check that all requests are served
-    time.sleep(3)
-    httpserver.check()
-    global metric_kinds_checked, checks
+    # we expect uploads at 1Hz, on busy runners this could be too optimistic,
+    # so give 5s we only want to get the following upload after "ready" value.
+    # later tests will be added to ensure that the timeseries are sane.
+    timeout = 5
+    uploads.put("ready")
+
+    while True:
+        # discard earlier than "ready"
+        log.info("waiting for upload")
+        events = uploads.get(timeout=timeout)
+        import json
+
+        if events == "ready":
+            events = uploads.get(timeout=timeout)
+            httpserver.check()
+            httpserver.stop()
+            # if anything comes after this, we'll just ignore it
+            stringified = json.dumps(events, indent=2)
+            log.info(f"inspecting: {stringified}")
+            break
+        else:
+            stringified = json.dumps(events, indent=2)
+            log.info(f"discarding: {stringified}")
+
+    # verify that metrics look minimally sane
+    checks = {
+        "written_size": lambda value: value > 0,
+        "resident_size": lambda value: value >= 0,
+        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value == 0,
+        # logical size may lag behind the actual size, so allow 0 here
+        "timeline_logical_size": lambda value: value >= 0,
+        # this can also be zero, depending on when we get the value
+        "written_data_bytes_delta": lambda value: value >= 0,
+    }
+
+    metric_kinds_checked = set()
+    metric_kinds_seen = set()
+
+    for event in events:
+        assert event["tenant_id"] == str(tenant_id)
+        metric_name = event["metric"]
+        metric_kinds_seen.add(metric_name)
+
+        check = checks.get(metric_name)
+        # calm down mypy
+        if check is not None:
+            value = event["value"]
+            log.info(f"checking {metric_name} value {value}")
+            assert check(value), f"{metric_name} isn't valid"
+            metric_kinds_checked.add(metric_name)
+
     expected_checks = set(checks.keys())
-    assert len(metric_kinds_checked) == len(
-        checks
+    assert (
+        metric_kinds_checked == checks.keys()
     ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
-
-
-# ==============================================================================
-# Proxy metrics tests
-# ==============================================================================
+    assert metric_kinds_seen == metric_kinds_checked
 
 
 def proxy_metrics_handler(request: Request) -> Response:
