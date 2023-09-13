@@ -29,6 +29,7 @@ else ifeq ($(UNAME_S),Darwin)
 	# It can be configured with OPENSSL_PREFIX variable
 	OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
 	PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+	PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
 	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
 	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
 	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
@@ -83,6 +84,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # I'm not sure why it wouldn't work, but this is the only place (apart from
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
+.PHONY: postgres-configure-v16
+postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
 .PHONY: postgres-configure-v15
 postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
 .PHONY: postgres-configure-v14
@@ -118,6 +121,10 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect clean
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
+.PHONY: postgres-check-%
+postgres-check-%: postgres-%
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
+
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
@@ -130,6 +137,11 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile install
+	+@echo "Compiling neon_rmgr $*"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$*
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+		-C $(POSTGRES_INSTALL_DIR)/build/neon-rmgr-$* \
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon_rmgr/Makefile install
 	+@echo "Compiling neon_test_utils $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -140,6 +152,13 @@ neon-pg-ext-%: postgres-%
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
+
+# pg_embedding was temporarily released as hnsw from this repo, when we only
+# supported PostgreSQL 14 and 15
+neon-pg-ext-v14: neon-pg-ext-hnsw-v14
+neon-pg-ext-v15: neon-pg-ext-hnsw-v15
+
+neon-pg-ext-hnsw-%: postgres-headers-% postgres-%
 	+@echo "Compiling hnsw $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/hnsw-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -167,28 +186,39 @@ neon-pg-ext-clean-%:
 .PHONY: neon-pg-ext
 neon-pg-ext: \
 	neon-pg-ext-v14 \
-	neon-pg-ext-v15
+	neon-pg-ext-v15 \
+	neon-pg-ext-v16
 
 .PHONY: neon-pg-ext-clean
 neon-pg-ext-clean: \
 	neon-pg-ext-clean-v14 \
-	neon-pg-ext-clean-v15
+	neon-pg-ext-clean-v15 \
+	neon-pg-ext-clean-v16
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
 postgres: \
 	postgres-v14 \
-	postgres-v15
+	postgres-v15 \
+	postgres-v16
 
 .PHONY: postgres-headers
 postgres-headers: \
 	postgres-headers-v14 \
-	postgres-headers-v15
+	postgres-headers-v15 \
+	postgres-headers-v16
 
 .PHONY: postgres-clean
 postgres-clean: \
 	postgres-clean-v14 \
-	postgres-clean-v15
+	postgres-clean-v15 \
+	postgres-clean-v16
+
+.PHONY: postgres-check
+postgres-check: \
+	postgres-check-v14 \
+	postgres-check-v15 \
+	postgres-check-v16
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean

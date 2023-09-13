@@ -379,8 +379,8 @@ typedef struct Safekeeper
 	AppendResponse appendResponse;	/* feedback for master */
 } Safekeeper;
 
-extern void WalProposerSync(int argc, char *argv[]);
-extern void WalProposerMain(Datum main_arg);
+extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
+extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
 extern void WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(void);
 extern void ParsePageserverFeedbackMessage(StringInfo reply_message,

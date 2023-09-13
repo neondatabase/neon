@@ -4,9 +4,10 @@
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{BlockNumber, OffsetNumber, TimestampTz};
+use postgres_ffi::{BlockNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
 use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
@@ -76,9 +77,12 @@ pub struct DecodedBkpBlock {
     pub flags: u8,
 
     /* Information on full-page image, if any */
-    pub has_image: bool,   /* has image, even for consistency checking */
-    pub apply_image: bool, /* has image that should be restored */
-    pub will_init: bool,   /* record doesn't need previous page version to apply */
+    pub has_image: bool,
+    /* has image, even for consistency checking */
+    pub apply_image: bool,
+    /* has image that should be restored */
+    pub will_init: bool,
+    /* record doesn't need previous page version to apply */
     //char	   *bkp_image;
     pub hole_offset: u16,
     pub hole_length: u16,
@@ -130,6 +134,237 @@ impl XlRelmapUpdate {
             dbid: buf.get_u32_le(),
             tsid: buf.get_u32_le(),
             nbytes: buf.get_i32_le(),
+        }
+    }
+}
+
+pub mod v14 {
+    use bytes::{Buf, Bytes};
+    use postgres_ffi::{OffsetNumber, TransactionId};
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapInsert {
+        pub offnum: OffsetNumber,
+        pub flags: u8,
+    }
+
+    impl XlHeapInsert {
+        pub fn decode(buf: &mut Bytes) -> XlHeapInsert {
+            XlHeapInsert {
+                offnum: buf.get_u16_le(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapMultiInsert {
+        pub flags: u8,
+        pub _padding: u8,
+        pub ntuples: u16,
+    }
+
+    impl XlHeapMultiInsert {
+        pub fn decode(buf: &mut Bytes) -> XlHeapMultiInsert {
+            XlHeapMultiInsert {
+                flags: buf.get_u8(),
+                _padding: buf.get_u8(),
+                ntuples: buf.get_u16_le(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapDelete {
+        pub xmax: TransactionId,
+        pub offnum: OffsetNumber,
+        pub _padding: u16,
+        pub t_cid: u32,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapDelete {
+        pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
+            XlHeapDelete {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: buf.get_u16_le(),
+                t_cid: buf.get_u32_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapUpdate {
+        pub old_xmax: TransactionId,
+        pub old_offnum: OffsetNumber,
+        pub old_infobits_set: u8,
+        pub flags: u8,
+        pub t_cid: u32,
+        pub new_xmax: TransactionId,
+        pub new_offnum: OffsetNumber,
+    }
+
+    impl XlHeapUpdate {
+        pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
+            XlHeapUpdate {
+                old_xmax: buf.get_u32_le(),
+                old_offnum: buf.get_u16_le(),
+                old_infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+                t_cid: buf.get_u32(),
+                new_xmax: buf.get_u32_le(),
+                new_offnum: buf.get_u16_le(),
+            }
+        }
+    }
+}
+
+pub mod v15 {
+    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapMultiInsert, XlHeapUpdate};
+}
+
+pub mod v16 {
+    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert};
+    use bytes::{Buf, Bytes};
+    use postgres_ffi::{OffsetNumber, TransactionId};
+
+    pub struct XlHeapDelete {
+        pub xmax: TransactionId,
+        pub offnum: OffsetNumber,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapDelete {
+        pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
+            XlHeapDelete {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapUpdate {
+        pub old_xmax: TransactionId,
+        pub old_offnum: OffsetNumber,
+        pub old_infobits_set: u8,
+        pub flags: u8,
+        pub new_xmax: TransactionId,
+        pub new_offnum: OffsetNumber,
+    }
+
+    impl XlHeapUpdate {
+        pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
+            XlHeapUpdate {
+                old_xmax: buf.get_u32_le(),
+                old_offnum: buf.get_u16_le(),
+                old_infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+                new_xmax: buf.get_u32_le(),
+                new_offnum: buf.get_u16_le(),
+            }
+        }
+    }
+
+    /* Since PG16, we have the Neon RMGR (RM_NEON_ID) to manage Neon-flavored WAL. */
+    pub mod rm_neon {
+        use bytes::{Buf, Bytes};
+        use postgres_ffi::{OffsetNumber, TransactionId};
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapInsert {
+            pub offnum: OffsetNumber,
+            pub flags: u8,
+        }
+
+        impl XlNeonHeapInsert {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapInsert {
+                XlNeonHeapInsert {
+                    offnum: buf.get_u16_le(),
+                    flags: buf.get_u8(),
+                }
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapMultiInsert {
+            pub flags: u8,
+            pub _padding: u8,
+            pub ntuples: u16,
+            pub t_cid: u32,
+        }
+
+        impl XlNeonHeapMultiInsert {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapMultiInsert {
+                XlNeonHeapMultiInsert {
+                    flags: buf.get_u8(),
+                    _padding: buf.get_u8(),
+                    ntuples: buf.get_u16_le(),
+                    t_cid: buf.get_u32_le(),
+                }
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapDelete {
+            pub xmax: TransactionId,
+            pub offnum: OffsetNumber,
+            pub infobits_set: u8,
+            pub flags: u8,
+            pub t_cid: u32,
+        }
+
+        impl XlNeonHeapDelete {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapDelete {
+                XlNeonHeapDelete {
+                    xmax: buf.get_u32_le(),
+                    offnum: buf.get_u16_le(),
+                    infobits_set: buf.get_u8(),
+                    flags: buf.get_u8(),
+                    t_cid: buf.get_u32_le(),
+                }
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapUpdate {
+            pub old_xmax: TransactionId,
+            pub old_offnum: OffsetNumber,
+            pub old_infobits_set: u8,
+            pub flags: u8,
+            pub t_cid: u32,
+            pub new_xmax: TransactionId,
+            pub new_offnum: OffsetNumber,
+        }
+
+        impl XlNeonHeapUpdate {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapUpdate {
+                XlNeonHeapUpdate {
+                    old_xmax: buf.get_u32_le(),
+                    old_offnum: buf.get_u16_le(),
+                    old_infobits_set: buf.get_u8(),
+                    flags: buf.get_u8(),
+                    t_cid: buf.get_u32(),
+                    new_xmax: buf.get_u32_le(),
+                    new_offnum: buf.get_u16_le(),
+                }
+            }
         }
     }
 }
@@ -223,90 +458,6 @@ impl XlDropDatabase {
     }
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapInsert {
-    pub offnum: OffsetNumber,
-    pub flags: u8,
-}
-
-impl XlHeapInsert {
-    pub fn decode(buf: &mut Bytes) -> XlHeapInsert {
-        XlHeapInsert {
-            offnum: buf.get_u16_le(),
-            flags: buf.get_u8(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapMultiInsert {
-    pub flags: u8,
-    pub _padding: u8,
-    pub ntuples: u16,
-}
-
-impl XlHeapMultiInsert {
-    pub fn decode(buf: &mut Bytes) -> XlHeapMultiInsert {
-        XlHeapMultiInsert {
-            flags: buf.get_u8(),
-            _padding: buf.get_u8(),
-            ntuples: buf.get_u16_le(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapDelete {
-    pub xmax: TransactionId,
-    pub offnum: OffsetNumber,
-    pub _padding: u16,
-    pub t_cid: u32,
-    pub infobits_set: u8,
-    pub flags: u8,
-}
-
-impl XlHeapDelete {
-    pub fn decode(buf: &mut Bytes) -> XlHeapDelete {
-        XlHeapDelete {
-            xmax: buf.get_u32_le(),
-            offnum: buf.get_u16_le(),
-            _padding: buf.get_u16_le(),
-            t_cid: buf.get_u32_le(),
-            infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlHeapUpdate {
-    pub old_xmax: TransactionId,
-    pub old_offnum: OffsetNumber,
-    pub old_infobits_set: u8,
-    pub flags: u8,
-    pub t_cid: u32,
-    pub new_xmax: TransactionId,
-    pub new_offnum: OffsetNumber,
-}
-
-impl XlHeapUpdate {
-    pub fn decode(buf: &mut Bytes) -> XlHeapUpdate {
-        XlHeapUpdate {
-            old_xmax: buf.get_u32_le(),
-            old_offnum: buf.get_u16_le(),
-            old_infobits_set: buf.get_u8(),
-            flags: buf.get_u8(),
-            t_cid: buf.get_u32(),
-            new_xmax: buf.get_u32_le(),
-            new_offnum: buf.get_u16_le(),
-        }
-    }
-}
-
 ///
 /// Note: Parsing some fields is missing, because they're not needed.
 ///
@@ -321,9 +472,10 @@ pub struct XlXactParsedRecord {
     pub xact_time: TimestampTz,
     pub xinfo: u32,
 
-    pub db_id: Oid, /* MyDatabaseId */
-    pub ts_id: Oid, /* MyDatabaseTableSpace */
-
+    pub db_id: Oid,
+    /* MyDatabaseId */
+    pub ts_id: Oid,
+    /* MyDatabaseTableSpace */
     pub subxacts: Vec<TransactionId>,
 
     pub xnodes: Vec<RelFileNode>,
@@ -455,9 +607,12 @@ impl MultiXactMember {
 #[repr(C)]
 #[derive(Debug)]
 pub struct XlMultiXactCreate {
-    pub mid: MultiXactId,      /* new MultiXact's ID */
-    pub moff: MultiXactOffset, /* its starting offset in members file */
-    pub nmembers: u32,         /* number of member XIDs */
+    pub mid: MultiXactId,
+    /* new MultiXact's ID */
+    pub moff: MultiXactOffset,
+    /* its starting offset in members file */
+    pub nmembers: u32,
+    /* number of member XIDs */
     pub members: Vec<MultiXactMember>,
 }
 
@@ -484,7 +639,8 @@ impl XlMultiXactCreate {
 pub struct XlMultiXactTruncate {
     pub oldest_multi_db: Oid,
     /* to-be-truncated range of multixact offsets */
-    pub start_trunc_off: MultiXactId, /* just for completeness' sake */
+    pub start_trunc_off: MultiXactId,
+    /* just for completeness' sake */
     pub end_trunc_off: MultiXactId,
 
     /* to-be-truncated range of multixact members */
@@ -626,12 +782,10 @@ pub fn decode_wal_record(
                     blk.hole_offset = buf.get_u16_le();
                     blk.bimg_info = buf.get_u8();
 
-                    blk.apply_image = if pg_version == 14 {
-                        (blk.bimg_info & postgres_ffi::v14::bindings::BKPIMAGE_APPLY) != 0
-                    } else {
-                        assert_eq!(pg_version, 15);
-                        (blk.bimg_info & postgres_ffi::v15::bindings::BKPIMAGE_APPLY) != 0
-                    };
+                    blk.apply_image = dispatch_pgversion!(
+                        pg_version,
+                        (blk.bimg_info & pgv::bindings::BKPIMAGE_APPLY) != 0
+                    );
 
                     let blk_img_is_compressed =
                         postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;

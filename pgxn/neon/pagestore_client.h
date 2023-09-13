@@ -14,9 +14,10 @@
 #define pageserver_h
 
 #include "postgres.h"
+#include "neon_pgversioncompat.h"
 
 #include "access/xlogdefs.h"
-#include "storage/relfilenode.h"
+#include RELFILEINFO_HDR
 #include "storage/block.h"
 #include "storage/smgr.h"
 #include "lib/stringinfo.h"
@@ -71,14 +72,14 @@ typedef struct
 typedef struct
 {
 	NeonRequest req;
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 }			NeonExistsRequest;
 
 typedef struct
 {
 	NeonRequest req;
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 }			NeonNblocksRequest;
 
@@ -91,7 +92,7 @@ typedef struct
 typedef struct
 {
 	NeonRequest req;
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 	BlockNumber blkno;
 }			NeonGetPageRequest;
@@ -164,7 +165,7 @@ extern char *neon_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
 
-extern const f_smgr *smgr_neon(BackendId backend, RelFileNode rnode);
+extern const f_smgr *smgr_neon(BackendId backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
 
@@ -175,19 +176,35 @@ extern void neon_open(SMgrRelation reln);
 extern void neon_close(SMgrRelation reln, ForkNumber forknum);
 extern void neon_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
 extern bool neon_exists(SMgrRelation reln, ForkNumber forknum);
-extern void neon_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
+extern void neon_unlink(NRelFileInfoBackend rnode, ForkNumber forknum, bool isRedo);
+#if PG_MAJORVERSION_NUM < 16
 extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
+#else
+extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
+						BlockNumber blocknum, const void *buffer, bool skipFsync);
+extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
+							BlockNumber blocknum, int nbuffers, bool skipFsync);
+#endif
+
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
+
+#if PG_MAJORVERSION_NUM < 16
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
-
-extern void neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 							 XLogRecPtr request_lsn, bool request_latest, char *buffer);
-
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, char *buffer, bool skipFsync);
+#else
+extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+					  void *buffer);
+extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
+							 XLogRecPtr request_lsn, bool request_latest, void *buffer);
+extern void neon_write(SMgrRelation reln, ForkNumber forknum,
+					   BlockNumber blocknum, const void *buffer, bool skipFsync);
+#endif
 extern void neon_writeback(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum, BlockNumber nblocks);
 extern BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
@@ -198,16 +215,22 @@ extern void neon_immedsync(SMgrRelation reln, ForkNumber forknum);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
-extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size);
-extern void set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
-extern void update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
-extern void forget_cached_relsize(RelFileNode rnode, ForkNumber forknum);
+extern bool get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size);
+extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
+extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
+extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
 /* functions for local file cache */
-extern void lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno, char *buffer);
-extern bool lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno, char *buffer);
-extern bool lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
-extern void lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
+#if PG_MAJORVERSION_NUM < 16
+extern void lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+					  char *buffer);
+#else
+extern void lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+					  const void *buffer);
+#endif
+extern bool lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, char *buffer);
+extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
+extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
 
