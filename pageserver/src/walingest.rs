@@ -733,12 +733,6 @@ impl<'a> WalIngest<'a> {
                         .await?;
                     }
                 }
-            } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
-                let xlrec = XlHeapLock::decode(buf); // XlHeapLockUpdated is the same as XlHeapLock
-                if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
-                    old_heap_blkno = Some(decoded.blocks[0].blkno);
-                    flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
-                }
             }
         }
 
@@ -759,6 +753,8 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match self.timeline.pg_version {
