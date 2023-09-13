@@ -3,9 +3,9 @@
 # Use mock HTTP server to receive metrics and verify that they look sane.
 #
 
-import time
 from pathlib import Path
-from typing import Iterator
+from queue import Empty, SimpleQueue
+from typing import Any, Iterator, Set
 
 import pytest
 from fixtures.log_helper import log
@@ -23,11 +23,6 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 
-# ==============================================================================
-# Storage metrics tests
-# ==============================================================================
-
-
 @pytest.mark.parametrize(
     "remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.LOCAL_FS]
 )
@@ -40,21 +35,10 @@ def test_metric_collection(
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
 
-    metric_kinds_checked = set([])
-    remote_uploaded = 0
-    checks = {
-        "written_size": lambda value: value > 0,
-        "resident_size": lambda value: value >= 0,
-        # >= 0 check here is to avoid race condition when we receive metrics before
-        # remote_uploaded is updated
-        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
-        # logical size may lag behind the actual size, so allow 0 here
-        "timeline_logical_size": lambda value: value >= 0,
-    }
+    metric_kinds_checked: Set[str] = set([])
 
-    #
-    # verify that metrics look minimally sane
-    #
+    uploads: SimpleQueue[Any] = SimpleQueue()
+
     def metrics_handler(request: Request) -> Response:
         if request.json is None:
             return Response(status=400)
@@ -63,18 +47,7 @@ def test_metric_collection(
         log.info("received events:")
         log.info(events)
 
-        for event in events:
-            assert event["tenant_id"] == str(
-                neon_env_builder.initial_tenant
-            ), "Expecting metrics only from the initial tenant"
-            metric_name = event["metric"]
-
-            check = checks.get(metric_name)
-            # calm down mypy
-            if check is not None:
-                assert check(event["value"]), f"{metric_name} isn't valid"
-                metric_kinds_checked.add(metric_name)
-
+        uploads.put(events)
         return Response(status=200)
 
     # Require collecting metrics frequently, since we change
@@ -134,6 +107,8 @@ def test_metric_collection(
             total += sample[2]
         return int(total)
 
+    remote_uploaded = 0
+
     # upload some data to remote storage
     if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
@@ -147,17 +122,43 @@ def test_metric_collection(
         assert remote_uploaded == 0
 
     # wait longer than collecting interval and check that all requests are served
-    time.sleep(3)
+    log.info("waiting for queue")
+    events = uploads.get()
     httpserver.check()
+    httpserver.stop()
+
+    while True:
+        # verify that metrics look minimally sane
+        checks = {
+            "written_size": lambda value: value > 0,
+            "resident_size": lambda value: value >= 0,
+            # >= 0 check here is to avoid race condition when we receive metrics before
+            # remote_uploaded is updated
+            "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
+            # logical size may lag behind the actual size, so allow 0 here
+            "timeline_logical_size": lambda value: value >= 0,
+        }
+        metric_kinds_checked = set()
+
+        for event in events:
+            assert event["tenant_id"] == str(tenant_id)
+            metric_name = event["metric"]
+
+            check = checks.get(metric_name)
+            # calm down mypy
+            if check is not None:
+                assert check(event["value"]), f"{metric_name} isn't valid"
+                metric_kinds_checked.add(metric_name)
+
+        try:
+            events = uploads.get(block=False)
+        except Empty:
+            break
+
     expected_checks = set(checks.keys())
     assert len(metric_kinds_checked) == len(
         checks
     ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
-
-
-# ==============================================================================
-# Proxy metrics tests
-# ==============================================================================
 
 
 def proxy_metrics_handler(request: Request) -> Response:
