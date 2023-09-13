@@ -13,6 +13,7 @@ use pageserver_api::models;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
+use utils::generation::Generation;
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -44,7 +45,81 @@ pub mod defaults {
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
 
-/// Per-tenant configuration options
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum AttachmentMode {
+    /// Our generation is current as far as we know, and as far as we know we are the only attached
+    /// pageserver.  This is the "normal" attachment mode.
+    Single,
+    /// Our generation number is current as far as we know, but we are advised that another
+    /// pageserver is still attached, and therefore to avoid executing deletions.   This is
+    /// the attachment mode of a pagesever that is the destination of a migration.
+    Multi,
+    /// Our generation number is superseded, or about to be superseded.  We are advised
+    /// to avoid remote storage writes if possible, and to avoid sending billing data.  This
+    /// is the attachment mode of a pageserver that is the origin of a migration.
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AttachedLocationConfig {
+    pub(crate) generation: Generation,
+    pub(crate) attach_mode: AttachmentMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SecondaryLocationConfig {
+    /// If true, keep the local cache warm by polling remote storage
+    pub(crate) warm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum LocationMode {
+    Attached(AttachedLocationConfig),
+    Secondary(SecondaryLocationConfig),
+}
+
+/// Per-tenant, per-pageserver configuration.  All pageservers use the same TenantConf,
+/// but have distinct LocationConf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocationConf {
+    /// The location-specific part of the configuration, describes the operating
+    /// mode of this pageserver for this tenant.
+    mode: LocationMode,
+    /// The pan-cluster tenant configuration, the same on all locations
+    pub(crate) tenant_conf: TenantConfOpt,
+}
+
+impl LocationConf {
+    pub(crate) fn new(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation,
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf,
+        }
+    }
+}
+
+impl Default for LocationConf {
+    // TODO: this should be removed once tenant loading can guarantee that we are never
+    // loading from a directory without a configuration.
+    fn default() -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation: Generation::none(),
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf: TenantConfOpt::default(),
+        }
+    }
+}
+
+/// A tenant's calcuated configuration, which is the result of merging a
+/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
+///
+/// For storing and transmitting individual tenant's configuration, see
+/// TenantConfOpt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
