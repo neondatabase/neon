@@ -33,6 +33,33 @@ struct Ids {
     timeline_id: Option<TimelineId>,
 }
 
+/// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
+/// instead of static str.
+// Do not rename any of these without first consulting with data team and partner
+// management.
+// FIXME: write those tests before refactoring to this!
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+enum Name {
+    /// Timeline last_record_lsn, absolute
+    #[serde(rename = "written_size")]
+    WrittenSize,
+    /// Timeline last_record_lsn, incremental
+    #[serde(rename = "written_data_bytes_delta")]
+    WrittenSizeDelta,
+    /// Timeline logical size
+    #[serde(rename = "timeline_logical_size")]
+    LogicalSize,
+    /// Tenant remote size
+    #[serde(rename = "remote_storage_size")]
+    RemoteSize,
+    /// Tenant resident size
+    #[serde(rename = "resident_size")]
+    ResidentSize,
+    /// Tenant synthetic size
+    #[serde(rename = "synthetic_storage_size")]
+    SyntheticSize,
+}
+
 /// Key that uniquely identifies the object, this metric describes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MetricsKey {
