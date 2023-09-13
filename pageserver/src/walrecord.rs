@@ -250,7 +250,7 @@ pub mod v14 {
 }
 
 pub mod v15 {
-    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate};
 }
 
 pub mod v16 {
