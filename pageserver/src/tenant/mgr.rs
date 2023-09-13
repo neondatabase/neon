@@ -39,6 +39,39 @@ use super::delete::DeleteTenantError;
 use super::timeline::delete::DeleteTimelineFlow;
 use super::TenantSharedResources;
 
+/// For a tenant that appears in TenantsMap, it may either be
+/// - `Attached`: has a full Tenant object, is elegible to service
+///    reads and ingest WAL.
+/// - `Secondary`: is only keeping a local cache warm.
+///
+/// Secondary is a totally distinct state rather than being a mode of a `Tenant`, because
+/// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
+/// its lifetime, and we can preserve some important safety invariants like `Tenant` always
+/// having a properly acquired generation (Secondary doesn't need a generation)
+#[derive(Clone)]
+pub enum TenantSlot {
+    Attached(Arc<Tenant>),
+    Secondary,
+}
+
+impl TenantSlot {
+    /// Return the `Tenant` in this slot if attached, else None
+    fn get_attached(&self) -> Option<&Arc<Tenant>> {
+        match self {
+            Self::Attached(t) => Some(t),
+            Self::Secondary => None,
+        }
+    }
+
+    /// Consume self and return the `Tenant` that was in this slot if attached, else None
+    fn into_attached(self) -> Option<Arc<Tenant>> {
+        match self {
+            Self::Attached(t) => Some(t),
+            Self::Secondary => None,
+        }
+    }
+}
+
 /// The tenants known to the pageserver.
 /// The enum variants are used to distinguish the different states that the pageserver can be in.
 pub(crate) enum TenantsMap {
@@ -46,23 +79,27 @@ pub(crate) enum TenantsMap {
     Initializing,
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
     /// New tenants can be added using [`tenant_map_insert`].
-    Open(HashMap<TenantId, Arc<Tenant>>),
+    Open(HashMap<TenantId, TenantSlot>),
     /// The pageserver has entered shutdown mode via [`shutdown_all_tenants`].
     /// Existing tenants are still accessible, but no new tenants can be created.
-    ShuttingDown(HashMap<TenantId, Arc<Tenant>>),
+    ShuttingDown(HashMap<TenantId, TenantSlot>),
 }
 
 impl TenantsMap {
     pub(crate) fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.get(tenant_id),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                m.get(tenant_id).and_then(TenantSlot::get_attached)
+            }
         }
     }
     pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                m.remove(tenant_id).and_then(TenantSlot::into_attached)
+            }
         }
     }
 }
@@ -243,7 +280,7 @@ pub async fn init_tenant_mgr(
                         &ctx,
                     ) {
                         Ok(tenant) => {
-                            tenants.insert(tenant.tenant_id(), tenant);
+                            tenants.insert(tenant.tenant_id(), TenantSlot::Attached(tenant));
                         }
                         Err(e) => {
                             error!("Failed to collect tenant files from dir {tenants_dir:?} for entry {dir_entry:?}, reason: {e:#}");
@@ -380,7 +417,16 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
 
                 let res = {
                     let (_guard, shutdown_progress) = completion::channel();
-                    tenant.shutdown(shutdown_progress, freeze_and_flush).await
+                    match tenant {
+                        TenantSlot::Attached(t) => {
+                            t.shutdown(shutdown_progress, freeze_and_flush).await
+                        }
+                        TenantSlot::Secondary => {
+                            // TODO: once secondary mode downloads are implemented,
+                            // ensure they have all stopped before we reach this point.
+                            Ok(())
+                        }
+                    }
                 };
 
                 if let Err(other_progress) = res {
@@ -702,7 +748,10 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
         TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
     };
     Ok(m.iter()
-        .map(|(id, tenant)| (*id, tenant.current_state()))
+        .filter_map(|(id, tenant)| match tenant {
+            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
+            TenantSlot::Secondary => None,
+        })
         .collect())
 }
 
@@ -755,6 +804,8 @@ pub enum TenantMapInsertError {
     ShuttingDown,
     #[error("tenant {0} already exists, state: {1:?}")]
     TenantAlreadyExists(TenantId, TenantState),
+    #[error("tenant {0} already exists in secondary state")]
+    TenantExistsSecondary(TenantId),
     #[error(transparent)]
     Closure(#[from] anyhow::Error),
 }
@@ -780,13 +831,16 @@ where
         TenantsMap::Open(m) => m,
     };
     match m.entry(tenant_id) {
-        hash_map::Entry::Occupied(e) => Err(TenantMapInsertError::TenantAlreadyExists(
-            tenant_id,
-            e.get().current_state(),
-        )),
+        hash_map::Entry::Occupied(e) => match e.get() {
+            TenantSlot::Attached(t) => Err(TenantMapInsertError::TenantAlreadyExists(
+                tenant_id,
+                t.current_state(),
+            )),
+            TenantSlot::Secondary => Err(TenantMapInsertError::TenantExistsSecondary(tenant_id)),
+        },
         hash_map::Entry::Vacant(v) => match insert_fn().await {
             Ok(tenant) => {
-                v.insert(tenant.clone());
+                v.insert(TenantSlot::Attached(tenant.clone()));
                 Ok(tenant)
             }
             Err(e) => Err(TenantMapInsertError::Closure(e)),
@@ -925,6 +979,8 @@ mod tests {
     use std::sync::Arc;
     use tracing::{info_span, Instrument};
 
+    use crate::tenant::mgr::TenantSlot;
+
     use super::{super::harness::TenantHarness, TenantsMap};
 
     #[tokio::test(start_paused = true)]
@@ -946,7 +1002,7 @@ mod tests {
         // tenant harness configures the logging and we cannot escape it
         let _e = info_span!("testing", tenant_id = %id).entered();
 
-        let tenants = HashMap::from([(id, t.clone())]);
+        let tenants = HashMap::from([(id, TenantSlot::Attached(t.clone()))]);
         let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
 
         let (until_cleanup_completed, can_complete_cleanup) = utils::completion::channel();

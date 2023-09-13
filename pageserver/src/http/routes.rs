@@ -150,6 +150,9 @@ impl From<TenantMapInsertError> for ApiError {
             TenantMapInsertError::TenantAlreadyExists(id, state) => {
                 ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
             }
+            TenantMapInsertError::TenantExistsSecondary(id) => {
+                ApiError::Conflict(format!("tenant {id} already exists as secondary"))
+            }
             TenantMapInsertError::Closure(e) => ApiError::InternalServerError(e),
         }
     }
