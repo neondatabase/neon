@@ -72,8 +72,7 @@ def test_metric_collection(
 
     # spin up neon,  after http server is ready
     env = neon_env_builder.init_start()
-    # Order of fixtures shutdown is not specified, and if http server gets down
-    # before pageserver, pageserver log might contain such errors in the end.
+    # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_metric_collection")
@@ -117,16 +116,20 @@ def test_metric_collection(
         remote_uploaded = get_num_remote_ops("index", "upload")
         assert remote_uploaded > 0
 
+    # we expect uploads at 1Hz, on busy runners this could be too optimistic,
+    # so give 5s we only want to get the following upload after "ready" value.
+    # later tests will be added to ensure that the timeseries are sane.
+    timeout = 5
     uploads.put("ready")
 
     while True:
         # discard earlier than "ready"
         log.info("waiting for upload")
-        events = uploads.get()
+        events = uploads.get(timeout=timeout)
         import json
 
         if events == "ready":
-            events = uploads.get()
+            events = uploads.get(timeout=timeout)
             httpserver.check()
             httpserver.stop()
             # if anything comes after this, we'll just ignore it
