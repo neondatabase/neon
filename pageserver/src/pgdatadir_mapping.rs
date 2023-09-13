@@ -819,6 +819,12 @@ impl<'a> DatadirModification<'a> {
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
             );
+            trace!("Create AuxFilesDirectory for database {}", dbnode);
+            // Create AuxFilesDirectory
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })?;
+            self.put(aux_files_key(dbnode), Value::Image(Bytes::from(buf)));
         }
 
         self.put(relmap_file_key(spcnode, dbnode), Value::Image(img));
@@ -912,6 +918,14 @@ impl<'a> DatadirModification<'a> {
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            trace!("Create AuxFilesDirectory for database {}", rel.dbnode);
+            // Create AuxFilesDirectory
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })
+            .context("serialize aux files directory")?;
+            self.put(aux_files_key(rel.dbnode), Value::Image(Bytes::from(buf)));
 
             // and create the RelDirectory
             RelDirectory::default()
