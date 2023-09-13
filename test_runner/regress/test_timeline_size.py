@@ -518,7 +518,7 @@ def test_timeline_size_metrics(
     ).value
 
     # assert that the physical size metric matches the actual physical size on disk
-    timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
     # Check that the logical size metric is sane, and matches
@@ -658,7 +658,7 @@ def get_physical_size_values(
     )
     res.api_current_physical = detail["current_physical_size"]
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     res.python_timelinedir_layerfiles_physical = get_timeline_dir_size(timeline_path)
 
     return res

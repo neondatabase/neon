@@ -417,7 +417,7 @@ def poor_mans_du(
     largest_layer = 0
     smallest_layer = None
     for tenant_id, timeline_id in timelines:
-        timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+        timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
         assert timeline_dir.exists(), f"timeline dir does not exist: {timeline_dir}"
         total = 0
         for file in timeline_dir.iterdir():

@@ -38,7 +38,7 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     new_temp_layer_files = list(
         filter(
             lambda file: str(file).endswith(NeonPageserver.TEMP_FILE_SUFFIX),
-            [path for path in env.timeline_dir(tenant_id, timeline_id).iterdir()],
+            [path for path in env.pageserver.timeline_dir(tenant_id, timeline_id).iterdir()],
         )
     )
 
@@ -84,7 +84,7 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     new_temp_layer_files = list(
         filter(
             lambda file: str(file).endswith(NeonPageserver.TEMP_FILE_SUFFIX),
-            [path for path in env.timeline_dir(tenant_id, timeline_id).iterdir()],
+            [path for path in env.pageserver.timeline_dir(tenant_id, timeline_id).iterdir()],
         )
     )
 
