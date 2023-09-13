@@ -444,7 +444,7 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
-		let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
         match self.timeline.pg_version {
             14 => {
@@ -481,12 +481,12 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
-					    let xlrec = v14::XlHeapLock::decode(buf);
+                        let xlrec = v14::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
-						}
-					}
+                        }
+                    }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
                     if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
@@ -510,7 +510,7 @@ impl<'a> WalIngest<'a> {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
-					}
+                    }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
@@ -549,11 +549,11 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
-					    let xlrec = v15::XlHeapLock::decode(buf);
+                        let xlrec = v15::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
-						}
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -577,6 +577,7 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -616,11 +617,11 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
-					    let xlrec = v16::XlHeapLock::decode(buf);
+                        let xlrec = v16::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
-						}
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -644,6 +645,7 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -816,7 +818,7 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
-						}
+                        }
                     }
                     info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
                 }
