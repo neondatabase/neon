@@ -64,6 +64,9 @@ pub(crate) enum AttachmentMode {
 pub(crate) struct AttachedLocationConfig {
     pub(crate) generation: Generation,
     pub(crate) attach_mode: AttachmentMode,
+    // TODO: add a flag to override AttachmentMode's policies under
+    // disk pressure (i.e. unblock uploads under disk pressure in Stale
+    // state, unblock deletions after timeout in Multi state)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,13 +83,30 @@ pub(crate) enum LocationMode {
 
 /// Per-tenant, per-pageserver configuration.  All pageservers use the same TenantConf,
 /// but have distinct LocationConf.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LocationConf {
     /// The location-specific part of the configuration, describes the operating
     /// mode of this pageserver for this tenant.
     pub(crate) mode: LocationMode,
     /// The pan-cluster tenant configuration, the same on all locations
     pub(crate) tenant_conf: TenantConfOpt,
+}
+
+impl std::fmt::Debug for LocationConf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.mode {
+            LocationMode::Attached(conf) => {
+                write!(
+                    f,
+                    "Attached {:?}, gen={:?}",
+                    conf.attach_mode, conf.generation
+                )
+            }
+            LocationMode::Secondary(conf) => {
+                write!(f, "Secondary, warm={}", conf.warm)
+            }
+        }
+    }
 }
 
 impl LocationConf {
@@ -114,6 +134,63 @@ impl LocationConf {
                     generation,
                     attach_mode: AttachmentMode::Single,
                 })
+            }
+        }
+    }
+
+    /// Consult attachment mode to determine whether we are currently permitted
+    /// to delete layers.  This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_delete_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.mode {
+            LocationMode::Attached(attach_conf) => {
+                match attach_conf.attach_mode {
+                    AttachmentMode::Single => true,
+                    AttachmentMode::Multi | AttachmentMode::Stale => {
+                        // In Multi mode we avoid doing deletions because some other
+                        // attached pageserver might get 404 while trying to read
+                        // a layer we delete which is still referenced in their metadata.
+                        //
+                        // In Stale mode, we avoid doing deletions because we expect
+                        // that they would ultimately fail validation in the deletion
+                        // queue due to our stale generation.
+                        false
+                    }
+                }
+            }
+            LocationMode::Secondary(_) => {
+                // Do not expect to be called in this state
+                tracing::error!("Called may_delete_layers_hint on a tenant in secondary mode");
+                false
+            }
+        }
+    }
+
+    /// Whether we are currently hinted that it is worthwhile to upload layers.
+    /// This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_upload_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.mode {
+            LocationMode::Attached(attach_conf) => {
+                match attach_conf.attach_mode {
+                    AttachmentMode::Single | AttachmentMode::Multi => true,
+                    AttachmentMode::Stale => {
+                        // In Stale mode, we avoid dong uploads because we expect that
+                        // our replacement pageserver will already have started its own
+                        // IndexPart that will never reference layers we upload: it is
+                        // wasteful.
+                        false
+                    }
+                }
+            }
+            LocationMode::Secondary(_) => {
+                // Do not expect to be called in this state
+                tracing::error!("Called may_upload_layers_hint on a tenant in secondary mode");
+                false
             }
         }
     }

@@ -1659,6 +1659,15 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
+        {
+            let conf = self.tenant_conf.read().unwrap();
+
+            if !conf.may_delete_layers_hint() {
+                info!("Skipping GC in location state {:?}", conf);
+                return Ok(GcResult::default());
+            }
+        }
+
         self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
             .await
     }
@@ -1676,6 +1685,14 @@ impl Tenant {
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
         );
+
+        {
+            let conf = self.tenant_conf.read().unwrap();
+            if !conf.may_delete_layers_hint() || !conf.may_upload_layers_hint() {
+                info!("Skipping compaction in location state {:?}", conf);
+                return Ok(());
+            }
+        }
 
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
