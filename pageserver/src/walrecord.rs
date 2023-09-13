@@ -254,7 +254,7 @@ pub mod v15 {
 }
 
 pub mod v16 {
-    pub use super::v14::{XlHeapInsert, XlHeapLock, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert};
     use bytes::{Buf, Bytes};
     use postgres_ffi::{OffsetNumber, TransactionId};
 
