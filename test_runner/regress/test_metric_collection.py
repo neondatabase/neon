@@ -4,7 +4,7 @@
 #
 
 from pathlib import Path
-from queue import Empty, SimpleQueue
+from queue import SimpleQueue
 from typing import Any, Iterator, Set
 
 import pytest
@@ -164,9 +164,10 @@ def test_metric_collection(
             assert check(value), f"{metric_name} isn't valid"
             metric_kinds_checked.add(metric_name)
 
-
     expected_checks = set(checks.keys())
-    assert metric_kinds_checked == checks.keys(), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
+    assert (
+        metric_kinds_checked == checks.keys()
+    ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
     assert metric_kinds_seen == metric_kinds_checked
 
 
