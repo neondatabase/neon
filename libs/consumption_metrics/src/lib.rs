@@ -58,12 +58,30 @@ pub struct Event<Extra> {
 }
 
 pub fn idempotency_key(node_id: &str) -> String {
-    format!(
-        "{}-{}-{:04}",
-        Utc::now(),
-        node_id,
-        rand::thread_rng().gen_range(0..=9999)
-    )
+    IdempotencyKey::generate(node_id).to_string()
+}
+
+/// Downstream users will use these to detect upload retries.
+pub struct IdempotencyKey<'a> {
+    now: chrono::DateTime<Utc>,
+    node_id: &'a str,
+    nonce: u16,
+}
+
+impl std::fmt::Display for IdempotencyKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}-{:04}", self.now, self.node_id, self.nonce)
+    }
+}
+
+impl<'a> IdempotencyKey<'a> {
+    pub fn generate(node_id: &'a str) -> Self {
+        IdempotencyKey {
+            now: Utc::now(),
+            node_id,
+            nonce: rand::thread_rng().gen_range(0..=9999),
+        }
+    }
 }
 
 pub const CHUNK_SIZE: usize = 1000;
