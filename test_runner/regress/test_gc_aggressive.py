@@ -15,45 +15,45 @@ from fixtures.types import TimelineId
 
 # Test configuration
 #
-# Create a table with {num_rows} rows, and perform {updates_to_perform} random
-# UPDATEs on it, using {num_connections} separate connections.
-num_connections = 10
-num_rows = 100000
-updates_to_perform = 10000
-
-updates_performed = 0
-
-
-# Run random UPDATEs on test table
-async def update_table(endpoint: Endpoint):
-    global updates_performed
-    pg_conn = await endpoint.connect_async()
-
-    while updates_performed < updates_to_perform:
-        updates_performed += 1
-        id = random.randrange(1, num_rows)
-        await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
-
-
-# Perform aggressive GC with 0 horizon
-async def gc(env: NeonEnv, timeline: TimelineId):
-    pageserver_http = env.pageserver.http_client()
-
-    loop = asyncio.get_running_loop()
-
-    def do_gc():
-        pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
-        pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
-
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        while updates_performed < updates_to_perform:
-            await loop.run_in_executor(pool, do_gc)
+# Create a table with {NUM_ROWS} rows, and perform {UPDATES_TO_PERFORM} random
+# UPDATEs on it, using {NUM_CONNECTIONS} separate connections.
+NUM_CONNECTIONS = 10
+NUM_ROWS = 100000
+UPDATES_TO_PERFORM = 10000
 
 
 # At the same time, run UPDATEs and GC
 async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
     workers = []
-    for _ in range(num_connections):
+    updates_performed = 0
+
+    # Perform aggressive GC with 0 horizon
+    async def gc(env: NeonEnv, timeline: TimelineId):
+        pageserver_http = env.pageserver.http_client()
+        nonlocal updates_performed
+        global UPDATES_TO_PERFORM
+
+        loop = asyncio.get_running_loop()
+
+        def do_gc():
+            pageserver_http.timeline_checkpoint(env.initial_tenant, timeline)
+            pageserver_http.timeline_gc(env.initial_tenant, timeline, 0)
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            while updates_performed < UPDATES_TO_PERFORM:
+                await loop.run_in_executor(pool, do_gc)
+
+    # Run random UPDATEs on test table
+    async def update_table(endpoint: Endpoint):
+        pg_conn = await endpoint.connect_async()
+        nonlocal updates_performed
+
+        while updates_performed < UPDATES_TO_PERFORM:
+            updates_performed += 1
+            id = random.randrange(1, NUM_ROWS)
+            await pg_conn.fetchrow(f"UPDATE foo SET counter = counter + 1 WHERE id = {id}")
+
+    for _ in range(NUM_CONNECTIONS):
         workers.append(asyncio.create_task(update_table(endpoint)))
     workers.append(asyncio.create_task(gc(env, timeline)))
 
@@ -81,7 +81,7 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
             f"""
             INSERT INTO foo
                 SELECT g, 0, 'long string to consume some space' || g
-                FROM generate_series(1, {num_rows}) g
+                FROM generate_series(1, {NUM_ROWS}) g
         """
         )
         cur.execute("CREATE INDEX ON foo(id)")
@@ -91,7 +91,7 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
         cur.execute("SELECT COUNT(*), SUM(counter) FROM foo")
         r = cur.fetchone()
         assert r is not None
-        assert r == (num_rows, updates_to_perform)
+        assert r == (NUM_ROWS, UPDATES_TO_PERFORM)
 
 
 #
@@ -99,6 +99,7 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     # Disable time-based pitr, we will use LSN-based thresholds in the manual GC calls
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
+    num_index_uploads = 0
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
@@ -160,5 +161,5 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         log.info(f"{num_index_uploads} index uploads after GC iteration {i}")
 
     after = num_index_uploads
-    log.info(f"{after-before} new index uploads during test")
+    log.info(f"{after - before} new index uploads during test")
     assert after - before < 5
