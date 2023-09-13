@@ -44,9 +44,6 @@ def test_metric_collection(
             return Response(status=400)
 
         events = request.json["events"]
-        log.info("received events:")
-        log.info(events)
-
         uploads.put(events)
         return Response(status=200)
 
@@ -59,6 +56,7 @@ def test_metric_collection(
         f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
+        cached_metric_collection_interval="0s"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
     )
@@ -121,44 +119,52 @@ def test_metric_collection(
     else:
         assert remote_uploaded == 0
 
-    # wait longer than collecting interval and check that all requests are served
-    log.info("waiting for queue")
-    events = uploads.get()
-    httpserver.check()
-    httpserver.stop()
+    uploads.put("ready")
 
     while True:
-        # verify that metrics look minimally sane
-        checks = {
-            "written_size": lambda value: value > 0,
-            "resident_size": lambda value: value >= 0,
-            # >= 0 check here is to avoid race condition when we receive metrics before
-            # remote_uploaded is updated
-            "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value >= 0,
-            # logical size may lag behind the actual size, so allow 0 here
-            "timeline_logical_size": lambda value: value >= 0,
-        }
-        metric_kinds_checked = set()
+        # discard earlier than "ready"
+        log.info("waiting for upload")
+        events = uploads.get()
+        import json
 
-        for event in events:
-            assert event["tenant_id"] == str(tenant_id)
-            metric_name = event["metric"]
-
-            check = checks.get(metric_name)
-            # calm down mypy
-            if check is not None:
-                assert check(event["value"]), f"{metric_name} isn't valid"
-                metric_kinds_checked.add(metric_name)
-
-        try:
-            events = uploads.get(block=False)
-        except Empty:
+        if events == "ready":
+            events = uploads.get()
+            httpserver.check()
+            httpserver.stop()
+            # if anything comes after this, we'll just ignore it
+            stringified = json.dumps(events, indent=2)
+            log.info(f"inspecting: {stringified}")
             break
+        else:
+            stringified = json.dumps(events, indent=2)
+            log.info(f"discarding: {stringified}")
+
+    # verify that metrics look minimally sane
+    checks = {
+        "written_size": lambda value: value > 0,
+        "resident_size": lambda value: value >= 0,
+        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value == 0,
+        # logical size may lag behind the actual size, so allow 0 here
+        "timeline_logical_size": lambda value: value >= 0,
+    }
+
+    metric_kinds_checked = set()
+
+    for event in events:
+        assert event["tenant_id"] == str(tenant_id)
+        metric_name = event["metric"]
+
+        check = checks.get(metric_name)
+        # calm down mypy
+        if check is not None:
+            value = event["value"]
+            log.info(f"checking {metric_name} value {value}")
+            assert check(value), f"{metric_name} isn't valid"
+            metric_kinds_checked.add(metric_name)
+
 
     expected_checks = set(checks.keys())
-    assert len(metric_kinds_checked) == len(
-        checks
-    ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
+    assert metric_kinds_checked == checks.keys(), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
 
 
 def proxy_metrics_handler(request: Request) -> Response:
