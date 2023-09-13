@@ -45,6 +45,7 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use self::config::LocationConf;
 use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
 use self::metadata::LoadMetadataError;
@@ -2396,7 +2397,7 @@ impl Tenant {
     pub(super) async fn persist_tenant_config(
         tenant_id: &TenantId,
         target_config_path: &Path,
-        tenant_conf: TenantConfOpt,
+        location_conf: LocationConf,
     ) -> anyhow::Result<()> {
         // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
@@ -2409,7 +2410,7 @@ impl Tenant {
         .to_string();
 
         // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
+        conf_content += &toml_edit::ser::to_string(&location_conf)?;
 
         let conf_content = conf_content.as_bytes();
 
@@ -3111,7 +3112,7 @@ pub(crate) enum CreateTenantFilesMode {
 
 pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
+    location_conf: LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
@@ -3140,7 +3141,7 @@ pub(crate) async fn create_tenant_files(
 
     let creation_result = try_create_target_tenant_dir(
         conf,
-        tenant_conf,
+        location_conf,
         tenant_id,
         mode,
         &temporary_tenant_dir,
@@ -3166,7 +3167,7 @@ pub(crate) async fn create_tenant_files(
 
 async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
+    location_conf: LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
@@ -3203,7 +3204,7 @@ async fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf).await?;
+    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, location_conf).await?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(

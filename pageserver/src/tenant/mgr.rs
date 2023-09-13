@@ -25,7 +25,7 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
@@ -453,10 +453,13 @@ pub async fn create_tenant(
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
+
+        let location_conf = LocationConf::new(tenant_conf, generation);
+
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+        let tenant_directory = super::create_tenant_files(conf, location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -491,8 +494,9 @@ pub async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
+    let location_conf = LocationConf::new(new_tenant_conf, tenant.generation);
     let tenant_config_path = conf.tenant_config_path(&tenant_id);
-    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, new_tenant_conf)
+    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, location_conf)
         .await
         .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
@@ -714,7 +718,8 @@ pub async fn attach_tenant(
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
-        let tenant_dir = create_tenant_files(conf, tenant_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
+        let location_conf = LocationConf::new(tenant_conf, generation);
+        let tenant_dir = create_tenant_files(conf, location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
