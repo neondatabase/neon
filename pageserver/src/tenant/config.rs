@@ -84,7 +84,7 @@ pub(crate) enum LocationMode {
 pub(crate) struct LocationConf {
     /// The location-specific part of the configuration, describes the operating
     /// mode of this pageserver for this tenant.
-    mode: LocationMode,
+    pub(crate) mode: LocationMode,
     /// The pan-cluster tenant configuration, the same on all locations
     pub(crate) tenant_conf: TenantConfOpt,
 }

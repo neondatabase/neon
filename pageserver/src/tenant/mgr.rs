@@ -495,8 +495,9 @@ pub async fn set_new_tenant_config(
     let tenant = get_tenant(tenant_id, true).await?;
 
     let location_conf = LocationConf::new(new_tenant_conf, tenant.generation);
-    let tenant_config_path = conf.tenant_config_path(&tenant_id);
-    Tenant::persist_tenant_config(&tenant_id, &tenant_config_path, location_conf)
+    let legacy_config_path = conf.tenant_config_path(&tenant_id);
+    let config_path = conf.tenant_location_config_path(&tenant_id);
+    Tenant::persist_tenant_config(&tenant_id, &config_path, &legacy_config_path, location_conf)
         .await
         .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);

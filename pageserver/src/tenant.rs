@@ -66,6 +66,7 @@ use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETI
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::config::LocationMode;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -534,7 +535,7 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
-        let tenant_conf =
+        let location_conf =
             Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
 
         let TenantSharedResources {
@@ -547,7 +548,7 @@ impl Tenant {
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
-            tenant_conf,
+            location_conf.tenant_conf,
             wal_redo_manager,
             tenant_id,
             generation,
@@ -906,7 +907,7 @@ impl Tenant {
         let tenant = Tenant::new(
             TenantState::Loading,
             conf,
-            tenant_conf,
+            tenant_conf.tenant_conf,
             wal_redo_manager,
             tenant_id,
             generation,
@@ -2353,51 +2354,115 @@ impl Tenant {
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_id: &TenantId,
-    ) -> anyhow::Result<TenantConfOpt> {
-        let target_config_path = conf.tenant_config_path(tenant_id);
-        let target_config_display = target_config_path.display();
+    ) -> anyhow::Result<LocationConf> {
+        let legacy_config_path = conf.tenant_config_path(tenant_id);
+        let config_path = conf.tenant_location_config_path(tenant_id);
 
-        info!("loading tenantconf from {target_config_display}");
+        if std::path::Path::exists(&config_path) {
+            // New-style config takes precedence
+            let deserialized = Self::read_config(&config_path)?;
+            Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
+        } else if std::path::Path::exists(&legacy_config_path) {
+            // Upgrade path: found an old-style configuration only
+            let deserialized = Self::read_config(&legacy_config_path)?;
+            let display_path = legacy_config_path.display();
 
-        // FIXME If the config file is not found, assume that we're attaching
-        // a detached tenant and config is passed via attach command.
-        // https://github.com/neondatabase/neon/issues/1555
-        // OR: we're loading after incomplete deletion that managed to remove config.
-        if !target_config_path.exists() {
-            info!("tenant config not found in {target_config_display}");
-            return Ok(TenantConfOpt::default());
+            let mut tenant_conf = TenantConfOpt::default();
+            for (key, item) in deserialized.iter() {
+                match key {
+                    "tenant_config" => {
+                        tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
+                            format!("Failed to parse config from file '{display_path}' as pageserver config")
+                        })?;
+                    }
+                    _ => bail!(
+                        "config file {display_path} has unrecognized pageserver option '{key}'"
+                    ),
+                }
+            }
+
+            Ok(LocationConf::new(tenant_conf, Generation::none()))
+        } else {
+            // FIXME If the config file is not found, assume that we're attaching
+            // a detached tenant and config is passed via attach command.
+            // https://github.com/neondatabase/neon/issues/1555
+            // OR: we're loading after incomplete deletion that managed to remove config.
+            info!(
+                "tenant config not found in {} or {}",
+                config_path.display(),
+                legacy_config_path.display()
+            );
+            Ok(LocationConf::default())
         }
+    }
+
+    fn read_config(path: &Path) -> anyhow::Result<toml_edit::Document> {
+        let path_display = path.display();
+        info!("loading tenant configuration from {path_display}");
 
         // load and parse file
-        let config = fs::read_to_string(&target_config_path).with_context(|| {
-            format!("Failed to load config from path '{target_config_display}'")
-        })?;
+        let config = fs::read_to_string(path)
+            .with_context(|| format!("Failed to load config from path '{path_display}'"))?;
 
-        let toml = config.parse::<toml_edit::Document>().with_context(|| {
-            format!("Failed to parse config from file '{target_config_display}' as toml file")
-        })?;
-
-        let mut tenant_conf = TenantConfOpt::default();
-        for (key, item) in toml.iter() {
-            match key {
-                "tenant_config" => {
-                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
-                        format!("Failed to parse config from file '{target_config_display}' as pageserver config")
-                    })?;
-                }
-                _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),
-
-            }
-        }
-
-        Ok(tenant_conf)
+        config.parse::<toml_edit::Document>().with_context(|| {
+            format!("Failed to parse config from file '{path_display}' as toml file")
+        })
     }
 
     #[tracing::instrument(skip_all, fields(%tenant_id))]
     pub(super) async fn persist_tenant_config(
         tenant_id: &TenantId,
-        target_config_path: &Path,
+        config_path: &Path,
+        legacy_config_path: &Path,
         location_conf: LocationConf,
+    ) -> anyhow::Result<()> {
+        // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
+        Self::persist_tenant_config_legacy(
+            tenant_id,
+            legacy_config_path,
+            location_conf.tenant_conf,
+        )
+        .await?;
+
+        if let LocationMode::Attached(attach_conf) = &location_conf.mode {
+            // Once we use LocationMode, generations are mandatory.  If we aren't using generations,
+            // then drop out after writing legacy-style config.
+            if attach_conf.generation.is_none() {
+                tracing::debug!("Running without generations, not writing new-style LocationConf");
+                return Ok(());
+            }
+        }
+
+        // imitate a try-block with a closure
+        info!("persisting tenantconf to {}", config_path.display());
+
+        let mut conf_content = r#"# This file contains a specific per-tenant's config.
+#  It is read in case of pageserver restart.
+"#
+        .to_string();
+
+        // Convert the config to a toml file.
+        conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
+
+        let conf_content = conf_content.as_bytes();
+
+        let temp_path = path_with_suffix_extension(config_path, TEMP_FILE_SUFFIX);
+        VirtualFile::crashsafe_overwrite(config_path, &temp_path, conf_content)
+            .await
+            .with_context(|| {
+                format!(
+                    "write tenant {tenant_id} config to {}",
+                    config_path.display()
+                )
+            })?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    async fn persist_tenant_config_legacy(
+        tenant_id: &TenantId,
+        target_config_path: &Path,
+        tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
         // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
@@ -2410,7 +2475,7 @@ impl Tenant {
         .to_string();
 
         // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string(&location_conf)?;
+        conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
 
         let conf_content = conf_content.as_bytes();
 
@@ -3197,14 +3262,26 @@ async fn try_create_target_tenant_dir(
         temporary_tenant_dir,
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary timelines dir"))?;
-    let temporary_tenant_config_path = rebase_directory(
+    let temporary_legacy_tenant_config_path = rebase_directory(
         &conf.tenant_config_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
+    let temporary_tenant_config_path = rebase_directory(
+        &conf.tenant_location_config_path(tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, location_conf).await?;
+    Tenant::persist_tenant_config(
+        tenant_id,
+        &temporary_tenant_config_path,
+        &temporary_legacy_tenant_config_path,
+        location_conf,
+    )
+    .await?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
