@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use futures::TryFutureExt;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -1146,6 +1147,39 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+async fn deletion_queue_flush(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if state.remote_storage.is_none() {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
+    let flush = async {
+        if execute {
+            state.deletion_queue_client.flush_execute().await
+        } else {
+            state.deletion_queue_client.flush().await
+        }
+    }
+    // DeletionQueueError's only case is shutting down.
+    .map_err(|_| ApiError::ShuttingDown);
+
+    tokio::select! {
+        res = flush => {
+            res.map(|()| json_response(StatusCode::OK, ()))?
+        }
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
+}
+
 async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1479,6 +1513,9 @@ pub fn make_router(
         )
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
+        })
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

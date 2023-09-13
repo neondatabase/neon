@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -354,7 +355,11 @@ fn start_pageserver(
     let remote_storage = create_remote_storage_client(conf)?;
 
     // Set up deletion queue
-    let (deletion_queue, deletion_workers) = DeletionQueue::new(remote_storage.clone(), conf);
+    let (deletion_queue, deletion_workers) = DeletionQueue::new(
+        remote_storage.clone(),
+        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        conf,
+    );
     if let Some(deletion_workers) = deletion_workers {
         deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }

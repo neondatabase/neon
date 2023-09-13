@@ -874,6 +874,14 @@ pub(crate) static DELETION_QUEUE_SUBMITTED: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static DELETION_QUEUE_DROPPED: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_deletion_queue_dropped_total",
+        "Number of object deletions dropped due to stale generation."
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static DELETION_QUEUE_EXECUTED: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "pageserver_deletion_queue_executed_total",
