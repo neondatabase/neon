@@ -116,8 +116,6 @@ def test_metric_collection(
 
         remote_uploaded = get_num_remote_ops("index", "upload")
         assert remote_uploaded > 0
-    else:
-        assert remote_uploaded == 0
 
     uploads.put("ready")
 
@@ -146,13 +144,17 @@ def test_metric_collection(
         "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value == 0,
         # logical size may lag behind the actual size, so allow 0 here
         "timeline_logical_size": lambda value: value >= 0,
+        # this can also be zero, depending on when we get the value
+        "written_data_bytes_delta": lambda value: value >= 0,
     }
 
     metric_kinds_checked = set()
+    metric_kinds_seen = set()
 
     for event in events:
         assert event["tenant_id"] == str(tenant_id)
         metric_name = event["metric"]
+        metric_kinds_seen.add(metric_name)
 
         check = checks.get(metric_name)
         # calm down mypy
@@ -165,6 +167,7 @@ def test_metric_collection(
 
     expected_checks = set(checks.keys())
     assert metric_kinds_checked == checks.keys(), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
+    assert metric_kinds_seen == metric_kinds_checked
 
 
 def proxy_metrics_handler(request: Request) -> Response:
