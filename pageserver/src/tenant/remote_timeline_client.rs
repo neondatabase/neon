@@ -1196,67 +1196,49 @@ impl RemoteTimelineClient {
         }
 
         // The task has completed successfully. Remove it from the in-progress list.
-        let lsn_update = {
-            let mut upload_queue_guard = self.upload_queue.lock().unwrap();
-            let upload_queue = match upload_queue_guard.deref_mut() {
-                UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
-                UploadQueue::Stopped(_stopped) => {
-                    None
-                },
-                UploadQueue::Initialized(qi) => { Some(qi) }
-            };
-
-            let upload_queue = match upload_queue {
-                Some(upload_queue) => upload_queue,
-                None => {
-                    info!("another concurrent task already stopped the queue");
-                    return;
-                }
-            };
-
-            upload_queue.inprogress_tasks.remove(&task.task_id);
-
-            let lsn_update = match task.op {
-                UploadOp::UploadLayer(_, _) => {
-                    upload_queue.num_inprogress_layer_uploads -= 1;
-                    None
-                }
-                UploadOp::UploadMetadata(_, lsn) => {
-                    upload_queue.num_inprogress_metadata_uploads -= 1;
-                    // XXX monotonicity check?
-
-                    upload_queue.projected_remote_consistent_lsn = Some(lsn);
-                    if self.generation.is_none() {
-                        // Legacy mode: skip validating generation
-                        upload_queue.visible_remote_consistent_lsn.store(lsn);
-                        None
-                    } else {
-                        Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
-                    }
-                }
-                UploadOp::Delete(_) => {
-                    upload_queue.num_inprogress_deletions -= 1;
-                    None
-                }
-                UploadOp::Barrier(_) => unreachable!(),
-            };
-
-            // Launch any queued tasks that were unblocked by this one.
-            self.launch_queued_tasks(upload_queue);
-            lsn_update
+        let mut upload_queue_guard = self.upload_queue.lock().unwrap();
+        let upload_queue = match upload_queue_guard.deref_mut() {
+            UploadQueue::Uninitialized => panic!(
+                "callers are responsible for ensuring this is only called on an initialized queue"
+            ),
+            UploadQueue::Stopped(_stopped) => None,
+            UploadQueue::Initialized(qi) => Some(qi),
         };
 
-        if let Some((lsn, slot)) = lsn_update {
-            self.deletion_queue_client
-                .update_remote_consistent_lsn(
-                    self.tenant_id,
-                    self.timeline_id,
-                    self.generation,
-                    lsn,
-                    slot,
-                )
-                .await;
-        }
+        let upload_queue = match upload_queue {
+            Some(upload_queue) => upload_queue,
+            None => {
+                info!("another concurrent task already stopped the queue");
+                return;
+            }
+        };
+
+        upload_queue.inprogress_tasks.remove(&task.task_id);
+
+        match task.op {
+            UploadOp::UploadLayer(_, _) => {
+                upload_queue.num_inprogress_layer_uploads -= 1;
+            }
+            UploadOp::UploadMetadata(_, lsn) => {
+                upload_queue.num_inprogress_metadata_uploads -= 1;
+                // XXX monotonicity check?
+
+                upload_queue.projected_remote_consistent_lsn = Some(lsn);
+                if self.generation.is_none() {
+                    // Legacy mode: skip validating generation
+                    upload_queue.visible_remote_consistent_lsn.store(lsn);
+                } else {
+                    unimplemented!("no support for generations yet")
+                }
+            }
+            UploadOp::Delete(_) => {
+                upload_queue.num_inprogress_deletions -= 1;
+            }
+            UploadOp::Barrier(_) => unreachable!(),
+        };
+
+        // Launch any queued tasks that were unblocked by this one.
+        self.launch_queued_tasks(upload_queue);
 
         self.calls_unfinished_metric_end(&task.op);
     }

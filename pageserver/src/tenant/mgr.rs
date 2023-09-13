@@ -20,7 +20,6 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::{ControlPlaneClient, ControlPlaneGenerationsApi};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
@@ -65,17 +64,6 @@ impl TenantsMap {
     }
 }
 
-/// This is "safe" in that that it won't leave behind a partially deleted directory
-/// at the original path, because we rename with TEMP_FILE_SUFFIX before starting deleting
-/// the contents.
-///
-/// This is pageserver-specific, as it relies on future processes after a crash to check
-/// for TEMP_FILE_SUFFIX when loading things.
-async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let tmp_path = safe_rename_tenant_dir(path).await?;
-    fs::remove_dir_all(tmp_path).await
-}
-
 async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let parent = path
         .as_ref()
@@ -114,22 +102,6 @@ pub async fn init_tenant_mgr(
     let tenants_dir = conf.tenants_path();
 
     let mut tenants = HashMap::new();
-
-    // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        let result = client.re_attach().await?;
-
-        // Tip off the deletion queue about latest attached generations before starting any Tenants
-        resources
-            .deletion_queue_client
-            .recover(result.clone())
-            .await?;
-
-        Some(result)
-    } else {
-        info!("Control plane API not configured, tenant generations are disabled");
-        None
-    };
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
         .await
@@ -196,31 +168,7 @@ pub async fn init_tenant_mgr(
                         }
                     };
 
-                    let generation = if let Some(generations) = &tenant_generations {
-                        // We have a generation map: treat it as the authority for whether
-                        // this tenant is really attached.
-                        if let Some(gen) = generations.get(&tenant_id) {
-                            *gen
-                        } else {
-                            info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
-                            if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                                error!(
-                                    "Failed to remove detached tenant directory '{}': {:?}",
-                                    tenant_dir_path.display(),
-                                    e
-                                );
-                            }
-                            continue;
-                        }
-                    } else {
-                        // Legacy mode: no generation information, any tenant present
-                        // on local disk may activate
-                        info!(
-                            "Starting tenant {} in legacy mode, no generation",
-                            tenant_dir_path.display()
-                        );
-                        Generation::none()
-                    };
+                    let generation = Generation::none();
 
                     match schedule_local_tenant_processing(
                         conf,
