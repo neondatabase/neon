@@ -57,6 +57,7 @@ def test_metric_collection(
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"
+        synthetic_size_calculation_interval="3s"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
     )
@@ -75,8 +76,8 @@ def test_metric_collection(
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_metric_collection")
-    endpoint = env.endpoints.create_start("test_metric_collection")
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
