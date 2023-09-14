@@ -3,9 +3,10 @@
 # Use mock HTTP server to receive metrics and verify that they look sane.
 #
 
+import time
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Any, Iterator, Set
+from typing import Any, Iterator
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +14,8 @@ from fixtures.neon_fixtures import (
     PSQL,
     NeonEnvBuilder,
     NeonProxy,
+    TenantId,
+    TimelineId,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
@@ -34,8 +37,6 @@ def test_metric_collection(
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
-
-    metric_kinds_checked: Set[str] = set([])
 
     uploads: SimpleQueue[Any] = SimpleQueue()
 
@@ -123,6 +124,8 @@ def test_metric_collection(
     timeout = 5
     uploads.put("ready")
 
+    v = MetricsVerifier()
+
     while True:
         # discard earlier than "ready"
         log.info("waiting for upload")
@@ -136,43 +139,142 @@ def test_metric_collection(
             # if anything comes after this, we'll just ignore it
             stringified = json.dumps(events, indent=2)
             log.info(f"inspecting: {stringified}")
+            v.ingest(events)
             break
         else:
             stringified = json.dumps(events, indent=2)
             log.info(f"discarding: {stringified}")
+            v.ingest(events)
 
-    # verify that metrics look minimally sane
-    checks = {
-        "written_size": lambda value: value > 0,
-        "resident_size": lambda value: value >= 0,
-        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value == 0,
-        # logical size may lag behind the actual size, so allow 0 here
-        "timeline_logical_size": lambda value: value >= 0,
-        # this can also be zero, depending on when we get the value
-        "written_data_bytes_delta": lambda value: value >= 0,
-    }
 
-    metric_kinds_checked = set()
-    metric_kinds_seen = set()
 
-    for event in events:
-        assert event["tenant_id"] == str(tenant_id)
-        metric_name = event["metric"]
-        metric_kinds_seen.add(metric_name)
 
-        check = checks.get(metric_name)
-        # calm down mypy
-        if check is not None:
-            value = event["value"]
-            log.info(f"checking {metric_name} value {value}")
-            assert check(value), f"{metric_name} isn't valid"
-            metric_kinds_checked.add(metric_name)
 
-    expected_checks = set(checks.keys())
-    assert (
-        metric_kinds_checked == checks.keys()
-    ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
-    assert metric_kinds_seen == metric_kinds_checked
+class MetricsVerifier:
+    def __init__(self):
+        self.tenants = {}
+        pass
+
+    def ingest(self, events):
+        for event in events:
+            id = TenantId(event["tenant_id"])
+            if id not in self.tenants:
+                self.tenants[id] = TenantMetricsVerifier(id)
+
+            self.tenants[id].ingest(event)
+
+        for t in self.tenants.values():
+            t.post_batch()
+
+
+class TenantMetricsVerifier:
+    def __init__(self, id: TenantId):
+        self.id = id
+        self.timelines = {}
+        self.state = {}
+
+    def ingest(self, event):
+        assert TenantId(event["tenant_id"]) == self.id
+
+        if "timeline_id" in event:
+            id = TimelineId(event["timeline_id"])
+            if id not in self.timelines:
+                self.timelines[id] = TimelineMetricsVerifier(self.id, id)
+
+            self.timelines[id].ingest(event)
+        else:
+            name = event["metric"]
+            if name not in self.state:
+                self.state[name] = PER_METRIC_VERIFIERS[name]()
+            self.state[name].ingest(event, self)
+
+    def post_batch(self):
+        for v in self.state.values():
+            v.post_batch(self)
+
+        for tl in self.timelines.values():
+            tl.post_batch(self)
+
+
+class TimelineMetricsVerifier:
+    def __init__(self, tenant_id: TenantId, timeline_id: TimelineId):
+        self.id = timeline_id
+        self.state = {}
+
+    def ingest(self, event):
+        name = event["metric"]
+        if name not in self.state:
+            self.state[name] = PER_METRIC_VERIFIERS[name]()
+        self.state[name].ingest(event, self)
+
+    def post_batch(self, parent):
+        for v in self.state.values():
+            v.post_batch(self)
+
+
+class CannotVerifyAnything:
+    """We can only assert types, but rust already has types, so no need."""
+
+    def __init__(self):
+        pass
+
+    def ingest(self, event, parent):
+        pass
+
+    def post_batch(self, parent):
+        pass
+
+
+class WrittenDataVerifier:
+    def __init__(self):
+        self.prev = None
+        self.latest = None
+        pass
+
+    def ingest(self, event, parent):
+        self.prev = self.latest
+        self.latest = event["value"]
+
+    def post_batch(self, parent):
+        pass
+
+
+class WrittenDataDeltaVerifier:
+    def __init__(self):
+        self.value = None
+        self.sum = 0
+        self.timerange = None
+        pass
+
+    def ingest(self, event, parent):
+        assert event["type"] == "incremental"
+        self.value = event["value"]
+        self.sum += event["value"]
+        start = event["start_time"]
+        stop = event["stop_time"]
+        timerange = (start, stop)
+        if self.timerange is not None:
+            assert self.timerange[1] == timerange[0], "time ranges should be continious"
+        self.timerange = timerange
+
+    def post_batch(self, parent):
+        absolute = parent.state["written_size"]
+        if absolute.prev is None:
+            # in tests this comes up as initdb execution, so we can have 0 or
+            # about 30MB on the first event. it is not consistent.
+            assert self.value is not None
+        else:
+            assert self.value == absolute.latest - absolute.prev
+            assert self.sum == absolute.latest
+
+
+PER_METRIC_VERIFIERS = {
+    "remote_storage_size": CannotVerifyAnything,
+    "resident_size": CannotVerifyAnything,
+    "written_size": WrittenDataVerifier,
+    "written_data_bytes_delta": WrittenDataDeltaVerifier,
+    "timeline_logical_size": CannotVerifyAnything,
+}
 
 
 def proxy_metrics_handler(request: Request) -> Response:
