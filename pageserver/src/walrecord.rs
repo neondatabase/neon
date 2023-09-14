@@ -231,6 +231,7 @@ pub mod v14 {
     pub struct XlHeapLock {
         pub locking_xid: TransactionId,
         pub offnum: OffsetNumber,
+        pub _padding: u16,
         pub t_cid: u32,
         pub infobits_set: u8,
         pub flags: u8,
@@ -241,6 +242,7 @@ pub mod v14 {
             XlHeapLock {
                 locking_xid: buf.get_u32_le(),
                 offnum: buf.get_u16_le(),
+                _padding: buf.get_u16_le(),
                 t_cid: buf.get_u32_le(),
                 infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
@@ -436,6 +438,7 @@ pub mod v16 {
         pub struct XlNeonHeapLock {
             pub locking_xid: TransactionId,
             pub offnum: OffsetNumber,
+            pub _padding: u16,
             pub t_cid: u32,
             pub infobits_set: u8,
             pub flags: u8,
@@ -446,6 +449,7 @@ pub mod v16 {
                 XlNeonHeapLock {
                     locking_xid: buf.get_u32_le(),
                     offnum: buf.get_u16_le(),
+                    _padding: buf.get_u16_le(),
                     t_cid: buf.get_u32_le(),
                     infobits_set: buf.get_u8(),
                     flags: buf.get_u8(),
