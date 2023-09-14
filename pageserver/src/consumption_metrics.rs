@@ -822,6 +822,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn metric_image_stability() {
+        // it is important that these strings stay as they are
+
+        let tenant_id = TenantId::from_array([0; 16]);
+        let timeline_id = TimelineId::from_array([0xff; 16]);
+
+        let now = DateTime::parse_from_rfc3339("2023-09-15T00:00:00.123456789Z").unwrap();
+        let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z").unwrap();
+
+        let [now, before] = [DateTime::<Utc>::from(now), DateTime::from(before)];
+
+        let examples = [
+            (
+                line!(),
+                MetricsKey::written_size(tenant_id, timeline_id).at(now, 0),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"written_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                MetricsKey::written_size_delta(tenant_id, timeline_id)
+                    .from_previous_up_to(before, now, 0),
+                r#"{"type":"incremental","start_time":"2023-09-14T00:00:00.123456789Z","stop_time":"2023-09-15T00:00:00.123456789Z","metric":"written_data_bytes_delta","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"timeline_logical_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                MetricsKey::remote_storage_size(tenant_id).at(now, 0),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"remote_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+            (
+                line!(),
+                MetricsKey::resident_size(tenant_id).at(now, 0),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"resident_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+            (
+                line!(),
+                MetricsKey::synthetic_size(tenant_id).at(now, 1),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"synthetic_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":1,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+        ];
+
+        let idempotency_key = consumption_metrics::IdempotencyKey::for_tests(now, "1", 0);
+
+        for (line, (key, (kind, value)), expected) in examples {
+            let e = consumption_metrics::Event {
+                kind,
+                metric: key.metric,
+                idempotency_key: idempotency_key.to_string(),
+                value,
+                extra: super::Ids {
+                    tenant_id: key.tenant_id,
+                    timeline_id: key.timeline_id,
+                },
+            };
+            let actual = serde_json::to_string(&e).unwrap();
+            assert_eq!(expected, actual, "example from line {line}");
+        }
+    }
+
     fn time_backwards<const N: usize>() -> [std::time::SystemTime; N] {
         let mut times = [std::time::SystemTime::UNIX_EPOCH; N];
         times[0] = std::time::SystemTime::now();
