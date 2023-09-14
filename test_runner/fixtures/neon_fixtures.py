@@ -2308,7 +2308,7 @@ class Endpoint(PgProtocol):
         http_port: int,
         check_stop_result: bool = True,
     ):
-        super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
+        super().__init__(host="localhost", port=pg_port, user="arthur", dbname="neondb", password="I2GH6gtFBpCz")
         self.env = env
         self.running = False
         self.branch_name: Optional[str] = None  # dubious

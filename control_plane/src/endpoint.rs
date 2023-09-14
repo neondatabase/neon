@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::GenericOption;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -478,29 +479,192 @@ impl Endpoint {
             }
         }
 
-        // Create spec file
-        let spec = ComputeSpec {
-            skip_pg_catalog_updates: self.skip_pg_catalog_updates,
-            format_version: 1.0,
-            operation_uuid: None,
-            cluster: Cluster {
-                cluster_id: None, // project ID: not used
-                name: None,       // project name: not used
-                state: None,
-                roles: vec![],
-                databases: vec![],
-                settings: None,
-                postgresql_conf: Some(postgresql_conf),
+        let raw_spec = r#"
+        {
+            "cluster": {
+              "cluster_id": "young-forest-08365916",
+              "name": "young-forest-08365916",
+              "settings": [
+                {
+                  "name": "listen_addresses",
+                  "value": "*",
+                  "vartype": "string"
+                },
+                {
+                  "name": "wal_level",
+                  "value": "replica",
+                  "vartype": "enum"
+                },
+                {
+                  "name": "max_wal_size",
+                  "value": "1024",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "max_parallel_workers",
+                  "value": "8",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "max_connections",
+                  "value": "112",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "wal_sender_timeout",
+                  "value": "10000",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "synchronous_standby_names",
+                  "value": "walproposer",
+                  "vartype": "string"
+                },
+                {
+                  "name": "effective_io_concurrency",
+                  "value": "100",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "shared_preload_libraries",
+                  "value": "neon",
+                  "vartype": "string"
+                },
+                {
+                  "name": "max_replication_slots",
+                  "value": "10",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "neon.max_cluster_size",
+                  "value": "204800",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "fsync",
+                  "value": "off",
+                  "vartype": "bool"
+                },
+                {
+                  "name": "max_replication_write_lag",
+                  "value": "15",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "wal_log_hints",
+                  "value": "off",
+                  "vartype": "bool"
+                },
+                {
+                  "name": "maintenance_io_concurrency",
+                  "value": "100",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "max_worker_processes",
+                  "value": "8",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "idle_in_transaction_session_timeout",
+                  "value": "300000",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "password_encryption",
+                  "value": "scram-sha-256",
+                  "vartype": "enum"
+                },
+                {
+                  "name": "max_replication_flush_lag",
+                  "value": "10240",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "max_wal_senders",
+                  "value": "10",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "restart_after_crash",
+                  "value": "off",
+                  "vartype": "bool"
+                },
+                {
+                  "name": "shared_buffers",
+                  "value": "65536",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "hot_standby",
+                  "value": "off",
+                  "vartype": "bool"
+                },
+                {
+                  "name": "superuser_reserved_connections",
+                  "value": "4",
+                  "vartype": "integer"
+                },
+                {
+                  "name": "maintenance_work_mem",
+                  "value": "65536",
+                  "vartype": "integer"
+                }
+              ],
+              "roles": [
+                {
+                  "name": "arthur",
+                  "encrypted_password": "SCRAM-SHA-256$4096:goIf+DVnIR1HglUPCerpKw==$cCdVfO1J81t5q6Ry54Eu9wJyjtm/Q5gu281MHbV/0r8=:1vyoQkj0Z/rMEzZ96QcoSECrYckSvQNgWWIL7x2Lcyw=",
+                  "options": []
+                }
+              ],
+              "databases": [
+                {
+                  "name": "neondb",
+                  "owner": "arthur",
+                  "options": null
+                }
+              ]
             },
-            delta_operations: None,
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
-            mode: self.mode,
-            pageserver_connstring: Some(pageserver_connstring),
-            safekeeper_connstrings,
-            storage_auth_token: auth_token.clone(),
-            remote_extensions: None,
-        };
+            "skip_pg_catalog_updates": false,
+            "mode": "Primary",
+            "delta_operations": null,
+            "format_version": 1,
+            "operation_uuid": "9eaaac44-1d3b-405f-abd9-3562f633c6b5",
+            "timestamp": "2023-09-14T16:10:56.936947442Z",
+            "storage_auth_token": ""
+          }
+"#;
+
+        let mut spec: ComputeSpec = serde_json::from_str(raw_spec)?;
+        if let Some(ref mut settings) = spec.cluster.settings {
+            settings.push(GenericOption{
+                name: "neon.safekeepers".to_owned(),
+                value: Some(safekeeper_connstrings.join(",")),
+                vartype: "string".to_owned(),
+            });
+            settings.push(GenericOption{
+                name: "neon.pageserver_connstring".to_owned(),
+                value: Some(pageserver_connstring),
+                vartype: "string".to_owned(),
+            });
+            settings.push(GenericOption{
+                name: "neon.tenant_id".to_owned(),
+                value: Some(self.tenant_id.to_string()),
+                vartype: "string".to_owned(),
+            });
+            settings.push(GenericOption{
+                name: "neon.timeline_id".to_owned(),
+                value: Some(self.timeline_id.to_string()),
+                vartype: "string".to_owned(),
+            });
+            settings.push(GenericOption{
+                name: "port".to_owned(),
+                value: Some(self.pg_address.port().to_string()),
+                vartype: "string".to_owned(),
+            });
+        }
+
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
 
