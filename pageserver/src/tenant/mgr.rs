@@ -119,7 +119,10 @@ pub async fn init_tenant_mgr(
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
         let result = client.re_attach().await?;
 
-        // Tip off the deletion queue about latest attached generations before starting any Tenants
+        // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
+        // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
+        // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
+        // are processed, even though we don't block on recovery completing here.
         resources
             .deletion_queue_client
             .recover(result.clone())
