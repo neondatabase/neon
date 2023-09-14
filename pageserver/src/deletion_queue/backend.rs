@@ -13,11 +13,11 @@ use crate::metrics::DELETION_QUEUE_DROPPED;
 use crate::metrics::DELETION_QUEUE_ERRORS;
 
 use super::executor::ExecutorMessage;
+use super::lsn_visibility;
 use super::DeletionHeader;
 use super::DeletionList;
 use super::DeletionQueueError;
 use super::FlushOp;
-use super::VisibleLsnUpdates;
 
 // After this length of time, do any validation work that is pending,
 // even if we haven't accumulated many keys to delete.
@@ -58,7 +58,7 @@ where
     // Lsn validation state: we read projected LSNs and write back visible LSNs
     // after validation.  This is the LSN equivalent of `pending_validation_lists`:
     // it is drained in [`validate`]
-    lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
+    lsn_table: Arc<std::sync::RwLock<lsn_visibility::VisibleLsnUpdates>>,
 
     cancel: CancellationToken,
 }
@@ -72,7 +72,7 @@ where
         rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
         control_plane_client: Option<C>,
-        lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
+        lsn_table: Arc<std::sync::RwLock<lsn_visibility::VisibleLsnUpdates>>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -122,7 +122,7 @@ where
 
         let pending_lsn_updates = {
             let mut lsn_table = self.lsn_table.write().expect("Lock should not be poisoned");
-            let mut pending_updates = VisibleLsnUpdates::new();
+            let mut pending_updates = lsn_visibility::VisibleLsnUpdates::new();
             std::mem::swap(&mut pending_updates, &mut lsn_table);
             pending_updates
         };

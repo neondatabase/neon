@@ -139,41 +139,13 @@ pub struct DeletionQueueClient {
     tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
     executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
 
-    lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
+    lsn_table: Arc<std::sync::RwLock<lsn_visibility::VisibleLsnUpdates>>,
 }
 
 mod deletion_list;
 use deletion_list::*;
 
-struct PendingLsn {
-    projected: Lsn,
-    result_slot: Arc<AtomicLsn>,
-}
-
-struct TenantLsnState {
-    timelines: HashMap<TimelineId, PendingLsn>,
-
-    // In what generation was the most recent update proposed?
-    generation: Generation,
-}
-
-struct VisibleLsnUpdates {
-    tenants: HashMap<TenantId, TenantLsnState>,
-}
-
-impl VisibleLsnUpdates {
-    fn new() -> Self {
-        Self {
-            tenants: HashMap::new(),
-        }
-    }
-}
-
-impl std::fmt::Debug for VisibleLsnUpdates {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "VisibleLsnUpdates({} tenants)", self.tenants.len())
-    }
-}
+mod lsn_visibility;
 
 #[derive(Error, Debug)]
 pub enum DeletionQueueError {
@@ -189,7 +161,9 @@ impl DeletionQueueClient {
         Self {
             tx,
             executor_tx,
-            lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
+            lsn_table: Arc::new(std::sync::RwLock::new(
+                lsn_visibility::VisibleLsnUpdates::new(),
+            )),
         }
     }
 
@@ -241,10 +215,14 @@ impl DeletionQueueClient {
             .write()
             .expect("Lock should never be poisoned");
 
-        let tenant_entry = locked.tenants.entry(tenant_id).or_insert(TenantLsnState {
-            timelines: HashMap::new(),
-            generation: current_generation,
-        });
+        let tenant_entry =
+            locked
+                .tenants
+                .entry(tenant_id)
+                .or_insert(lsn_visibility::TenantLsnState {
+                    timelines: HashMap::new(),
+                    generation: current_generation,
+                });
 
         if tenant_entry.generation != current_generation {
             // Generation might have changed if we were detached and then re-attached: in this case,
@@ -255,7 +233,7 @@ impl DeletionQueueClient {
 
         tenant_entry.timelines.insert(
             timeline_id,
-            PendingLsn {
+            lsn_visibility::PendingLsn {
                 projected: lsn,
                 result_slot,
             },
@@ -419,7 +397,9 @@ impl DeletionQueue {
         // happen in the backend (persistent), not in this queue.
         let (executor_tx, executor_rx) = tokio::sync::mpsc::channel(16);
 
-        let lsn_table = Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new()));
+        let lsn_table = Arc::new(std::sync::RwLock::new(
+            lsn_visibility::VisibleLsnUpdates::new(),
+        ));
 
         // The deletion queue has an independent cancellation token to
         // the general pageserver shutdown token, because it stays alive a bit
@@ -1034,7 +1014,7 @@ pub mod mock {
         executed: Arc<AtomicUsize>,
         remote_storage: Option<GenericRemoteStorage>,
         consumer: std::sync::Mutex<ConsumerState>,
-        lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
+        lsn_table: Arc<std::sync::RwLock<lsn_visibility::VisibleLsnUpdates>>,
     }
 
     impl MockDeletionQueue {
@@ -1050,7 +1030,9 @@ pub mod mock {
                 executed,
                 remote_storage,
                 consumer: std::sync::Mutex::new(ConsumerState { rx, executor_rx }),
-                lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
+                lsn_table: Arc::new(std::sync::RwLock::new(
+                    lsn_visibility::VisibleLsnUpdates::new(),
+                )),
             }
         }
 
