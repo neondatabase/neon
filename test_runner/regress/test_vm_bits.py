@@ -113,7 +113,6 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     assert cur_new.fetchall() == []
 
 
-
 #
 # Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK
 # record.
@@ -129,7 +128,7 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
             # Perform anti-wraparound vacuuming aggressively
             "autovacuum_naptime='1 s'",
             "autovacuum_freeze_max_age = 1000000",
-        ]
+        ],
     )
 
     pg_conn = endpoint.connect()
@@ -166,7 +165,8 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     # in and the clog gets truncated. We set autovacuum_freeze_max_age to a very
     # low value, so it doesn't take all that many XIDs for autovacuum to kick in.
     for _ in range(50):
-        cur.execute("""
+        cur.execute(
+            """
         CREATE TEMP TABLE othertable (i int) ON COMMIT DROP;
         do $$
         begin
@@ -180,7 +180,8 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
           end loop;
         end;
         $$;
-        """)
+        """
+        )
         # FIXME: verify that the 'xmax' is not cleared by concurrent autovacuums.
         cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 ")
         tup = cur.fetchall()
