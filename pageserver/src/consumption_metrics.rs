@@ -589,28 +589,23 @@ async fn upload_metrics(
 
     // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
     let mut buffer = bytes::BytesMut::new();
-    let mut chunk_to_send = Vec::new();
+    let mut chunk_to_send = Vec::<Event<Ids, Name>>::new();
 
     for chunk in metrics.chunks(CHUNK_SIZE) {
-        chunk_to_send.clear();
-
-        // FIXME: this should always overwrite and truncate to chunk.len()
-        chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
-            kind: *when,
-            metric: curr_key.metric.as_str(),
-            // FIXME: finally write! this to the prev allocation
-            idempotency_key: idempotency_key(&node_id),
-            value: *curr_val,
-            extra: Ids {
-                tenant_id: curr_key.tenant_id,
-                timeline_id: curr_key.timeline_id,
-            },
-        }));
+        if !chunk_to_send.is_empty() {
+            assert_eq!(chunk_to_send.len(), CHUNK_SIZE);
+            chunk_to_send
+                .iter_mut()
+                .zip(chunk.iter())
+                .for_each(|(slot, raw_metric)| raw_metric.update_in_place(slot, node_id));
+        } else {
+            chunk_to_send.extend(chunk.iter().map(|raw_metric| raw_metric.as_event(node_id)));
+        }
 
         serde_json::to_writer(
             (&mut buffer).writer(),
             &EventChunk {
-                events: (&chunk_to_send).into(),
+                events: (&chunk_to_send[..chunk.len()]).into(),
             },
         )?;
 
@@ -946,6 +941,63 @@ async fn calculate_synthetic_size_worker(
             synthetic_size_calculation_interval,
             "consumption_metrics_synthetic_size_worker",
         );
+    }
+}
+
+trait RawMetricExt {
+    fn as_event(&self, node_id: &str) -> Event<Ids, Name>;
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str);
+}
+
+impl RawMetricExt for RawMetric {
+    fn as_event(&self, node_id: &str) -> Event<Ids, Name> {
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.0;
+
+        let (kind, value) = self.1;
+
+        Event {
+            kind,
+            metric,
+            idempotency_key: idempotency_key(&node_id),
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        }
+    }
+
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str) {
+        use consumption_metrics::IdempotencyKey;
+        use std::fmt::Write;
+
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.0;
+
+        let (kind, value) = self.1;
+
+        *event = Event {
+            kind,
+            metric,
+            idempotency_key: {
+                event.idempotency_key.clear();
+                let next = IdempotencyKey::generate(node_id);
+                write!(event.idempotency_key, "{}", next).unwrap();
+                std::mem::take(&mut event.idempotency_key)
+            },
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        };
     }
 }
 
