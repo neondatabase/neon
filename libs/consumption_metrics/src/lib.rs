@@ -93,6 +93,14 @@ impl<'a> IdempotencyKey<'a> {
             nonce: rand::thread_rng().gen_range(0..=9999),
         }
     }
+
+    pub fn for_tests(now: DateTime<Utc>, node_id: &'a str, nonce: u16) -> Self {
+        IdempotencyKey {
+            now,
+            node_id,
+            nonce,
+        }
+    }
 }
 
 pub const CHUNK_SIZE: usize = 1000;
