@@ -121,7 +121,7 @@ async fn collect_metrics_iteration(
 
     let current_metrics = gather_proxy_io_bytes_per_client();
 
-    let metrics_to_send: Vec<Event<Ids>> = current_metrics
+    let metrics_to_send: Vec<Event<Ids, &'static str>> = current_metrics
         .iter()
         .filter_map(|(curr_key, (curr_val, curr_time))| {
             let mut start_time = *curr_time;
