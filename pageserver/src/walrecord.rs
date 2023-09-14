@@ -430,6 +430,28 @@ pub mod v16 {
                 }
             }
         }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapLock {
+            pub locking_xid: TransactionId,
+            pub offnum: OffsetNumber,
+            pub t_cid: u32,
+            pub infobits_set: u8,
+            pub flags: u8,
+        }
+
+        impl XlNeonHeapLock {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapLock {
+                XlNeonHeapLock {
+                    locking_xid: buf.get_u32_le(),
+                    offnum: buf.get_u16_le(),
+                    t_cid: buf.get_u32_le(),
+                    infobits_set: buf.get_u8(),
+                    flags: buf.get_u8(),
+                }
+            }
+        }
     }
 }
 

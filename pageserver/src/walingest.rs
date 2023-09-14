@@ -810,7 +810,7 @@ impl<'a> WalIngest<'a> {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        let xlrec = v16::XlHeapLock::decode(buf);
+                        let xlrec = v16::XlNeonHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
