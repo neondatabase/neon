@@ -16,20 +16,28 @@ on:
       # Actual magic happens here:
       - labeled
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PR_NUMBER: ${{ github.event.pull_request.number }}
   BRANCH: "ci-run/pr-${{ github.event.pull_request.number }}"
 
-permissions: write-all
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
 
 jobs:
   remove-label:
     # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
     # The PR should be reviewed and labelled manually again.
+
+    permissions:
+      pull-requests: write # For `gh pr edit`
 
     if: |
       contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
@@ -42,6 +50,10 @@ jobs:
 
   create-or-update-pr-for-ci-run:
     # Create local PR for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
+
+    permissions:
+      pull-requests: write # for `gh pr edit`
+      # For `git push` and `gh pr create` we use CI_ACCESS_TOKEN
 
     if: |
       github.event.action == 'labeled' &&
@@ -75,7 +87,7 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${HEAD} --base main --json number --jq '.[].number')"
+          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
             gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
@@ -87,6 +99,10 @@ jobs:
   cleanup:
     # Close PRs and delete branchs if the original PR is closed.
 
+    permissions:
+      contents: write # for `--delete-branch` flag in `gh pr close`
+      pull-requests: write # for `gh pr close`
+
     if: |
       github.event.action == 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository
@@ -94,8 +110,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - run: |
-          CLOSED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${HEAD} --json 'closed' --jq '.[].closed')"
+      - name: Close PR and delete `ci-run/pr-${{ env.PR_NUMBER }}` branch
+        run: |
+          CLOSED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --json 'closed' --jq '.[].closed')"
           if [ "${CLOSED}" == "false" ]; then
             gh pr --repo "${GITHUB_REPOSITORY}" close "${BRANCH}" --delete-branch
           fi
