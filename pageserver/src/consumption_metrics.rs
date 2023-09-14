@@ -53,7 +53,7 @@ impl MetricsKey {
 struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    fn at(self, time: DateTime<Utc>, val: u64) -> (MetricsKey, (EventType, u64)) {
+    fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
     }
@@ -69,7 +69,7 @@ impl IncrementalValueFactory {
         prev_end: DateTime<Utc>,
         up_to: DateTime<Utc>,
         val: u64,
-    ) -> (MetricsKey, (EventType, u64)) {
+    ) -> RawMetric {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
         (
@@ -172,6 +172,22 @@ impl MetricsKey {
     }
 }
 
+/// Basically a key-value pair, but usually in a Vec except for [`Cache`].
+///
+/// This is as opposed to `consumption_metrics::Event` which is the externally communicated form.
+/// Difference is basically the missing idempotency key, which lives only for the duration of
+/// upload attempts.
+///
+/// See also: [`RawMetricExt`]
+type RawMetric = (MetricsKey, (EventType, u64));
+
+/// Caches the [`RawMetric`]s
+///
+/// In practice, during startup, last sent values are stored here to be used in calculating new
+/// ones. After successful uploading, the cached values are updated to cache. This used to be used
+/// for deduplication, but that is no longer needed.
+type Cache = HashMap<MetricsKey, (EventType, u64)>;
+
 /// Main thread that serves metrics collection
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
@@ -249,13 +265,13 @@ pub async fn collect_metrics(
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
 async fn collect_metrics_iteration(
     client: &reqwest::Client,
-    cached_metrics: &mut HashMap<MetricsKey, (EventType, u64)>,
+    cached_metrics: &mut Cache,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
     send_cached: bool,
 ) {
-    let mut current_metrics: Vec<(MetricsKey, (EventType, u64))> = Vec::new();
+    let mut current_metrics: Vec<RawMetric> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
@@ -434,12 +450,7 @@ impl TenantSnapshot {
         }
     }
 
-    fn to_metrics(
-        &self,
-        tenant_id: TenantId,
-        now: DateTime<Utc>,
-        metrics: &mut Vec<(MetricsKey, (EventType, u64))>,
-    ) {
+    fn to_metrics(&self, tenant_id: TenantId, now: DateTime<Utc>, metrics: &mut Vec<RawMetric>) {
         let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
 
         let resident_size = MetricsKey::resident_size(tenant_id).at(now, self.resident_size);
@@ -515,8 +526,8 @@ impl TimelineSnapshot {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         now: DateTime<Utc>,
-        metrics: &mut Vec<(MetricsKey, (EventType, u64))>,
-        cache: &HashMap<MetricsKey, (EventType, u64)>,
+        metrics: &mut Vec<RawMetric>,
+        cache: &Cache,
     ) {
         let timeline_written_size = u64::from(self.last_record_lsn);
 
