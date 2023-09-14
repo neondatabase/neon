@@ -170,6 +170,7 @@ def test_metric_collection(
 
 
 class MetricsVerifier:
+    """A graph of verifiers, allowing one for each metric"""
     def __init__(self):
         self.tenants = {}
         pass
@@ -264,13 +265,11 @@ class CannotVerifyAnything:
 
 class WrittenDataVerifier:
     def __init__(self):
-        self.prev = None
-        self.latest = None
+        self.values = []
         pass
 
     def ingest(self, event, parent):
-        self.prev = self.latest
-        self.latest = event["value"]
+        self.values.append(event["value"])
 
     def post_batch(self, parent):
         pass
@@ -296,13 +295,13 @@ class WrittenDataDeltaVerifier:
 
     def post_batch(self, parent):
         absolute = parent.state["written_size"]
-        if absolute.prev is None:
+        if len(absolute.values) == 1:
             # in tests this comes up as initdb execution, so we can have 0 or
             # about 30MB on the first event. it is not consistent.
             assert self.value is not None
         else:
-            assert self.value == absolute.latest - absolute.prev
-            # FIXME: this should hold, it's probably because we don't send the initial difference always
+            assert self.value == absolute.values[-1] - absolute.values[-2]
+            # sounds like this should hold, but it will not for branches -- probably related to timing
             # assert self.sum == absolute.latest
 
 class SyntheticSizeVerifier:
@@ -312,11 +311,14 @@ class SyntheticSizeVerifier:
         pass
 
     def ingest(self, event, parent):
+        assert isinstance(parent, TenantMetricsVerifier)
+        assert event["type"] == "absolute"
         value = event["value"]
         self.value = value
 
     def post_batch(self, parent):
         if self.prev is not None:
+            # this is assuming no one goes and deletes the cache file
             assert self.value is not None, "after calculating first synthetic size, cached or more recent should be returned"
         self.prev = self.value
         self.value = None
