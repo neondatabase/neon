@@ -427,6 +427,9 @@ impl DeletionQueueClient {
         }
     }
 
+    /// This is cancel-safe.  If you drop the future before it completes, the message
+    /// is not pushed, although in the context of the deletion queue it doesn't matter: once
+    /// we decide to do a deletion the decision is always final.
     async fn do_push<T>(
         &self,
         queue: &tokio::sync::mpsc::Sender<T>,
@@ -539,6 +542,7 @@ impl DeletionQueueClient {
         .await
     }
 
+    /// This is cancel-safe.  If you drop the future the flush may still happen in the background.
     async fn do_flush<T>(
         &self,
         queue: &tokio::sync::mpsc::Sender<T>,
@@ -558,6 +562,8 @@ impl DeletionQueueClient {
     }
 
     /// Wait until all previous deletions are persistent (either executed, or written to a DeletionList)
+    ///
+    /// This is cancel-safe.  If you drop the future the flush may still happen in the background.
     pub async fn flush(&self) -> Result<(), DeletionQueueError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         self.do_flush(&self.tx, FrontendQueueMessage::Flush(FlushOp { tx }), rx)
