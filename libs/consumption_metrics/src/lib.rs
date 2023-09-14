@@ -44,12 +44,12 @@ impl EventType {
 }
 
 #[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Event<Extra> {
+pub struct Event<Extra, Metric: Serialize> {
     #[serde(flatten)]
     #[serde(rename = "type")]
     pub kind: EventType,
 
-    pub metric: &'static str,
+    pub metric: Metric,
     pub idempotency_key: String,
     pub value: u64,
 
