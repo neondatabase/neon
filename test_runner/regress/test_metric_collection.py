@@ -3,6 +3,7 @@
 # Use mock HTTP server to receive metrics and verify that they look sane.
 #
 
+import json
 import time
 from pathlib import Path
 from queue import SimpleQueue
@@ -24,7 +25,6 @@ from fixtures.remote_storage import RemoteStorageKind
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
-import json
 
 
 @pytest.mark.parametrize(
@@ -157,7 +157,7 @@ def test_metric_collection(
         events = uploads.get(timeout=timeout)
 
         if events == "ready":
-            events = uploads.get(timeout=timeout*3)
+            events = uploads.get(timeout=timeout * 3)
             v.ingest(events)
             events = uploads.get(timeout=timeout)
             v.ingest(events)
@@ -171,6 +171,7 @@ def test_metric_collection(
 
 class MetricsVerifier:
     """A graph of verifiers, allowing one for each metric"""
+
     def __init__(self):
         self.tenants = {}
         pass
@@ -193,7 +194,6 @@ class MetricsVerifier:
         for t in self.tenants.values():
             names = names.union(t.accepted_event_names())
         return names
-
 
 
 class TenantMetricsVerifier:
@@ -304,6 +304,7 @@ class WrittenDataDeltaVerifier:
             # sounds like this should hold, but it will not for branches -- probably related to timing
             # assert self.sum == absolute.latest
 
+
 class SyntheticSizeVerifier:
     def __init__(self):
         self.prev = None
@@ -319,7 +320,9 @@ class SyntheticSizeVerifier:
     def post_batch(self, parent):
         if self.prev is not None:
             # this is assuming no one goes and deletes the cache file
-            assert self.value is not None, "after calculating first synthetic size, cached or more recent should be returned"
+            assert (
+                self.value is not None
+            ), "after calculating first synthetic size, cached or more recent should be returned"
         self.prev = self.value
         self.value = None
 
