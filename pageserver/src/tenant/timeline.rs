@@ -523,7 +523,9 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
-    /// remote_consistent_lsn for objects uploaded in the tenant's current generation
+    /// remote_consistent_lsn from the perspective of the tenant's current generation,
+    /// not validated with control plane yet.
+    /// See [`get_remote_consistent_lsn_visible`].
     pub fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
             remote_client.remote_consistent_lsn_projected()
