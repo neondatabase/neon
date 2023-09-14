@@ -59,7 +59,8 @@ pub(crate) struct UploadQueueInitialized {
     /// Safekeeper can rely on it to make decisions for WAL storage.
     ///
     /// visible_remote_consistent_lsn is only updated after our generation has been validated with
-    /// the control plane.
+    /// the control plane (unlesss a timeline's generation is None, in which case
+    /// we skip validation)
     pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
     pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
