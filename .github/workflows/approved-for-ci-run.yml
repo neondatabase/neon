@@ -24,7 +24,7 @@ env:
   PR_NUMBER: ${{ github.event.pull_request.number }}
   BRANCH: "ci-run/pr-${{ github.event.pull_request.number }}"
 
-# No permission for GITHUB_TOKEN by default; the **minimal requied** set of permission should be exactly granted in each job.
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
 defaults:
