@@ -134,8 +134,6 @@ def test_metric_collection(
 
         if events == "ready":
             events = uploads.get(timeout=timeout)
-            httpserver.check()
-            httpserver.stop()
             # if anything comes after this, we'll just ignore it
             stringified = json.dumps(events, indent=2)
             log.info(f"inspecting: {stringified}")
@@ -146,8 +144,25 @@ def test_metric_collection(
             log.info(f"discarding: {stringified}")
             v.ingest(events)
 
+    env.pageserver.stop()
+    time.sleep(1)
+    uploads.put("ready")
+    env.pageserver.start()
 
+    while True:
+        events = uploads.get(timeout=timeout)
 
+        if events == "ready":
+            events = uploads.get(timeout=timeout)
+            v.ingest(events)
+            events = uploads.get(timeout=timeout)
+            v.ingest(events)
+            break
+        else:
+            v.ingest(events)
+
+    httpserver.check()
+    httpserver.stop()
 
 
 class MetricsVerifier:
