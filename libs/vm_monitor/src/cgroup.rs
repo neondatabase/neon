@@ -315,12 +315,8 @@ impl CgroupWatcher {
     where
         E: Stream<Item = Sequenced<u64>>,
     {
-        // There are several actions might do when receiving a `memory.high`,
-        // such as freezing the cgroup, or increasing its `memory.high`. We don't
-        // want to do these things too often (because postgres needs to run, and
-        // we only have so much memory). These timers serve as rate limits for this.
         let mut wait_to_freeze = pin!(tokio::time::sleep(Duration::ZERO));
-        let mut wait_to_increase_memory_high = pin!(tokio::time::sleep(Duration::ZERO));
+        let mut last_memory_high_increase_at: Option<Instant> = None;
         let mut events = pin!(events);
 
         // Are we waiting to be upscaled? Could be true if we request upscale due
@@ -332,6 +328,8 @@ impl CgroupWatcher {
                 upscale = upscales.recv() => {
                     let Sequenced { seqnum, data } = upscale
                         .context("failed to listen on upscale notification channel")?;
+                    waiting_on_upscale = false;
+                    last_memory_high_increase_at = None;
                     self.last_upscale_seqnum.store(seqnum, Ordering::Release);
                     info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
                 }
@@ -396,12 +394,17 @@ impl CgroupWatcher {
                             .send(())
                             .await
                             .context("failed to request upscale")?;
+                        waiting_on_upscale = true;
                         continue;
                     }
 
                     // Shoot, we can't freeze or and we're still waiting on upscale,
                     // increase memory.high to reduce throttling
-                    if wait_to_increase_memory_high.is_elapsed() {
+                    let can_increase_memory_high = match last_memory_high_increase_at {
+                        None => true,
+                        Some(t) => t.elapsed() > self.config.memory_high_increase_every,
+                    };
+                    if can_increase_memory_high {
                         info!(
                             "received memory.high event, \
                             but too soon to refreeze and already requested upscale \
@@ -437,12 +440,11 @@ impl CgroupWatcher {
                         );
                         self.set_high_bytes(new_high)
                             .context("failed to set memory.high")?;
-                        wait_to_increase_memory_high
-                            .as_mut()
-                            .reset(Instant::now() + self.config.memory_high_increase_every)
+                        last_memory_high_increase_at = Some(Instant::now());
+                        continue;
                     }
 
-                    // we can't do anything
+                    info!("received memory.high event, but can't do anything");
                 }
             };
         }
