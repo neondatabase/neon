@@ -88,6 +88,8 @@ where
         }
     }
 
+    // these lists have been drained, all we need from them is the list path.
+    // See my comments in the caller caller.
     async fn cleanup_lists(&mut self, lists: Vec<DeletionList>) {
         for list in lists {
             let list_path = self.conf.deletion_list_path(list.sequence);
@@ -98,6 +100,13 @@ where
                 // be touching these files.  We will leave the file behind.  Subsequent
                 // pageservers will try and load it again: hopefully whatever storage
                 // issue (probably permissions) has been fixed by then.
+                //
+                // Hm, the recover() function would load these again as `validate=true`, right?
+                // So, we'd retry the deletions, even though we know that by the time this
+                // function gets called, the deletions were successful.
+                // That seems wasteful. Can't the header keep an additional pointer/sequence number
+                // that tracks the deletions lists that were already fully executed?
+                // (... I guess I need to read the code that handles failure to write out the header)
                 tracing::error!("Failed to delete {}: {e:#}", list_path.display());
                 break;
             }
@@ -256,7 +265,7 @@ where
         // After successful validation, nothing is pending: any lists that
         // made it through validation will be in validated_lists.
         assert!(self.pending_lists.is_empty());
-        self.pending_key_count = 0;
+        self.pending_key_count = 0; // why can't we just pending_lists.len() in all places we use pending_key_count
 
         tracing::debug!(
             "Validation complete, have {} validated lists",
@@ -272,6 +281,12 @@ where
         // Drain `validated_lists` into the executor
         let mut executing_lists = Vec::new();
         for mut list in self.validated_lists.drain(..) {
+            // again, this weird C++-esque &mut self drain function.
+            // I think a consuming `into_drain_paths()` would be more idiomatic.
+            //
+            // I see you need the drained list for the `cleanup_lists` call below.
+            // Make an `into_...()` function that returns a tuple, then.
+            // Less mutable state, more values = better.
             let objects = list.drain_paths();
             self.tx
                 .send(ExecutorMessage::Delete(objects))
@@ -288,6 +303,7 @@ where
         Ok(())
     }
 
+    // better name: flush_to_executor_and_wait
     async fn flush_executor(&mut self) -> Result<(), DeletionQueueError> {
         // Flush the executor, so that all the keys referenced by these deletion lists
         // are actually removed from remote storage.  This is a precondition to deleting
@@ -326,6 +342,7 @@ where
             match msg {
                 BackendQueueMessage::Delete(list) => {
                     if list.validated {
+                        // this only happens during recovery
                         self.validated_lists.push(list)
                     } else {
                         self.pending_key_count += list.len();
@@ -334,10 +351,14 @@ where
 
                     if self.pending_key_count > AUTOFLUSH_KEY_COUNT {
                         // Drop possible shutdown error, because we will just fall out of loop if that happens
+                        // TODO: log the error at least?
+                        // Alternatively, put a match here to ensure that it's really the shutdown error,
+                        // and not some other error variant we might add in the future.
                         drop(self.flush().await);
                     }
                 }
                 BackendQueueMessage::Flush(op) => {
+                    // would prefer an exhaustive match of the Ok() and each Err(...) variant here.
                     if let Ok(()) = self.flush().await {
                         // If we fail due to shutting down, we will just drop `op` to propagate that status.
                         op.fire();

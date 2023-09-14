@@ -1,3 +1,11 @@
+//! The frontend batches deletion requests into DeletionLists and once batched,
+//! passes them to the backend for validation & execution.
+//!
+//! Durability: the frontend persists the DeletionLists to disk, and the backend persists
+//! the header file that keeps track of which deletion lists have been validated yet.
+//! The split responsiblity is a bit headache-inducing, but, it allows us to persist
+//! intention to delete in the frontend, even if the backend is down/full/slow.
+
 use super::BackendQueueMessage;
 use super::DeletionHeader;
 use super::DeletionList;
@@ -130,6 +138,8 @@ impl FrontendQueueWorker {
                     f.fire();
                 }
 
+                // the .drain() is like a C++ move constructor; unidiomatics.
+                // Use std::mem::replace (together with the line below) instead.
                 let onward_list = self.pending.drain();
 
                 // We have consumed out of pending: reset it for the next incoming deletions to accumulate there
@@ -189,6 +199,8 @@ impl FrontendQueueWorker {
         }
     }
 
+    /// 1. There are no safeguards that this function isn't called more than once.
+    /// 2. Why isn't this part of the DeletionQueue::new() function?
     async fn recover(
         &mut self,
         attached_tenants: HashMap<TenantId, Generation>,
@@ -204,6 +216,7 @@ impl FrontendQueueWorker {
         // Start our next deletion list from after the last location validated by
         // previous process lifetime, or after the last location found (it is updated
         // below after enumerating the deletion lists)
+        // isn't self.pending.sequence always 0 at this point?
         self.pending.sequence = std::cmp::max(self.pending.sequence, validated_sequence + 1);
 
         let deletion_directory = self.conf.deletion_prefix();
@@ -234,6 +247,9 @@ impl FrontendQueueWorker {
             let file_name = dentry.file_name().to_owned();
             let basename = file_name.to_string_lossy();
             let seq_part = if let Some(m) = list_name_pattern.captures(&basename) {
+                // named capture group would help readability here.
+                // Also, I see two capture groups, what is the second one for? version number, right?
+                // Would have been self-documenting through named capture groups.
                 m.get(1)
                     .expect("Non optional group should be present")
                     .as_str()
@@ -261,6 +277,9 @@ impl FrontendQueueWorker {
         }
 
         for s in seqs {
+            // why doesn't the header simply store the set of DeletionList names / sequence numbers?
+            // Then we could save ourselves the directory enumeration above, along with the
+            // regex parsing and cmp::max stuff.
             let list_path = self.conf.deletion_list_path(s);
 
             let list_bytes = tokio::fs::read(&list_path).await?;
@@ -302,13 +321,14 @@ impl FrontendQueueWorker {
 
             // We will drop out of recovery if this fails: it indicates that we are shutting down
             // or the backend has panicked
+            // we already counted these before we crashed, mustn't count them again
             DELETION_QUEUE_SUBMITTED.inc_by(deletion_list.len() as u64);
             self.tx
                 .send(BackendQueueMessage::Delete(deletion_list))
                 .await?;
         }
 
-        info!(next_sequence = self.pending.sequence, "Replay complete");
+        info!(next_sequence = self.pending.sequence, "Recovery complete");
 
         Ok(())
     }
@@ -383,6 +403,8 @@ impl FrontendQueueWorker {
                             // Unexpected: after we flush, we should have
                             // drained self.pending, so a conflict on
                             // generation numbers should be impossible.
+                            // Wondering whether we should have a counter metric that we bump each time we know we might be leaking objects.
+                            // Better / easier / cheaper to monitor than scraping logs.
                             tracing::error!(
                                 "Failed to enqueue deletions, leaking objects.  This is a bug."
                             );
@@ -413,6 +435,14 @@ impl FrontendQueueWorker {
                         // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
                         // queue receiver has been dropped, or something is critically broken with
                         // the local filesystem holding deletion lists.
+                        //
+                        // Hmm, so, if we fail to recover, we return from the frontend queue worker.
+                        // This means subsequent submissions will fail, right?
+                        // Which means each tenant's compaction loop affected by failed submission will enter the "retry in 2" seconds loop.
+                        // => IMO we should move recovery to the DeletionQueue::new() constructor function,
+                        //    and if it fails, refuse to start the pageserver. Avoids a whole bunch of pain.
+                        //    If recovery fails because the on-disk state is garbage, can always `rm -rf` it and then
+                        //    restart the PS.
                         info!(
                             "Deletion queue recover aborted, deletion queue will not proceed ({e})"
                         );

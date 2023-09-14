@@ -126,6 +126,7 @@ struct FlushOp {
 }
 
 impl FlushOp {
+    // better name: wake_waiters
     fn fire(self) {
         if self.tx.send(()).is_err() {
             // oneshot channel closed. This is legal: a client could be destroyed while waiting for a flush.
