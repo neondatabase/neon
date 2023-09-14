@@ -1,8 +1,11 @@
-use consumption_metrics::{idempotency_key, EventChunk, CHUNK_SIZE};
+use consumption_metrics::{idempotency_key, Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{Cache, RawMetric};
+use super::{
+    metrics::{Ids, Name},
+    Cache, MetricsKey, RawMetric,
+};
 
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
 pub(super) async fn upload_metrics(
@@ -67,9 +70,7 @@ fn serialize_in_chunks<'a>(
     input: &'a [RawMetric],
     node_id: &'a str,
 ) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a {
-    use super::Ids;
     use bytes::BufMut;
-    use consumption_metrics::Event;
 
     // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
     let mut buffer = bytes::BytesMut::new();
@@ -79,19 +80,15 @@ fn serialize_in_chunks<'a>(
     std::iter::from_fn(move || {
         let chunk = chunks.next()?;
 
-        // FIXME: this should always overwrite and truncate to chunk.len()
-        events.clear();
-        events.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
-            kind: *when,
-            metric: curr_key.metric,
-            // FIXME: finally write! this to the prev allocation
-            idempotency_key: idempotency_key(node_id),
-            value: *curr_val,
-            extra: Ids {
-                tenant_id: curr_key.tenant_id,
-                timeline_id: curr_key.timeline_id,
-            },
-        }));
+        if !events.is_empty() {
+            assert_eq!(events.len(), CHUNK_SIZE);
+            events
+                .iter_mut()
+                .zip(chunk.iter())
+                .for_each(|(slot, raw_metric)| raw_metric.update_in_place(slot, node_id));
+        } else {
+            events.extend(chunk.iter().map(|raw_metric| raw_metric.as_event(node_id)));
+        }
 
         let res = serde_json::to_writer(
             (&mut buffer).writer(),
@@ -105,6 +102,62 @@ fn serialize_in_chunks<'a>(
             Err(e) => Some(Err(e)),
         }
     })
+}
+
+trait RawMetricExt {
+    fn as_event(&self, node_id: &str) -> Event<Ids, Name>;
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str);
+}
+
+impl RawMetricExt for RawMetric {
+    fn as_event(&self, node_id: &str) -> Event<Ids, Name> {
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.0;
+
+        let (kind, value) = self.1;
+
+        Event {
+            kind,
+            metric,
+            idempotency_key: idempotency_key(&node_id),
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        }
+    }
+
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str) {
+        use std::fmt::Write;
+
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.0;
+
+        let (kind, value) = self.1;
+
+        *event = Event {
+            kind,
+            metric,
+            idempotency_key: {
+                event.idempotency_key.clear();
+                let next = IdempotencyKey::generate(node_id);
+                write!(event.idempotency_key, "{}", next).unwrap();
+                std::mem::take(&mut event.idempotency_key)
+            },
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        };
+    }
 }
 
 enum UploadError {

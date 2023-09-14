@@ -14,7 +14,7 @@ use tracing::*;
 use utils::id::NodeId;
 
 mod metrics;
-use metrics::{Ids, MetricsKey};
+use metrics::MetricsKey;
 mod disk_cache;
 mod upload;
 
