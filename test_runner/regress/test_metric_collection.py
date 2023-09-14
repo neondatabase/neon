@@ -121,10 +121,14 @@ def test_metric_collection(
 
     # we expect uploads at 1Hz, on busy runners this could be too optimistic,
     # so give 5s we only want to get the following upload after "ready" value.
-    # later tests will be added to ensure that the timeseries are sane.
     timeout = 5
+
+    # these strings in the upload queue allow synchronizing with the uploads
+    # and the main test execution
     uploads.put("ready")
 
+    # note that this verifier graph should live across restarts as long as the
+    # cache file lives
     v = MetricsVerifier()
 
     while True:
@@ -166,11 +170,13 @@ def test_metric_collection(
             v.ingest(events)
 
     httpserver.check()
-    httpserver.stop()
 
 
 class MetricsVerifier:
-    """A graph of verifiers, allowing one for each metric"""
+    """
+    A graph of per tenant per timeline verifiers, allowing one for each
+    metric
+    """
 
     def __init__(self):
         self.tenants = {}
@@ -290,6 +296,7 @@ class WrittenDataDeltaVerifier:
         stop = event["stop_time"]
         timerange = (start, stop)
         if self.timerange is not None:
+            # this holds across restarts
             assert self.timerange[1] == timerange[0], "time ranges should be continious"
         self.timerange = timerange
 
@@ -322,7 +329,7 @@ class SyntheticSizeVerifier:
             # this is assuming no one goes and deletes the cache file
             assert (
                 self.value is not None
-            ), "after calculating first synthetic size, cached or more recent should be returned"
+            ), "after calculating first synthetic size, cached or more recent should be sent"
         self.prev = self.value
         self.value = None
 
