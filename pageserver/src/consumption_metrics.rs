@@ -501,12 +501,8 @@ where
             tenant_resident_size += timeline.resident_physical_size();
         }
 
-        TenantSnapshot::collect(&tenant, tenant_resident_size).to_metrics(
-            tenant_id,
-            Utc::now(),
-            &cache,
-            &mut current_metrics,
-        );
+        let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
+        snap.to_metrics(tenant_id, Utc::now(), &cache, &mut current_metrics);
     }
 
     current_metrics
