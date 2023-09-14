@@ -60,7 +60,10 @@ enum Name {
     SyntheticSize,
 }
 
-/// Key that uniquely identifies the object, this metric describes.
+/// Key that uniquely identifies the object this metric describes.
+///
+/// This is a denormalization done at the MetricsKey const methods; these should not be constructed
+/// elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MetricsKey {
     tenant_id: TenantId,
