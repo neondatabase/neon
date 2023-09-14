@@ -505,7 +505,7 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
-                        let xlrec = v14::XlHeapLock::decode(buf); // XlHeapLockUpdated is the same as XlHeapLock
+                        let xlrec = v14::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
@@ -573,7 +573,7 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
-                        let xlrec = v15::XlHeapLock::decode(buf); // XlHeapLockUpdated is the same as XlHeapLock
+                        let xlrec = v15::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
@@ -641,7 +641,7 @@ impl<'a> WalIngest<'a> {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
-                        let xlrec = v16::XlHeapLock::decode(buf); // XlHeapLockUpdated is the same as XlHeapLock
+                        let xlrec = v16::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;

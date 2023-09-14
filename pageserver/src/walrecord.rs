@@ -219,7 +219,7 @@ pub mod v14 {
                 old_offnum: buf.get_u16_le(),
                 old_infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
-                t_cid: buf.get_u32(),
+                t_cid: buf.get_u32_le(),
                 new_xmax: buf.get_u32_le(),
                 new_offnum: buf.get_u16_le(),
             }
@@ -229,7 +229,7 @@ pub mod v14 {
     #[repr(C)]
     #[derive(Debug)]
     pub struct XlHeapLock {
-        pub xmax: TransactionId,
+        pub locking_xid: TransactionId,
         pub offnum: OffsetNumber,
         pub t_cid: u32,
         pub infobits_set: u8,
@@ -239,9 +239,29 @@ pub mod v14 {
     impl XlHeapLock {
         pub fn decode(buf: &mut Bytes) -> XlHeapLock {
             XlHeapLock {
+                locking_xid: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                t_cid: buf.get_u32_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapLockUpdated {
+        pub xmax: TransactionId,
+        pub offnum: OffsetNumber,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapLockUpdated {
+        pub fn decode(buf: &mut Bytes) -> XlHeapLockUpdated {
+            XlHeapLockUpdated {
                 xmax: buf.get_u32_le(),
                 offnum: buf.get_u16_le(),
-                t_cid: buf.get_u32(),
                 infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
             }
@@ -250,11 +270,13 @@ pub mod v14 {
 }
 
 pub mod v15 {
-    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate};
+    pub use super::v14::{
+        XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapLockUpdated, XlHeapMultiInsert, XlHeapUpdate,
+    };
 }
 
 pub mod v16 {
-    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert};
     use bytes::{Buf, Bytes};
     use postgres_ffi::{OffsetNumber, TransactionId};
 
@@ -303,7 +325,7 @@ pub mod v16 {
     #[repr(C)]
     #[derive(Debug)]
     pub struct XlHeapLock {
-        pub xmax: TransactionId,
+        pub locking_xid: TransactionId,
         pub offnum: OffsetNumber,
         pub infobits_set: u8,
         pub flags: u8,
@@ -312,7 +334,7 @@ pub mod v16 {
     impl XlHeapLock {
         pub fn decode(buf: &mut Bytes) -> XlHeapLock {
             XlHeapLock {
-                xmax: buf.get_u32_le(),
+                locking_xid: buf.get_u32_le(),
                 offnum: buf.get_u16_le(),
                 infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
