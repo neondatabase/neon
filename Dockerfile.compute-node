@@ -416,7 +416,7 @@ RUN case "${PG_VERSION}" in \
         ;; \
       "v16") \
         export PG_HINT_PLAN_VERSION=16_1_6_0 \
-        export PG_HINT_PLAN_CHECKSUM=ce6a8040c78012000f5da7240caf6a971401412f41d33f930f09291e6c304b99 \
+        export PG_HINT_PLAN_CHECKSUM=fc85a9212e7d2819d4ae4ac75817481101833c3cfa9f0fe1f980984e12347d00 \
         ;; \
       *) \
         echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
