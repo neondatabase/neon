@@ -27,7 +27,8 @@ impl EventType {
     }
 
     pub fn incremental_timerange(&self) -> Option<std::ops::Range<&DateTime<Utc>>> {
-        // these can most likely be thought of as Range or RangeFull
+        // these can most likely be thought of as Range or RangeFull, at least pageserver creates
+        // incremental ranges where the stop and next start are equal.
         use EventType::*;
         match self {
             Incremental {
@@ -40,6 +41,16 @@ impl EventType {
 
     pub fn is_incremental(&self) -> bool {
         matches!(self, EventType::Incremental { .. })
+    }
+
+    /// Returns the absolute time, or for incremental ranges, the stop time.
+    pub fn recorded_at(&self) -> &DateTime<Utc> {
+        use EventType::*;
+
+        match self {
+            Absolute { time } => time,
+            Incremental { stop_time, .. } => stop_time,
+        }
     }
 }
 
