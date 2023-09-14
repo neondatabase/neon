@@ -606,17 +606,8 @@ impl TimelineSnapshot {
     ) {
         let timeline_written_size = u64::from(self.last_record_lsn);
 
-        let (key, written_size_now) =
-            MetricsKey::written_size(tenant_id, timeline_id).at(now, timeline_written_size);
-
-        // last_record_lsn can only go up, right now at least, TODO: #2592 or related
-        // features might change this.
-
         let written_size_delta_key = MetricsKey::written_size_delta(tenant_id, timeline_id);
 
-        // use this when available, because in a stream of incremental values, it will be
-        // accurate where as when last_record_lsn stops moving, we will only cache the last
-        // one of those.
         let last_stop_time = cache
             .get(written_size_delta_key.key())
             .map(|(until, _val)| {
@@ -625,6 +616,9 @@ impl TimelineSnapshot {
                     .expect("never create EventType::Absolute for written_size_delta")
                     .end
             });
+
+        let (key, written_size_now) =
+            MetricsKey::written_size(tenant_id, timeline_id).at(now, timeline_written_size);
 
         // by default, use the last sent written_size as the basis for
         // calculating the delta. if we don't yet have one, use the load time value.
