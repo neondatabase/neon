@@ -525,7 +525,7 @@ impl Timeline {
 
     /// remote_consistent_lsn from the perspective of the tenant's current generation,
     /// not validated with control plane yet.
-    /// See [`get_remote_consistent_lsn_visible`].
+    /// See [`Self::get_remote_consistent_lsn_visible`].
     pub fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
             remote_client.remote_consistent_lsn_projected()
