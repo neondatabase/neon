@@ -200,7 +200,7 @@ async fn upload(
     )
     .await;
 
-    match res {
+    match &res {
         Ok(_) => {}
         Err(e) if e.is_reject() => {
             // permanent errors currently do not get logged by backoff::retry
