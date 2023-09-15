@@ -135,7 +135,7 @@ impl ExecutorWorker {
                     // If flush() errors, we drop the flush_op and the caller will get
                     // an error recv()'ing their oneshot channel.
                     self.flush().await?;
-                    flush_op.fire();
+                    flush_op.notify();
                 }
             }
         }

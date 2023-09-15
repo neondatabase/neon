@@ -82,7 +82,7 @@ pub(super) struct FrontendQueueWorker {
     // and our next sequence number
     pending: DeletionList,
 
-    // These FlushOps should fire the next time we flush
+    // These FlushOps should notify the next time we flush
     pending_flushes: Vec<FlushOp>,
 
     // Worker loop is torn down when this fires.
@@ -117,7 +117,7 @@ impl FrontendQueueWorker {
     async fn flush(&mut self) {
         if self.pending.is_empty() {
             for f in self.pending_flushes.drain(..) {
-                f.fire();
+                f.notify();
             }
             return;
         }
@@ -127,7 +127,7 @@ impl FrontendQueueWorker {
                 info!(sequence = self.pending.sequence, "Stored deletion list");
 
                 for f in self.pending_flushes.drain(..) {
-                    f.fire();
+                    f.notify();
                 }
 
                 let onward_list = self.pending.drain();
@@ -393,7 +393,7 @@ impl FrontendQueueWorker {
                     if self.pending.is_empty() {
                         // Execute immediately
                         debug!("Flush: No pending objects, flushing immediately");
-                        op.fire()
+                        op.notify()
                     } else {
                         // Execute next time we flush
                         debug!("Flush: adding to pending flush list for next deadline flush");

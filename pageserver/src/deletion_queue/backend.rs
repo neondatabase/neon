@@ -340,7 +340,7 @@ where
                 BackendQueueMessage::Flush(op) => {
                     if let Ok(()) = self.flush().await {
                         // If we fail due to shutting down, we will just drop `op` to propagate that status.
-                        op.fire();
+                        op.notify();
                     }
                 }
             }

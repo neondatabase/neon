@@ -130,7 +130,7 @@ struct FlushOp {
 }
 
 impl FlushOp {
-    fn fire(self) {
+    fn notify(self) {
         if self.tx.send(()).is_err() {
             // oneshot channel closed. This is legal: a client could be destroyed while waiting for a flush.
             debug!("deletion queue flush from dropped client");
@@ -1219,7 +1219,7 @@ pub mod mock {
                         }
                     }
                     ExecutorMessage::Flush(flush_op) => {
-                        flush_op.fire();
+                        flush_op.notify();
                     }
                 }
             }
@@ -1251,11 +1251,11 @@ pub mod mock {
                         }
                     }
                     FrontendQueueMessage::Flush(op) => {
-                        op.fire();
+                        op.notify();
                     }
                     FrontendQueueMessage::FlushExecute(op) => {
                         // We have already executed all prior deletions because mock does them inline
-                        op.fire();
+                        op.notify();
                     }
                     FrontendQueueMessage::Recover(_) => {
                         // no-op in mock
