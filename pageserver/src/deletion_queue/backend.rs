@@ -208,11 +208,14 @@ where
                 let valid = tenants_valid.get(tenant_id).copied().unwrap_or(false);
 
                 // A list is valid if it comes from the current _or previous_ generation.
-                // The previous generation case is due to how we store deletion lists locally:
+                // - The previous generation case is permitted due to how we store deletion lists locally:
                 // if we see the immediately previous generation in a locally stored deletion list,
                 // it proves that this node's disk was used for both current & previous generations,
                 // and therefore no other node was involved in between: the two generations may be
                 // logically treated as the same.
+                // - In that previous generation case, we rewrote it to the current generation
+                // in recover(), so the comparison here is simply an equality.
+
                 let this_list_valid = valid
                     && (tenant.generation == *validated_generation);
 
