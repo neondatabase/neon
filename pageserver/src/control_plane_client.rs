@@ -23,13 +23,19 @@ pub struct ControlPlaneClient {
     cancel: CancellationToken,
 }
 
+/// Represent operations which internally retry on all errors other than
+/// cancellation token firing: the only way they can fail is ShuttingDown.
+pub enum RetryForeverError {
+    ShuttingDown,
+}
+
 #[async_trait::async_trait]
 pub trait ControlPlaneGenerationsApi {
-    async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>>;
+    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError>;
     async fn validate(
         &self,
         tenants: Vec<(TenantId, Generation)>,
-    ) -> anyhow::Result<HashMap<TenantId, bool>>;
+    ) -> Result<HashMap<TenantId, bool>, RetryForeverError>;
 }
 
 impl ControlPlaneClient {
@@ -59,7 +65,11 @@ impl ControlPlaneClient {
         })
     }
 
-    async fn retry_http_forever<R, T>(&self, url: &url::Url, request: R) -> Result<T, anyhow::Error>
+    async fn retry_http_forever<R, T>(
+        &self,
+        url: &url::Url,
+        request: R,
+    ) -> Result<T, RetryForeverError>
     where
         R: Serialize,
         T: DeserializeOwned,
@@ -98,7 +108,7 @@ impl ControlPlaneClient {
         )
         .await
         {
-            Err(RemoteAttemptError::Shutdown) => Err(anyhow::anyhow!("Shutting down")),
+            Err(RemoteAttemptError::Shutdown) => Err(RetryForeverError::ShuttingDown),
             Err(RemoteAttemptError::Remote(_)) => {
                 panic!("We retry forever, this should never be reached");
             }
@@ -109,8 +119,8 @@ impl ControlPlaneClient {
 
 #[async_trait::async_trait]
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
-    /// Block until we get a successful response
-    async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>> {
+    /// Block until we get a successful response, or error out if we are shut down
+    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
@@ -132,10 +142,11 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             .collect::<HashMap<_, _>>())
     }
 
+    /// Block until we get a successful response, or error out if we are shut down
     async fn validate(
         &self,
         tenants: Vec<(TenantId, Generation)>,
-    ) -> anyhow::Result<HashMap<TenantId, bool>> {
+    ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("validate")

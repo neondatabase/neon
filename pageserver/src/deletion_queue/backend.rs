@@ -10,6 +10,7 @@ use tracing::warn;
 
 use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
+use crate::control_plane_client::RetryForeverError;
 use crate::metrics::DELETION_QUEUE_DROPPED;
 use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 
@@ -142,11 +143,16 @@ where
         }
 
         let tenants_valid = if let Some(control_plane_client) = &self.control_plane_client {
-            control_plane_client
+            match control_plane_client
                 .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
                 .await
-                // The only wait a validation call returns an error is when the cancellation token fires
-                .map_err(|_| DeletionQueueError::ShuttingDown)?
+            {
+                Ok(tenants) => tenants,
+                Err(RetryForeverError::ShuttingDown) => {
+                    // The only way a validation call returns an error is when the cancellation token fires
+                    return Err(DeletionQueueError::ShuttingDown);
+                }
+            }
         } else {
             // Control plane API disabled.  In legacy mode we consider everything valid.
             tenant_generations.keys().map(|k| (*k, true)).collect()

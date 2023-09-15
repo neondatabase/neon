@@ -731,6 +731,7 @@ mod test {
     use tokio::task::JoinHandle;
 
     use crate::{
+        control_plane_client::RetryForeverError,
         repository::Key,
         tenant::{
             harness::TenantHarness, remote_timeline_client::remote_timeline_path,
@@ -837,13 +838,13 @@ mod test {
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
         #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
-        async fn re_attach(&self) -> anyhow::Result<HashMap<TenantId, Generation>> {
+        async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
             unimplemented!()
         }
         async fn validate(
             &self,
             tenants: Vec<(TenantId, Generation)>,
-        ) -> anyhow::Result<HashMap<TenantId, bool>> {
+        ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
             let mut result = HashMap::new();
 
             let latest_generation = self.latest_generation.lock().unwrap();

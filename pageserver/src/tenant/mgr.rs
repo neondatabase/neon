@@ -20,7 +20,9 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::{ControlPlaneClient, ControlPlaneGenerationsApi};
+use crate::control_plane_client::{
+    ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
+};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
@@ -117,7 +119,12 @@ pub async fn init_tenant_mgr(
 
     // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        let result = client.re_attach().await?;
+        let result = match client.re_attach().await {
+            Ok(tenants) => tenants,
+            Err(RetryForeverError::ShuttingDown) => {
+                anyhow::bail!("Shut down while waiting for control plane re-attach response")
+            }
+        };
 
         // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
         // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
