@@ -221,7 +221,8 @@ impl FrontendQueueWorker {
             }
         };
 
-        let list_name_pattern = Regex::new("([a-zA-Z0-9]{16})-([a-zA-Z0-9]{2}).list").unwrap();
+        let list_name_pattern =
+            Regex::new("(?<sequence>[a-zA-Z0-9]{16})-(?<version>[a-zA-Z0-9]{2}).list").unwrap();
 
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
@@ -234,7 +235,7 @@ impl FrontendQueueWorker {
             let file_name = dentry.file_name().to_owned();
             let basename = file_name.to_string_lossy();
             let seq_part = if let Some(m) = list_name_pattern.captures(&basename) {
-                m.get(1)
+                m.name("sequence")
                     .expect("Non optional group should be present")
                     .as_str()
             } else {
