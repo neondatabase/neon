@@ -18,6 +18,7 @@ use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
+use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
 use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 use crate::tenant::remote_timeline_client::remote_layer_path;
@@ -228,8 +229,26 @@ impl FrontendQueueWorker {
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
         while let Some(dentry) = dir.next_entry().await? {
-            if Some(dentry.file_name().as_os_str()) == header_path.file_name() {
+            let file_name = dentry.file_name();
+            let dentry_str = file_name.to_string_lossy();
+
+            if Some(file_name.as_os_str()) == header_path.file_name() {
                 // Don't try and parse the header's name like a list
+                continue;
+            }
+
+            if dentry_str.ends_with(TEMP_SUFFIX) {
+                info!("Cleaning up temporary file {dentry_str}");
+                let absolute_path = deletion_directory.join(dentry.file_name());
+                if let Err(e) = tokio::fs::remove_file(&absolute_path).await {
+                    // Non-fatal error: we will just leave the file behind but not
+                    // try and load it.
+                    warn!(
+                        "Failed to clean up temporary file {}: {e:#}",
+                        absolute_path.display()
+                    );
+                }
+
                 continue;
             }
 

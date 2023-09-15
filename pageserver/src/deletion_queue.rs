@@ -11,6 +11,7 @@ use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
+use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
@@ -22,6 +23,7 @@ use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::{self, debug, error};
+use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::AtomicLsn;
@@ -197,6 +199,10 @@ where
         .collect()
 }
 
+/// Files ending with this suffix will be ignored and erased
+/// during recovery as startup.
+const TEMP_SUFFIX: &str = ".tmp";
+
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionList {
@@ -251,10 +257,10 @@ impl DeletionHeader {
         debug!("Saving deletion list header {:?}", self);
         let header_bytes = serde_json::to_vec(self).context("serialize deletion header")?;
         let header_path = conf.deletion_header_path();
-
-        tokio::fs::write(&header_path, header_bytes)
+        let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
+        VirtualFile::crashsafe_overwrite(&header_path, &temp_path, &header_bytes)
             .await
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(Into::into)
     }
 }
 
@@ -342,11 +348,12 @@ impl DeletionList {
 
     async fn save(&self, conf: &'static PageServerConf) -> anyhow::Result<()> {
         let path = conf.deletion_list_path(self.sequence);
+        let temp_path = path_with_suffix_extension(&path, TEMP_SUFFIX);
 
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
-        tokio::fs::write(&path, &bytes).await?;
-        tokio::fs::File::open(&path).await?.sync_all().await?;
-        Ok(())
+        VirtualFile::crashsafe_overwrite(&path, &temp_path, &bytes)
+            .await
+            .map_err(Into::into)
     }
 }
 
