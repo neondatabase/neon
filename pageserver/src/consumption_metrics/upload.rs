@@ -161,66 +161,58 @@ async fn upload(
     body: bytes::Bytes,
     cancel: &CancellationToken,
 ) -> Result<(), UploadError> {
-    if cancel.is_cancelled() {
-        // retry does not drop the request when cancel comes, so pre-check it.
-        //
-        // it's not terrible, because those come at shutdown when we will have very little time to
-        // act anyways.
-        Err(UploadError::Cancelled)
-    } else {
-        let warn_after = 3;
-        let max_attempts = 10;
-        let res = utils::backoff::retry(
-            move || {
-                let body = body.clone();
-                async move {
-                    let res = client
-                        .post(metric_collection_endpoint.clone())
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .body(body)
-                        .send()
-                        .await;
+    let warn_after = 3;
+    let max_attempts = 10;
+    let res = utils::backoff::retry(
+        move || {
+            let body = body.clone();
+            async move {
+                let res = client
+                    .post(metric_collection_endpoint.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .send()
+                    .await;
 
-                    let res = res.and_then(|res| res.error_for_status());
+                let res = res.and_then(|res| res.error_for_status());
 
-                    // 10 redirects are normally allowed, so we don't need worry about 3xx
-                    match res {
-                        Ok(_response) => Ok(()),
-                        Err(e) => {
-                            let status = e.status().filter(|s| s.is_client_error());
-                            if let Some(status) = status {
-                                // rejection used to be a thing when the server could reject a
-                                // whole batch of metrics if one metric was bad.
-                                Err(UploadError::Rejected(status))
-                            } else {
-                                Err(UploadError::Reqwest(e))
-                            }
+                // 10 redirects are normally allowed, so we don't need worry about 3xx
+                match res {
+                    Ok(_response) => Ok(()),
+                    Err(e) => {
+                        let status = e.status().filter(|s| s.is_client_error());
+                        if let Some(status) = status {
+                            // rejection used to be a thing when the server could reject a
+                            // whole batch of metrics if one metric was bad.
+                            Err(UploadError::Rejected(status))
+                        } else {
+                            Err(UploadError::Reqwest(e))
                         }
                     }
                 }
-            },
-            UploadError::is_reject,
-            warn_after,
-            max_attempts,
-            "upload consumption_metrics",
-            utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
-        )
-        .await;
+            }
+        },
+        UploadError::is_reject,
+        warn_after,
+        max_attempts,
+        "upload consumption_metrics",
+        utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
+    )
+    .await;
 
-        match res {
-            Ok(_) => {}
-            Err(e) if e.is_reject() => {
-                // permanent errors currently do not get logged by backoff::retry
-                // display alternate has no effect, but keeping it here for easier pattern matching.
-                tracing::error!("failed to upload metrics: {e:#}");
-            }
-            Err(_) => {
-                // these have been logged already
-            }
+    match res {
+        Ok(_) => {}
+        Err(e) if e.is_reject() => {
+            // permanent errors currently do not get logged by backoff::retry
+            // display alternate has no effect, but keeping it here for easier pattern matching.
+            tracing::error!("failed to upload metrics: {e:#}");
         }
-
-        res
+        Err(_) => {
+            // these have been logged already
+        }
     }
+
+    res
 }
 
 #[cfg(test)]
