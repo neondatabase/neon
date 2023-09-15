@@ -150,7 +150,7 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     # Remember the XID. We will use it later to verify that we have consumed a lot of
     # XIDs after this.
     cur.execute("select pg_current_xact_id()")
-    locking_xid = cur.fetchone()[0]
+    locking_xid = cur.fetchall()[0][0]
 
     # Stop and restart postgres, to clear the buffer cache.
     #
@@ -163,8 +163,8 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     cur = pg_conn.cursor()
 
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 ")
-    tup = cur.fetchone()
-    xmax_before = tup[1]
+    tup = cur.fetchall()
+    xmax_before = tup[0][1]
 
     # Consume a lot of XIDs, so that anti-wraparound autovacuum kicks
     # in and the clog gets truncated. We set autovacuum_freeze_max_age to a very
@@ -188,19 +188,19 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
         """
         )
         cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 ")
-        tup = cur.fetchone()
+        tup = cur.fetchall()
         log.info(f"tuple = {tup}")
-        xmax = tup[1]
+        xmax = tup[0][1]
         assert xmax == xmax_before
 
         if i % 50 == 0:
             cur.execute("select datfrozenxid from pg_database where datname='postgres'")
-            datfrozenxid = cur.fetchone()[0]
+            datfrozenxid = cur.fetchall()[0][0]
             if datfrozenxid > locking_xid:
                 break
 
     cur.execute("select pg_current_xact_id()")
-    curr_xid = cur.fetchone()[0]
+    curr_xid = cur.fetchall()[0][0]
     assert int(curr_xid) - int(locking_xid) >= 100000
 
     # Now, if the VM all-frozen bit was not correctly cleared on
