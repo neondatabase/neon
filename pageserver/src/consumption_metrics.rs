@@ -72,7 +72,7 @@ pub async fn collect_metrics(
         },
     );
 
-    let final_path: Arc<PathBuf> = Arc::new(local_disk_storage);
+    let path: Arc<PathBuf> = Arc::new(local_disk_storage);
 
     // define client here to reuse it for all requests
     let client = reqwest::ClientBuilder::new()
@@ -83,7 +83,7 @@ pub async fn collect_metrics(
     let node_id = node_id.to_string();
     let cancel = task_mgr::shutdown_token();
 
-    let restore_and_reschedule = restore_and_reschedule(&final_path, metric_collection_interval);
+    let restore_and_reschedule = restore_and_reschedule(&path, metric_collection_interval);
 
     let mut cached_metrics = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
@@ -112,14 +112,14 @@ pub async fn collect_metrics(
         // already here, better to try to flush the new values.
 
         let flush = async {
-            match disk_cache::flush_metrics_to_disk(&metrics, &final_path).await {
+            match disk_cache::flush_metrics_to_disk(&metrics, &path).await {
                 Ok(()) => {
                     tracing::debug!("flushed metrics to disk");
                 }
                 Err(e) => {
-                    // idea here is that if someone creates a directory as our final_path, then they
+                    // idea here is that if someone creates a directory as our path, then they
                     // might notice it from the logs before shutdown and remove it
-                    tracing::error!("failed to persist metrics to {final_path:?}: {e:#}");
+                    tracing::error!("failed to persist metrics to {path:?}: {e:#}");
                 }
             }
         };
@@ -154,11 +154,11 @@ pub async fn collect_metrics(
 /// Called on the first iteration in an attempt to join the metric uploading schedule from previous
 /// pageserver session. Pageserver is supposed to upload at intervals regardless of restarts.
 async fn restore_and_reschedule(
-    final_path: &Arc<PathBuf>,
+    path: &Arc<PathBuf>,
     metric_collection_interval: Duration,
 ) -> Cache {
     let (cached_metrics, earlier_metric_at) =
-        match disk_cache::read_metrics_from_disk(final_path.clone()).await {
+        match disk_cache::read_metrics_from_disk(path.clone()).await {
             Ok(found_some) => {
                 // there is no min needed because we write these sequentially in
                 // collect_all_metrics
@@ -182,7 +182,7 @@ async fn restore_and_reschedule(
 
                 if !is_not_found {
                     tracing::info!(
-                        "failed to read any previous metrics from {final_path:?}: {e:#}"
+                        "failed to read any previous metrics from {path:?}: {e:#}"
                     );
                 }
 

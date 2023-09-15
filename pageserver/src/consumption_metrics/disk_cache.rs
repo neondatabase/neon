@@ -21,23 +21,23 @@ pub(super) async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result
 
 pub(super) async fn flush_metrics_to_disk(
     current_metrics: &Arc<Vec<RawMetric>>,
-    final_path: &Arc<PathBuf>,
+    path: &Arc<PathBuf>,
 ) -> anyhow::Result<()> {
     use std::io::Write;
 
     anyhow::ensure!(
-        final_path.parent().is_some(),
-        "path must have parent: {final_path:?}"
+        path.parent().is_some(),
+        "path must have parent: {path:?}"
     );
 
     let span = tracing::Span::current();
     tokio::task::spawn_blocking({
         let current_metrics = current_metrics.clone();
-        let final_path = final_path.clone();
+        let path = path.clone();
         move || {
             let _e = span.entered();
 
-            let parent = final_path.parent().expect("existence checked");
+            let parent = path.parent().expect("existence checked");
             let mut tempfile = NamedTempFile::new_in(parent)?;
 
             {
@@ -52,15 +52,15 @@ pub(super) async fn flush_metrics_to_disk(
             tempfile.flush()?;
             tempfile.as_file().sync_all()?;
 
-            drop(tempfile.persist(&*final_path)?);
+            drop(tempfile.persist(&*path)?);
 
-            let f = std::fs::File::open(final_path.parent().unwrap())?;
+            let f = std::fs::File::open(path.parent().unwrap())?;
             f.sync_all()?;
 
             anyhow::Ok(())
         }
     })
     .await
-    .with_context(|| format!("write metrics to {final_path:?} join error"))
-    .and_then(|x| x.with_context(|| format!("write metrics to {final_path:?}")))
+    .with_context(|| format!("write metrics to {path:?} join error"))
+    .and_then(|x| x.with_context(|| format!("write metrics to {path:?}")))
 }
