@@ -365,7 +365,7 @@ async fn collect_metrics_iteration(
                 events: (&chunk_to_send).into(),
             },
         )
-        .expect("serialization must not fail");
+        .expect("serialization must not fail and bytesmut grows");
 
         let body = buffer.split().freeze();
 
