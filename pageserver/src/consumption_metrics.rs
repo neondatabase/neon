@@ -376,10 +376,7 @@ async fn collect_metrics_iteration(
                 cached_metrics.insert(curr_key.clone(), *curr_val);
             }
         } else {
-            // no need to log, backoff::retry has done it, just give up uploading, but still finish
-            // up the on-disk part.
-            //
-            // note if we are cancelled we'll end up just writing the files to disk asap
+            // no need to log, backoff::retry and upload have done it, just give up uploading.
         }
     }
 }
