@@ -444,6 +444,7 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
         match self.timeline.pg_version {
             14 => {
@@ -479,6 +480,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v14::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -496,6 +503,12 @@ impl<'a> WalIngest<'a> {
 
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v14::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
                     }
                 } else {
@@ -535,6 +548,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v15::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -552,6 +571,12 @@ impl<'a> WalIngest<'a> {
 
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v15::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
                     }
                 } else {
@@ -591,6 +616,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v16::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -609,6 +640,12 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v16::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -616,7 +653,6 @@ impl<'a> WalIngest<'a> {
             }
             _ => {}
         }
-        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -660,7 +696,7 @@ impl<'a> WalIngest<'a> {
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            flags,
                         },
                         ctx,
                     )
@@ -676,7 +712,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -690,7 +726,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -717,6 +753,8 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match self.timeline.pg_version {
@@ -772,7 +810,11 @@ impl<'a> WalIngest<'a> {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        /* XLOG_NEON_HEAP_LOCK doesn't need special care */
+                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                     info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
                 }
@@ -782,8 +824,6 @@ impl<'a> WalIngest<'a> {
                 self.timeline.pg_version
             ),
         }
-
-        // FIXME: What about XLOG_NEON_HEAP_LOCK?
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -827,7 +867,7 @@ impl<'a> WalIngest<'a> {
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            flags,
                         },
                         ctx,
                     )
@@ -843,7 +883,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -857,7 +897,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )

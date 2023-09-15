@@ -219,20 +219,66 @@ pub mod v14 {
                 old_offnum: buf.get_u16_le(),
                 old_infobits_set: buf.get_u8(),
                 flags: buf.get_u8(),
-                t_cid: buf.get_u32(),
+                t_cid: buf.get_u32_le(),
                 new_xmax: buf.get_u32_le(),
                 new_offnum: buf.get_u16_le(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapLock {
+        pub locking_xid: TransactionId,
+        pub offnum: OffsetNumber,
+        pub _padding: u16,
+        pub t_cid: u32,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapLock {
+        pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+            XlHeapLock {
+                locking_xid: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                _padding: buf.get_u16_le(),
+                t_cid: buf.get_u32_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapLockUpdated {
+        pub xmax: TransactionId,
+        pub offnum: OffsetNumber,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapLockUpdated {
+        pub fn decode(buf: &mut Bytes) -> XlHeapLockUpdated {
+            XlHeapLockUpdated {
+                xmax: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
             }
         }
     }
 }
 
 pub mod v15 {
-    pub use super::v14::{XlHeapDelete, XlHeapInsert, XlHeapMultiInsert, XlHeapUpdate};
+    pub use super::v14::{
+        XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapLockUpdated, XlHeapMultiInsert, XlHeapUpdate,
+    };
 }
 
 pub mod v16 {
-    pub use super::v14::{XlHeapInsert, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert};
     use bytes::{Buf, Bytes};
     use postgres_ffi::{OffsetNumber, TransactionId};
 
@@ -274,6 +320,26 @@ pub mod v16 {
                 flags: buf.get_u8(),
                 new_xmax: buf.get_u32_le(),
                 new_offnum: buf.get_u16_le(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlHeapLock {
+        pub locking_xid: TransactionId,
+        pub offnum: OffsetNumber,
+        pub infobits_set: u8,
+        pub flags: u8,
+    }
+
+    impl XlHeapLock {
+        pub fn decode(buf: &mut Bytes) -> XlHeapLock {
+            XlHeapLock {
+                locking_xid: buf.get_u32_le(),
+                offnum: buf.get_u16_le(),
+                infobits_set: buf.get_u8(),
+                flags: buf.get_u8(),
             }
         }
     }
@@ -363,6 +429,28 @@ pub mod v16 {
                     t_cid: buf.get_u32(),
                     new_xmax: buf.get_u32_le(),
                     new_offnum: buf.get_u16_le(),
+                }
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonHeapLock {
+            pub locking_xid: TransactionId,
+            pub t_cid: u32,
+            pub offnum: OffsetNumber,
+            pub infobits_set: u8,
+            pub flags: u8,
+        }
+
+        impl XlNeonHeapLock {
+            pub fn decode(buf: &mut Bytes) -> XlNeonHeapLock {
+                XlNeonHeapLock {
+                    locking_xid: buf.get_u32_le(),
+                    t_cid: buf.get_u32_le(),
+                    offnum: buf.get_u16_le(),
+                    infobits_set: buf.get_u8(),
+                    flags: buf.get_u8(),
                 }
             }
         }
