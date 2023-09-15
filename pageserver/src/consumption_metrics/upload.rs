@@ -1,4 +1,4 @@
-use consumption_metrics::{idempotency_key, Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -65,11 +65,14 @@ pub(super) async fn upload_metrics(
 }
 
 // The return type is quite ugly, but we gain testability in isolation
-fn serialize_in_chunks<'a>(
+fn serialize_in_chunks<'a, F>(
     chunk_size: usize,
     input: &'a [RawMetric],
-    node_id: &'a str,
-) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a {
+    factory: F,
+) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
+where
+    F: KeyGen<'a> + 'a,
+{
     use bytes::BufMut;
 
     // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
@@ -85,9 +88,15 @@ fn serialize_in_chunks<'a>(
             events
                 .iter_mut()
                 .zip(chunk.iter())
-                .for_each(|(slot, raw_metric)| raw_metric.update_in_place(slot, node_id));
+                .for_each(|(slot, raw_metric)| {
+                    raw_metric.update_in_place(slot, &factory.generate())
+                });
         } else {
-            events.extend(chunk.iter().map(|raw_metric| raw_metric.as_event(node_id)));
+            events.extend(
+                chunk
+                    .iter()
+                    .map(|raw_metric| raw_metric.as_event(&factory.generate())),
+            );
         }
 
         let res = serde_json::to_writer(
@@ -105,12 +114,12 @@ fn serialize_in_chunks<'a>(
 }
 
 trait RawMetricExt {
-    fn as_event(&self, node_id: &str) -> Event<Ids, Name>;
-    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str);
+    fn as_event(&self, key: &IdempotencyKey<'_>) -> Event<Ids, Name>;
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, key: &IdempotencyKey<'_>);
 }
 
 impl RawMetricExt for RawMetric {
-    fn as_event(&self, node_id: &str) -> Event<Ids, Name> {
+    fn as_event(&self, key: &IdempotencyKey<'_>) -> Event<Ids, Name> {
         let MetricsKey {
             metric,
             tenant_id,
@@ -122,7 +131,7 @@ impl RawMetricExt for RawMetric {
         Event {
             kind,
             metric,
-            idempotency_key: idempotency_key(&node_id),
+            idempotency_key: key.to_string(),
             value,
             extra: Ids {
                 tenant_id,
@@ -131,7 +140,7 @@ impl RawMetricExt for RawMetric {
         }
     }
 
-    fn update_in_place(&self, event: &mut Event<Ids, Name>, node_id: &str) {
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, key: &IdempotencyKey<'_>) {
         use std::fmt::Write;
 
         let MetricsKey {
@@ -147,8 +156,7 @@ impl RawMetricExt for RawMetric {
             metric,
             idempotency_key: {
                 event.idempotency_key.clear();
-                let next = IdempotencyKey::generate(node_id);
-                write!(event.idempotency_key, "{}", next).unwrap();
+                write!(event.idempotency_key, "{key}").unwrap();
                 std::mem::take(&mut event.idempotency_key)
             },
             value,
@@ -157,6 +165,16 @@ impl RawMetricExt for RawMetric {
                 timeline_id,
             },
         };
+    }
+}
+
+trait KeyGen<'a>: Copy {
+    fn generate(&self) -> IdempotencyKey<'a>;
+}
+
+impl<'a> KeyGen<'a> for &'a str {
+    fn generate(&self) -> IdempotencyKey<'a> {
+        IdempotencyKey::generate(self)
     }
 }
 
@@ -246,4 +264,55 @@ async fn upload(
     }
 
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn chunked_serialization() {
+        let examples = crate::consumption_metrics::metrics::metrics_samples();
+        assert!(examples.len() > 1);
+
+        let factory = FixedGen::new(Utc::now(), "1", 42);
+
+        // need to use Event here because serde_json::Value uses default hashmap, not linked
+        // hashmap
+        #[derive(serde::Deserialize)]
+        struct EventChunk {
+            events: Vec<Event<Ids, Name>>,
+        }
+
+        let correct = serialize_in_chunks(examples.len(), &examples, factory)
+            .map(|res| res.unwrap().1)
+            .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
+            .collect::<Vec<_>>();
+
+        for chunk_size in 1..examples.len() {
+            let actual = serialize_in_chunks(chunk_size, &examples, factory)
+                .map(|res| res.unwrap().1)
+                .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
+                .collect::<Vec<_>>();
+
+            // if these are equal, it means that multi-chunking version works as well
+            assert_eq!(correct, actual);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FixedGen<'a>(chrono::DateTime<chrono::Utc>, &'a str, u16);
+
+    impl<'a> FixedGen<'a> {
+        fn new(now: chrono::DateTime<chrono::Utc>, node_id: &'a str, nonce: u16) -> Self {
+            FixedGen(now, node_id, nonce)
+        }
+    }
+
+    impl<'a> KeyGen<'a> for FixedGen<'a> {
+        fn generate(&self) -> IdempotencyKey<'a> {
+            IdempotencyKey::for_tests(self.0, self.1, self.2)
+        }
+    }
 }
