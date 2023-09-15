@@ -63,6 +63,11 @@ where
     // it is drained in [`validate`]
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
 
+    // If we failed to rewrite a deletion list due to local filesystem I/O failure,
+    // we must remember that and refuse to advance our persistent validated sequence
+    // number past the failure.
+    list_write_failed: Option<u64>,
+
     cancel: CancellationToken,
 }
 
@@ -87,6 +92,7 @@ where
             pending_lists: Vec::new(),
             validated_lists: Vec::new(),
             pending_key_count: 0,
+            list_write_failed: None,
             cancel,
         }
     }
@@ -231,6 +237,12 @@ where
                     // Rather than have a complex retry process, just drop it and leak the objects,
                     // scrubber will clean up eventually.
                     list.tenants.clear(); // Result is a valid-but-empty list, which is a no-op for execution.
+
+                    // We must remember this failure, to prevent later writing out a header that
+                    // would imply the unwritable list was valid on disk.
+                    if self.list_write_failed.is_none() {
+                        self.list_write_failed = Some(list.sequence);
+                    }
                 }
             }
 
@@ -238,16 +250,29 @@ where
         }
 
         if let Some(validated_sequence) = validated_sequence {
-            // Write the queue header to record how far validation progressed.  This avoids having
-            // to rewrite each DeletionList to set validated=true in it.
-            let header = DeletionHeader::new(validated_sequence);
+            if let Some(list_write_failed) = self.list_write_failed {
+                // Rare error case: we failed to write out a deletion list to excise invalid
+                // entries, so we cannot advance the header's valid sequence number past that point.
+                //
+                // In this state we will continue to validate, execute and delete deletion lists,
+                // we just cannot update the header.  It should be noticed and fixed by a human due to
+                // the nonzero value of our unexpected_errors metric.
+                warn!(
+                    sequence_number = list_write_failed,
+                    "Cannot write header because writing a deletion list failed earlier",
+                );
+            } else {
+                // Write the queue header to record how far validation progressed.  This avoids having
+                // to rewrite each DeletionList to set validated=true in it.
+                let header = DeletionHeader::new(validated_sequence);
 
-            // Drop result because the validated_sequence is an optimization.  If we fail to save it,
-            // then restart, we will drop some deletion lists, creating work for scrubber.
-            // The save() function logs a warning on error.
-            if let Err(e) = header.save(self.conf).await {
-                warn!("Failed to write deletion queue header: {e:#}");
-                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                // Drop result because the validated_sequence is an optimization.  If we fail to save it,
+                // then restart, we will drop some deletion lists, creating work for scrubber.
+                // The save() function logs a warning on error.
+                if let Err(e) = header.save(self.conf).await {
+                    warn!("Failed to write deletion queue header: {e:#}");
+                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                }
             }
         }
 
