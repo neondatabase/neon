@@ -338,12 +338,9 @@ impl DeletionList {
         true
     }
 
-    fn drain_paths(&mut self) -> Vec<RemotePath> {
-        let mut tenants = HashMap::new();
-        std::mem::swap(&mut tenants, &mut self.tenants);
-
+    fn into_remote_paths(self) -> Vec<RemotePath> {
         let mut result = Vec::new();
-        for (tenant, tenant_deletions) in tenants.into_iter() {
+        for (tenant, tenant_deletions) in self.tenants.into_iter() {
             for (timeline, timeline_layers) in tenant_deletions.timelines.into_iter() {
                 let timeline_remote_path = remote_timeline_path(&tenant, &timeline);
                 result.extend(

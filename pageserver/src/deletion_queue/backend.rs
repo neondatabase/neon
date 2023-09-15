@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -88,10 +89,9 @@ where
         }
     }
 
-    async fn cleanup_lists(&mut self, lists: Vec<DeletionList>) {
-        for list in lists {
-            let list_path = self.conf.deletion_list_path(list.sequence);
-            debug!("Removing deletion list {list} at {}", list_path.display());
+    async fn cleanup_lists(&mut self, list_paths: Vec<PathBuf>) {
+        for list_path in list_paths {
+            debug!("Removing deletion list {}", list_path.display());
 
             if let Err(e) = tokio::fs::remove_file(&list_path).await {
                 // Unexpected: we should have permissions and nothing else should
@@ -271,13 +271,14 @@ where
 
         // Drain `validated_lists` into the executor
         let mut executing_lists = Vec::new();
-        for mut list in self.validated_lists.drain(..) {
-            let objects = list.drain_paths();
+        for list in self.validated_lists.drain(..) {
+            let list_path = self.conf.deletion_list_path(list.sequence);
+            let objects = list.into_remote_paths();
             self.tx
                 .send(ExecutorMessage::Delete(objects))
                 .await
                 .map_err(|_| DeletionQueueError::ShuttingDown)?;
-            executing_lists.push(list);
+            executing_lists.push(list_path);
         }
 
         self.flush_executor().await?;
