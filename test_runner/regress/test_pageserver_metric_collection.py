@@ -336,21 +336,3 @@ PER_METRIC_VERIFIERS = {
     "timeline_logical_size": CannotVerifyAnything,
     "synthetic_storage_size": SyntheticSizeVerifier,
 }
-
-
-def proxy_metrics_handler(request: Request) -> Response:
-    if request.json is None:
-        return Response(status=400)
-
-    events = request.json["events"]
-    log.info("received events:")
-    log.info(events)
-
-    # perform basic sanity checks
-    for event in events:
-        assert event["metric"] == "proxy_io_bytes_per_client"
-        assert event["endpoint_id"] == "test_endpoint_id"
-        assert event["value"] >= 0
-        assert event["stop_time"] >= event["start_time"]
-
-    return Response(status=200)
