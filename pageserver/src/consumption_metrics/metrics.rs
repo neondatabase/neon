@@ -185,6 +185,7 @@ impl MetricsKey {
     /// [`Tenant::cached_synthetic_size`] as refreshed by [`calculate_synthetic_size_worker`].
     ///
     /// [`Tenant::cached_synthetic_size`]: crate::tenant::Tenant::cached_synthetic_size
+    /// [`calculate_synthetic_size_worker`]: super::calculate_synthetic_size_worker
     const fn synthetic_size(tenant_id: TenantId) -> AbsoluteValueFactory {
         MetricsKey {
             tenant_id,
