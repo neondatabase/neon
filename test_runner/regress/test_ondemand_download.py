@@ -403,13 +403,8 @@ def test_download_remote_layers_api(
     # witnessed for example difference of 29827072 (filled_current_physical) to 29868032 (here) is no good reason to fail a test.
     this_time = get_api_current_physical_size()
     assert (
-        filled_current_physical <= this_time
+        filled_current_physical == this_time
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
-    if filled_current_physical != this_time:
-        log.info(
-            f"fixing up filled_current_physical from {filled_current_physical} to {this_time} ({this_time - filled_current_physical})"
-        )
-        filled_current_physical = this_time
 
     post_unlink_size = get_resident_physical_size()
     log.info(f"post_unlink_size: {post_unlink_size}")
