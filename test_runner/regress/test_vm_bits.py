@@ -32,7 +32,9 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("INSERT INTO vmtest_cold_update SELECT g FROM generate_series(1, 1000) g")
     cur.execute("VACUUM FREEZE vmtest_cold_update")
 
-    cur.execute("CREATE TABLE vmtest_cold_update2 (id integer PRIMARY KEY, filler text) WITH (fillfactor=100)")
+    cur.execute(
+        "CREATE TABLE vmtest_cold_update2 (id integer PRIMARY KEY, filler text) WITH (fillfactor=100)"
+    )
     cur.execute("INSERT INTO vmtest_cold_update2 SELECT g, '' FROM generate_series(1, 1000) g")
     cur.execute("VACUUM FREEZE vmtest_cold_update2")
 
@@ -48,7 +50,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     # on the page containing the old tuple. We had a bug where we got the old
     # and new pages mixed up, and that only shows up when one of the bits is
     # cleared, but not the other one.
-    cur.execute("INSERT INTO vmtest_cold_update2 VALUES (9999, 'x')");
+    cur.execute("INSERT INTO vmtest_cold_update2 VALUES (9999, 'x')")
     # Clears the VM bit on the old page
     cur.execute("UPDATE vmtest_cold_update2 SET id = 5000, filler=repeat('x', 200) WHERE id = 1")
 
