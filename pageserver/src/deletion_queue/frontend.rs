@@ -87,6 +87,9 @@ pub(super) struct FrontendQueueWorker {
 
     // Worker loop is torn down when this fires.
     cancel: CancellationToken,
+
+    // Safety guard to do recovery exactly once
+    recovered: bool,
 }
 
 impl FrontendQueueWorker {
@@ -107,6 +110,7 @@ impl FrontendQueueWorker {
             tx,
             pending_flushes: Vec::new(),
             cancel,
+            recovered: false,
         }
     }
 
@@ -348,6 +352,11 @@ impl FrontendQueueWorker {
 
             match msg {
                 FrontendQueueMessage::Delete(op) => {
+                    assert!(
+                        self.recovered,
+                        "Cannot process deletions before recovery.  This is a bug."
+                    );
+
                     debug!(
                         "Delete: ingesting {} layers, {} other objects",
                         op.layers.len(),
@@ -408,6 +417,14 @@ impl FrontendQueueWorker {
                     }
                 }
                 FrontendQueueMessage::Recover(op) => {
+                    if self.recovered {
+                        tracing::error!(
+                            "Deletion queue recovery called more than once.  This is a bug."
+                        );
+                        // Non-fatal: although this is a bug, since we did recovery at least once we may proceed.
+                        continue;
+                    }
+
                     if let Err(e) = self.recover(op.attached_tenants).await {
                         // This should only happen in truly unrecoverable cases, like the recovery finding that the backend
                         // queue receiver has been dropped, or something is critically broken with
@@ -416,6 +433,8 @@ impl FrontendQueueWorker {
                             "Deletion queue recover aborted, deletion queue will not proceed ({e})"
                         );
                         return;
+                    } else {
+                        self.recovered = true;
                     }
                 }
             }

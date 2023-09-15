@@ -962,6 +962,7 @@ mod test {
         // Basic test that the deletion queue processes the deletions we pass into it
         let ctx = setup("deletion_queue_smoke").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
+        client.recover(HashMap::new()).await?;
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let tenant_id = ctx.harness.tenant_id;
@@ -1029,6 +1030,7 @@ mod test {
     async fn deletion_queue_validation() -> anyhow::Result<()> {
         let ctx = setup("deletion_queue_validation").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
+        client.recover(HashMap::new()).await?;
 
         // Generation that the control plane thinks is current
         let latest_generation = Generation::new(0xdeadbeef);
@@ -1085,6 +1087,7 @@ mod test {
         // Basic test that the deletion queue processes the deletions we pass into it
         let mut ctx = setup("deletion_queue_recovery").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
+        client.recover(HashMap::new()).await?;
 
         let tenant_id = ctx.harness.tenant_id;
 
