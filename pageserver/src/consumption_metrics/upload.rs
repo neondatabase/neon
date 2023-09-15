@@ -66,52 +66,80 @@ fn serialize_in_chunks<'a, F>(
     chunk_size: usize,
     input: &'a [RawMetric],
     factory: F,
-) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
+) -> impl ExactSizeIterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
 where
     F: KeyGen<'a> + 'a,
 {
+    use super::{Ids, Name};
     use bytes::BufMut;
+    use consumption_metrics::Event;
 
-    // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
-    let mut buffer = bytes::BytesMut::new();
-    let mut chunks = input.chunks(chunk_size);
+    struct Iter<'a, F> {
+        inner: std::slice::Chunks<'a, RawMetric>,
+        chunk_size: usize,
 
-    // chunk amount of events are reused to produce the serialized document
-    let mut scratch = Vec::new();
+        // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
+        buffer: bytes::BytesMut,
+        // chunk amount of events are reused to produce the serialized document
+        scratch: Vec<Event<Ids, Name>>,
+        factory: F,
+    }
 
-    std::iter::from_fn(move || {
-        let chunk = chunks.next()?;
+    impl<'a, F: KeyGen<'a>> Iterator for Iter<'a, F> {
+        type Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>;
 
-        if scratch.is_empty() {
-            // first round: create events with N strings
-            scratch.extend(
-                chunk
-                    .iter()
-                    .map(|raw_metric| raw_metric.as_event(factory.generate())),
+        fn next(&mut self) -> Option<Self::Item> {
+            let chunk = self.inner.next()?;
+
+            if self.scratch.is_empty() {
+                // first round: create events with N strings
+                self.scratch.extend(
+                    chunk
+                        .iter()
+                        .map(|raw_metric| raw_metric.as_event(self.factory.generate())),
+                );
+            } else {
+                // next rounds: update_in_place to reuse allocations
+                assert_eq!(self.scratch.len(), self.chunk_size);
+                self.scratch
+                    .iter_mut()
+                    .zip(chunk.iter())
+                    .for_each(|(slot, raw_metric)| {
+                        raw_metric.update_in_place(slot, self.factory.generate())
+                    });
+            }
+
+            let res = serde_json::to_writer(
+                (&mut self.buffer).writer(),
+                &EventChunk {
+                    events: (&self.scratch[..chunk.len()]).into(),
+                },
             );
-        } else {
-            // next rounds: update_in_place to reuse allocations
-            assert_eq!(scratch.len(), chunk_size);
-            scratch
-                .iter_mut()
-                .zip(chunk.iter())
-                .for_each(|(slot, raw_metric)| {
-                    raw_metric.update_in_place(slot, factory.generate())
-                });
+
+            match res {
+                Ok(()) => Some(Ok((chunk, self.buffer.split().freeze()))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
-        let res = serde_json::to_writer(
-            (&mut buffer).writer(),
-            &EventChunk {
-                events: (&scratch[..chunk.len()]).into(),
-            },
-        );
-
-        match res {
-            Ok(()) => Some(Ok((chunk, buffer.split().freeze()))),
-            Err(e) => Some(Err(e)),
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.inner.size_hint()
         }
-    })
+    }
+
+    impl<'a, F: KeyGen<'a>> ExactSizeIterator for Iter<'a, F> {}
+
+    let buffer = bytes::BytesMut::new();
+    let inner = input.chunks(chunk_size);
+    let scratch = Vec::new();
+
+    Iter {
+        inner,
+        chunk_size,
+        buffer,
+        scratch,
+        factory,
+    }
 }
 
 trait KeyGen<'a>: Copy {
