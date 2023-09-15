@@ -487,7 +487,6 @@ async fn upload(
 
                 let res = res.and_then(|res| res.error_for_status());
 
-                // TODO: ensure redirects are configured on
                 match res {
                     Ok(_response) => Ok(()),
                     Err(e) => {
