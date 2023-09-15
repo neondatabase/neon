@@ -64,7 +64,7 @@ pub mod defaults {
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
+    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
