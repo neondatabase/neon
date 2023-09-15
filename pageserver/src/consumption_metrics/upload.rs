@@ -75,31 +75,35 @@ where
     // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
     let mut buffer = bytes::BytesMut::new();
     let mut chunks = input.chunks(chunk_size);
-    let mut events = Vec::new();
+
+    // chunk amount of events are reused to produce the serialized document
+    let mut scratch = Vec::new();
 
     std::iter::from_fn(move || {
         let chunk = chunks.next()?;
 
-        if !events.is_empty() {
-            assert_eq!(events.len(), chunk_size);
-            events
+        if scratch.is_empty() {
+            // first round: create events with N strings
+            scratch.extend(
+                chunk
+                    .iter()
+                    .map(|raw_metric| raw_metric.as_event(factory.generate())),
+            );
+        } else {
+            // next rounds: update_in_place to reuse allocations
+            assert_eq!(scratch.len(), chunk_size);
+            scratch
                 .iter_mut()
                 .zip(chunk.iter())
                 .for_each(|(slot, raw_metric)| {
                     raw_metric.update_in_place(slot, factory.generate())
                 });
-        } else {
-            events.extend(
-                chunk
-                    .iter()
-                    .map(|raw_metric| raw_metric.as_event(factory.generate())),
-            );
         }
 
         let res = serde_json::to_writer(
             (&mut buffer).writer(),
             &EventChunk {
-                events: (&events[..chunk.len()]).into(),
+                events: (&scratch[..chunk.len()]).into(),
             },
         );
 
