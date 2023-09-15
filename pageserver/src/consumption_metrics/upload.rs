@@ -234,11 +234,14 @@ async fn upload(
 
                 let res = res.and_then(|res| res.error_for_status());
 
+                // 10 redirects are normally allowed, so we don't need worry about 3xx
                 match res {
                     Ok(_response) => Ok(()),
                     Err(e) => {
                         let status = e.status().filter(|s| s.is_client_error());
                         if let Some(status) = status {
+                            // rejection used to be a thing when the server could reject a
+                            // whole batch of metrics if one metric was bad.
                             Err(UploadError::Rejected(status))
                         } else {
                             Err(UploadError::Reqwest(e))
