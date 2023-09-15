@@ -120,6 +120,14 @@ def get_deletion_queue_dropped(ps_http) -> int:
     return get_metric_or_0(ps_http, "pageserver_deletion_queue_dropped_total")
 
 
+def get_deletion_queue_unexpected_errors(ps_http) -> int:
+    return get_metric_or_0(ps_http, "pageserver_deletion_queue_unexpected_errors_total")
+
+
+def get_deletion_queue_dropped_lsn_updates(ps_http) -> int:
+    return get_metric_or_0(ps_http, "pageserver_deletion_queue_dropped_lsn_updates_total")
+
+
 def get_deletion_queue_depth(ps_http) -> int:
     """
     Queue depth if at least one deletion has been submitted, else None
@@ -205,6 +213,8 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     assert len(suffixed_objects) > 0
     assert len(legacy_objects) > 0
 
+    assert get_deletion_queue_unexpected_errors(env.pageserver.http_client()) == 0
+
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_generations = True
@@ -228,6 +238,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     # Our visible remote_consistent_lsn should match projected
     timeline = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
     assert timeline["remote_consistent_lsn"] == timeline["remote_consistent_lsn_visible"]
+    assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
     env.pageserver.allowed_errors.extend(
         [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
@@ -254,8 +265,11 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     # because generation validation fails.
     timeline = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
     assert timeline["remote_consistent_lsn"] != timeline["remote_consistent_lsn_visible"]
+    assert get_deletion_queue_dropped_lsn_updates(ps_http) > 0
 
     # TODO: list bucket and confirm all objects have a generation suffix.
+
+    assert get_deletion_queue_unexpected_errors(ps_http) == 0
 
 
 @pytest.mark.parametrize("keep_attachment", [True, False])
@@ -288,6 +302,9 @@ def test_deletion_queue_recovery(
     ps_http.deletion_queue_flush()
     before_restart_depth = get_deletion_queue_depth(ps_http)
 
+    assert get_deletion_queue_unexpected_errors(ps_http) == 0
+    assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
+
     log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
     env.pageserver.stop(immediate=True)
 
@@ -319,6 +336,9 @@ def test_deletion_queue_recovery(
         assert get_deletion_queue_dropped(ps_http) == before_restart_depth
         env.pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
 
+    assert get_deletion_queue_unexpected_errors(ps_http) == 0
+    assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
+
     # Restart again
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
@@ -327,3 +347,6 @@ def test_deletion_queue_recovery(
     # were cleaned up after being executed or dropped in the previous process lifetime.
     time.sleep(1)
     assert_deletion_queue(ps_http, lambda n: n == 0)
+
+    assert get_deletion_queue_unexpected_errors(ps_http) == 0
+    assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0

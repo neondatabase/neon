@@ -12,6 +12,7 @@ use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::control_plane_client::RetryForeverError;
 use crate::metrics::DELETION_QUEUE_DROPPED;
+use crate::metrics::DELETION_QUEUE_DROPPED_LSN_UPDATES;
 use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 
 use super::executor::ExecutorMessage;
@@ -179,6 +180,7 @@ where
             } else {
                 // If we failed validation, then do not apply any of the projected updates
                 warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {0:?}", tenant_lsn_state.generation);
+                DELETION_QUEUE_DROPPED_LSN_UPDATES.inc();
             }
         }
 
