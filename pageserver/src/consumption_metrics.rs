@@ -208,8 +208,6 @@ impl MetricsKey {
 /// This is as opposed to `consumption_metrics::Event` which is the externally communicated form.
 /// Difference is basically the missing idempotency key, which lives only for the duration of
 /// upload attempts.
-///
-/// See also: [`RawMetricExt`]
 type RawMetric = (MetricsKey, (EventType, u64));
 
 /// Caches the [`RawMetric`]s
