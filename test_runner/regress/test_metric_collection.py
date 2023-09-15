@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Any, Iterator
+from typing import Any, Dict, Iterator, Set
 
 import pytest
 from fixtures.log_helper import log
@@ -15,13 +15,12 @@ from fixtures.neon_fixtures import (
     PSQL,
     NeonEnvBuilder,
     NeonProxy,
-    TenantId,
-    TimelineId,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.types import TenantId, TimelineId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -179,7 +178,7 @@ class MetricsVerifier:
     """
 
     def __init__(self):
-        self.tenants = {}
+        self.tenants: Dict[TenantId, TenantMetricsVerifier] = {}
         pass
 
     def ingest(self, events):
@@ -195,8 +194,8 @@ class MetricsVerifier:
         for t in self.tenants.values():
             t.post_batch()
 
-    def accepted_event_names(self):
-        names = set()
+    def accepted_event_names(self) -> Set[str]:
+        names: Set[str] = set()
         for t in self.tenants.values():
             names = names.union(t.accepted_event_names())
         return names
@@ -205,8 +204,8 @@ class MetricsVerifier:
 class TenantMetricsVerifier:
     def __init__(self, id: TenantId):
         self.id = id
-        self.timelines = {}
-        self.state = {}
+        self.timelines: Dict[TimelineId, TimelineMetricsVerifier] = {}
+        self.state: Dict[str, Any] = {}
 
     def ingest(self, event):
         assert TenantId(event["tenant_id"]) == self.id
@@ -230,7 +229,7 @@ class TenantMetricsVerifier:
         for tl in self.timelines.values():
             tl.post_batch(self)
 
-    def accepted_event_names(self):
+    def accepted_event_names(self) -> Set[str]:
         names = set(self.state.keys())
         for t in self.timelines.values():
             names = names.union(t.accepted_event_names())
@@ -240,7 +239,7 @@ class TenantMetricsVerifier:
 class TimelineMetricsVerifier:
     def __init__(self, tenant_id: TenantId, timeline_id: TimelineId):
         self.id = timeline_id
-        self.state = {}
+        self.state: Dict[str, Any] = {}
 
     def ingest(self, event):
         name = event["metric"]
@@ -252,7 +251,7 @@ class TimelineMetricsVerifier:
         for v in self.state.values():
             v.post_batch(self)
 
-    def accepted_event_names(self):
+    def accepted_event_names(self) -> Set[str]:
         return set(self.state.keys())
 
 
