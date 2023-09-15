@@ -270,20 +270,6 @@ impl DeletionList {
         }
     }
 
-    fn drain(&mut self) -> Self {
-        let mut tenants = HashMap::new();
-        std::mem::swap(&mut self.tenants, &mut tenants);
-        let other = Self {
-            version: Self::VERSION_LATEST,
-            sequence: self.sequence,
-            tenants,
-            size: self.size,
-            validated: self.validated,
-        };
-        self.size = 0;
-        other
-    }
-
     fn is_empty(&self) -> bool {
         self.tenants.is_empty()
     }

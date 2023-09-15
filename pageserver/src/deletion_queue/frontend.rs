@@ -130,12 +130,11 @@ impl FrontendQueueWorker {
                     f.notify();
                 }
 
-                let onward_list = self.pending.drain();
+                // Take the list we've accumulated, replace it with a fresh list for the next sequence
+                let next_list = DeletionList::new(self.pending.sequence + 1);
+                let list = std::mem::replace(&mut self.pending, next_list);
 
-                // We have consumed out of pending: reset it for the next incoming deletions to accumulate there
-                self.pending = DeletionList::new(self.pending.sequence + 1);
-
-                if let Err(e) = self.tx.send(BackendQueueMessage::Delete(onward_list)).await {
+                if let Err(e) = self.tx.send(BackendQueueMessage::Delete(list)).await {
                     // This is allowed to fail: it will only happen if the backend worker is shut down,
                     // so we can just drop this on the floor.
                     info!("Deletion list dropped, this is normal during shutdown ({e:#})");
