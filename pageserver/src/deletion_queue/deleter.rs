@@ -1,3 +1,11 @@
+//! The deleter is the final stage in the deletion queue.  It accumulates remote
+//! paths to delete, and periodically executes them in batches of up to 1000
+//! using the DeleteObjects request.
+//!
+//! Its purpose is to increase efficiency of remote storage I/O by issuing a smaller
+//! number of full-sized DeleteObjects requests, rather than a larger number of
+//! smaller requests.
+
 use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
 use remote_storage::MAX_KEYS_PER_DELETE;
@@ -14,27 +22,27 @@ use super::FlushOp;
 
 const AUTOFLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(super) enum ExecutorMessage {
+pub(super) enum DeleterMessage {
     Delete(Vec<RemotePath>),
     Flush(FlushOp),
 }
 
 /// Non-persistent deletion queue, for coalescing multiple object deletes into
 /// larger DeleteObjects requests.
-pub(super) struct ExecutorWorker {
+pub(super) struct Deleter {
     // Accumulate up to 1000 keys for the next deletion operation
     accumulator: Vec<RemotePath>,
 
-    rx: tokio::sync::mpsc::Receiver<ExecutorMessage>,
+    rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
 
     cancel: CancellationToken,
     remote_storage: GenericRemoteStorage,
 }
 
-impl ExecutorWorker {
+impl Deleter {
     pub(super) fn new(
         remote_storage: GenericRemoteStorage,
-        rx: tokio::sync::mpsc::Receiver<ExecutorMessage>,
+        rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -118,7 +126,7 @@ impl ExecutorWorker {
             };
 
             match msg {
-                ExecutorMessage::Delete(mut list) => {
+                DeleterMessage::Delete(mut list) => {
                     while !list.is_empty() || self.accumulator.len() == MAX_KEYS_PER_DELETE {
                         if self.accumulator.len() == MAX_KEYS_PER_DELETE {
                             self.flush().await?;
@@ -133,7 +141,7 @@ impl ExecutorWorker {
                         }
                     }
                 }
-                ExecutorMessage::Flush(flush_op) => {
+                DeleterMessage::Flush(flush_op) => {
                     // If flush() errors, we drop the flush_op and the caller will get
                     // an error recv()'ing their oneshot channel.
                     self.flush().await?;

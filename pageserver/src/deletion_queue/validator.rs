@@ -1,3 +1,19 @@
+//! The validator is responsible for validating DeletionLists for execution,
+//! based on whethe the generation in the DeletionList is still the latest
+//! generation for a tenant.
+//!
+//! The purpose of validation is to ensure split-brain safety in the cluster
+//! of pageservers: a deletion may only be executed if the tenant generation
+//! that originated it is still current.  See docs/rfcs/025-generation-numbers.md
+//! The purpose of accumulating lists before validating them is to reduce load
+//! on the control plane API by issuing fewer, larger requests.
+//!
+//! In addition to validating DeletionLists, the validator validates updates to remote_consistent_lsn
+//! for timelines: these are logically deletions because the safekeepers use remote_consistent_lsn
+//! to decide when old
+//!
+//! Deletions are passed onward to the Deleter.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +31,7 @@ use crate::metrics::DELETION_QUEUE_DROPPED;
 use crate::metrics::DELETION_QUEUE_DROPPED_LSN_UPDATES;
 use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 
-use super::executor::ExecutorMessage;
+use super::deleter::DeleterMessage;
 use super::DeletionHeader;
 use super::DeletionList;
 use super::DeletionQueueError;
@@ -33,17 +49,17 @@ const AUTOFLUSH_INTERVAL: Duration = Duration::from_secs(10);
 const AUTOFLUSH_KEY_COUNT: usize = 16384;
 
 #[derive(Debug)]
-pub(super) enum BackendQueueMessage {
+pub(super) enum ValidatorQueueMessage {
     Delete(DeletionList),
     Flush(FlushOp),
 }
-pub(super) struct BackendQueueWorker<C>
+pub(super) struct Validator<C>
 where
     C: ControlPlaneGenerationsApi,
 {
     conf: &'static PageServerConf,
-    rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
-    tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
+    rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
+    tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     // Client for calling into control plane API for validation of deletes
     control_plane_client: Option<C>,
@@ -71,14 +87,14 @@ where
     cancel: CancellationToken,
 }
 
-impl<C> BackendQueueWorker<C>
+impl<C> Validator<C>
 where
     C: ControlPlaneGenerationsApi,
 {
     pub(super) fn new(
         conf: &'static PageServerConf,
-        rx: tokio::sync::mpsc::Receiver<BackendQueueMessage>,
-        tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
+        rx: tokio::sync::mpsc::Receiver<ValidatorQueueMessage>,
+        tx: tokio::sync::mpsc::Sender<DeleterMessage>,
         control_plane_client: Option<C>,
         lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
         cancel: CancellationToken,
@@ -313,7 +329,7 @@ where
             let list_path = self.conf.deletion_list_path(list.sequence);
             let objects = list.into_remote_paths();
             self.tx
-                .send(ExecutorMessage::Delete(objects))
+                .send(DeleterMessage::Delete(objects))
                 .await
                 .map_err(|_| DeletionQueueError::ShuttingDown)?;
             executing_lists.push(list_path);
@@ -334,7 +350,7 @@ where
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let flush_op = FlushOp { tx };
         self.tx
-            .send(ExecutorMessage::Flush(flush_op))
+            .send(DeleterMessage::Flush(flush_op))
             .await
             .map_err(|_| DeletionQueueError::ShuttingDown)?;
 
@@ -368,7 +384,7 @@ where
             };
 
             match msg {
-                BackendQueueMessage::Delete(list) => {
+                ValidatorQueueMessage::Delete(list) => {
                     if list.validated {
                         // A pre-validated list may only be seen during recovery, if we are recovering
                         // a DeletionList whose on-disk state has validated=true
@@ -387,7 +403,7 @@ where
                         }
                     }
                 }
-                BackendQueueMessage::Flush(op) => {
+                ValidatorQueueMessage::Flush(op) => {
                     match self.flush().await {
                         Ok(()) => {
                             op.notify();

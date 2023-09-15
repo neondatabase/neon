@@ -1,7 +1,19 @@
-use super::BackendQueueMessage;
+//! The list writer is the first stage in the deletion queue.  It accumulates
+//! layers to delete, and periodically writes out these layers into a persistent
+//! DeletionList.
+//!
+//! The purpose of writing DeletionLists is to decouple the decision to
+//! delete an object from the validation required to execute it: even if
+//! validation is not possible, e.g. due to a control plane outage, we can
+//! still persist our intent to delete an object, in a way that would
+//! survive a restart.
+//!
+//! DeletionLists are passed onwards to the Validator.
+
 use super::DeletionHeader;
 use super::DeletionList;
 use super::FlushOp;
+use super::ValidatorQueueMessage;
 
 use std::collections::HashMap;
 use std::fs::create_dir_all;
@@ -59,7 +71,7 @@ pub(super) struct RecoverOp {
 }
 
 #[derive(Debug)]
-pub(super) enum FrontendQueueMessage {
+pub(super) enum ListWriterQueueMessage {
     Delete(DeletionOp),
     // Wait until all prior deletions make it into a persistent DeletionList
     Flush(FlushOp),
@@ -70,14 +82,14 @@ pub(super) enum FrontendQueueMessage {
     Recover(RecoverOp),
 }
 
-pub(super) struct FrontendQueueWorker {
+pub(super) struct ListWriter {
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
-    rx: tokio::sync::mpsc::Receiver<FrontendQueueMessage>,
+    rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
 
     // Outbound requests to the backend to execute deletion lists we have composed.
-    tx: tokio::sync::mpsc::Sender<BackendQueueMessage>,
+    tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
 
     // The list we are currently building, contains a buffer of keys to delete
     // and our next sequence number
@@ -93,15 +105,15 @@ pub(super) struct FrontendQueueWorker {
     recovered: bool,
 }
 
-impl FrontendQueueWorker {
+impl ListWriter {
     // Initially DeletionHeader.validated_sequence is zero.  The place we start our
     // sequence numbers must be higher than that.
     const BASE_SEQUENCE: u64 = 1;
 
     pub(super) fn new(
         conf: &'static PageServerConf,
-        rx: tokio::sync::mpsc::Receiver<FrontendQueueMessage>,
-        tx: tokio::sync::mpsc::Sender<BackendQueueMessage>,
+        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -139,7 +151,7 @@ impl FrontendQueueWorker {
                 let next_list = DeletionList::new(self.pending.sequence + 1);
                 let list = std::mem::replace(&mut self.pending, next_list);
 
-                if let Err(e) = self.tx.send(BackendQueueMessage::Delete(list)).await {
+                if let Err(e) = self.tx.send(ValidatorQueueMessage::Delete(list)).await {
                     // This is allowed to fail: it will only happen if the backend worker is shut down,
                     // so we can just drop this on the floor.
                     info!("Deletion list dropped, this is normal during shutdown ({e:#})");
@@ -329,7 +341,7 @@ impl FrontendQueueWorker {
             // or the backend has panicked
             DELETION_QUEUE_SUBMITTED.inc_by(deletion_list.len() as u64);
             self.tx
-                .send(BackendQueueMessage::Delete(deletion_list))
+                .send(ValidatorQueueMessage::Delete(deletion_list))
                 .await?;
         }
 
@@ -374,7 +386,7 @@ impl FrontendQueueWorker {
             };
 
             match msg {
-                FrontendQueueMessage::Delete(op) => {
+                ListWriterQueueMessage::Delete(op) => {
                     assert!(
                         self.recovered,
                         "Cannot process deletions before recovery.  This is a bug."
@@ -421,7 +433,7 @@ impl FrontendQueueWorker {
                         }
                     }
                 }
-                FrontendQueueMessage::Flush(op) => {
+                ListWriterQueueMessage::Flush(op) => {
                     if self.pending.is_empty() {
                         // Execute immediately
                         debug!("Flush: No pending objects, flushing immediately");
@@ -432,15 +444,15 @@ impl FrontendQueueWorker {
                         self.pending_flushes.push(op);
                     }
                 }
-                FrontendQueueMessage::FlushExecute(op) => {
+                ListWriterQueueMessage::FlushExecute(op) => {
                     debug!("FlushExecute: passing through to backend");
                     // We do not flush to a deletion list here: the client sends a Flush before the FlushExecute
-                    if let Err(e) = self.tx.send(BackendQueueMessage::Flush(op)).await {
+                    if let Err(e) = self.tx.send(ValidatorQueueMessage::Flush(op)).await {
                         info!("Can't flush, shutting down ({e})");
                         // Caller will get error when their oneshot sender was dropped.
                     }
                 }
-                FrontendQueueMessage::Recover(op) => {
+                ListWriterQueueMessage::Recover(op) => {
                     if self.recovered {
                         tracing::error!(
                             "Deletion queue recovery called more than once.  This is a bug."

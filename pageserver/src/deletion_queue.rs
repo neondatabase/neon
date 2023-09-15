@@ -1,6 +1,6 @@
-mod backend;
-mod executor;
-mod frontend;
+mod deleter;
+mod list_writer;
+mod validator;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,14 +29,14 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::AtomicLsn;
 use utils::lsn::Lsn;
 
-use self::backend::BackendQueueWorker;
-use self::executor::ExecutorWorker;
-use self::frontend::DeletionOp;
-use self::frontend::FrontendQueueWorker;
-use self::frontend::RecoverOp;
-use backend::BackendQueueMessage;
-use executor::ExecutorMessage;
-use frontend::FrontendQueueMessage;
+use self::deleter::Deleter;
+use self::list_writer::DeletionOp;
+use self::list_writer::ListWriter;
+use self::list_writer::RecoverOp;
+use self::validator::Validator;
+use deleter::DeleterMessage;
+use list_writer::ListWriterQueueMessage;
+use validator::ValidatorQueueMessage;
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 
@@ -59,16 +59,16 @@ use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 /// with other deletions in flight.
 ///
 /// Deferred deletions pass through three steps:
-/// - Frontend: accumulate deletion requests from Timelines, and batch them up into
+/// - ListWriter: accumulate deletion requests from Timelines, and batch them up into
 ///   DeletionLists, which are persisted to disk.
-/// - Backend: accumulate deletion lists, and validate them en-masse prior to passing
+/// - Validator: accumulate deletion lists, and validate them en-masse prior to passing
 ///   the keys in the list onward for actual deletion.  Also validate remote_consistent_lsn
 ///   updates for running timelines.
-/// - Executor: accumulate object keys that the backend has validated, and execute them in
+/// - Deleter: accumulate object keys that the validator has validated, and execute them in
 ///   batches of 1000 keys via DeleteObjects.
 ///
 /// Non-deferred deletions, such as during timeline deletion, bypass the first
-/// two stages and are passed straight into the Executor.
+/// two stages and are passed straight into the Deleter.
 ///
 /// Internally, each stage is joined by a channel to the next.  On disk, there is only
 /// one queue (of DeletionLists), which is written by the frontend and consumed
@@ -87,9 +87,9 @@ pub struct DeletionQueueWorkers<C>
 where
     C: ControlPlaneGenerationsApi + Send + Sync,
 {
-    frontend: FrontendQueueWorker,
-    backend: BackendQueueWorker<C>,
-    executor: ExecutorWorker,
+    frontend: ListWriter,
+    backend: Validator<C>,
+    executor: Deleter,
 }
 
 impl<C> DeletionQueueWorkers<C>
@@ -142,8 +142,8 @@ impl FlushOp {
 
 #[derive(Clone, Debug)]
 pub struct DeletionQueueClient {
-    tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
-    executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
+    tx: tokio::sync::mpsc::Sender<ListWriterQueueMessage>,
+    executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
 }
@@ -443,7 +443,7 @@ impl DeletionQueueClient {
     ) -> Result<(), DeletionQueueError> {
         self.do_push(
             &self.tx,
-            FrontendQueueMessage::Recover(RecoverOp { attached_tenants }),
+            ListWriterQueueMessage::Recover(RecoverOp { attached_tenants }),
         )
         .await
     }
@@ -521,7 +521,7 @@ impl DeletionQueueClient {
         DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
         self.do_push(
             &self.tx,
-            FrontendQueueMessage::Delete(DeletionOp {
+            ListWriterQueueMessage::Delete(DeletionOp {
                 tenant_id,
                 timeline_id,
                 layers,
@@ -556,7 +556,7 @@ impl DeletionQueueClient {
     /// This is cancel-safe.  If you drop the future the flush may still happen in the background.
     pub async fn flush(&self) -> Result<(), DeletionQueueError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        self.do_flush(&self.tx, FrontendQueueMessage::Flush(FlushOp { tx }), rx)
+        self.do_flush(&self.tx, ListWriterQueueMessage::Flush(FlushOp { tx }), rx)
             .await
     }
 
@@ -571,7 +571,7 @@ impl DeletionQueueClient {
         debug!("flush_execute: flushing backend...");
         self.do_flush(
             &self.tx,
-            FrontendQueueMessage::FlushExecute(FlushOp { tx }),
+            ListWriterQueueMessage::FlushExecute(FlushOp { tx }),
             rx,
         )
         .await?;
@@ -581,12 +581,8 @@ impl DeletionQueueClient {
         // the executor if deletions had flowed through the backend)
         debug!("flush_execute: flushing execution...");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        self.do_flush(
-            &self.executor_tx,
-            ExecutorMessage::Flush(FlushOp { tx }),
-            rx,
-        )
-        .await?;
+        self.do_flush(&self.executor_tx, DeleterMessage::Flush(FlushOp { tx }), rx)
+            .await?;
         debug!("flush_execute: finished flushing execution...");
         Ok(())
     }
@@ -603,7 +599,7 @@ impl DeletionQueueClient {
     ) -> Result<(), DeletionQueueError> {
         DELETION_QUEUE_SUBMITTED.inc_by(objects.len() as u64);
         self.executor_tx
-            .send(ExecutorMessage::Delete(objects))
+            .send(DeleterMessage::Delete(objects))
             .await
             .map_err(|_| DeletionQueueError::ShuttingDown)
     }
@@ -613,7 +609,7 @@ impl DeletionQueueClient {
     pub(crate) async fn flush_immediate(&self) -> Result<(), DeletionQueueError> {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         self.executor_tx
-            .send(ExecutorMessage::Flush(FlushOp { tx }))
+            .send(DeleterMessage::Flush(FlushOp { tx }))
             .await
             .map_err(|_| DeletionQueueError::ShuttingDown)?;
 
@@ -683,8 +679,8 @@ impl DeletionQueue {
                 cancel: cancel.clone(),
             },
             Some(DeletionQueueWorkers {
-                frontend: FrontendQueueWorker::new(conf, rx, backend_tx, cancel.clone()),
-                backend: BackendQueueWorker::new(
+                frontend: ListWriter::new(conf, rx, backend_tx, cancel.clone()),
+                backend: Validator::new(
                     conf,
                     backend_rx,
                     executor_tx,
@@ -692,7 +688,7 @@ impl DeletionQueue {
                     lsn_table.clone(),
                     cancel.clone(),
                 ),
-                executor: ExecutorWorker::new(remote_storage, executor_rx, cancel.clone()),
+                executor: Deleter::new(remote_storage, executor_rx, cancel.clone()),
             }),
         )
     }
@@ -1186,8 +1182,8 @@ pub mod mock {
     };
 
     pub struct ConsumerState {
-        rx: tokio::sync::mpsc::Receiver<FrontendQueueMessage>,
-        executor_rx: tokio::sync::mpsc::Receiver<ExecutorMessage>,
+        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
     }
 
     impl ConsumerState {
@@ -1199,7 +1195,7 @@ pub mod mock {
             // Transform all executor messages to generic frontend messages
             while let Ok(msg) = self.executor_rx.try_recv() {
                 match msg {
-                    ExecutorMessage::Delete(objects) => {
+                    DeleterMessage::Delete(objects) => {
                         for path in objects {
                             match remote_storage.delete(&path).await {
                                 Ok(_) => {
@@ -1212,7 +1208,7 @@ pub mod mock {
                             executed += 1;
                         }
                     }
-                    ExecutorMessage::Flush(flush_op) => {
+                    DeleterMessage::Flush(flush_op) => {
                         flush_op.notify();
                     }
                 }
@@ -1220,7 +1216,7 @@ pub mod mock {
 
             while let Ok(msg) = self.rx.try_recv() {
                 match msg {
-                    FrontendQueueMessage::Delete(op) => {
+                    ListWriterQueueMessage::Delete(op) => {
                         let mut objects = op.objects;
                         for (layer, generation) in op.layers {
                             objects.push(remote_layer_path(
@@ -1244,14 +1240,14 @@ pub mod mock {
                             executed += 1;
                         }
                     }
-                    FrontendQueueMessage::Flush(op) => {
+                    ListWriterQueueMessage::Flush(op) => {
                         op.notify();
                     }
-                    FrontendQueueMessage::FlushExecute(op) => {
+                    ListWriterQueueMessage::FlushExecute(op) => {
                         // We have already executed all prior deletions because mock does them inline
                         op.notify();
                     }
-                    FrontendQueueMessage::Recover(_) => {
+                    ListWriterQueueMessage::Recover(_) => {
                         // no-op in mock
                     }
                 }
@@ -1263,8 +1259,8 @@ pub mod mock {
     }
 
     pub struct MockDeletionQueue {
-        tx: tokio::sync::mpsc::Sender<FrontendQueueMessage>,
-        executor_tx: tokio::sync::mpsc::Sender<ExecutorMessage>,
+        tx: tokio::sync::mpsc::Sender<ListWriterQueueMessage>,
+        executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
         executed: Arc<AtomicUsize>,
         remote_storage: Option<GenericRemoteStorage>,
         consumer: std::sync::Mutex<ConsumerState>,
