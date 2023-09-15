@@ -403,7 +403,7 @@ def test_timeline_resurrection_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = env.pageserver.tenant_dir(None)
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -902,7 +902,7 @@ def test_timeline_delete_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = env.pageserver.tenant_dir(None)
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

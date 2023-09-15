@@ -136,7 +136,7 @@ def test_remote_storage_backup_and_restore(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = env.pageserver.tenant_dir(None)
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -352,7 +352,7 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = env.pageserver.tenant_dir(None)
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -487,7 +487,7 @@ def test_remote_timeline_client_calls_started_metric(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = env.pageserver.tenant_dir(None)
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

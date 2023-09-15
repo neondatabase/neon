@@ -114,7 +114,7 @@ def test_ondemand_download_large_rel(
     env.pageserver.stop()
 
     # remove all the layer files
-    for layer in (env.pageserver.tenant_dir(None)).glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer}")
         layer.unlink()
 
@@ -236,7 +236,7 @@ def test_ondemand_download_timetravel(
     env.pageserver.stop()
 
     # remove all the layer files
-    for layer in (env.pageserver.tenant_dir(None)).glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer}")
         layer.unlink()
 
@@ -367,7 +367,7 @@ def test_download_remote_layers_api(
 
     # remove all the layer files
     # XXX only delete some of the layer files, to show that it really just downloads all the layers
-    for layer in (env.pageserver.tenant_dir(None)).glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer.name}")
         layer.unlink()
 

@@ -286,7 +286,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -329,7 +329,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("gc thread returned")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     with pytest.raises(
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
@@ -354,7 +354,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -383,7 +383,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     log.info("ignored tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
@@ -410,7 +410,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -427,7 +427,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     log.info("regular tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.tenant_dir(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]

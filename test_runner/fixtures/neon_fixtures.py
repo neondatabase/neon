@@ -1568,7 +1568,7 @@ class NeonPageserver(PgProtocol):
             '.*registered custom resource manager "neon".*',
         ]
 
-    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId]) -> Path:
+    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
             return self.tenant_dir(tenant_id) / "timelines"
@@ -1576,7 +1576,7 @@ class NeonPageserver(PgProtocol):
 
     def tenant_dir(
         self,
-        tenant_id: Optional[TenantId],
+        tenant_id: Optional[TenantId] = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
         if tenant_id is None:
