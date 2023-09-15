@@ -187,9 +187,11 @@ where
                     .get(tenant_id)
                     .expect("Map was built from the same keys we're reading");
 
-                // If the tenant was missing from the validation response, it has been deleted.  We may treat
-                // deletions as valid as the tenant's remote storage is all to be wiped anyway.
-                let valid = tenants_valid.get(tenant_id).copied().unwrap_or(true);
+                // If the tenant was missing from the validation response, it has been deleted.
+                // This means that a deletion is valid, but also redundant since the tenant's
+                // objects should have already been deleted.  Treat it as invalid to drop the
+                // redundant deletion.
+                let valid = tenants_valid.get(tenant_id).copied().unwrap_or(false);
 
                 // A list is valid if it comes from the current _or previous_ generation.
                 // The previous generation case is due to how we store deletion lists locally:
