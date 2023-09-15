@@ -21,12 +21,16 @@ pub(super) async fn upload_metrics(
 
     let started_at = std::time::Instant::now();
 
-    for res in serialize_in_chunks(CHUNK_SIZE, metrics, node_id) {
+    let mut iter = serialize_in_chunks(CHUNK_SIZE, metrics, node_id);
+
+    while let Some(res) = iter.next() {
         let (chunk, body) = res?;
 
         let event_bytes = body.len();
 
-        let res = upload(client, metric_collection_endpoint, body, cancel)
+        let is_last = iter.len() == 0;
+
+        let res = upload(client, metric_collection_endpoint, body, cancel, is_last)
             .instrument(tracing::info_span!(
                 "upload",
                 %event_bytes,
@@ -239,11 +243,16 @@ impl UploadError {
     }
 }
 
+// this is consumed by the test verifiers
+static LAST_IN_BATCH: reqwest::header::HeaderName =
+    reqwest::header::HeaderName::from_static("pageserver-metrics-last-upload-in-batch");
+
 async fn upload(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     body: bytes::Bytes,
     cancel: &CancellationToken,
+    is_last: bool,
 ) -> Result<(), UploadError> {
     let warn_after = 3;
     let max_attempts = 10;
@@ -254,6 +263,10 @@ async fn upload(
                 let res = client
                     .post(metric_collection_endpoint.clone())
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        LAST_IN_BATCH.clone(),
+                        if is_last { "true" } else { "false" },
+                    )
                     .body(body)
                     .send()
                     .await;
