@@ -475,7 +475,7 @@ async fn upload(
     body: bytes::Bytes,
     cancel: &CancellationToken,
 ) -> Result<(), UploadError> {
-    utils::backoff::retry(
+    let res = utils::backoff::retry(
         move || {
             let body = body.clone();
             async move {
@@ -508,7 +508,21 @@ async fn upload(
         "upload consumption_metrics",
         utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
     )
-    .await
+    .await;
+
+    match &res {
+        Ok(_) => {}
+        Err(e) if e.is_reject() => {
+            // permanent errors currently do not get logged by backoff::retry
+            // display alternate has no effect, but keeping it here for easier pattern matching.
+            tracing::error!("failed to upload metrics: {e:#}");
+        }
+        Err(_) => {
+            // these have been logged already
+        }
+    }
+
+    res
 }
 
 /// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
