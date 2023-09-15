@@ -1,8 +1,3 @@
-#
-# Test for collecting metrics from pageserver and proxy.
-# Use mock HTTP server to receive metrics and verify that they look sane.
-#
-
 import json
 import time
 from queue import SimpleQueue
