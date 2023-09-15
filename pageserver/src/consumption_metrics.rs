@@ -297,7 +297,7 @@ async fn collect_metrics_iteration(
         }
     });
 
-    let mut current_metrics = collect(tenants, &cached_metrics, ctx).await;
+    let mut current_metrics = collect(tenants, cached_metrics, ctx).await;
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
     // See: https://github.com/neondatabase/neon/issues/3485
