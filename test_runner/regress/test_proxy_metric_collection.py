@@ -1,8 +1,3 @@
-#
-# Test for collecting metrics from pageserver and proxy.
-# Use mock HTTP server to receive metrics and verify that they look sane.
-#
-
 from pathlib import Path
 from typing import Iterator
 
