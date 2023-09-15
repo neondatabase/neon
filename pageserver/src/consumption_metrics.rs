@@ -181,9 +181,7 @@ async fn restore_and_reschedule(
                 let is_not_found = maybe_ioerr.is_some_and(|e| e.kind() == ErrorKind::NotFound);
 
                 if !is_not_found {
-                    tracing::info!(
-                        "failed to read any previous metrics from {path:?}: {e:#}"
-                    );
+                    tracing::info!("failed to read any previous metrics from {path:?}: {e:#}");
                 }
 
                 (HashMap::new(), None)
