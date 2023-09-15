@@ -318,7 +318,12 @@ where
                     // Timeout, we hit deadline to execute whatever we have in hand.  These functions will
                     // return immediately if no work is pending.
                     // Drop result, because it' a background flush and we don't care whether it really worked.
-                    drop(self.flush().await);
+                    match self.flush().await {
+                        Ok(()) => {}
+                        Err(DeletionQueueError::ShuttingDown) => {
+                            // If we are shutting down, then auto-flush can safely be skipped
+                        }
+                    }
 
                     continue;
                 }
@@ -327,6 +332,8 @@ where
             match msg {
                 BackendQueueMessage::Delete(list) => {
                     if list.validated {
+                        // A pre-validated list may only be seen during recovery, if we are recovering
+                        // a DeletionList whose on-disk state has validated=true
                         self.validated_lists.push(list)
                     } else {
                         self.pending_key_count += list.len();
@@ -334,14 +341,22 @@ where
                     }
 
                     if self.pending_key_count > AUTOFLUSH_KEY_COUNT {
-                        // Drop possible shutdown error, because we will just fall out of loop if that happens
-                        drop(self.flush().await);
+                        match self.flush().await {
+                            Ok(()) => {}
+                            Err(DeletionQueueError::ShuttingDown) => {
+                                // If we are shutting down, then auto-flush can safely be skipped
+                            }
+                        }
                     }
                 }
                 BackendQueueMessage::Flush(op) => {
-                    if let Ok(()) = self.flush().await {
-                        // If we fail due to shutting down, we will just drop `op` to propagate that status.
-                        op.notify();
+                    match self.flush().await {
+                        Ok(()) => {
+                            op.notify();
+                        }
+                        Err(DeletionQueueError::ShuttingDown) => {
+                            // If we fail due to shutting down, we will just drop `op` to propagate that status.
+                        }
                     }
                 }
             }
