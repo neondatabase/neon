@@ -73,7 +73,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("SELECT id FROM vmtest_delete WHERE id = 1")
     assert cur.fetchall() == []
     cur.execute("SELECT id FROM vmtest_hot_update WHERE id = 1")
-    assert cur.fetchall() == []
+    assert cur.fetchall() == [(1,)]
     cur.execute("SELECT id FROM vmtest_cold_update WHERE id = 1")
     assert cur.fetchall() == []
     cur.execute("SELECT id FROM vmtest_cold_update2 WHERE id = 1")
@@ -104,7 +104,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur_new.execute("SELECT id FROM vmtest_delete WHERE id = 1")
     assert cur_new.fetchall() == []
     cur_new.execute("SELECT id FROM vmtest_hot_update WHERE id = 1")
-    assert cur_new.fetchall() == []
+    assert cur_new.fetchall() == [(1,)]
     cur_new.execute("SELECT id FROM vmtest_cold_update WHERE id = 1")
     assert cur_new.fetchall() == []
     cur_new.execute("SELECT id FROM vmtest_cold_update2 WHERE id = 1")

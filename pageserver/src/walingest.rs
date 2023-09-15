@@ -470,7 +470,7 @@ impl<'a> WalIngest<'a> {
                         // we can't validate the remaining number of bytes without parsing
                         // the tuple data.
                         if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
-                            old_heap_blkno = Some(decoded.blocks[1].blkno);
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
                         }
                         if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
                             // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
@@ -533,7 +533,7 @@ impl<'a> WalIngest<'a> {
                             // non-HOT update where the new tuple goes to different page than
                             // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
                             // set.
-                            new_heap_blkno = Some(decoded.blocks[1].blkno);
+                            new_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
                         }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
@@ -589,7 +589,7 @@ impl<'a> WalIngest<'a> {
                             // non-HOT update where the new tuple goes to different page than
                             // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
                             // set.
-                            new_heap_blkno = Some(decoded.blocks[1].blkno);
+                            new_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
                         }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
@@ -745,7 +745,7 @@ impl<'a> WalIngest<'a> {
                         // we can't validate the remaining number of bytes without parsing
                         // the tuple data.
                         if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
-                            old_heap_blkno = Some(decoded.blocks[1].blkno);
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
                         }
                         if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
                             // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
