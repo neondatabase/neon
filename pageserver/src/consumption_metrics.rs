@@ -460,48 +460,40 @@ async fn upload(
     body: bytes::Bytes,
     cancel: &CancellationToken,
 ) -> Result<(), UploadError> {
-    if cancel.is_cancelled() {
-        // retry does not drop the request when cancel comes, so pre-check it.
-        //
-        // it's not terrible, because those come at shutdown when we will have very little time to
-        // act anyways.
-        Err(UploadError::Cancelled)
-    } else {
-        utils::backoff::retry(
-            move || {
-                let body = body.clone();
-                async move {
-                    let res = client
-                        .post(metric_collection_endpoint.clone())
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .body(body)
-                        .send()
-                        .await;
+    utils::backoff::retry(
+        move || {
+            let body = body.clone();
+            async move {
+                let res = client
+                    .post(metric_collection_endpoint.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .send()
+                    .await;
 
-                    let res = res.and_then(|res| res.error_for_status());
+                let res = res.and_then(|res| res.error_for_status());
 
-                    // TODO: ensure redirects are configured on
-                    match res {
-                        Ok(_response) => Ok(()),
-                        Err(e) => {
-                            let status = e.status().filter(|s| s.is_client_error());
-                            if let Some(status) = status {
-                                Err(UploadError::Rejected(status))
-                            } else {
-                                Err(UploadError::Reqwest(e))
-                            }
+                // TODO: ensure redirects are configured on
+                match res {
+                    Ok(_response) => Ok(()),
+                    Err(e) => {
+                        let status = e.status().filter(|s| s.is_client_error());
+                        if let Some(status) = status {
+                            Err(UploadError::Rejected(status))
+                        } else {
+                            Err(UploadError::Reqwest(e))
                         }
                     }
                 }
-            },
-            UploadError::is_reject,
-            3,
-            10,
-            "upload consumption_metrics",
-            utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
-        )
-        .await
-    }
+            }
+        },
+        UploadError::is_reject,
+        3,
+        10,
+        "upload consumption_metrics",
+        utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
+    )
+    .await
 }
 
 /// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
