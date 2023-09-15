@@ -11,7 +11,7 @@ use tracing::warn;
 use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics::DELETION_QUEUE_DROPPED;
-use crate::metrics::DELETION_QUEUE_ERRORS;
+use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 
 use super::executor::ExecutorMessage;
 use super::DeletionHeader;
@@ -99,6 +99,7 @@ where
                 // pageservers will try and load it again: hopefully whatever storage
                 // issue (probably permissions) has been fixed by then.
                 tracing::error!("Failed to delete {}: {e:#}", list_path.display());
+                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                 break;
             }
         }
@@ -215,6 +216,7 @@ where
                     // Highly unexpected.  Could happen if e.g. disk full.
                     // If we didn't save the trimmed list, it is _not_ valid to execute.
                     warn!("Failed to save modified deletion list {list}: {e:#}");
+                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
 
                     // Rather than have a complex retry process, just drop it and leak the objects,
                     // scrubber will clean up eventually.
@@ -235,9 +237,7 @@ where
             // The save() function logs a warning on error.
             if let Err(e) = header.save(self.conf).await {
                 warn!("Failed to write deletion queue header: {e:#}");
-                DELETION_QUEUE_ERRORS
-                    .with_label_values(&["put_header"])
-                    .inc();
+                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
             }
         }
 

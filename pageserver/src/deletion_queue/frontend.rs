@@ -18,8 +18,8 @@ use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
-use crate::metrics::DELETION_QUEUE_ERRORS;
 use crate::metrics::DELETION_QUEUE_SUBMITTED;
+use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
 
@@ -145,7 +145,7 @@ impl FrontendQueueWorker {
                 }
             }
             Err(e) => {
-                DELETION_QUEUE_ERRORS.with_label_values(&["put_list"]).inc();
+                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                 warn!(
                     sequence = self.pending.sequence,
                     "Failed to write deletion list, will retry later ({e:#})"
@@ -174,6 +174,7 @@ impl FrontendQueueWorker {
                         // This should never happen unless we make a mistake with our serialization.
                         // Ignoring a deletion header is not consequential for correctnes because all deletions
                         // are ultimately allowed to fail: worst case we leak some objects for the scrubber to clean up.
+                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                         Ok(None)
                     }
                 }
@@ -240,6 +241,7 @@ impl FrontendQueueWorker {
                     .as_str()
             } else {
                 warn!("Unexpected key in deletion queue: {basename}");
+                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                 continue;
             };
 
@@ -247,6 +249,7 @@ impl FrontendQueueWorker {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Malformed key '{basename}': {e}");
+                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                     continue;
                 }
             };
@@ -273,6 +276,7 @@ impl FrontendQueueWorker {
                     // Drop the list on the floor: any objects it referenced will be left behind
                     // for scrubbing to clean up.  This should never happen unless we have a serialization bug.
                     warn!(sequence = s, "Failed to deserialize deletion list: {e}");
+                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                     continue;
                 }
             };
@@ -326,6 +330,7 @@ impl FrontendQueueWorker {
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
                 self.conf.deletion_prefix().display()
             );
+            DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
             return;
         }
 
@@ -393,6 +398,7 @@ impl FrontendQueueWorker {
                             tracing::error!(
                                 "Failed to enqueue deletions, leaking objects.  This is a bug."
                             );
+                            DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                         }
                     }
                 }
@@ -420,6 +426,7 @@ impl FrontendQueueWorker {
                         tracing::error!(
                             "Deletion queue recovery called more than once.  This is a bug."
                         );
+                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                         // Non-fatal: although this is a bug, since we did recovery at least once we may proceed.
                         continue;
                     }
@@ -431,6 +438,7 @@ impl FrontendQueueWorker {
                         info!(
                             "Deletion queue recover aborted, deletion queue will not proceed ({e})"
                         );
+                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
                         return;
                     } else {
                         self.recovered = true;

@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
 
-use crate::metrics::DELETION_QUEUE_ERRORS;
 use crate::metrics::DELETION_QUEUE_EXECUTED;
+use crate::metrics::DELETION_QUEUE_REMOTE_ERRORS;
 
 use super::DeletionQueueError;
 use super::FlushOp;
@@ -49,7 +49,7 @@ impl ExecutorWorker {
     async fn remote_delete(&self) -> Result<(), anyhow::Error> {
         fail::fail_point!("deletion-queue-before-execute", |_| {
             info!("Skipping execution, failpoint set");
-            DELETION_QUEUE_ERRORS
+            DELETION_QUEUE_REMOTE_ERRORS
                 .with_label_values(&["failpoint"])
                 .inc();
             Err(anyhow::anyhow!("failpoint hit"))
@@ -79,7 +79,9 @@ impl ExecutorWorker {
                 }
                 Err(e) => {
                     warn!("DeleteObjects request failed: {e:#}, will retry");
-                    DELETION_QUEUE_ERRORS.with_label_values(&["execute"]).inc();
+                    DELETION_QUEUE_REMOTE_ERRORS
+                        .with_label_values(&["execute"])
+                        .inc();
                 }
             };
         }
