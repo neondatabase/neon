@@ -28,6 +28,7 @@ def test_metric_collection(
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
 
+    # this should be Union[str, Tuple[List[Any], bool]], but it will make unpacking much more verbose
     uploads: SimpleQueue[Any] = SimpleQueue()
 
     def metrics_handler(request: Request) -> Response:
@@ -35,7 +36,9 @@ def test_metric_collection(
             return Response(status=400)
 
         events = request.json["events"]
-        uploads.put(events)
+        is_last = request.headers["pageserver-metrics-last-upload-in-batch"]
+        assert is_last in ["true", "false"]
+        uploads.put((events, is_last == "true"))
         return Response(status=200)
 
     # Require collecting metrics frequently, since we change
@@ -124,19 +127,20 @@ def test_metric_collection(
         events = uploads.get(timeout=timeout)
 
         if events == "ready":
-            events = uploads.get(timeout=timeout)
-            v.ingest(events)
+            (events, is_last) = uploads.get(timeout=timeout)
+            v.ingest(events, is_last)
             break
         else:
-            v.ingest(events)
+            (events, is_last) = events
+            v.ingest(events, is_last)
 
     if "synthetic_storage_size" not in v.accepted_event_names():
         log.info("waiting for synthetic storage size to be calculated and uploaded...")
 
     rounds = 0
     while "synthetic_storage_size" not in v.accepted_event_names():
-        events = uploads.get(timeout=timeout)
-        v.ingest(events)
+        (events, is_last) = uploads.get(timeout=timeout)
+        v.ingest(events, is_last)
         rounds += 1
         assert rounds < 10, "did not get synthetic_storage_size in 10 uploads"
         # once we have it in verifiers, it will assert that future batches will contain it
@@ -150,13 +154,14 @@ def test_metric_collection(
         events = uploads.get(timeout=timeout)
 
         if events == "ready":
-            events = uploads.get(timeout=timeout * 3)
-            v.ingest(events)
-            events = uploads.get(timeout=timeout)
-            v.ingest(events)
+            (events, is_last) = uploads.get(timeout=timeout * 3)
+            v.ingest(events, is_last)
+            (events, is_last) = uploads.get(timeout=timeout)
+            v.ingest(events, is_last)
             break
         else:
-            v.ingest(events)
+            (events, is_last) = events
+            v.ingest(events, is_last)
 
     httpserver.check()
 
@@ -171,7 +176,7 @@ class MetricsVerifier:
         self.tenants: Dict[TenantId, TenantMetricsVerifier] = {}
         pass
 
-    def ingest(self, events):
+    def ingest(self, events, is_last):
         stringified = json.dumps(events, indent=2)
         log.info(f"ingesting: {stringified}")
         for event in events:
@@ -181,8 +186,9 @@ class MetricsVerifier:
 
             self.tenants[id].ingest(event)
 
-        for t in self.tenants.values():
-            t.post_batch()
+        if is_last:
+            for t in self.tenants.values():
+                t.post_batch()
 
     def accepted_event_names(self) -> Set[str]:
         names: Set[str] = set()
