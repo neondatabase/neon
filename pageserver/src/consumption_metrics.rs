@@ -438,14 +438,29 @@ where
     current_metrics
 }
 
-#[derive(thiserror::Error, Debug)]
 enum UploadError {
-    #[error("server rejected metrics")]
     Rejected(reqwest::StatusCode),
-    #[error("request failed")]
-    Reqwest(#[source] reqwest::Error),
-    #[error("cancelled")]
+    Reqwest(reqwest::Error),
     Cancelled,
+}
+
+impl std::fmt::Debug for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // use same impl because backoff::retry will log this using both
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use UploadError::*;
+
+        match self {
+            Rejected(code) => write!(f, "server rejected the metrics with {code}"),
+            Reqwest(e) => write!(f, "request failed: {e}"),
+            Cancelled => write!(f, "cancelled"),
+        }
+    }
 }
 
 impl UploadError {
