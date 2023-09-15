@@ -357,6 +357,21 @@ def test_download_remote_layers_api(
             tenant_id, timeline_id, "pageserver_resident_physical_size"
         )
 
+    # Shut down safekeepers before starting the pageserver.
+    # If we don't, the tenant's walreceiver handler will trigger the
+    # the logical size computation task, and that downloads layes,
+    # which makes our assertions on size fail.
+    for sk in env.safekeepers:
+        sk.stop()
+        # sk.stop(immediate=True)
+
+    # it is sad we cannot do a flush inmem layer without compaction, but
+    # working around with very high layer0 count and image layer creation
+    # threshold
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    wait_for_upload_queue_empty(client, tenant_id, timeline_id)
+
     filled_current_physical = get_api_current_physical_size()
     log.info(filled_current_physical)
     filled_size = get_resident_physical_size()
@@ -370,13 +385,6 @@ def test_download_remote_layers_api(
     for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer.name}")
         layer.unlink()
-
-    # Shut down safekeepers before starting the pageserver.
-    # If we don't, the tenant's walreceiver handler will trigger the
-    # the logical size computation task, and that downloads layes,
-    # which makes our assertions on size fail.
-    for sk in env.safekeepers:
-        sk.stop(immediate=True)
 
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
