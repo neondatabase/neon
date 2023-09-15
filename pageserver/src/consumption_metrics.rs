@@ -311,7 +311,7 @@ pub async fn collect_metrics(
         // FIXME: chrono methods panic
         let oldest_metric_captured_at: SystemTime = oldest_metric_captured_at.into();
         let now = SystemTime::now();
-        let error = match now.duration_since(oldest_metric_captured_at.into()) {
+        let error = match now.duration_since(oldest_metric_captured_at) {
             Ok(from_last_send) if from_last_send < metric_collection_interval => {
                 let sleep_for = metric_collection_interval - from_last_send;
 
@@ -390,7 +390,7 @@ async fn iteration(
     ctx: &RequestContext,
 ) {
     // these are point in time, with variable "now"
-    let metrics = collect_all_metrics(&cached_metrics, &ctx).await;
+    let metrics = collect_all_metrics(cached_metrics, ctx).await;
 
     if metrics.is_empty() {
         return;
@@ -399,7 +399,7 @@ async fn iteration(
     let metrics = Arc::new(metrics);
 
     let flush = async {
-        match flush_metrics_to_disk(&metrics, &final_path).await {
+        match flush_metrics_to_disk(&metrics, final_path).await {
             Ok(()) => {
                 tracing::debug!("flushed metrics to disk");
             }
@@ -413,10 +413,10 @@ async fn iteration(
 
     let upload = async {
         let res = upload_metrics(
-            &client,
-            &metric_collection_endpoint,
-            &cancel,
-            &node_id,
+            client,
+            metric_collection_endpoint,
+            cancel,
+            node_id,
             &metrics,
             cached_metrics,
         )
@@ -453,7 +453,7 @@ async fn collect_all_metrics(cached_metrics: &Cache, ctx: &RequestContext) -> Ve
         }
     });
 
-    let res = collect(tenants, &cached_metrics, ctx).await;
+    let res = collect(tenants, cached_metrics, ctx).await;
 
     tracing::info!(
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -502,7 +502,7 @@ where
         }
 
         let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
-        snap.to_metrics(tenant_id, Utc::now(), &cache, &mut current_metrics);
+        snap.to_metrics(tenant_id, Utc::now(), cache, &mut current_metrics);
     }
 
     current_metrics
@@ -527,7 +527,7 @@ async fn flush_metrics_to_disk(
             let _e = span.entered();
 
             let mut tempfile =
-                tempfile::NamedTempFile::new_in(&final_path.parent().expect("existence checked"))?;
+                tempfile::NamedTempFile::new_in(final_path.parent().expect("existence checked"))?;
 
             // write out all of the raw metrics, to be read out later on restart as cached values
             {
@@ -544,7 +544,7 @@ async fn flush_metrics_to_disk(
 
             drop(tempfile.persist(&*final_path)?);
 
-            let f = std::fs::File::open(&final_path.parent().unwrap())?;
+            let f = std::fs::File::open(final_path.parent().unwrap())?;
             f.sync_all()?;
 
             anyhow::Ok(())
@@ -597,7 +597,7 @@ async fn upload_metrics(
             kind: *when,
             metric: curr_key.metric,
             // FIXME: finally write! this to the prev allocation
-            idempotency_key: idempotency_key(&node_id),
+            idempotency_key: idempotency_key(node_id),
             value: *curr_val,
             extra: Ids {
                 tenant_id: curr_key.tenant_id,
