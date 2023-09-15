@@ -323,8 +323,8 @@ def test_download_remote_layers_api(
             "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
-            "compaction_threshold": "1",
-            "image_creation_threshold": "1",
+            "compaction_threshold": "999999",
+            "image_creation_threshold": "999999",
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
