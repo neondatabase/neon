@@ -214,6 +214,7 @@ impl DeletionQueueClient {
         let mut locked = self
             .lsn_table
             .write()
+            // non-poisoned is default assumption in the code base, ok to just use unwrap
             .expect("Lock should never be poisoned");
 
         let tenant_entry =

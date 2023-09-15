@@ -154,6 +154,7 @@ where
                 .validate(tenant_generations.iter().map(|(k, v)| (*k, *v)).collect())
                 .await
                 // The only wait a validation call returns an error is when the cancellation token fires
+                // Can't it also return an error if there is a networking issue?
                 .map_err(|_| DeletionQueueError::ShuttingDown)?
         } else {
             // Control plane API disabled.  In legacy mode we consider everything valid.
@@ -170,16 +171,20 @@ where
 
             // If the tenant was missing from the validation response, it has been deleted.  We may treat
             // deletions as valid as the tenant's remote storage is all to be wiped anyway.
+            // What's the downside of being conservative here and treating as invalid?
+            // That would guard us against console bugs (e.g., someone putting an accidental LIMIT where there should be none)
             let valid = tenants_valid.get(&tenant_id).copied().unwrap_or(true);
 
             if valid && *validated_generation == tenant_lsn_state.generation {
                 for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
                     // Drop result of send: it is legal for the Timeline to have been dropped along
                     // with its queue receiver while we were doing validation.
+                    // This comment seems outdated.
                     pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
+                // Add a global counter metric (no tenant_id label) for this so we can have a distinguished alert on it? Should be initialzed to 0 in preinitialize_metrics.
                 warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {0:?}", tenant_lsn_state.generation);
             }
         }
@@ -189,6 +194,7 @@ where
             // Filter the list based on whether the server responded valid: true.
             // If a tenant is omitted in the response, it has been deleted, and we should
             // proceed with deletion.
+            // Again, what's the downside of being conservative here and not doing anything on omissions?
             let mut mutated = false;
             list.tenants.retain(|tenant_id, tenant| {
                 let validated_generation = tenant_generations
@@ -205,6 +211,16 @@ where
                 // it proves that this node's disk was used for both current & previous generations,
                 // and therefore no other node was involved in between: the two generations may be
                 // logically treated as the same.
+                //
+                // 1. I don't see the check for previous generatio nhere? at a minimum variable names are not obvious?
+                // 2. Wondering what would have been if we had made this part of /re-attach, i.e.,
+                //    option to present previous_generation in re-attach and if that previous generation
+                //    is still the most recent, return the same generation number.
+                //    Would avoid special cases like this one here.
+                //    Basically, what we have now is we persist the generation number across restart in the DeletionList,
+                //    but don't really trust it unless it passes this special-case check here.
+                //    Why not move the special-case check into the /re-attach endpoint?
+                //    Not a blocker for this PR, but would appreciate a response in #team-storage on this.
                 let this_list_valid = valid
                     && (tenant.generation == *validated_generation);
 
@@ -220,14 +236,19 @@ where
             if mutated {
                 // Save the deletion list if we had to make changes due to stale generations.  The
                 // saved list is valid for execution.
+                // This save is overwriting and it's neither atomic nor crashsafe; use VirtualFile::crashsafe_overwrite or similar.
                 if let Err(e) = list.save(self.conf).await {
                     // Highly unexpected.  Could happen if e.g. disk full.
                     // If we didn't save the trimmed list, it is _not_ valid to execute.
+                    // log message should mention leaking of objects. also I requested a counter metric for such events somehwere else, should increment it here.
                     warn!("Failed to save modified deletion list {list}: {e:#}");
 
                     // Rather than have a complex retry process, just drop it and leak the objects,
                     // scrubber will clean up eventually.
                     list.tenants.clear(); // Result is a valid-but-empty list, which is a no-op for execution.
+
+                    // if we hit a save error here, i.e., leave the untrimmed list on disk, and later successfully save the header.
+                    // wouldn't recovery treat the untrimmed list as validated?
                 }
             }
 
@@ -242,6 +263,10 @@ where
             // Drop result because the validated_sequence is an optimization.  If we fail to save it,
             // then restart, we will drop some deletion lists, creating work for scrubber.
             // The save() function logs a warning on error.
+            // 1. Again, use VirtualFile::crashsafe_overwrite here for atomic replace.
+            // 2. Have you thought through whether it's safe to continue with the existing queue?
+            //    Would feel more comfortable if I didn't have to think about what it means for recovery.
+            //    How about just starting a new queue if this here happens? Or: panic the pageserver? I'd be ok with that in this very unlikely case.
             if let Err(e) = header.save(self.conf).await {
                 warn!("Failed to write deletion queue header: {e:#}");
                 DELETION_QUEUE_ERRORS
