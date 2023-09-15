@@ -373,7 +373,7 @@ def test_download_remote_layers_api(
     wait_for_upload_queue_empty(client, tenant_id, timeline_id)
 
     filled_current_physical = get_api_current_physical_size()
-    log.info(filled_current_physical)
+    log.info(f"filled_current_physical: {filled_current_physical}")
     filled_size = get_resident_physical_size()
     log.info(f"filled_size: {filled_size}")
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
