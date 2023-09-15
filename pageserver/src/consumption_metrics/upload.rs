@@ -62,11 +62,14 @@ pub(super) async fn upload_metrics(
 }
 
 // The return type is quite ugly, but we gain testability in isolation
-fn serialize_in_chunks<'a>(
+fn serialize_in_chunks<'a, F>(
     chunk_size: usize,
     input: &'a [RawMetric],
-    node_id: &'a str,
-) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a {
+    factory: F,
+) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
+where
+    F: KeyGen<'a> + 'a,
+{
     use bytes::BufMut;
 
     // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
@@ -83,13 +86,13 @@ fn serialize_in_chunks<'a>(
                 .iter_mut()
                 .zip(chunk.iter())
                 .for_each(|(slot, raw_metric)| {
-                    raw_metric.update_in_place(slot, IdempotencyKey::generate(node_id))
+                    raw_metric.update_in_place(slot, factory.generate())
                 });
         } else {
             events.extend(
                 chunk
                     .iter()
-                    .map(|raw_metric| raw_metric.as_event(IdempotencyKey::generate(node_id))),
+                    .map(|raw_metric| raw_metric.as_event(factory.generate())),
             );
         }
 
@@ -105,6 +108,16 @@ fn serialize_in_chunks<'a>(
             Err(e) => Some(Err(e)),
         }
     })
+}
+
+trait KeyGen<'a>: Copy {
+    fn generate(&self) -> IdempotencyKey<'a>;
+}
+
+impl<'a> KeyGen<'a> for &'a str {
+    fn generate(&self) -> IdempotencyKey<'a> {
+        IdempotencyKey::generate(self)
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -174,5 +187,63 @@ async fn upload(
             utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use consumption_metrics::Event;
+
+    use crate::consumption_metrics::metrics::{Ids, Name};
+
+    use super::*;
+
+    #[test]
+    fn chunked_serialization() {
+        let examples = crate::consumption_metrics::metrics::metrics_samples();
+        assert!(examples.len() > 1);
+
+        let factory = FixedGen::new(Utc::now(), "1", 42);
+
+        // need to use Event here because serde_json::Value uses default hashmap, not linked
+        // hashmap
+        #[derive(serde::Deserialize)]
+        struct EventChunk {
+            events: Vec<Event<Ids, Name>>,
+        }
+
+        let correct = serialize_in_chunks(examples.len(), &examples, factory)
+            .map(|res| res.unwrap().1)
+            .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
+            .collect::<Vec<_>>();
+
+        for chunk_size in 1..examples.len() {
+            let actual = serialize_in_chunks(chunk_size, &examples, factory)
+                .map(|res| res.unwrap().1)
+                .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
+                .collect::<Vec<_>>();
+
+            // if these are equal, it means that multi-chunking version works as well
+            assert_eq!(correct, actual);
+        }
+    }
+
+    #[cfg(test)]
+    #[derive(Clone, Copy)]
+    struct FixedGen<'a>(chrono::DateTime<chrono::Utc>, &'a str, u16);
+
+    #[cfg(test)]
+    impl<'a> FixedGen<'a> {
+        fn new(now: chrono::DateTime<chrono::Utc>, node_id: &'a str, nonce: u16) -> Self {
+            FixedGen(now, node_id, nonce)
+        }
+    }
+
+    #[cfg(test)]
+    impl<'a> KeyGen<'a> for FixedGen<'a> {
+        fn generate(&self) -> IdempotencyKey<'a> {
+            IdempotencyKey::for_tests(self.0, self.1, self.2)
+        }
     }
 }
