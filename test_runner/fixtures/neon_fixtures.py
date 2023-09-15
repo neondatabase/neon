@@ -847,18 +847,6 @@ class NeonEnv:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join(f"localhost:{wa.port.pg}" for wa in self.safekeepers)
 
-    def timeline_dir(
-        self, tenant_id: TenantId, timeline_id: TimelineId, pageserver_id: Optional[int] = None
-    ) -> Path:
-        """Get a timeline directory's path based on the repo directory of the test environment"""
-        return (
-            self.tenant_dir(tenant_id, pageserver_id=pageserver_id) / "timelines" / str(timeline_id)
-        )
-
-    def tenant_dir(self, tenant_id: TenantId, pageserver_id: Optional[int] = None) -> Path:
-        """Get a tenant directory's path based on the repo directory of the test environment"""
-        return self.get_pageserver(pageserver_id).workdir / "tenants" / str(tenant_id)
-
     def get_pageserver_version(self) -> str:
         bin_pageserver = str(self.neon_binpath / "pageserver")
         res = subprocess.run(
@@ -1579,6 +1567,21 @@ class NeonPageserver(PgProtocol):
             ".*completed, took longer than expected.*",
             '.*registered custom resource manager "neon".*',
         ]
+
+    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
+        """Get a timeline directory's path based on the repo directory of the test environment"""
+        if timeline_id is None:
+            return self.tenant_dir(tenant_id) / "timelines"
+        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+
+    def tenant_dir(
+        self,
+        tenant_id: Optional[TenantId] = None,
+    ) -> Path:
+        """Get a tenant directory's path based on the repo directory of the test environment"""
+        if tenant_id is None:
+            return self.workdir / "tenants"
+        return self.workdir / "tenants" / str(tenant_id)
 
     def start(
         self,

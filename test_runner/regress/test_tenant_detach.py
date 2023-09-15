@@ -286,7 +286,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -329,7 +329,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("gc thread returned")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     with pytest.raises(
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
@@ -354,7 +354,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -383,7 +383,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     log.info("ignored tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
@@ -410,7 +410,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -427,7 +427,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     log.info("regular tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
@@ -528,7 +528,7 @@ def test_ignored_tenant_reattach(
     pageserver_http = env.pageserver.http_client()
 
     ignored_tenant_id, _ = env.neon_cli.create_tenant()
-    tenant_dir = env.pageserver.workdir / "tenants" / str(ignored_tenant_id)
+    tenant_dir = env.pageserver.tenant_dir(ignored_tenant_id)
     tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_before_ignore.sort()
     timelines_before_ignore = [
@@ -619,7 +619,7 @@ def test_ignored_tenant_download_missing_layers(
 
     # ignore the tenant and remove its layers
     pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
     layers_removed = False
     for dir_entry in timeline_dir.iterdir():
         if dir_entry.name.startswith("00000"):
@@ -672,7 +672,7 @@ def test_ignored_tenant_stays_broken_without_metadata(
 
     # ignore the tenant and remove its metadata
     pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
     metadata_removed = False
     for dir_entry in timeline_dir.iterdir():
         if dir_entry.name == "metadata":

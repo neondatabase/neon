@@ -6,7 +6,6 @@ import queue
 import shutil
 import threading
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pytest
@@ -137,7 +136,7 @@ def test_remote_storage_backup_and_restore(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -353,7 +352,7 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -488,7 +487,7 @@ def test_remote_timeline_client_calls_started_metric(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -533,7 +532,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
 
     client = env.pageserver.http_client()
 
@@ -704,7 +703,9 @@ def test_empty_branch_remote_storage_upload_on_restart(
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    local_metadata = env.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
+    local_metadata = (
+        env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
+    )
     assert local_metadata.is_file()
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)

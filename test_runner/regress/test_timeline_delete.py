@@ -3,7 +3,6 @@ import os
 import queue
 import shutil
 import threading
-from pathlib import Path
 
 import pytest
 import requests
@@ -72,13 +71,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
     )
 
-    timeline_path = (
-        env.pageserver.workdir
-        / "tenants"
-        / str(env.initial_tenant)
-        / "timelines"
-        / str(parent_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)
 
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
@@ -89,13 +82,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     assert exc.value.status_code == 412
 
-    timeline_path = (
-        env.pageserver.workdir
-        / "tenants"
-        / str(env.initial_tenant)
-        / "timelines"
-        / str(leaf_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
     assert timeline_path.exists()
 
     # retry deletes when compaction or gc is running in pageserver
@@ -336,7 +323,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             ),
         )
 
-    timeline_dir = env.timeline_dir(env.initial_tenant, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, timeline_id)
     # Check local is empty
     assert not timeline_dir.exists()
     # Check no delete mark present
@@ -416,7 +403,7 @@ def test_timeline_resurrection_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -467,13 +454,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         "test_timeline_delete_fail_before_local_delete",
     )
 
-    leaf_timeline_path = (
-        env.pageserver.workdir
-        / "tenants"
-        / str(env.initial_tenant)
-        / "timelines"
-        / str(leaf_timeline_id)
-    )
+    leaf_timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
     timeline_info = wait_until_timeline_state(
@@ -921,7 +902,7 @@ def test_timeline_delete_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.pageserver.workdir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -933,7 +914,7 @@ def test_timeline_delete_resumed_on_attach(
     # delete should be resumed
     wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id, iterations=iterations)
 
-    tenant_path = env.timeline_dir(tenant_id=tenant_id, timeline_id=timeline_id)
+    tenant_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():
