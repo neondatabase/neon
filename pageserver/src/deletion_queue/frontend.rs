@@ -204,10 +204,7 @@ impl FrontendQueueWorker {
         // Load the header
         let validated_sequence = self.load_validated_sequence().await?.unwrap_or(0);
 
-        // Start our next deletion list from after the last location validated by
-        // previous process lifetime, or after the last location found (it is updated
-        // below after enumerating the deletion lists)
-        self.pending.sequence = std::cmp::max(self.pending.sequence, validated_sequence + 1);
+        self.pending.sequence = validated_sequence + 1;
 
         let deletion_directory = self.conf.deletion_prefix();
         let mut dir = match tokio::fs::read_dir(&deletion_directory).await {
@@ -256,9 +253,10 @@ impl FrontendQueueWorker {
         }
         seqs.sort();
 
-        // Initialize the next sequence number in the frontend based on the maximum of the highest list we see,
-        // and the last list that was deleted according to the header.  Combined with writing out the header
-        // prior to deletions, this guarnatees no re-use of sequence numbers.
+        // Start our next deletion list from after the last location validated by
+        // previous process lifetime, or after the last location found (it is updated
+        // below after enumerating the deletion lists)
+        self.pending.sequence = validated_sequence + 1;
         if let Some(max_list_seq) = seqs.last() {
             self.pending.sequence = std::cmp::max(self.pending.sequence, max_list_seq + 1);
         }
