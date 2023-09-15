@@ -475,6 +475,8 @@ async fn upload(
     body: bytes::Bytes,
     cancel: &CancellationToken,
 ) -> Result<(), UploadError> {
+    let warn_after = 3;
+    let max_attempts = 10;
     let res = utils::backoff::retry(
         move || {
             let body = body.clone();
@@ -503,8 +505,8 @@ async fn upload(
             }
         },
         UploadError::is_reject,
-        3,
-        10,
+        warn_after,
+        max_attempts,
         "upload consumption_metrics",
         utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
     )
