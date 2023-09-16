@@ -27,7 +27,6 @@ pub(super) struct Ids {
 /// instead of static str.
 // Do not rename any of these without first consulting with data team and partner
 // management.
-// FIXME: write those tests before refactoring to this!
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(super) enum Name {
     /// Timeline last_record_lsn, absolute
