@@ -295,6 +295,9 @@ pub async fn collect_metrics(
 
         let metrics = Arc::new(metrics);
 
+        // why not race cancellation here? because we are one of the last tasks, and if we are
+        // already here, better to try to flush the new values.
+
         let flush = async {
             match flush_metrics_to_disk(&metrics, &final_path).await {
                 Ok(()) => {
