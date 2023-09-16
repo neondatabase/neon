@@ -461,3 +461,6 @@ impl TimelineSnapshot {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::metrics_samples;
