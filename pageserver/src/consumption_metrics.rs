@@ -926,7 +926,7 @@ async fn calculate_synthetic_size_worker(
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
 
-    // reminder: this ticker is ready right away
+    // reminder: ticker is ready immediatedly
     let mut ticker = tokio::time::interval(synthetic_size_calculation_interval);
     let cause = LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 
