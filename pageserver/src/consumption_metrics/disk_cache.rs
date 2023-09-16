@@ -54,7 +54,7 @@ pub(super) async fn flush_metrics_to_disk(
             tempfile.flush()?;
             tempfile.as_file().sync_all()?;
 
-            drop(tempfile.persist(&*path)?);
+            drop(tempfile.persist(&*path).map_err(|e| e.error)?);
 
             let f = std::fs::File::open(path.parent().unwrap())?;
             f.sync_all()?;
