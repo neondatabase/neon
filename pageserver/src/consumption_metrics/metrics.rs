@@ -80,7 +80,7 @@ impl MetricsKey {
 struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
+    const fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
     }
@@ -94,7 +94,12 @@ impl AbsoluteValueFactory {
 struct IncrementalValueFactory(MetricsKey);
 
 impl IncrementalValueFactory {
-    fn from_until(self, prev_end: DateTime<Utc>, up_to: DateTime<Utc>, val: u64) -> RawMetric {
+    const fn from_until(
+        self,
+        prev_end: DateTime<Utc>,
+        up_to: DateTime<Utc>,
+        val: u64,
+    ) -> RawMetric {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
         let when = EventType::Incremental {
