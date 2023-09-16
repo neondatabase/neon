@@ -12,17 +12,6 @@ use utils::{
 
 use super::{Cache, RawMetric};
 
-// FIXME: all other consumption_metrics::Event stuff is over at uploading, maybe move?
-#[serde_as]
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
-pub(super) struct Ids {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub(super) tenant_id: TenantId,
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) timeline_id: Option<TimelineId>,
-}
-
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
 // Do not rename any of these without first consulting with data team and partner
@@ -55,7 +44,7 @@ pub(super) enum Name {
 /// elsewhere.
 #[serde_with::serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(super) struct MetricsKey {
+pub(crate) struct MetricsKey {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub(super) tenant_id: TenantId,
 
@@ -462,4 +451,4 @@ impl TimelineSnapshot {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::metrics_samples;
+pub(crate) use tests::metric_examples;

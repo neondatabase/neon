@@ -114,95 +114,6 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
     );
 }
 
-#[cfg(test)]
-pub(crate) fn metrics_samples() -> [RawMetric; 6] {
-    let tenant_id = TenantId::from_array([0; 16]);
-    let timeline_id = TimelineId::from_array([0xff; 16]);
-
-    let now = DateTime::parse_from_rfc3339("2023-09-15T00:00:00.123456789Z").unwrap();
-    let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z").unwrap();
-    let [now, before] = [DateTime::<Utc>::from(now), DateTime::from(before)];
-
-    metric_examples(tenant_id, timeline_id, now, before)
-}
-
-#[cfg(test)]
-const fn metric_examples(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    now: DateTime<Utc>,
-    before: DateTime<Utc>,
-) -> [RawMetric; 6] {
-    [
-        MetricsKey::written_size(tenant_id, timeline_id).at(now, 0),
-        MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),
-        MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0),
-        MetricsKey::remote_storage_size(tenant_id).at(now, 0),
-        MetricsKey::resident_size(tenant_id).at(now, 0),
-        MetricsKey::synthetic_size(tenant_id).at(now, 1),
-    ]
-}
-
-#[test]
-fn metric_image_stability() {
-    // it is important that these strings stay as they are
-
-    let tenant_id = TenantId::from_array([0; 16]);
-    let timeline_id = TimelineId::from_array([0xff; 16]);
-
-    let now = DateTime::parse_from_rfc3339("2023-09-15T00:00:00.123456789Z").unwrap();
-    let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z").unwrap();
-
-    let [now, before] = [DateTime::<Utc>::from(now), DateTime::from(before)];
-
-    let examples = [
-        (
-            line!(),
-            r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"written_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
-        ),
-        (
-            line!(),
-            r#"{"type":"incremental","start_time":"2023-09-14T00:00:00.123456789Z","stop_time":"2023-09-15T00:00:00.123456789Z","metric":"written_data_bytes_delta","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
-        ),
-        (
-            line!(),
-            r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"timeline_logical_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
-        ),
-        (
-            line!(),
-            r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"remote_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
-        ),
-        (
-            line!(),
-            r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"resident_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
-        ),
-        (
-            line!(),
-            r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"synthetic_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":1,"tenant_id":"00000000000000000000000000000000"}"#,
-        ),
-    ];
-
-    let idempotency_key = consumption_metrics::IdempotencyKey::for_tests(now, "1", 0);
-    let examples = examples
-        .into_iter()
-        .zip(metric_examples(tenant_id, timeline_id, now, before));
-
-    for ((line, expected), (key, (kind, value))) in examples {
-        let e = consumption_metrics::Event {
-            kind,
-            metric: key.metric,
-            idempotency_key: idempotency_key.to_string(),
-            value,
-            extra: Ids {
-                tenant_id: key.tenant_id,
-                timeline_id: key.timeline_id,
-            },
-        };
-        let actual = serde_json::to_string(&e).unwrap();
-        assert_eq!(expected, actual, "example for {kind:?} from line {line}");
-    }
-}
-
 #[test]
 fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
     // it can happen that we lose the inmemorylayer but have previously sent metrics and we
@@ -367,4 +278,20 @@ fn time_backwards<const N: usize>() -> [std::time::SystemTime; N] {
     }
 
     times
+}
+
+pub(crate) const fn metric_examples(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    now: DateTime<Utc>,
+    before: DateTime<Utc>,
+) -> [RawMetric; 6] {
+    [
+        MetricsKey::written_size(tenant_id, timeline_id).at(now, 0),
+        MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),
+        MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 0),
+        MetricsKey::remote_storage_size(tenant_id).at(now, 0),
+        MetricsKey::resident_size(tenant_id).at(now, 0),
+        MetricsKey::synthetic_size(tenant_id).at(now, 1),
+    ]
 }

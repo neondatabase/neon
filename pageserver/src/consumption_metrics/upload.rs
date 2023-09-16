@@ -1,11 +1,21 @@
 use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use serde_with::serde_as;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{
-    metrics::{Ids, Name},
-    Cache, MetricsKey, RawMetric,
-};
+use super::{metrics::Name, Cache, MetricsKey, RawMetric};
+use utils::id::{TenantId, TimelineId};
+
+/// How the metrics from pageserver are identified.
+#[serde_with::serde_as]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
+struct Ids {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub(super) tenant_id: TenantId,
+    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) timeline_id: Option<TimelineId>,
+}
 
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
 pub(super) async fn upload_metrics(
@@ -315,11 +325,12 @@ async fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
+    use once_cell::sync::Lazy;
 
     #[test]
     fn chunked_serialization() {
-        let examples = crate::consumption_metrics::metrics::metrics_samples();
+        let examples = metric_samples();
         assert!(examples.len() > 1);
 
         let factory = FixedGen::new(Utc::now(), "1", 42);
@@ -360,5 +371,73 @@ mod tests {
         fn generate(&self) -> IdempotencyKey<'a> {
             IdempotencyKey::for_tests(self.0, self.1, self.2)
         }
+    }
+
+    static SAMPLES_NOW: Lazy<DateTime<Utc>> = Lazy::new(|| {
+        DateTime::parse_from_rfc3339("2023-09-15T00:00:00.123456789Z")
+            .unwrap()
+            .into()
+    });
+
+    #[test]
+    fn metric_image_stability() {
+        // it is important that these strings stay as they are
+
+        let examples = [
+            (
+                line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"written_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                r#"{"type":"incremental","start_time":"2023-09-14T00:00:00.123456789Z","stop_time":"2023-09-15T00:00:00.123456789Z","metric":"written_data_bytes_delta","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"timeline_logical_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000","timeline_id":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            (
+                line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"remote_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+            (
+                line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"resident_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":0,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+            (
+                line!(),
+                r#"{"type":"absolute","time":"2023-09-15T00:00:00.123456789Z","metric":"synthetic_storage_size","idempotency_key":"2023-09-15 00:00:00.123456789 UTC-1-0000","value":1,"tenant_id":"00000000000000000000000000000000"}"#,
+            ),
+        ];
+
+        let idempotency_key = consumption_metrics::IdempotencyKey::for_tests(*SAMPLES_NOW, "1", 0);
+        let examples = examples.into_iter().zip(metric_samples());
+
+        for ((line, expected), (key, (kind, value))) in examples {
+            let e = consumption_metrics::Event {
+                kind,
+                metric: key.metric,
+                idempotency_key: idempotency_key.to_string(),
+                value,
+                extra: Ids {
+                    tenant_id: key.tenant_id,
+                    timeline_id: key.timeline_id,
+                },
+            };
+            let actual = serde_json::to_string(&e).unwrap();
+            assert_eq!(expected, actual, "example for {kind:?} from line {line}");
+        }
+    }
+
+    fn metric_samples() -> [RawMetric; 6] {
+        let tenant_id = TenantId::from_array([0; 16]);
+        let timeline_id = TimelineId::from_array([0xff; 16]);
+
+        let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z")
+            .unwrap()
+            .into();
+        let [now, before] = [*SAMPLES_NOW, before];
+
+        super::super::metrics::metric_examples(tenant_id, timeline_id, now, before)
     }
 }
