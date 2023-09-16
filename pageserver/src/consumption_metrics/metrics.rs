@@ -278,7 +278,7 @@ where
     current_metrics
 }
 
-/// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
+/// In-between abstraction to allow testing metrics without actual Tenants.
 struct TenantSnapshot {
     resident_size: u64,
     remote_size: u64,
