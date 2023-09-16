@@ -1,6 +1,7 @@
 use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::NamedTempFile;
 
 use super::RawMetric;
 
@@ -36,8 +37,8 @@ pub(super) async fn flush_metrics_to_disk(
         move || {
             let _e = span.entered();
 
-            let mut tempfile =
-                tempfile::NamedTempFile::new_in(final_path.parent().expect("existence checked"))?;
+            let parent = final_path.parent().expect("existence checked");
+            let mut tempfile = NamedTempFile::new_in(parent)?;
 
             // write out all of the raw metrics, to be read out later on restart as cached values
             {
