@@ -166,6 +166,142 @@ def test_metric_collection(
     httpserver.check()
 
 
+def test_metric_collection_cleans_up_tempfile(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    (host, port) = httpserver_listen_address
+    metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
+
+    # this should be Union[str, Tuple[List[Any], bool]], but it will make unpacking much more verbose
+    uploads: SimpleQueue[Any] = SimpleQueue()
+
+    def metrics_handler(request: Request) -> Response:
+        if request.json is None:
+            return Response(status=400)
+
+        events = request.json["events"]
+        is_last = request.headers["pageserver-metrics-last-upload-in-batch"]
+        assert is_last in ["true", "false"]
+        uploads.put((events, is_last == "true"))
+        return Response(status=200)
+
+    # Require collecting metrics frequently, since we change
+    # the timeline and want something to be logged about it.
+    #
+    # Disable time-based pitr, we will use the manual GC calls
+    # to trigger remote storage operations in a controlled way
+    neon_env_builder.pageserver_config_override = (
+        f"""
+        metric_collection_interval="1s"
+        metric_collection_endpoint="{metric_collection_endpoint}"
+        cached_metric_collection_interval="0s"
+        synthetic_size_calculation_interval="3s"
+    """
+        + "tenant_config={pitr_interval = '0 sec'}"
+    )
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    # mock http server that returns OK for the metrics
+    httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
+        metrics_handler
+    )
+
+    # spin up neon,  after http server is ready
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # httpserver is shut down before pageserver during passing run
+    env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    cur.execute("CREATE TABLE foo (id int, counter int, t text)")
+    cur.execute(
+        """
+        INSERT INTO foo
+        SELECT g, 0, 'long string to consume some space' || g
+        FROM generate_series(1, 100000) g
+        """
+    )
+
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    # we expect uploads at 1Hz, on busy runners this could be too optimistic,
+    # so give 5s we only want to get the following upload after "ready" value.
+    timeout = 5
+
+    # these strings in the upload queue allow synchronizing with the uploads
+    # and the main test execution
+    uploads.put("ready")
+
+    while True:
+        events = uploads.get(timeout=timeout)
+
+        if events == "ready":
+            (events, _) = uploads.get(timeout=timeout)
+            break
+
+    # should really configure an env?
+    pageserver_http.configure_failpoints(("before-persist-last-metrics-collected", "exit"))
+
+    time.sleep(3)
+
+    env.pageserver.stop()
+
+    matching = []
+    other_files = set()
+    for entry in env.pageserver.workdir.iterdir():
+        if not entry.is_file():
+            continue
+
+        if not entry.name.startswith("last_consumption_metrics.json"):
+            other_files.add(entry.name)
+            continue
+
+        matching.append(entry.name)
+
+    assert len(matching) == 2, f"expecting actual file and tempfile, but not found: {matching}"
+
+    uploads.put("ready")
+    env.pageserver.start()
+
+    while True:
+        events = uploads.get(timeout=timeout * 3)
+
+        if events == "ready":
+            (events, _) = uploads.get(timeout=timeout)
+            break
+
+    env.pageserver.stop()
+
+    matching = []
+    for entry in env.pageserver.workdir.iterdir():
+        if not entry.is_file():
+            continue
+
+        if not entry.name.startswith("last_consumption_metrics.json"):
+            assert (
+                entry.name in other_files
+            ), f"some other file was created in directory: {entry.name}"
+            other_files.remove(entry.name)
+            continue
+
+        matching.append(entry.name)
+
+    assert len(matching) == 1, "expected the tempfile to be deleted"
+    assert (
+        len(other_files) == 0
+    ), f"expected to find all other files in directory, but missing: {other_files}"
+
+
 class MetricsVerifier:
     """
     A graph of per tenant per timeline verifiers, allowing one for each

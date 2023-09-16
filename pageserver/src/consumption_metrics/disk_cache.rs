@@ -1,7 +1,6 @@
 use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tempfile::NamedTempFile;
 
 use super::RawMetric;
 
@@ -10,6 +9,13 @@ pub(super) async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
         let _e = span.entered();
+
+        if let Some(parent) = path.parent() {
+            if let Err(e) = scan_and_delete_with_same_prefix(&path) {
+                tracing::info!("failed to cleanup temporary files in {parent:?}: {e:#}");
+            }
+        }
+
         let mut file = std::fs::File::open(&*path)?;
         let reader = std::io::BufReader::new(&mut file);
         anyhow::Ok(serde_json::from_reader::<_, Vec<RawMetric>>(reader)?)
@@ -17,6 +23,41 @@ pub(super) async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result
     .await
     .context("read metrics join error")
     .and_then(|x| x)
+}
+
+fn scan_and_delete_with_same_prefix(path: &std::path::Path) -> std::io::Result<()> {
+    let it = std::fs::read_dir(path.parent().expect("caller checked"))?;
+
+    let prefix = path.file_name().expect("caller checked").to_string_lossy();
+
+    for entry in it {
+        let entry = entry?;
+        if !entry.metadata()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+
+        if path.file_name().unwrap() == file_name {
+            // do not remove our actual file
+            continue;
+        }
+
+        let file_name = file_name.to_string_lossy();
+
+        if !file_name.starts_with(&*prefix) {
+            continue;
+        }
+
+        let path = entry.path();
+
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!("cleaning up old tempfile {file_name:?} failed: {e:#}");
+        } else {
+            tracing::info!("cleaned up old tempfile {file_name:?}");
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) async fn flush_metrics_to_disk(
@@ -39,7 +80,13 @@ pub(super) async fn flush_metrics_to_disk(
             let _e = span.entered();
 
             let parent = path.parent().expect("existence checked");
-            let mut tempfile = NamedTempFile::new_in(parent)?;
+            let file_name = path.file_name().expect("existence checked");
+            let mut tempfile = tempfile::Builder::new()
+                .prefix(file_name)
+                .suffix(".tmp")
+                .tempfile_in(parent)?;
+
+            tracing::debug!("using tempfile {:?}", tempfile.path());
 
             // write out all of the raw metrics, to be read out later on restart as cached values
             {
@@ -53,6 +100,8 @@ pub(super) async fn flush_metrics_to_disk(
 
             tempfile.flush()?;
             tempfile.as_file().sync_all()?;
+
+            fail::fail_point!("before-persist-last-metrics-collected");
 
             drop(tempfile.persist(&*path).map_err(|e| e.error)?);
 
