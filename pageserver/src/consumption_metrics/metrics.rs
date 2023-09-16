@@ -1,27 +1,24 @@
 use crate::context::RequestContext;
-use crate::tenant::mgr;
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use pageserver_api::models::TenantState;
-use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
-use std::sync::Arc;
-use std::time::SystemTime;
-use utils::id::{TenantId, TimelineId};
-use utils::lsn::Lsn;
-
-use anyhow::Context;
+use serde_with::serde_as;
+use std::{sync::Arc, time::SystemTime};
+use utils::{
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+};
 
 use super::{Cache, RawMetric};
 
 // FIXME: all other consumption_metrics::Event stuff is over at uploading, maybe move?
 #[serde_as]
-#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 pub(super) struct Ids {
-    #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub(super) tenant_id: TenantId,
-    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) timeline_id: Option<TimelineId>,
 }
@@ -209,9 +206,11 @@ pub(super) async fn collect_all_metrics(
     cached_metrics: &Cache,
     ctx: &RequestContext,
 ) -> Vec<RawMetric> {
+    use pageserver_api::models::TenantState;
+
     let started_at = std::time::Instant::now();
 
-    let tenants = match mgr::list_tenants().await {
+    let tenants = match crate::tenant::mgr::list_tenants().await {
         Ok(tenants) => tenants,
         Err(err) => {
             tracing::error!("failed to list tenants: {:?}", err);
@@ -223,7 +222,7 @@ pub(super) async fn collect_all_metrics(
         if state != TenantState::Active {
             None
         } else {
-            mgr::get_tenant(id, true)
+            crate::tenant::mgr::get_tenant(id, true)
                 .await
                 .ok()
                 .map(|tenant| (id, tenant))
