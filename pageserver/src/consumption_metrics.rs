@@ -313,29 +313,27 @@ async fn restore_and_reschedule(
     final_path: &Arc<PathBuf>,
     metric_collection_interval: Duration,
 ) -> Cache {
-    let (cached, oldest_metric_captured_at) = match read_metrics_from_disk(final_path.clone()).await
-    {
+    let (cached, earlier_metric_at) = match read_metrics_from_disk(final_path.clone()).await {
         Ok(found_some) => {
             // there is no min needed because we write these sequentially in
             // collect_all_metrics
-            let oldest_metric_captured_at = found_some
+            let earlier_metric_at = found_some
                 .iter()
                 .map(|(_, (et, _))| et.recorded_at())
                 .copied()
                 .next();
 
-            let cached = found_some
-                .into_iter()
-                .collect::<HashMap<MetricsKey, (EventType, u64)>>();
+            let cached = found_some.into_iter().collect::<Cache>();
 
-            (cached, oldest_metric_captured_at)
+            (cached, earlier_metric_at)
         }
         Err(e) => {
+            use std::io::{Error, ErrorKind};
+
             let root = e.root_cause();
 
-            let maybe_ioerr = root.downcast_ref::<std::io::Error>();
-            let is_not_found =
-                maybe_ioerr.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            let maybe_ioerr = root.downcast_ref::<Error>();
+            let is_not_found = maybe_ioerr.is_some_and(|e| e.kind() == ErrorKind::NotFound);
 
             if !is_not_found {
                 tracing::info!("failed to read any previous metrics from {final_path:?}: {e:#}");
@@ -345,16 +343,30 @@ async fn restore_and_reschedule(
         }
     };
 
-    if let Some(oldest_metric_captured_at) = oldest_metric_captured_at {
-        reschedule(oldest_metric_captured_at.into(), metric_collection_interval).await
+    if let Some(earlier_metric_at) = earlier_metric_at {
+        let earlier_metric_at: SystemTime = earlier_metric_at.into();
+
+        let error = reschedule(earlier_metric_at, metric_collection_interval).await;
+
+        if let Some(error) = error {
+            if error.as_secs() >= 60 {
+                tracing::info!(
+                    error_ms = error.as_millis(),
+                    "startup scheduling error due to restart"
+                )
+            }
+        }
     }
 
     cached
 }
 
-async fn reschedule(earlier_metric_at: SystemTime, metric_collection_interval: Duration) {
+async fn reschedule(
+    earlier_metric_at: SystemTime,
+    metric_collection_interval: Duration,
+) -> Option<Duration> {
     let now = SystemTime::now();
-    let error = match now.duration_since(earlier_metric_at) {
+    match now.duration_since(earlier_metric_at) {
         Ok(from_last_send) if from_last_send < metric_collection_interval => {
             let sleep_for = metric_collection_interval - from_last_send;
 
@@ -376,18 +388,9 @@ async fn reschedule(earlier_metric_at: SystemTime, metric_collection_interval: D
             tracing::warn!(
                 ?now,
                 ?earlier_metric_at,
-                "earlier recorded metric is from future; first values will come out with inconsistent timestamps"
+                "oldest recorded metric is in future; first values will come out with inconsistent timestamps"
             );
             earlier_metric_at.duration_since(now).ok()
-        }
-    };
-
-    if let Some(error) = error {
-        if error.as_secs() >= 60 {
-            tracing::info!(
-                error_ms = error.as_millis(),
-                "startup scheduling error due to restart"
-            )
         }
     }
 }
