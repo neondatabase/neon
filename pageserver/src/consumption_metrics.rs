@@ -14,6 +14,7 @@ use reqwest::Url;
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -21,10 +22,12 @@ use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use anyhow::Context;
+
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[serde_as]
-#[derive(Serialize, Debug, Clone, Copy)]
+#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy)]
 struct Ids {
     #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
@@ -64,11 +67,17 @@ enum Name {
 ///
 /// This is a denormalization done at the MetricsKey const methods; these should not be constructed
 /// elsewhere.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[serde_with::serde_as]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct MetricsKey {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     tenant_id: TenantId,
+
+    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     timeline_id: Option<TimelineId>,
-    metric: &'static str,
+
+    metric: Name,
 }
 
 impl MetricsKey {
@@ -87,6 +96,10 @@ impl AbsoluteValueFactory {
     fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
+    }
+
+    fn key(&self) -> &MetricsKey {
+        &self.0
     }
 }
 
@@ -129,7 +142,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: "written_size",
+            metric: Name::WrittenSize,
         }
         .absolute_values()
     }
@@ -144,9 +157,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            // the name here is correctly about data not size, because that is what is wanted by
-            // downstream pipeline
-            metric: "written_data_bytes_delta",
+            metric: Name::WrittenSizeDelta,
         }
         .incremental_values()
     }
@@ -161,7 +172,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: Some(timeline_id),
-            metric: "timeline_logical_size",
+            metric: Name::LogicalSize,
         }
         .absolute_values()
     }
@@ -173,7 +184,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: "remote_storage_size",
+            metric: Name::RemoteSize,
         }
         .absolute_values()
     }
@@ -185,7 +196,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: "resident_size",
+            metric: Name::ResidentSize,
         }
         .absolute_values()
     }
@@ -197,7 +208,7 @@ impl MetricsKey {
         MetricsKey {
             tenant_id,
             timeline_id: None,
-            metric: "synthetic_storage_size",
+            metric: Name::SyntheticSize,
         }
         .absolute_values()
     }
@@ -224,6 +235,7 @@ pub async fn collect_metrics(
     _cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
+    local_disk_storage: PathBuf,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
@@ -231,8 +243,6 @@ pub async fn collect_metrics(
             "cached_metric_collection_interval is no longer used, please set it to zero."
         )
     }
-    let mut ticker = tokio::time::interval(metric_collection_interval);
-    info!("starting collect_metrics");
 
     // spin up background worker that caclulates tenant sizes
     let worker_ctx =
@@ -252,61 +262,183 @@ pub async fn collect_metrics(
         },
     );
 
+    let final_path: Arc<PathBuf> = Arc::new(local_disk_storage);
+
     // define client here to reuse it for all requests
     let client = reqwest::ClientBuilder::new()
         .timeout(DEFAULT_HTTP_REPORTING_TIMEOUT)
         .build()
         .expect("Failed to create http client with timeout");
-    let mut cached_metrics = HashMap::new();
 
-    loop {
-        tokio::select! {
-            _ = task_mgr::shutdown_watcher() => {
-                info!("collect_metrics received cancellation request");
-                return Ok(());
-            },
-            tick_at = ticker.tick() => {
+    let node_id = node_id.to_string();
+    let cancel = task_mgr::shutdown_token();
 
-                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await;
+    let (mut cached_metrics, oldest_metric_captured_at) =
+        match read_metrics_from_disk(final_path.clone()).await {
+            Ok(found_some) => {
+                // there is no min needed because we write these sequentially in
+                // collect_all_metrics
+                let oldest_metric_captured_at = found_some
+                    .iter()
+                    .map(|(_, (et, _))| et.recorded_at())
+                    .copied()
+                    .next();
 
-                crate::tenant::tasks::warn_when_period_overrun(
-                    tick_at.elapsed(),
-                    metric_collection_interval,
-                    "consumption_metrics_collect_metrics",
+                let cached = found_some
+                    .into_iter()
+                    .collect::<HashMap<MetricsKey, (EventType, u64)>>();
+
+                (cached, oldest_metric_captured_at)
+            }
+            Err(e) => {
+                let root = e.root_cause();
+
+                let maybe_ioerr = root.downcast_ref::<std::io::Error>();
+                let is_not_found =
+                    maybe_ioerr.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+
+                if !is_not_found {
+                    tracing::info!(
+                        "failed to read any previous metrics from {final_path:?}: {e:#}"
+                    );
+                }
+
+                (HashMap::new(), None)
+            }
+        };
+
+    if let Some(oldest_metric_captured_at) = oldest_metric_captured_at {
+        // FIXME: chrono methods panic
+        let oldest_metric_captured_at: SystemTime = oldest_metric_captured_at.into();
+        let now = SystemTime::now();
+        let error = match now.duration_since(oldest_metric_captured_at) {
+            Ok(from_last_send) if from_last_send < metric_collection_interval => {
+                let sleep_for = metric_collection_interval - from_last_send;
+
+                let deadline = std::time::Instant::now() + sleep_for;
+
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); },
+                    _ = tokio::time::sleep_until(deadline.into()) => {},
+                }
+
+                let now = std::time::Instant::now();
+
+                // executor threads might be busy, add extra measurements
+                Some(if now < deadline {
+                    deadline - now
+                } else {
+                    now - deadline
+                })
+            }
+            Ok(from_last_send) => Some(from_last_send.saturating_sub(metric_collection_interval)),
+            Err(_) => {
+                tracing::warn!(
+                    ?now,
+                    ?oldest_metric_captured_at,
+                    "oldest recorded metric is in future; first values will come out with inconsistent timestamps"
                 );
+                oldest_metric_captured_at.duration_since(now).ok()
+            }
+        };
+
+        if let Some(error) = error {
+            if error.as_secs() >= 60 {
+                tracing::info!(
+                    error_ms = error.as_millis(),
+                    "startup scheduling error due to restart"
+                )
             }
         }
     }
+
+    // reminder: ticker is ready immediatedly
+    let mut ticker = tokio::time::interval(metric_collection_interval);
+
+    loop {
+        let tick_at = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            tick_at = ticker.tick() => tick_at,
+        };
+
+        iteration(
+            &client,
+            metric_collection_endpoint,
+            &cancel,
+            &mut cached_metrics,
+            &node_id,
+            &final_path,
+            &ctx,
+        )
+        .await;
+
+        crate::tenant::tasks::warn_when_period_overrun(
+            tick_at.elapsed(),
+            metric_collection_interval,
+            "consumption_metrics_collect_metrics",
+        );
+    }
 }
 
-/// One iteration of metrics collection
-///
-/// Gather per-tenant and per-timeline metrics and send them to the `metric_collection_endpoint`.
-/// Cache metrics to avoid sending the same metrics multiple times.
-///
-/// This function handles all errors internally
-/// and doesn't break iteration if just one tenant fails.
-///
-/// TODO
-/// - refactor this function (chunking+sending part) to reuse it in proxy module;
-async fn collect_metrics_iteration(
+async fn iteration(
     client: &reqwest::Client,
-    cached_metrics: &mut Cache,
     metric_collection_endpoint: &reqwest::Url,
-    node_id: NodeId,
+    cancel: &CancellationToken,
+    cached_metrics: &mut Cache,
+    node_id: &str,
+    final_path: &Arc<PathBuf>,
     ctx: &RequestContext,
 ) {
-    trace!(
-        "starting collect_metrics_iteration. metric_collection_endpoint: {}",
-        metric_collection_endpoint
-    );
+    // these are point in time, with variable "now"
+    let metrics = collect_all_metrics(cached_metrics, ctx).await;
 
-    // get list of tenants
+    if metrics.is_empty() {
+        return;
+    }
+
+    let metrics = Arc::new(metrics);
+
+    let flush = async {
+        match flush_metrics_to_disk(&metrics, final_path).await {
+            Ok(()) => {
+                tracing::debug!("flushed metrics to disk");
+            }
+            Err(e) => {
+                // idea here is that if someone creates a directory as our final_path, then they
+                // might notice it from the logs before shutdown and remove it
+                tracing::error!("failed to persist metrics to {final_path:?}: {e:#}");
+            }
+        }
+    };
+
+    let upload = async {
+        let res = upload_metrics(
+            client,
+            metric_collection_endpoint,
+            cancel,
+            node_id,
+            &metrics,
+            cached_metrics,
+        )
+        .await;
+        if let Err(e) = res {
+            // serialization error which should never happen
+            tracing::error!("failed to upload due to {e:#}");
+        }
+    };
+
+    // let these run concurrently
+    let (_, _) = tokio::join!(flush, upload);
+}
+
+async fn collect_all_metrics(cached_metrics: &Cache, ctx: &RequestContext) -> Vec<RawMetric> {
+    let started_at = std::time::Instant::now();
+
     let tenants = match mgr::list_tenants().await {
         Ok(tenants) => tenants,
         Err(err) => {
             error!("failed to list tenants: {:?}", err);
-            return;
+            return vec![];
         }
     };
 
@@ -321,85 +453,29 @@ async fn collect_metrics_iteration(
         }
     });
 
-    let current_metrics = collect(tenants, cached_metrics, ctx).await;
+    let res = collect(tenants, cached_metrics, ctx).await;
 
-    if current_metrics.is_empty() {
-        trace!("no new metrics to send");
-        return;
-    }
+    tracing::info!(
+        elapsed_ms = started_at.elapsed().as_millis(),
+        total = res.len(),
+        "collected metrics"
+    );
 
-    let cancel = task_mgr::shutdown_token();
-
-    // Send metrics.
-    // Split into chunks of 1000 metrics to avoid exceeding the max request size
-    let chunks = current_metrics.chunks(CHUNK_SIZE);
-
-    let mut chunk_to_send: Vec<Event<Ids, &'static str>> = Vec::with_capacity(CHUNK_SIZE);
-
-    let node_id = node_id.to_string();
-
-    let mut buffer = bytes::BytesMut::new();
-
-    for chunk in chunks {
-        chunk_to_send.clear();
-
-        // enrich metrics with type,timestamp and idempotency key before sending
-        chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
-            kind: *when,
-            metric: curr_key.metric,
-            idempotency_key: idempotency_key(&node_id),
-            value: *curr_val,
-            extra: Ids {
-                tenant_id: curr_key.tenant_id,
-                timeline_id: curr_key.timeline_id,
-            },
-        }));
-
-        use bytes::BufMut;
-
-        // FIXME: this is a new panic we did not have before. not really essential, but panics from
-        // this task currently restart pageserver.
-        serde_json::to_writer(
-            (&mut buffer).writer(),
-            &EventChunk {
-                events: (&chunk_to_send).into(),
-            },
-        )
-        .expect("serialization must not fail and bytesmut grows");
-
-        let body = buffer.split().freeze();
-
-        let res = upload(client, metric_collection_endpoint, body, &cancel).await;
-
-        if res.is_ok() {
-            for (curr_key, curr_val) in chunk.iter() {
-                cached_metrics.insert(curr_key.clone(), *curr_val);
-            }
-        } else {
-            // no need to log, backoff::retry and upload have done it, just give up uploading.
-        }
-    }
+    res
 }
 
-async fn collect<S>(
-    tenants: S,
-    cache: &HashMap<MetricsKey, (EventType, u64)>,
-    ctx: &RequestContext,
-) -> Vec<(MetricsKey, (EventType, u64))>
+async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<RawMetric>
 where
     S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
 {
-    let mut current_metrics: Vec<(MetricsKey, (EventType, u64))> = Vec::new();
+    let mut current_metrics: Vec<RawMetric> = Vec::new();
 
     let mut tenants = std::pin::pin!(tenants);
 
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
 
-        // iterate through list of timelines in tenant
         for timeline in tenant.list_timelines() {
-            // collect per-timeline metrics only for active timelines
-
             let timeline_id = timeline.timeline_id;
 
             match TimelineSnapshot::collect(&timeline, ctx) {
@@ -425,14 +501,156 @@ where
             tenant_resident_size += timeline.resident_physical_size();
         }
 
-        TenantSnapshot::collect(&tenant, tenant_resident_size).to_metrics(
-            tenant_id,
-            Utc::now(),
-            &mut current_metrics,
-        );
+        let snap = TenantSnapshot::collect(&tenant, tenant_resident_size);
+        snap.to_metrics(tenant_id, Utc::now(), cache, &mut current_metrics);
     }
 
     current_metrics
+}
+
+async fn flush_metrics_to_disk(
+    current_metrics: &Arc<Vec<(MetricsKey, (EventType, u64))>>,
+    final_path: &Arc<PathBuf>,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    anyhow::ensure!(
+        final_path.parent().is_some(),
+        "path must have parent: {final_path:?}"
+    );
+
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking({
+        let current_metrics = current_metrics.clone();
+        let final_path = final_path.clone();
+        move || {
+            let _e = span.entered();
+
+            let mut tempfile =
+                tempfile::NamedTempFile::new_in(final_path.parent().expect("existence checked"))?;
+
+            // write out all of the raw metrics, to be read out later on restart as cached values
+            {
+                let mut writer = std::io::BufWriter::new(&mut tempfile);
+                serde_json::to_writer(&mut writer, &*current_metrics)
+                    .context("serialize metrics")?;
+                writer
+                    .into_inner()
+                    .map_err(|_| anyhow::anyhow!("flushing metrics failed"))?;
+            }
+
+            tempfile.flush()?;
+            tempfile.as_file().sync_all()?;
+
+            drop(tempfile.persist(&*final_path)?);
+
+            let f = std::fs::File::open(final_path.parent().unwrap())?;
+            f.sync_all()?;
+
+            anyhow::Ok(())
+        }
+    })
+    .await
+    .with_context(|| format!("write metrics to {final_path:?} join error"))
+    .and_then(|x| x.with_context(|| format!("write metrics to {final_path:?}")))
+}
+
+async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result<Vec<RawMetric>> {
+    // do not add context to each error, callsite will log with full path
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _e = span.entered();
+        let mut file = std::fs::File::open(&*path)?;
+        let reader = std::io::BufReader::new(&mut file);
+        anyhow::Ok(serde_json::from_reader::<_, Vec<RawMetric>>(reader)?)
+    })
+    .await
+    .context("read metrics join error")
+    .and_then(|x| x)
+}
+
+#[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
+async fn upload_metrics(
+    client: &reqwest::Client,
+    metric_collection_endpoint: &reqwest::Url,
+    cancel: &CancellationToken,
+    node_id: &str,
+    metrics: &[RawMetric],
+    cached_metrics: &mut Cache,
+) -> anyhow::Result<()> {
+    use bytes::BufMut;
+
+    let mut uploaded = 0;
+    let mut failed = 0;
+
+    let started_at = std::time::Instant::now();
+
+    // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
+    let mut buffer = bytes::BytesMut::new();
+    let mut chunk_to_send = Vec::new();
+
+    for chunk in metrics.chunks(CHUNK_SIZE) {
+        chunk_to_send.clear();
+
+        // FIXME: this should always overwrite and truncate to chunk.len()
+        chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
+            kind: *when,
+            metric: curr_key.metric,
+            // FIXME: finally write! this to the prev allocation
+            idempotency_key: idempotency_key(node_id),
+            value: *curr_val,
+            extra: Ids {
+                tenant_id: curr_key.tenant_id,
+                timeline_id: curr_key.timeline_id,
+            },
+        }));
+
+        serde_json::to_writer(
+            (&mut buffer).writer(),
+            &EventChunk {
+                events: (&chunk_to_send).into(),
+            },
+        )?;
+
+        let body = buffer.split().freeze();
+        let event_bytes = body.len();
+
+        let res = upload(client, metric_collection_endpoint, body, cancel)
+            .instrument(tracing::info_span!(
+                "upload",
+                %event_bytes,
+                uploaded,
+                total = metrics.len(),
+            ))
+            .await;
+
+        match res {
+            Ok(()) => {
+                for (curr_key, curr_val) in chunk {
+                    cached_metrics.insert(*curr_key, *curr_val);
+                }
+                uploaded += chunk.len();
+            }
+            Err(_) => {
+                // failure(s) have already been logged
+                //
+                // however this is an inconsistency: if we crash here, we will start with the
+                // values as uploaded. in practice, the rejections no longer happen.
+                failed += chunk.len();
+            }
+        }
+    }
+
+    let elapsed = started_at.elapsed();
+
+    tracing::info!(
+        uploaded,
+        failed,
+        elapsed_ms = elapsed.as_millis(),
+        "done sending metrics"
+    );
+
+    Ok(())
 }
 
 enum UploadError {
@@ -545,16 +763,34 @@ impl TenantSnapshot {
         }
     }
 
-    fn to_metrics(&self, tenant_id: TenantId, now: DateTime<Utc>, metrics: &mut Vec<RawMetric>) {
+    fn to_metrics(
+        &self,
+        tenant_id: TenantId,
+        now: DateTime<Utc>,
+        cached: &Cache,
+        metrics: &mut Vec<RawMetric>,
+    ) {
         let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
 
         let resident_size = MetricsKey::resident_size(tenant_id).at(now, self.resident_size);
 
-        let synthetic_size = if self.synthetic_size != 0 {
-            // only send non-zeroes because otherwise these show up as errors in logs
-            Some(MetricsKey::synthetic_size(tenant_id).at(now, self.synthetic_size))
-        } else {
-            None
+        let synthetic_size = {
+            let factory = MetricsKey::synthetic_size(tenant_id);
+            let mut synthetic_size = self.synthetic_size;
+
+            if synthetic_size == 0 {
+                if let Some((_, value)) = cached.get(factory.key()) {
+                    // use the latest value from previous session
+                    synthetic_size = *value;
+                }
+            }
+
+            if synthetic_size != 0 {
+                // only send non-zeroes because otherwise these show up as errors in logs
+                Some(factory.at(now, synthetic_size))
+            } else {
+                None
+            }
         };
 
         metrics.extend(
@@ -585,8 +821,6 @@ impl TimelineSnapshot {
         t: &Arc<crate::tenant::Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Self>> {
-        use anyhow::Context;
-
         if !t.is_active() {
             // no collection for broken or stopping needed, we will still keep the cached values
             // though at the caller.
@@ -660,25 +894,30 @@ impl TimelineSnapshot {
                 (DateTime::from(*loaded_at), disk_consistent_lsn.0)
             });
 
-        // written_size_bytes_delta
-        metrics.extend(
-            if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
-                let up_to = written_size_now
-                    .0
-                    .absolute_time()
-                    .expect("never create EventType::Incremental for written_size");
-                let key_value = written_size_delta_key.from_previous_up_to(prev.0, *up_to, delta);
-                Some(key_value)
-            } else {
-                None
-            },
-        );
+        let up_to = now;
 
-        // written_size
-        metrics.push((key, written_size_now));
+        if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
+            let key_value = written_size_delta_key.from_previous_up_to(prev.0, up_to, delta);
+            // written_size_delta
+            metrics.push(key_value);
+            // written_size
+            metrics.push((key, written_size_now));
+        } else {
+            // the cached value was ahead of us, report zero until we've caught up
+            metrics.push(written_size_delta_key.from_previous_up_to(prev.0, up_to, 0));
+            // the cached value was ahead of us, report the same until we've caught up
+            metrics.push((key, (written_size_now.0, prev.1)));
+        }
 
-        if let Some(size) = self.current_exact_logical_size {
-            metrics.push(MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, size));
+        {
+            let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);
+            let current_or_previous = self
+                .current_exact_logical_size
+                .or_else(|| cache.get(factory.key()).map(|(_, val)| *val));
+
+            if let Some(size) = current_or_previous {
+                metrics.push(factory.at(now, size));
+            }
         }
     }
 }
@@ -738,9 +977,7 @@ mod tests {
         lsn::Lsn,
     };
 
-    use crate::consumption_metrics::MetricsKey;
-
-    use super::TimelineSnapshot;
+    use super::*;
     use chrono::{DateTime, Utc};
 
     #[test]
@@ -925,6 +1162,164 @@ mod tests {
             let actual = serde_json::to_string(&e).unwrap();
             assert_eq!(expected, actual, "example from line {line}");
         }
+    }
+
+    #[test]
+    fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
+        // it can happen that we lose the inmemorylayer but have previously sent metrics and we
+        // should never go backwards
+
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+
+        let [later, now, at_restart] = time_backwards();
+
+        // FIXME: tests would be so much easier if we did not need to juggle back and forth
+        // SystemTime and DateTime::<Utc> ... Could do the conversion only at upload time?
+        let now = DateTime::<Utc>::from(now);
+        let later = DateTime::<Utc>::from(later);
+        let before_restart = at_restart - std::time::Duration::from_secs(5 * 60);
+        let way_before = before_restart - std::time::Duration::from_secs(10 * 60);
+        let before_restart = DateTime::<Utc>::from(before_restart);
+        let way_before = DateTime::<Utc>::from(way_before);
+
+        let snap = TimelineSnapshot {
+            loaded_at: (Lsn(50), at_restart),
+            last_record_lsn: Lsn(50),
+            current_exact_logical_size: None,
+        };
+
+        let mut cache = HashMap::from([
+            MetricsKey::written_size(tenant_id, timeline_id).at(before_restart, 100),
+            MetricsKey::written_size_delta(tenant_id, timeline_id).from_previous_up_to(
+                way_before,
+                before_restart,
+                // not taken into account, but the timestamps are important
+                999_999_999,
+            ),
+        ]);
+
+        let mut metrics = Vec::new();
+        snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+        assert_eq!(
+            metrics,
+            &[
+                MetricsKey::written_size_delta(tenant_id, timeline_id).from_previous_up_to(
+                    before_restart,
+                    now,
+                    0
+                ),
+                MetricsKey::written_size(tenant_id, timeline_id).at(now, 100),
+            ]
+        );
+
+        // now if we cache these metrics, and re-run while "still in recovery"
+        cache.extend(metrics.drain(..));
+
+        // "still in recovery", because our snapshot did not change
+        snap.to_metrics(tenant_id, timeline_id, later, &mut metrics, &cache);
+
+        assert_eq!(
+            metrics,
+            &[
+                MetricsKey::written_size_delta(tenant_id, timeline_id)
+                    .from_previous_up_to(now, later, 0),
+                MetricsKey::written_size(tenant_id, timeline_id).at(later, 100),
+            ]
+        );
+    }
+
+    #[test]
+    fn post_restart_current_exact_logical_size_uses_cached() {
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+
+        let [now, at_restart] = time_backwards();
+
+        let now = DateTime::<Utc>::from(now);
+        let before_restart = at_restart - std::time::Duration::from_secs(5 * 60);
+        let before_restart = DateTime::<Utc>::from(before_restart);
+
+        let snap = TimelineSnapshot {
+            loaded_at: (Lsn(50), at_restart),
+            last_record_lsn: Lsn(50),
+            current_exact_logical_size: None,
+        };
+
+        let cache = HashMap::from([
+            MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(before_restart, 100)
+        ]);
+
+        let mut metrics = Vec::new();
+        snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
+
+        metrics.retain(|(key, _)| key.metric == Name::LogicalSize);
+
+        assert_eq!(
+            metrics,
+            &[MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(now, 100)]
+        );
+    }
+
+    #[test]
+    fn post_restart_synthetic_size_uses_cached_if_available() {
+        let tenant_id = TenantId::generate();
+
+        let ts = TenantSnapshot {
+            resident_size: 1000,
+            remote_size: 1000,
+            // not yet calculated
+            synthetic_size: 0,
+        };
+
+        let now = SystemTime::now();
+        let before_restart = DateTime::<Utc>::from(now - std::time::Duration::from_secs(5 * 60));
+        let now = DateTime::<Utc>::from(now);
+
+        let cached =
+            HashMap::from([MetricsKey::synthetic_size(tenant_id).at(before_restart, 1000)]);
+
+        let mut metrics = Vec::new();
+        ts.to_metrics(tenant_id, now, &cached, &mut metrics);
+
+        assert_eq!(
+            metrics,
+            &[
+                MetricsKey::remote_storage_size(tenant_id).at(now, 1000),
+                MetricsKey::resident_size(tenant_id).at(now, 1000),
+                MetricsKey::synthetic_size(tenant_id).at(now, 1000),
+            ]
+        );
+    }
+
+    #[test]
+    fn post_restart_synthetic_size_is_not_sent_when_not_cached() {
+        let tenant_id = TenantId::generate();
+
+        let ts = TenantSnapshot {
+            resident_size: 1000,
+            remote_size: 1000,
+            // not yet calculated
+            synthetic_size: 0,
+        };
+
+        let now = SystemTime::now();
+        let now = DateTime::<Utc>::from(now);
+
+        let cached = HashMap::new();
+
+        let mut metrics = Vec::new();
+        ts.to_metrics(tenant_id, now, &cached, &mut metrics);
+
+        assert_eq!(
+            metrics,
+            &[
+                MetricsKey::remote_storage_size(tenant_id).at(now, 1000),
+                MetricsKey::resident_size(tenant_id).at(now, 1000),
+                // no synthetic size here
+            ]
+        );
     }
 
     fn time_backwards<const N: usize>() -> [std::time::SystemTime; N] {

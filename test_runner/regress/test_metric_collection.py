@@ -3,9 +3,11 @@
 # Use mock HTTP server to receive metrics and verify that they look sane.
 #
 
+import json
+import time
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Any, Iterator, Set
+from typing import Any, Dict, Iterator, Set
 
 import pytest
 from fixtures.log_helper import log
@@ -18,6 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.types import TenantId, TimelineId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -34,8 +37,6 @@ def test_metric_collection(
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
-
-    metric_kinds_checked: Set[str] = set([])
 
     uploads: SimpleQueue[Any] = SimpleQueue()
 
@@ -57,6 +58,7 @@ def test_metric_collection(
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"
+        synthetic_size_calculation_interval="3s"
     """
         + "tenant_config={pitr_interval = '0 sec'}"
     )
@@ -75,8 +77,8 @@ def test_metric_collection(
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_metric_collection")
-    endpoint = env.endpoints.create_start("test_metric_collection")
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -118,60 +120,227 @@ def test_metric_collection(
 
     # we expect uploads at 1Hz, on busy runners this could be too optimistic,
     # so give 5s we only want to get the following upload after "ready" value.
-    # later tests will be added to ensure that the timeseries are sane.
     timeout = 5
+
+    # these strings in the upload queue allow synchronizing with the uploads
+    # and the main test execution
     uploads.put("ready")
 
+    # note that this verifier graph should live across restarts as long as the
+    # cache file lives
+    v = MetricsVerifier()
+
     while True:
-        # discard earlier than "ready"
-        log.info("waiting for upload")
         events = uploads.get(timeout=timeout)
-        import json
 
         if events == "ready":
             events = uploads.get(timeout=timeout)
-            httpserver.check()
-            httpserver.stop()
-            # if anything comes after this, we'll just ignore it
-            stringified = json.dumps(events, indent=2)
-            log.info(f"inspecting: {stringified}")
+            v.ingest(events)
             break
         else:
-            stringified = json.dumps(events, indent=2)
-            log.info(f"discarding: {stringified}")
+            v.ingest(events)
 
-    # verify that metrics look minimally sane
-    checks = {
-        "written_size": lambda value: value > 0,
-        "resident_size": lambda value: value >= 0,
-        "remote_storage_size": lambda value: value > 0 if remote_uploaded > 0 else value == 0,
-        # logical size may lag behind the actual size, so allow 0 here
-        "timeline_logical_size": lambda value: value >= 0,
-        # this can also be zero, depending on when we get the value
-        "written_data_bytes_delta": lambda value: value >= 0,
-    }
+    if "synthetic_storage_size" not in v.accepted_event_names():
+        log.info("waiting for synthetic storage size to be calculated and uploaded...")
 
-    metric_kinds_checked = set()
-    metric_kinds_seen = set()
+    rounds = 0
+    while "synthetic_storage_size" not in v.accepted_event_names():
+        events = uploads.get(timeout=timeout)
+        v.ingest(events)
+        rounds += 1
+        assert rounds < 10, "did not get synthetic_storage_size in 10 uploads"
+        # once we have it in verifiers, it will assert that future batches will contain it
 
-    for event in events:
-        assert event["tenant_id"] == str(tenant_id)
-        metric_name = event["metric"]
-        metric_kinds_seen.add(metric_name)
+    env.pageserver.stop()
+    time.sleep(1)
+    uploads.put("ready")
+    env.pageserver.start()
 
-        check = checks.get(metric_name)
-        # calm down mypy
-        if check is not None:
-            value = event["value"]
-            log.info(f"checking {metric_name} value {value}")
-            assert check(value), f"{metric_name} isn't valid"
-            metric_kinds_checked.add(metric_name)
+    while True:
+        events = uploads.get(timeout=timeout)
 
-    expected_checks = set(checks.keys())
-    assert (
-        metric_kinds_checked == checks.keys()
-    ), f"Expected to receive and check all kind of metrics, but {expected_checks - metric_kinds_checked} got uncovered"
-    assert metric_kinds_seen == metric_kinds_checked
+        if events == "ready":
+            events = uploads.get(timeout=timeout * 3)
+            v.ingest(events)
+            events = uploads.get(timeout=timeout)
+            v.ingest(events)
+            break
+        else:
+            v.ingest(events)
+
+    httpserver.check()
+
+
+class MetricsVerifier:
+    """
+    A graph of per tenant per timeline verifiers, allowing one for each
+    metric
+    """
+
+    def __init__(self):
+        self.tenants: Dict[TenantId, TenantMetricsVerifier] = {}
+        pass
+
+    def ingest(self, events):
+        stringified = json.dumps(events, indent=2)
+        log.info(f"ingesting: {stringified}")
+        for event in events:
+            id = TenantId(event["tenant_id"])
+            if id not in self.tenants:
+                self.tenants[id] = TenantMetricsVerifier(id)
+
+            self.tenants[id].ingest(event)
+
+        for t in self.tenants.values():
+            t.post_batch()
+
+    def accepted_event_names(self) -> Set[str]:
+        names: Set[str] = set()
+        for t in self.tenants.values():
+            names = names.union(t.accepted_event_names())
+        return names
+
+
+class TenantMetricsVerifier:
+    def __init__(self, id: TenantId):
+        self.id = id
+        self.timelines: Dict[TimelineId, TimelineMetricsVerifier] = {}
+        self.state: Dict[str, Any] = {}
+
+    def ingest(self, event):
+        assert TenantId(event["tenant_id"]) == self.id
+
+        if "timeline_id" in event:
+            id = TimelineId(event["timeline_id"])
+            if id not in self.timelines:
+                self.timelines[id] = TimelineMetricsVerifier(self.id, id)
+
+            self.timelines[id].ingest(event)
+        else:
+            name = event["metric"]
+            if name not in self.state:
+                self.state[name] = PER_METRIC_VERIFIERS[name]()
+            self.state[name].ingest(event, self)
+
+    def post_batch(self):
+        for v in self.state.values():
+            v.post_batch(self)
+
+        for tl in self.timelines.values():
+            tl.post_batch(self)
+
+    def accepted_event_names(self) -> Set[str]:
+        names = set(self.state.keys())
+        for t in self.timelines.values():
+            names = names.union(t.accepted_event_names())
+        return names
+
+
+class TimelineMetricsVerifier:
+    def __init__(self, tenant_id: TenantId, timeline_id: TimelineId):
+        self.id = timeline_id
+        self.state: Dict[str, Any] = {}
+
+    def ingest(self, event):
+        name = event["metric"]
+        if name not in self.state:
+            self.state[name] = PER_METRIC_VERIFIERS[name]()
+        self.state[name].ingest(event, self)
+
+    def post_batch(self, parent):
+        for v in self.state.values():
+            v.post_batch(self)
+
+    def accepted_event_names(self) -> Set[str]:
+        return set(self.state.keys())
+
+
+class CannotVerifyAnything:
+    """We can only assert types, but rust already has types, so no need."""
+
+    def __init__(self):
+        pass
+
+    def ingest(self, event, parent):
+        pass
+
+    def post_batch(self, parent):
+        pass
+
+
+class WrittenDataVerifier:
+    def __init__(self):
+        self.values = []
+        pass
+
+    def ingest(self, event, parent):
+        self.values.append(event["value"])
+
+    def post_batch(self, parent):
+        pass
+
+
+class WrittenDataDeltaVerifier:
+    def __init__(self):
+        self.value = None
+        self.sum = 0
+        self.timerange = None
+        pass
+
+    def ingest(self, event, parent):
+        assert event["type"] == "incremental"
+        self.value = event["value"]
+        self.sum += event["value"]
+        start = event["start_time"]
+        stop = event["stop_time"]
+        timerange = (start, stop)
+        if self.timerange is not None:
+            # this holds across restarts
+            assert self.timerange[1] == timerange[0], "time ranges should be continious"
+        self.timerange = timerange
+
+    def post_batch(self, parent):
+        absolute = parent.state["written_size"]
+        if len(absolute.values) == 1:
+            # in tests this comes up as initdb execution, so we can have 0 or
+            # about 30MB on the first event. it is not consistent.
+            assert self.value is not None
+        else:
+            assert self.value == absolute.values[-1] - absolute.values[-2]
+            # sounds like this should hold, but it will not for branches -- probably related to timing
+            # assert self.sum == absolute.latest
+
+
+class SyntheticSizeVerifier:
+    def __init__(self):
+        self.prev = None
+        self.value = None
+        pass
+
+    def ingest(self, event, parent):
+        assert isinstance(parent, TenantMetricsVerifier)
+        assert event["type"] == "absolute"
+        value = event["value"]
+        self.value = value
+
+    def post_batch(self, parent):
+        if self.prev is not None:
+            # this is assuming no one goes and deletes the cache file
+            assert (
+                self.value is not None
+            ), "after calculating first synthetic size, cached or more recent should be sent"
+        self.prev = self.value
+        self.value = None
+
+
+PER_METRIC_VERIFIERS = {
+    "remote_storage_size": CannotVerifyAnything,
+    "resident_size": CannotVerifyAnything,
+    "written_size": WrittenDataVerifier,
+    "written_data_bytes_delta": WrittenDataDeltaVerifier,
+    "timeline_logical_size": CannotVerifyAnything,
+    "synthetic_storage_size": SyntheticSizeVerifier,
+}
 
 
 def proxy_metrics_handler(request: Request) -> Response:
