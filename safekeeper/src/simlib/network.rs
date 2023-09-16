@@ -107,6 +107,8 @@ impl VirtualConnection {
             options,
         });
 
+        conn.world.add_conn(conn.clone());
+
         conn.schedule_timeout();
         conn.send_connect();
 
@@ -315,6 +317,11 @@ impl VirtualConnection {
     /// Get an event suitable for scheduling.
     fn as_event(self: &Arc<Self>) -> Box<NetworkEvent> {
         Box::new(NetworkEvent(self.clone()))
+    }
+
+    pub fn deallocate(&self) {
+        self.dst_sockets[0].clear();
+        self.dst_sockets[1].clear();
     }
 }
 

@@ -5,7 +5,7 @@ use std::{
     panic::AssertUnwindSafe,
     sync::{atomic::AtomicU64, Arc},
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::{
     chan::Chan,
@@ -47,6 +47,9 @@ pub struct World {
 
     /// Internal event log.
     events: Mutex<Vec<SEvent>>,
+
+    /// Connections.
+    connections: Mutex<Vec<Arc<VirtualConnection>>>,
 }
 
 impl World {
@@ -65,6 +68,7 @@ impl World {
             network_options,
             nodes_init,
             events: Mutex::new(Vec::new()),
+            connections: Mutex::new(Vec::new()),
         }
     }
 
@@ -279,6 +283,45 @@ impl World {
         std::mem::swap(&mut res, &mut events);
         res
     }
+
+    pub fn add_conn(&self, conn: Arc<VirtualConnection>) {
+        self.connections.lock().push(conn);
+    }
+
+    pub fn deallocate(&self) {
+        self.stop_all();
+
+        self.timing.lock().clear();
+        self.unconditional_parking.lock().clear();
+
+        let mut connections = Vec::new();
+        std::mem::swap(&mut connections, &mut self.connections.lock());
+        for conn in connections {
+            conn.deallocate();
+            debug!("conn strong count: {}", Arc::strong_count(&conn));
+        }
+
+        let mut nodes = Vec::new();
+        std::mem::swap(&mut nodes, &mut self.nodes.lock());
+
+        let mut weak_ptrs = Vec::new();
+        for node in nodes {
+            node.deallocate();
+            weak_ptrs.push(Arc::downgrade(&node));
+        }
+
+        for weak_ptr in weak_ptrs {
+            let node = weak_ptr.upgrade();
+            if node.is_none() {
+                debug!("node is already deallocated");
+                continue;
+            }
+            let node = node.unwrap();
+            debug!("node strong count: {}", Arc::strong_count(&node));
+        }
+
+        self.events.lock().clear();
+    }
 }
 
 thread_local! {
@@ -467,6 +510,10 @@ impl Node {
         park.crash_panic();
         // self.world.debug_print_state();
         self.world.wait_group.wait();
+    }
+
+    pub fn deallocate(&self) {
+        self.network.lock().clear();
     }
 }
 

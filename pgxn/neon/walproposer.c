@@ -323,6 +323,15 @@ nwp_shmem_startup_hook(void)
 
 void WalProposerCleanup()
 {
+	for (int i = 0; i < n_safekeepers; i++)
+	{
+		if (safekeeper[i].xlogreader)
+		{
+			XLogReaderFree(safekeeper[i].xlogreader);
+			safekeeper[i].xlogreader = NULL;
+		}
+	}
+
 	n_safekeepers = 0;
 	quorum = 0;
 	lastSentCommitLsn = 0;

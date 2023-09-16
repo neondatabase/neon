@@ -151,7 +151,7 @@ fn test_simple_schedule() -> anyhow::Result<()> {
 
     test.run_schedule(&schedule)?;
     info!("Test finished, stopping all threads");
-    test.world.stop_all();
+    test.world.deallocate();
 
     Ok(())
 }
@@ -209,7 +209,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
         let schedule = generate_schedule(seed);
         test.run_schedule(&schedule)?;
 
-        test.world.stop_all();
+        test.world.deallocate();
     }
 
     Ok(())
@@ -229,7 +229,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // let schedule = generate_schedule(seed);
     // info!("schedule: {:?}", schedule);
     // test.run_schedule(&schedule)?;
-    // test.world.stop_all();
+    // test.world.deallocate();
 
     let seed = 11245530003696902397;
     config.network = generate_network_opts(seed);
@@ -240,7 +240,32 @@ fn test_one_schedule() -> anyhow::Result<()> {
     let schedule = generate_schedule(seed);
     info!("schedule: {:?}", schedule);
     test.run_schedule(&schedule).unwrap();
+    test.world.deallocate();
+
+    Ok(())
+}
+
+#[test]
+fn test_res_dealloc() -> anyhow::Result<()> {
+    // enable_debug();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+
+    let seed = 123456;
+    config.network = generate_network_opts(seed);
+    let test = config.start(seed);
+    warn!("Running test with seed {}", seed);
+
+    let schedule = generate_schedule(seed);
+    info!("schedule: {:?}", schedule);
+    test.run_schedule(&schedule).unwrap();
     test.world.stop_all();
+
+    let world = test.world.clone();
+    drop(test);
+    info!("world strong count: {}", Arc::strong_count(&world));
+    world.deallocate();
+    info!("world strong count: {}", Arc::strong_count(&world));
 
     Ok(())
 }

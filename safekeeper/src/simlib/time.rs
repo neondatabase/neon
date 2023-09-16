@@ -59,6 +59,10 @@ impl Timing {
             .peek()
             .map_or(false, |x| x.time <= self.current_time)
     }
+
+    pub fn clear(&mut self) {
+        self.timers.clear();
+    }
 }
 
 pub struct Pending {

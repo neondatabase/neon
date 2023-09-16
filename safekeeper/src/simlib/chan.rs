@@ -70,4 +70,9 @@ impl<T: Clone> Chan<T> {
         let queue = self.shared.queue.lock();
         queue.front().cloned()
     }
+
+    pub fn clear(&self) {
+        let mut queue = self.shared.queue.lock();
+        queue.clear();
+    }
 }
