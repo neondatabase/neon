@@ -1,8 +1,8 @@
-use consumption_metrics::{idempotency_key, Event, EventChunk, CHUNK_SIZE};
+use consumption_metrics::{idempotency_key, EventChunk, CHUNK_SIZE};
 use tokio_util::sync::CancellationToken;
-use tracing::*;
+use tracing::Instrument;
 
-use super::{Cache, Ids, RawMetric};
+use super::{Cache, RawMetric};
 
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
 pub(super) async fn upload_metrics(
@@ -13,41 +13,14 @@ pub(super) async fn upload_metrics(
     metrics: &[RawMetric],
     cached_metrics: &mut Cache,
 ) -> anyhow::Result<()> {
-    use bytes::BufMut;
-
     let mut uploaded = 0;
     let mut failed = 0;
 
     let started_at = std::time::Instant::now();
 
-    // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
-    let mut buffer = bytes::BytesMut::new();
-    let mut chunk_to_send = Vec::new();
+    for res in serialize_in_chunks(CHUNK_SIZE, metrics, node_id) {
+        let (chunk, body) = res?;
 
-    for chunk in metrics.chunks(CHUNK_SIZE) {
-        chunk_to_send.clear();
-
-        // FIXME: this should always overwrite and truncate to chunk.len()
-        chunk_to_send.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
-            kind: *when,
-            metric: curr_key.metric,
-            // FIXME: finally write! this to the prev allocation
-            idempotency_key: idempotency_key(node_id),
-            value: *curr_val,
-            extra: Ids {
-                tenant_id: curr_key.tenant_id,
-                timeline_id: curr_key.timeline_id,
-            },
-        }));
-
-        serde_json::to_writer(
-            (&mut buffer).writer(),
-            &EventChunk {
-                events: (&chunk_to_send).into(),
-            },
-        )?;
-
-        let body = buffer.split().freeze();
         let event_bytes = body.len();
 
         let res = upload(client, metric_collection_endpoint, body, cancel)
@@ -86,6 +59,52 @@ pub(super) async fn upload_metrics(
     );
 
     Ok(())
+}
+
+// The return type is quite ugly, but we gain testability in isolation
+fn serialize_in_chunks<'a>(
+    chunk_size: usize,
+    input: &'a [RawMetric],
+    node_id: &'a str,
+) -> impl Iterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a {
+    use super::Ids;
+    use bytes::BufMut;
+    use consumption_metrics::Event;
+
+    // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
+    let mut buffer = bytes::BytesMut::new();
+    let mut chunks = input.chunks(chunk_size);
+    let mut events = Vec::new();
+
+    std::iter::from_fn(move || {
+        let chunk = chunks.next()?;
+
+        // FIXME: this should always overwrite and truncate to chunk.len()
+        events.clear();
+        events.extend(chunk.iter().map(|(curr_key, (when, curr_val))| Event {
+            kind: *when,
+            metric: curr_key.metric,
+            // FIXME: finally write! this to the prev allocation
+            idempotency_key: idempotency_key(node_id),
+            value: *curr_val,
+            extra: Ids {
+                tenant_id: curr_key.tenant_id,
+                timeline_id: curr_key.timeline_id,
+            },
+        }));
+
+        let res = serde_json::to_writer(
+            (&mut buffer).writer(),
+            &EventChunk {
+                events: (&events[..chunk.len()]).into(),
+            },
+        );
+
+        match res {
+            Ok(()) => Some(Ok((chunk, buffer.split().freeze()))),
+            Err(e) => Some(Err(e)),
+        }
+    })
 }
 
 enum UploadError {
