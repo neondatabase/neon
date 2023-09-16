@@ -261,6 +261,14 @@ pub async fn collect_metrics(
 
     let final_path: Arc<PathBuf> = Arc::new(local_disk_storage);
 
+    let cancel = task_mgr::shutdown_token();
+    let restore_and_reschedule = restore_and_reschedule(&final_path, metric_collection_interval);
+
+    let mut cached_metrics = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        ret = restore_and_reschedule => ret,
+    };
+
     // define client here to reuse it for all requests
     let client = reqwest::ClientBuilder::new()
         .timeout(DEFAULT_HTTP_REPORTING_TIMEOUT)
@@ -268,86 +276,6 @@ pub async fn collect_metrics(
         .expect("Failed to create http client with timeout");
 
     let node_id = node_id.to_string();
-    let cancel = task_mgr::shutdown_token();
-
-    let (mut cached_metrics, oldest_metric_captured_at) =
-        match read_metrics_from_disk(final_path.clone()).await {
-            Ok(found_some) => {
-                // there is no min needed because we write these sequentially in
-                // collect_all_metrics
-                let oldest_metric_captured_at = found_some
-                    .iter()
-                    .map(|(_, (et, _))| et.recorded_at())
-                    .copied()
-                    .next();
-
-                let cached = found_some
-                    .into_iter()
-                    .collect::<HashMap<MetricsKey, (EventType, u64)>>();
-
-                (cached, oldest_metric_captured_at)
-            }
-            Err(e) => {
-                let root = e.root_cause();
-
-                let maybe_ioerr = root.downcast_ref::<std::io::Error>();
-                let is_not_found =
-                    maybe_ioerr.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-
-                if !is_not_found {
-                    tracing::info!(
-                        "failed to read any previous metrics from {final_path:?}: {e:#}"
-                    );
-                }
-
-                (HashMap::new(), None)
-            }
-        };
-
-    if let Some(oldest_metric_captured_at) = oldest_metric_captured_at {
-        // FIXME: chrono methods panic
-        let oldest_metric_captured_at: SystemTime = oldest_metric_captured_at.into();
-        let now = SystemTime::now();
-        let error = match now.duration_since(oldest_metric_captured_at) {
-            Ok(from_last_send) if from_last_send < metric_collection_interval => {
-                let sleep_for = metric_collection_interval - from_last_send;
-
-                let deadline = std::time::Instant::now() + sleep_for;
-
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = tokio::time::sleep_until(deadline.into()) => {},
-                }
-
-                let now = std::time::Instant::now();
-
-                // executor threads might be busy, add extra measurements
-                Some(if now < deadline {
-                    deadline - now
-                } else {
-                    now - deadline
-                })
-            }
-            Ok(from_last_send) => Some(from_last_send.saturating_sub(metric_collection_interval)),
-            Err(_) => {
-                tracing::warn!(
-                    ?now,
-                    ?oldest_metric_captured_at,
-                    "oldest recorded metric is in future; first values will come out with inconsistent timestamps"
-                );
-                oldest_metric_captured_at.duration_since(now).ok()
-            }
-        };
-
-        if let Some(error) = error {
-            if error.as_secs() >= 60 {
-                tracing::info!(
-                    error_ms = error.as_millis(),
-                    "startup scheduling error due to restart"
-                )
-            }
-        }
-    }
 
     // reminder: ticker is ready immediatedly
     let mut ticker = tokio::time::interval(metric_collection_interval);
@@ -374,6 +302,93 @@ pub async fn collect_metrics(
             metric_collection_interval,
             "consumption_metrics_collect_metrics",
         );
+    }
+}
+
+/// Called on the first iteration in an attempt to join the metric uploading schedule from previous
+/// pageserver session. Pageserver is supposed to upload at intervals regardless of restarts.
+///
+/// Cancellation safe.
+async fn restore_and_reschedule(
+    final_path: &Arc<PathBuf>,
+    metric_collection_interval: Duration,
+) -> Cache {
+    let (cached, oldest_metric_captured_at) = match read_metrics_from_disk(final_path.clone()).await
+    {
+        Ok(found_some) => {
+            // there is no min needed because we write these sequentially in
+            // collect_all_metrics
+            let oldest_metric_captured_at = found_some
+                .iter()
+                .map(|(_, (et, _))| et.recorded_at())
+                .copied()
+                .next();
+
+            let cached = found_some
+                .into_iter()
+                .collect::<HashMap<MetricsKey, (EventType, u64)>>();
+
+            (cached, oldest_metric_captured_at)
+        }
+        Err(e) => {
+            let root = e.root_cause();
+
+            let maybe_ioerr = root.downcast_ref::<std::io::Error>();
+            let is_not_found =
+                maybe_ioerr.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+
+            if !is_not_found {
+                tracing::info!("failed to read any previous metrics from {final_path:?}: {e:#}");
+            }
+
+            (HashMap::new(), None)
+        }
+    };
+
+    if let Some(oldest_metric_captured_at) = oldest_metric_captured_at {
+        reschedule(oldest_metric_captured_at.into(), metric_collection_interval).await
+    }
+
+    cached
+}
+
+async fn reschedule(earlier_metric_at: SystemTime, metric_collection_interval: Duration) {
+    let now = SystemTime::now();
+    let error = match now.duration_since(earlier_metric_at) {
+        Ok(from_last_send) if from_last_send < metric_collection_interval => {
+            let sleep_for = metric_collection_interval - from_last_send;
+
+            let deadline = std::time::Instant::now() + sleep_for;
+
+            tokio::time::sleep_until(deadline.into()).await;
+
+            let now = std::time::Instant::now();
+
+            // executor threads might be busy, add extra measurements
+            Some(if now < deadline {
+                deadline - now
+            } else {
+                now - deadline
+            })
+        }
+        Ok(from_last_send) => Some(from_last_send.saturating_sub(metric_collection_interval)),
+        Err(_) => {
+            tracing::warn!(
+                ?now,
+                ?earlier_metric_at,
+                "earlier recorded metric is from future; first values will come out with inconsistent timestamps"
+            );
+            earlier_metric_at.duration_since(now).ok()
+        }
+    };
+
+    if let Some(error) = error {
+        if error.as_secs() >= 60 {
+            tracing::info!(
+                error_ms = error.as_millis(),
+                "startup scheduling error due to restart"
+            )
+        }
     }
 }
 
