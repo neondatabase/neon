@@ -286,16 +286,46 @@ pub async fn collect_metrics(
             tick_at = ticker.tick() => tick_at,
         };
 
-        iteration(
-            &client,
-            metric_collection_endpoint,
-            &cancel,
-            &mut cached_metrics,
-            &node_id,
-            &final_path,
-            &ctx,
-        )
-        .await;
+        // these are point in time, with variable "now"
+        let metrics = collect_all_metrics(&cached_metrics, &ctx).await;
+
+        if metrics.is_empty() {
+            continue;
+        }
+
+        let metrics = Arc::new(metrics);
+
+        let flush = async {
+            match flush_metrics_to_disk(&metrics, &final_path).await {
+                Ok(()) => {
+                    tracing::debug!("flushed metrics to disk");
+                }
+                Err(e) => {
+                    // idea here is that if someone creates a directory as our final_path, then they
+                    // might notice it from the logs before shutdown and remove it
+                    tracing::error!("failed to persist metrics to {final_path:?}: {e:#}");
+                }
+            }
+        };
+
+        let upload = async {
+            let res = upload_metrics(
+                &client,
+                metric_collection_endpoint,
+                &cancel,
+                &node_id,
+                &metrics,
+                &mut cached_metrics,
+            )
+            .await;
+            if let Err(e) = res {
+                // serialization error which should never happen
+                tracing::error!("failed to upload due to {e:#}");
+            }
+        };
+
+        // let these run concurrently
+        let (_, _) = tokio::join!(flush, upload);
 
         crate::tenant::tasks::warn_when_period_overrun(
             tick_at.elapsed(),
@@ -393,57 +423,6 @@ async fn reschedule(
             earlier_metric_at.duration_since(now).ok()
         }
     }
-}
-
-async fn iteration(
-    client: &reqwest::Client,
-    metric_collection_endpoint: &reqwest::Url,
-    cancel: &CancellationToken,
-    cached_metrics: &mut Cache,
-    node_id: &str,
-    final_path: &Arc<PathBuf>,
-    ctx: &RequestContext,
-) {
-    // these are point in time, with variable "now"
-    let metrics = collect_all_metrics(cached_metrics, ctx).await;
-
-    if metrics.is_empty() {
-        return;
-    }
-
-    let metrics = Arc::new(metrics);
-
-    let flush = async {
-        match flush_metrics_to_disk(&metrics, final_path).await {
-            Ok(()) => {
-                tracing::debug!("flushed metrics to disk");
-            }
-            Err(e) => {
-                // idea here is that if someone creates a directory as our final_path, then they
-                // might notice it from the logs before shutdown and remove it
-                tracing::error!("failed to persist metrics to {final_path:?}: {e:#}");
-            }
-        }
-    };
-
-    let upload = async {
-        let res = upload_metrics(
-            client,
-            metric_collection_endpoint,
-            cancel,
-            node_id,
-            &metrics,
-            cached_metrics,
-        )
-        .await;
-        if let Err(e) = res {
-            // serialization error which should never happen
-            tracing::error!("failed to upload due to {e:#}");
-        }
-    };
-
-    // let these run concurrently
-    let (_, _) = tokio::join!(flush, upload);
 }
 
 async fn collect_all_metrics(cached_metrics: &Cache, ctx: &RequestContext) -> Vec<RawMetric> {
