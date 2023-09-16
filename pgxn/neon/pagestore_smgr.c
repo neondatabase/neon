@@ -1450,6 +1450,9 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
+	XLogRecPtr	rel_lsn;
+	XLogRecPtr	db_lsn;
+	static const NRelFileInfo dummyNode = {0};
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1504,7 +1507,9 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	rel_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	db_lsn = neon_get_request_lsn(&latest, dummyNode, MAIN_FORKNUM, 0);
+	request_lsn = Max(rel_lsn, db_lsn);
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
