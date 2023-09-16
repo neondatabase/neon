@@ -1,8 +1,5 @@
-//!
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
-//! Cache metrics to send only the updated ones.
-//!
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{mgr, LogicalSizeCalculationCause};
