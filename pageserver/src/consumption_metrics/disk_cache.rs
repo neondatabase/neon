@@ -26,6 +26,10 @@ pub(super) async fn flush_metrics_to_disk(
     use std::io::Write;
 
     anyhow::ensure!(path.parent().is_some(), "path must have parent: {path:?}");
+    anyhow::ensure!(
+        path.file_name().is_some(),
+        "path must have filename: {path:?}"
+    );
 
     let span = tracing::Span::current();
     tokio::task::spawn_blocking({
