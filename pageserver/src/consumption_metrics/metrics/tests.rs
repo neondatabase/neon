@@ -174,7 +174,7 @@ fn metric_image_stability() {
             },
         };
         let actual = serde_json::to_string(&e).unwrap();
-        assert_eq!(expected, actual, "example from line {line}");
+        assert_eq!(expected, actual, "example for {kind:?} from line {line}");
     }
 }
 
