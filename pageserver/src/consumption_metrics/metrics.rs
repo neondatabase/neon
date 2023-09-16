@@ -82,6 +82,7 @@ impl AbsoluteValueFactory {
 struct IncrementalValueFactory(MetricsKey);
 
 impl IncrementalValueFactory {
+    #[allow(clippy::wrong_self_convention)]
     const fn from_until(
         self,
         prev_end: DateTime<Utc>,
