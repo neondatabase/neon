@@ -6,7 +6,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::super::*;
+use super::*;
 use chrono::{DateTime, Utc};
 
 #[test]
