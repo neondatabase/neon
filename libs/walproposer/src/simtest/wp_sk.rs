@@ -157,6 +157,42 @@ fn test_simple_schedule() -> anyhow::Result<()> {
 }
 
 #[test]
+fn test_many_tx() -> anyhow::Result<()> {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    let test = config.start(1337);
+
+    let mut schedule: Schedule = vec![];
+    for i in 0..100 {
+        schedule.push((i * 10, TestAction::WriteTx(10)));
+    }
+
+    test.run_schedule(&schedule)?;
+    info!("Test finished, stopping all threads");
+    test.world.stop_all();
+
+    let events = test.world.take_events();
+    info!("Events: {:?}", events);
+    let last_commit_lsn = events
+        .iter()
+        .filter_map(|event| {
+            if event.data.starts_with("commit_lsn;") {
+                let lsn: u64 = event.data.split(';').nth(1).unwrap().parse().unwrap();
+                return Some(lsn);
+            }
+            None
+        })
+        .last()
+        .unwrap();
+
+    let initdb_lsn = 21623024;
+    let diff = last_commit_lsn - initdb_lsn;
+    info!("Last commit lsn: {}, diff: {}", last_commit_lsn, diff);
+    assert!(diff > 1000 * 8);
+    Ok(())
+}
+
+#[test]
 fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));

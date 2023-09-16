@@ -230,3 +230,11 @@ pub extern "C" fn sim_set_result(code: i32, msg: *const u8) {
     debug!("sim_set_result({}, {:?})", code, msg);
     os().set_result(code, msg);
 }
+
+#[no_mangle]
+pub extern "C" fn sim_log_event(msg: *const i8) {
+    let msg = unsafe { CStr::from_ptr(msg) };
+    let msg = msg.to_string_lossy().into_owned();
+    debug!("sim_log_event({:?})", msg);
+    os().log_event(msg);
+}

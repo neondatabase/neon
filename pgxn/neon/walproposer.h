@@ -23,6 +23,12 @@
 } while (0)
 
 #define exit(code) sim_exit(code, "exit()")
+
+#define sim_log(fmt, ...) do { \
+	char buf[1024]; \
+	snprintf(buf, sizeof(buf), fmt, ##__VA_ARGS__); \
+	sim_log_event(buf); \
+} while (0)
 #else
 #define walprop_log(tag, fmt, ...) ereport(tag,                                  \
 										(errmsg(WALPROPOSER_TAG fmt, ##__VA_ARGS__), \

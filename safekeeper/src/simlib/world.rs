@@ -44,6 +44,9 @@ pub struct World {
 
     /// Optional function to initialize nodes right after thread creation.
     nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>,
+
+    /// Internal event log.
+    events: Mutex<Vec<SEvent>>,
 }
 
 impl World {
@@ -61,6 +64,7 @@ impl World {
             connection_counter: AtomicU64::new(0),
             network_options,
             nodes_init,
+            events: Mutex::new(Vec::new()),
         }
     }
 
@@ -263,6 +267,18 @@ impl World {
         }
         Some(parking.swap_remove(found?))
     }
+
+    pub fn add_event(&self, node: NodeId, data: String) {
+        let time = self.now();
+        self.events.lock().push(SEvent { time, node, data });
+    }
+
+    pub fn take_events(&self) -> Vec<SEvent> {
+        let mut events = self.events.lock();
+        let mut res = Vec::new();
+        std::mem::swap(&mut res, &mut events);
+        res
+    }
 }
 
 thread_local! {
@@ -463,4 +479,11 @@ pub enum NodeEvent {
     Internal(AnyMessage),
     WakeTimeout(u64),
     // TODO: close?
+}
+
+#[derive(Debug)]
+pub struct SEvent {
+    pub time: u64,
+    pub node: NodeId,
+    pub data: String,
 }

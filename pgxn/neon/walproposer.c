@@ -1553,6 +1553,8 @@ DetermineEpochStartLsn(void)
 		 safekeeper[donor].host, safekeeper[donor].port,
 		 LSN_FORMAT_ARGS(truncateLsn));
 
+	sim_log("prop_elected;%lu", propEpochStartLsn);
+
 	/*
 	 * Ensure the basebackup we are running (at RedoStartLsn) matches LSN
 	 * since which we are going to write according to the consensus. If not,
@@ -2129,6 +2131,7 @@ RecvAppendResponses(Safekeeper *sk)
 	minQuorumLsn = GetAcknowledgedByQuorumWALPosition();
 	if (minQuorumLsn > lastSentCommitLsn)
 	{
+		sim_log("commit_lsn;%lu", minQuorumLsn);
 		BroadcastAppendRequest();
 		lastSentCommitLsn = minQuorumLsn;
 	}

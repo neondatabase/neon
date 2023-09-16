@@ -164,4 +164,8 @@ impl NodeOs {
     pub fn set_result(&self, code: i32, result: String) {
         *self.internal.result.lock() = (code, result);
     }
+
+    pub fn log_event(&self, data: String) {
+        self.world.add_event(self.id(), data)
+    }
 }

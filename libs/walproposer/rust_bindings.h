@@ -73,6 +73,8 @@ void sim_exit(int32_t code, const uint8_t *msg);
 
 void sim_set_result(int32_t code, const uint8_t *msg);
 
+void sim_log_event(const int8_t *msg);
+
 /**
  * Get tag of the current message.
  */
