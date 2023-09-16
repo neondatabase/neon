@@ -475,8 +475,6 @@ def test_download_remote_layers_api(
     with endpoint_old.cursor() as cur:
         assert query_scalar(cur, "select count(*) from testtab") == table_len
 
-    raise RuntimeError("made it to the end of test_download_remote_layers_api :tada:")
-
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
 def test_compaction_downloads_on_demand_without_image_creation(
