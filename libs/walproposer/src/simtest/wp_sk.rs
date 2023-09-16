@@ -158,6 +158,7 @@ fn test_simple_schedule() -> anyhow::Result<()> {
 
 #[test]
 fn test_many_tx() -> anyhow::Result<()> {
+    enable_debug();
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
     let test = config.start(1337);
