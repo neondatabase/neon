@@ -94,25 +94,14 @@ impl AbsoluteValueFactory {
 struct IncrementalValueFactory(MetricsKey);
 
 impl IncrementalValueFactory {
-    #[allow(clippy::wrong_self_convention)]
-    fn from_previous_up_to(
-        self,
-        prev_end: DateTime<Utc>,
-        up_to: DateTime<Utc>,
-        val: u64,
-    ) -> RawMetric {
+    fn from_until(self, prev_end: DateTime<Utc>, up_to: DateTime<Utc>, val: u64) -> RawMetric {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
-        (
-            key,
-            (
-                EventType::Incremental {
-                    start_time: prev_end,
-                    stop_time: up_to,
-                },
-                val,
-            ),
-        )
+        let when = EventType::Incremental {
+            start_time: prev_end,
+            stop_time: up_to,
+        };
+        (key, (when, val))
     }
 
     fn key(&self) -> &MetricsKey {
@@ -440,14 +429,14 @@ impl TimelineSnapshot {
         let up_to = now;
 
         if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
-            let key_value = written_size_delta_key.from_previous_up_to(prev.0, up_to, delta);
+            let key_value = written_size_delta_key.from_until(prev.0, up_to, delta);
             // written_size_delta
             metrics.push(key_value);
             // written_size
             metrics.push((key, written_size_now));
         } else {
             // the cached value was ahead of us, report zero until we've caught up
-            metrics.push(written_size_delta_key.from_previous_up_to(prev.0, up_to, 0));
+            metrics.push(written_size_delta_key.from_until(prev.0, up_to, 0));
             // the cached value was ahead of us, report the same until we've caught up
             metrics.push((key, (written_size_now.0, prev.1)));
         }
