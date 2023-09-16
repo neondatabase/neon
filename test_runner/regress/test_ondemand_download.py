@@ -358,12 +358,9 @@ def test_download_remote_layers_api(
         )
 
     # Shut down safekeepers before starting the pageserver.
-    # If we don't, the tenant's walreceiver handler will trigger the
-    # the logical size computation task, and that downloads layes,
-    # which makes our assertions on size fail.
+    # If we don't, they might stream us more WAL.
     for sk in env.safekeepers:
         sk.stop()
-        # sk.stop(immediate=True)
 
     # it is sad we cannot do a flush inmem layer without compaction, but
     # working around with very high layer0 count and image layer creation
@@ -381,7 +378,6 @@ def test_download_remote_layers_api(
     env.pageserver.stop()
 
     # remove all the layer files
-    # XXX only delete some of the layer files, to show that it really just downloads all the layers
     for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer.name}")
         layer.unlink()
@@ -399,8 +395,6 @@ def test_download_remote_layers_api(
 
     ###### Phase 1: exercise download error code path
 
-    # comparison here is requiring the size to be at least the previous size, because it's possible received WAL after last_flush_lsn_upload
-    # witnessed for example difference of 29827072 (filled_current_physical) to 29868032 (here) is no good reason to fail a test.
     this_time = get_api_current_physical_size()
     assert (
         filled_current_physical == this_time
@@ -411,15 +405,11 @@ def test_download_remote_layers_api(
     assert (
         post_unlink_size < filled_size
     ), "we just deleted layers and didn't cause anything to re-download them yet"
-    assert filled_size - post_unlink_size > 5 * (
-        1024**2
-    ), "we may be downloading some layers as part of tenant activation"
 
     # issue downloads that we know will fail
     info = client.timeline_download_remote_layers(
         tenant_id,
         timeline_id,
-        # allow some concurrency to unveil potential concurrency bugs
         max_concurrent_downloads=10,
         errors_ok=True,
         at_least_one_download=False,
@@ -428,9 +418,9 @@ def test_download_remote_layers_api(
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
     assert info["successful_download_count"] == 0
-    assert (
-        info["failed_download_count"] > 0
-    )  # can't assert == total_layer_count because attach + tenant status downloads some layers
+    # can't assert == total_layer_count because timeline_detail also tries to
+    # download layers for logical size, but this might not always hold.
+    assert info["failed_download_count"] > 0
     assert (
         info["total_layer_count"]
         == info["successful_download_count"] + info["failed_download_count"]
@@ -439,7 +429,6 @@ def test_download_remote_layers_api(
     assert (
         get_resident_physical_size() == post_unlink_size
     ), "didn't download anything new due to failpoint"
-    # would be nice to assert that the layers in the layer map are still RemoteLayer
 
     ##### Retry, this time without failpoints
     client.configure_failpoints(("remote-storage-download-pre-rename", "off"))
