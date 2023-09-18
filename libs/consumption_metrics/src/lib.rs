@@ -3,7 +3,7 @@
 //!
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, serde::Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
@@ -54,8 +54,8 @@ impl EventType {
     }
 }
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Event<Extra, Metric: Serialize> {
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Event<Extra, Metric> {
     #[serde(flatten)]
     #[serde(rename = "type")]
     pub kind: EventType,

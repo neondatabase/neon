@@ -1,5 +1,7 @@
 import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from queue import SimpleQueue
 from typing import Any, Dict, Set
 
@@ -28,6 +30,7 @@ def test_metric_collection(
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
 
+    # this should be Union[str, Tuple[List[Any], bool]], but it will make unpacking much more verbose
     uploads: SimpleQueue[Any] = SimpleQueue()
 
     def metrics_handler(request: Request) -> Response:
@@ -35,7 +38,9 @@ def test_metric_collection(
             return Response(status=400)
 
         events = request.json["events"]
-        uploads.put(events)
+        is_last = request.headers["pageserver-metrics-last-upload-in-batch"]
+        assert is_last in ["true", "false"]
+        uploads.put((events, is_last == "true"))
         return Response(status=200)
 
     # Require collecting metrics frequently, since we change
@@ -43,15 +48,12 @@ def test_metric_collection(
     #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
-    neon_env_builder.pageserver_config_override = (
-        f"""
+    neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
-    """
-        + "tenant_config={pitr_interval = '0 sec'}"
-    )
+        """
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
@@ -63,7 +65,7 @@ def test_metric_collection(
     )
 
     # spin up neon,  after http server is ready
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
@@ -124,19 +126,20 @@ def test_metric_collection(
         events = uploads.get(timeout=timeout)
 
         if events == "ready":
-            events = uploads.get(timeout=timeout)
-            v.ingest(events)
+            (events, is_last) = uploads.get(timeout=timeout)
+            v.ingest(events, is_last)
             break
         else:
-            v.ingest(events)
+            (events, is_last) = events
+            v.ingest(events, is_last)
 
     if "synthetic_storage_size" not in v.accepted_event_names():
         log.info("waiting for synthetic storage size to be calculated and uploaded...")
 
     rounds = 0
     while "synthetic_storage_size" not in v.accepted_event_names():
-        events = uploads.get(timeout=timeout)
-        v.ingest(events)
+        (events, is_last) = uploads.get(timeout=timeout)
+        v.ingest(events, is_last)
         rounds += 1
         assert rounds < 10, "did not get synthetic_storage_size in 10 uploads"
         # once we have it in verifiers, it will assert that future batches will contain it
@@ -150,15 +153,159 @@ def test_metric_collection(
         events = uploads.get(timeout=timeout)
 
         if events == "ready":
-            events = uploads.get(timeout=timeout * 3)
-            v.ingest(events)
-            events = uploads.get(timeout=timeout)
-            v.ingest(events)
+            (events, is_last) = uploads.get(timeout=timeout * 3)
+            v.ingest(events, is_last)
+            (events, is_last) = uploads.get(timeout=timeout)
+            v.ingest(events, is_last)
             break
         else:
-            v.ingest(events)
+            (events, is_last) = events
+            v.ingest(events, is_last)
 
     httpserver.check()
+
+
+def test_metric_collection_cleans_up_tempfile(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    (host, port) = httpserver_listen_address
+    metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
+
+    # this should be Union[str, Tuple[List[Any], bool]], but it will make unpacking much more verbose
+    uploads: SimpleQueue[Any] = SimpleQueue()
+
+    def metrics_handler(request: Request) -> Response:
+        if request.json is None:
+            return Response(status=400)
+
+        events = request.json["events"]
+        is_last = request.headers["pageserver-metrics-last-upload-in-batch"]
+        assert is_last in ["true", "false"]
+        uploads.put((events, is_last == "true"))
+        return Response(status=200)
+
+    # Require collecting metrics frequently, since we change
+    # the timeline and want something to be logged about it.
+    #
+    # Disable time-based pitr, we will use the manual GC calls
+    # to trigger remote storage operations in a controlled way
+    neon_env_builder.pageserver_config_override = f"""
+        metric_collection_interval="1s"
+        metric_collection_endpoint="{metric_collection_endpoint}"
+        cached_metric_collection_interval="0s"
+        synthetic_size_calculation_interval="3s"
+        """
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    # mock http server that returns OK for the metrics
+    httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
+        metrics_handler
+    )
+
+    # spin up neon,  after http server is ready
+    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
+    pageserver_http = env.pageserver.http_client()
+
+    # httpserver is shut down before pageserver during passing run
+    env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    cur.execute("CREATE TABLE foo (id int, counter int, t text)")
+    cur.execute(
+        """
+        INSERT INTO foo
+        SELECT g, 0, 'long string to consume some space' || g
+        FROM generate_series(1, 100000) g
+        """
+    )
+
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    # we expect uploads at 1Hz, on busy runners this could be too optimistic,
+    # so give 5s we only want to get the following upload after "ready" value.
+    timeout = 5
+
+    # these strings in the upload queue allow synchronizing with the uploads
+    # and the main test execution
+    uploads.put("ready")
+
+    while True:
+        events = uploads.get(timeout=timeout)
+
+        if events == "ready":
+            (events, _) = uploads.get(timeout=timeout)
+            break
+
+    # should really configure an env?
+    pageserver_http.configure_failpoints(("before-persist-last-metrics-collected", "exit"))
+
+    time.sleep(3)
+
+    env.pageserver.stop()
+
+    initially = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
+
+    assert (
+        len(initially.matching) == 2
+    ), f"expecting actual file and tempfile, but not found: {initially.matching}"
+
+    uploads.put("ready")
+    env.pageserver.start()
+
+    while True:
+        events = uploads.get(timeout=timeout * 3)
+
+        if events == "ready":
+            (events, _) = uploads.get(timeout=timeout)
+            break
+
+    env.pageserver.stop()
+
+    later = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
+
+    # it is possible we shutdown the pageserver right at the correct time, so the old tempfile
+    # is gone, but we also have a new one.
+    only = set(["last_consumption_metrics.json"])
+    assert (
+        initially.matching.intersection(later.matching) == only
+    ), "only initial tempfile should had been removed"
+    assert initially.other.issuperset(later.other), "no other files should had been removed"
+
+
+@dataclass
+class PrefixPartitionedFiles:
+    matching: Set[str]
+    other: Set[str]
+
+
+def iterate_pageserver_workdir(path: Path, prefix: str) -> PrefixPartitionedFiles:
+    """
+    Iterates the files in the workdir, returns two sets:
+    - files with the prefix
+    - files without the prefix
+    """
+
+    matching = set()
+    other = set()
+    for entry in path.iterdir():
+        if not entry.is_file():
+            continue
+
+        if not entry.name.startswith(prefix):
+            other.add(entry.name)
+        else:
+            matching.add(entry.name)
+
+    return PrefixPartitionedFiles(matching, other)
 
 
 class MetricsVerifier:
@@ -171,7 +318,7 @@ class MetricsVerifier:
         self.tenants: Dict[TenantId, TenantMetricsVerifier] = {}
         pass
 
-    def ingest(self, events):
+    def ingest(self, events, is_last):
         stringified = json.dumps(events, indent=2)
         log.info(f"ingesting: {stringified}")
         for event in events:
@@ -181,8 +328,9 @@ class MetricsVerifier:
 
             self.tenants[id].ingest(event)
 
-        for t in self.tenants.values():
-            t.post_batch()
+        if is_last:
+            for t in self.tenants.values():
+                t.post_batch()
 
     def accepted_event_names(self) -> Set[str]:
         names: Set[str] = set()

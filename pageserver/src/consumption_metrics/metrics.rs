@@ -1,36 +1,21 @@
 use crate::context::RequestContext;
-use crate::tenant::mgr;
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use pageserver_api::models::TenantState;
-use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
-use std::sync::Arc;
-use std::time::SystemTime;
-use utils::id::{TenantId, TimelineId};
-use utils::lsn::Lsn;
-
-use anyhow::Context;
+use serde_with::serde_as;
+use std::{sync::Arc, time::SystemTime};
+use utils::{
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+};
 
 use super::{Cache, RawMetric};
-
-// FIXME: all other consumption_metrics::Event stuff is over at uploading, maybe move?
-#[serde_as]
-#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy)]
-pub(super) struct Ids {
-    #[serde_as(as = "DisplayFromStr")]
-    pub(super) tenant_id: TenantId,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) timeline_id: Option<TimelineId>,
-}
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
 // Do not rename any of these without first consulting with data team and partner
 // management.
-// FIXME: write those tests before refactoring to this!
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(super) enum Name {
     /// Timeline last_record_lsn, absolute
@@ -59,7 +44,7 @@ pub(super) enum Name {
 /// elsewhere.
 #[serde_with::serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(super) struct MetricsKey {
+pub(crate) struct MetricsKey {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub(super) tenant_id: TenantId,
 
@@ -83,7 +68,7 @@ impl MetricsKey {
 struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
+    const fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
     }
@@ -98,7 +83,7 @@ struct IncrementalValueFactory(MetricsKey);
 
 impl IncrementalValueFactory {
     #[allow(clippy::wrong_self_convention)]
-    fn from_previous_up_to(
+    const fn from_until(
         self,
         prev_end: DateTime<Utc>,
         up_to: DateTime<Utc>,
@@ -106,16 +91,11 @@ impl IncrementalValueFactory {
     ) -> RawMetric {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
-        (
-            key,
-            (
-                EventType::Incremental {
-                    start_time: prev_end,
-                    stop_time: up_to,
-                },
-                val,
-            ),
-        )
+        let when = EventType::Incremental {
+            start_time: prev_end,
+            stop_time: up_to,
+        };
+        (key, (when, val))
     }
 
     fn key(&self) -> &MetricsKey {
@@ -209,9 +189,11 @@ pub(super) async fn collect_all_metrics(
     cached_metrics: &Cache,
     ctx: &RequestContext,
 ) -> Vec<RawMetric> {
+    use pageserver_api::models::TenantState;
+
     let started_at = std::time::Instant::now();
 
-    let tenants = match mgr::list_tenants().await {
+    let tenants = match crate::tenant::mgr::list_tenants().await {
         Ok(tenants) => tenants,
         Err(err) => {
             tracing::error!("failed to list tenants: {:?}", err);
@@ -223,7 +205,7 @@ pub(super) async fn collect_all_metrics(
         if state != TenantState::Active {
             None
         } else {
-            mgr::get_tenant(id, true)
+            crate::tenant::mgr::get_tenant(id, true)
                 .await
                 .ok()
                 .map(|tenant| (id, tenant))
@@ -285,7 +267,7 @@ where
     current_metrics
 }
 
-/// Testing helping in-between abstraction allowing testing metrics without actual Tenants.
+/// In-between abstraction to allow testing metrics without actual Tenants.
 struct TenantSnapshot {
     resident_size: u64,
     remote_size: u64,
@@ -441,14 +423,14 @@ impl TimelineSnapshot {
         let up_to = now;
 
         if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
-            let key_value = written_size_delta_key.from_previous_up_to(prev.0, up_to, delta);
+            let key_value = written_size_delta_key.from_until(prev.0, up_to, delta);
             // written_size_delta
             metrics.push(key_value);
             // written_size
             metrics.push((key, written_size_now));
         } else {
             // the cached value was ahead of us, report zero until we've caught up
-            metrics.push(written_size_delta_key.from_previous_up_to(prev.0, up_to, 0));
+            metrics.push(written_size_delta_key.from_until(prev.0, up_to, 0));
             // the cached value was ahead of us, report the same until we've caught up
             metrics.push((key, (written_size_now.0, prev.1)));
         }
@@ -468,3 +450,6 @@ impl TimelineSnapshot {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::metric_examples;
