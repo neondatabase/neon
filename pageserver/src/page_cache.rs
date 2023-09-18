@@ -77,7 +77,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::Duration,
 };
@@ -169,6 +169,8 @@ struct Slot {
 
 struct SlotInner {
     key: Option<CacheKey>,
+    // for `coalesce_permit`
+    permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
     buf: &'static mut [u8; PAGE_SZ],
 }
 
@@ -211,6 +213,22 @@ impl Slot {
     }
 }
 
+impl SlotInner {
+    /// If there is aready a reader, drop our permit and share its permit, just like we share read access.
+    fn coalesce_readers_permit(&self, permit: PinnedSlotsPermit) -> Arc<PinnedSlotsPermit> {
+        let mut guard = self.permit.lock().unwrap();
+        if let Some(existing_permit) = guard.upgrade() {
+            drop(guard);
+            drop(permit);
+            existing_permit
+        } else {
+            let permit = Arc::new(permit);
+            *guard = Arc::downgrade(&permit);
+            permit
+        }
+    }
+}
+
 pub struct PageCache {
     /// This contains the mapping from the cache key to buffer slot that currently
     /// contains the page, if any.
@@ -244,7 +262,7 @@ struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
 /// until the guard is dropped.
 ///
 pub struct PageReadGuard<'i> {
-    _permit: PinnedSlotsPermit,
+    _permit: Arc<PinnedSlotsPermit>,
     slot_guard: tokio::sync::RwLockReadGuard<'i, SlotInner>,
 }
 
@@ -504,7 +522,7 @@ impl PageCache {
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageReadGuard {
-                    _permit: permit.take().unwrap(),
+                    _permit: inner.coalesce_readers_permit(permit.take().unwrap()),
                     slot_guard: inner,
                 });
             } else {
@@ -597,6 +615,14 @@ impl PageCache {
             inner.key = Some(cache_key.clone());
             slot.set_usage_count(1);
 
+            debug_assert!(
+                {
+                    let guard = inner.permit.lock().unwrap();
+                    guard.upgrade().is_none()
+                },
+                "we hold a write lock, so, no one else should have a permit"
+            );
+
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
                 _permit: permit.take().unwrap(),
                 inner,
@@ -622,10 +648,17 @@ impl PageCache {
             let inner = slot.inner.write().await;
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
+                debug_assert!(
+                    {
+                        let guard = inner.permit.lock().unwrap();
+                        guard.upgrade().is_none()
+                    },
+                    "we hold a write lock, so, no one else should have a permit"
+                );
                 return Some(PageWriteGuard {
+                    _permit: permit.take().unwrap(),
                     inner,
                     valid: true,
-                    _permit: permit.take().unwrap(),
                 });
             }
         }
@@ -672,10 +705,18 @@ impl PageCache {
             inner.key = Some(cache_key.clone());
             slot.set_usage_count(1);
 
+            debug_assert!(
+                {
+                    let guard = inner.permit.lock().unwrap();
+                    guard.upgrade().is_none()
+                },
+                "we hold a write lock, so, no one else should have a permit"
+            );
+
             return Ok(WriteBufResult::NotFound(PageWriteGuard {
+                _permit: permit.take().unwrap(),
                 inner,
                 valid: false,
-                _permit: permit.take().unwrap(),
             }));
         }
     }
@@ -881,7 +922,11 @@ impl PageCache {
                 let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
 
                 Slot {
-                    inner: tokio::sync::RwLock::new(SlotInner { key: None, buf }),
+                    inner: tokio::sync::RwLock::new(SlotInner {
+                        key: None,
+                        buf,
+                        permit: std::sync::Mutex::new(Weak::new()),
+                    }),
                     usage_count: AtomicU8::new(0),
                 }
             })
