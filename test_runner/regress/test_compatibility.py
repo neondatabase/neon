@@ -20,7 +20,7 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, RemoteStorageUser
 from fixtures.types import Lsn
@@ -151,7 +151,6 @@ def test_create_snapshot(
     shutil.copytree(test_output_dir, compatibility_snapshot_dir)
 
 
-@skip_on_postgres(PgVersion.V16, reason="TODO: Enable after the first Postgres 16 release")
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
@@ -209,7 +208,6 @@ def test_backward_compatibility(
     ), "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
-@skip_on_postgres(PgVersion.V16, reason="TODO: Enable after the first Postgres 16 release")
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
