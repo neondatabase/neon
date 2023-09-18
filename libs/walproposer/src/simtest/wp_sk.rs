@@ -251,6 +251,10 @@ fn test_res_dealloc() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
 
+    // print pid
+    let pid = unsafe { libc::getpid() };
+    info!("pid: {}", pid);
+
     let seed = 123456;
     config.network = generate_network_opts(seed);
     let test = config.start(seed);
