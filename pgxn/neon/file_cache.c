@@ -223,7 +223,7 @@ lfc_change_limit_hook(int newval, void *extra)
 	 * Stats collector detach shared memory, so we should not try to access shared memory here.
 	 * Parallel workers first assign default value (0), so not perform truncation in parallel workers.
 	 */
-	if (!lfc_ctl || !UsedShmemSegAddr || IsParallelWorker())
+	if (!lfc_ctl || !MyProc || !UsedShmemSegAddr || IsParallelWorker())
 		return;
 
 	/* Open cache file if not done yet */
