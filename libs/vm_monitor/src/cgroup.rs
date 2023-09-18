@@ -561,14 +561,7 @@ impl CgroupWatcher {
 /// Setting these values also affects the thresholds for receiving usage alerts.
 #[derive(Debug)]
 pub struct MemoryLimits {
-    high: u64,
-    max: u64,
-}
-
-impl MemoryLimits {
-    pub fn new(high: u64, max: u64) -> Self {
-        Self { max, high }
-    }
+    pub high: u64,
 }
 
 // Methods for manipulating the actual cgroup
@@ -645,12 +638,7 @@ impl CgroupWatcher {
 
     /// Set cgroup memory.high and memory.max.
     pub fn set_limits(&self, limits: &MemoryLimits) -> anyhow::Result<()> {
-        info!(
-            limits.high,
-            limits.max,
-            path = self.path(),
-            "writing new memory limits",
-        );
+        info!(limits.high, path = self.path(), "writing new memory limits",);
         self.memory()
             .context("failed to get memory subsystem while setting memory limits")?
             .set_mem(cgroups_rs::memory::SetMemory {
@@ -659,7 +647,7 @@ impl CgroupWatcher {
                 high: Some(MaxValue::Value(
                     u64::min(limits.high, i64::MAX as u64) as i64
                 )),
-                max: Some(MaxValue::Value(u64::min(limits.max, i64::MAX as u64) as i64)),
+                max: None,
             })
             .context("failed to set memory limits")
     }
@@ -667,7 +655,7 @@ impl CgroupWatcher {
     /// Given some amount of available memory, set the desired cgroup memory limits
     pub fn set_memory_limits(&mut self, available_memory: u64) -> anyhow::Result<()> {
         let new_high = self.config.calculate_memory_high_value(available_memory);
-        let limits = MemoryLimits::new(new_high, available_memory);
+        let limits = MemoryLimits { high: new_high };
         info!(
             path = self.path(),
             memory = ?limits,
