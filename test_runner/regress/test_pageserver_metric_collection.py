@@ -46,15 +46,12 @@ def test_metric_collection(
     #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
-    neon_env_builder.pageserver_config_override = (
-        f"""
+    neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
-    """
-        + "tenant_config={pitr_interval = '0 sec'}"
-    )
+        """
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
@@ -66,7 +63,7 @@ def test_metric_collection(
     )
 
     # spin up neon,  after http server is ready
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     tenant_id = env.initial_tenant
@@ -192,15 +189,12 @@ def test_metric_collection_cleans_up_tempfile(
     #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
-    neon_env_builder.pageserver_config_override = (
-        f"""
+    neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
-    """
-        + "tenant_config={pitr_interval = '0 sec'}"
-    )
+        """
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -210,7 +204,7 @@ def test_metric_collection_cleans_up_tempfile(
     )
 
     # spin up neon,  after http server is ready
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     pageserver_http = env.pageserver.http_client()
 
     # httpserver is shut down before pageserver during passing run
