@@ -244,8 +244,7 @@ struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
 /// until the guard is dropped.
 ///
 pub struct PageReadGuard<'i> {
-    #[allow(unused)]
-    permit: PinnedSlotsPermit,
+    _permit: PinnedSlotsPermit,
     slot_guard: tokio::sync::RwLockReadGuard<'i, SlotInner>,
 }
 
@@ -276,8 +275,7 @@ impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
 pub struct PageWriteGuard<'i> {
     inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
 
-    #[allow(unused)]
-    permit: PinnedSlotsPermit,
+    _permit: PinnedSlotsPermit,
 
     // Are the page contents currently valid?
     // Used to mark pages as invalid that are assigned but not yet filled with data.
@@ -506,7 +504,7 @@ impl PageCache {
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
                 return Some(PageReadGuard {
-                    permit: permit.take().unwrap(),
+                    _permit: permit.take().unwrap(),
                     slot_guard: inner,
                 });
             } else {
@@ -600,7 +598,7 @@ impl PageCache {
             slot.set_usage_count(1);
 
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
-                permit: permit.take().unwrap(),
+                _permit: permit.take().unwrap(),
                 inner,
                 valid: false,
             }));
@@ -627,7 +625,7 @@ impl PageCache {
                 return Some(PageWriteGuard {
                     inner,
                     valid: true,
-                    permit: permit.take().unwrap(),
+                    _permit: permit.take().unwrap(),
                 });
             }
         }
@@ -677,7 +675,7 @@ impl PageCache {
             return Ok(WriteBufResult::NotFound(PageWriteGuard {
                 inner,
                 valid: false,
-                permit: permit.take().unwrap(),
+                _permit: permit.take().unwrap(),
             }));
         }
     }
