@@ -14,7 +14,7 @@ use safekeeper::{
     },
     simlib::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent},
     timeline::TimelineError,
-    SafeKeeperConf,
+    SafeKeeperConf, wal_storage::Storage,
 };
 use tracing::{debug, info_span};
 use utils::{
@@ -149,6 +149,7 @@ impl GlobalMap {
 pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
     let _enter = info_span!("safekeeper", id = os.id()).entered();
     debug!("started server");
+    os.log_event("started;safekeeper".to_owned());
     let conf = SafeKeeperConf {
         workdir: PathBuf::from("."),
         my_id: NodeId(os.id() as u64),
@@ -167,6 +168,12 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
     let mut conns: HashMap<i64, ConnState> = HashMap::new();
+
+    for (&ttid, shared_state) in global.timelines.iter_mut() {
+        let flush_lsn = shared_state.sk.wal_store.flush_lsn();
+        let commit_lsn = shared_state.sk.state.commit_lsn;
+        os.log_event(format!("tli_loaded;{};{}", flush_lsn.0, commit_lsn.0));
+    }
 
     let epoll = os.epoll();
     loop {

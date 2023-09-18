@@ -278,6 +278,7 @@ void InitMyInsert()
 {
 	CurrBytePos = sim_redo_start_lsn;
 	PrevBytePos = InvalidXLogRecPtr;
+	sim_latest_available_lsn = sim_redo_start_lsn;
 }
 
 static void MyBeginInsert()
@@ -419,7 +420,6 @@ MyFinishInsert(RmgrId rmid, uint8 info, uint8 flags)
 
 	// Now write it to disk.
 	MyCopyXLogRecordToWAL(rechdr->xl_tot_len, &hdr_rdt, StartPos, EndPos);
-
 	return EndPos;
 }
 

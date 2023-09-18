@@ -370,6 +370,8 @@ void WalProposerRust()
 
 	InitMyInsert();
 
+	sim_log("started;walproposer;%d", (int) syncSafekeepers);
+
 #if PG_VERSION_NUM < 150000
 	ThisTimeLineID = 1;
 #endif
@@ -459,6 +461,8 @@ WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos)
 }
 
 #ifdef SIMLIB
+XLogRecPtr MyInsertRecord();
+
 int
 SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 {
@@ -484,9 +488,28 @@ SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
 			}
 		}
 		walprop_log(FATAL, "unknown tcp connection");
-	} else if (event.tag == Internal && event.any_message == LSN) {
+	} else if (event.tag == Internal && event.any_message == Just32) {
+		uint32_t tx_count;
+		XLogRecPtr start_lsn = sim_latest_available_lsn;
+		XLogRecPtr finish_lsn = sim_latest_available_lsn;
+
+		Assert(!syncSafekeepers);
+
 		sim_epoll_rcv(0);
-		sim_msg_get_lsn(&sim_latest_available_lsn);
+		sim_msg_get_just_u32(&tx_count);
+
+		// don't write WAL before winning the election
+		if (propEpochStartLsn != 0)
+		{
+			for (uint32_t i = 0; i < tx_count; i++)
+			{
+				finish_lsn = MyInsertRecord();
+			}
+
+			sim_log("write_wal;%lu;%lu;%d", start_lsn, finish_lsn, (int) tx_count);
+			sim_latest_available_lsn = finish_lsn;
+		}
+
 		*occurred_events = (WaitEvent) {
 			.events = WL_LATCH_SET,
 		};
@@ -1548,7 +1571,16 @@ DetermineEpochStartLsn(void)
 		 safekeeper[donor].host, safekeeper[donor].port,
 		 LSN_FORMAT_ARGS(truncateLsn));
 
-	sim_log("prop_elected;%lu", propEpochStartLsn);
+	{
+		XLogRecPtr prev_lsn = 0;
+		term_t prev_term = 0;
+		if (propTermHistory.n_entries > 1)
+		{
+			prev_lsn = propTermHistory.entries[propTermHistory.n_entries - 2].lsn;
+			prev_term = propTermHistory.entries[propTermHistory.n_entries - 2].term;
+		}
+		sim_log("prop_elected;%lu;%lu;%lu;%lu", propEpochStartLsn, propTerm, prev_lsn, prev_term);
+	}
 
 	/*
 	 * Ensure the basebackup we are running (at RedoStartLsn) matches LSN

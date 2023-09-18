@@ -5,7 +5,7 @@ use std::{
     panic::AssertUnwindSafe,
     sync::{atomic::AtomicU64, Arc},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use super::{
     chan::Chan,
@@ -298,7 +298,7 @@ impl World {
         std::mem::swap(&mut connections, &mut self.connections.lock());
         for conn in connections {
             conn.deallocate();
-            debug!("conn strong count: {}", Arc::strong_count(&conn));
+            trace!("conn strong count: {}", Arc::strong_count(&conn));
         }
 
         let mut nodes = Vec::new();
@@ -313,7 +313,7 @@ impl World {
         for weak_ptr in weak_ptrs {
             let node = weak_ptr.upgrade();
             if node.is_none() {
-                debug!("node is already deallocated");
+                trace!("node is already deallocated");
                 continue;
             }
             let node = node.unwrap();

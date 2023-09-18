@@ -4660,6 +4660,7 @@ dependencies = [
  "rand",
  "regex",
  "safekeeper",
+ "scopeguard",
  "serde",
  "thiserror",
  "tracing",

@@ -20,7 +20,7 @@ use crate::{
     simtest::{
         log::{init_logger, SimClock},
         safekeeper::run_server,
-        util::{generate_schedule, TestConfig, generate_network_opts},
+        util::{generate_schedule, TestConfig, generate_network_opts, validate_events},
     }, enable_debug,
 };
 
@@ -60,9 +60,8 @@ fn run_walproposer_generate_wal() {
     test.poll_for_duration(30);
 
     for i in 0..100 {
-        wp.write_tx();
+        wp.write_tx(1);
         test.poll_for_duration(5);
-        wp.update();
     }
 }
 
@@ -80,19 +79,13 @@ fn crash_safekeeper() {
     let mut wp = test.launch_walproposer(lsn);
 
     test.poll_for_duration(30);
-    wp.update();
 
-    wp.write_tx();
-    wp.write_tx();
-    wp.write_tx();
+    wp.write_tx(3);
 
     test.servers[0].restart();
 
     test.poll_for_duration(100);
-    wp.update();
-
     test.poll_for_duration(1000);
-    wp.update();
 }
 
 #[test]
@@ -109,13 +102,9 @@ fn test_simple_restart() {
     let mut wp = test.launch_walproposer(lsn);
 
     test.poll_for_duration(30);
-    wp.update();
 
-    wp.write_tx();
-    wp.write_tx();
-    wp.write_tx();
+    wp.write_tx(3);
     test.poll_for_duration(100);
-    wp.update();
 
     wp.stop();
     drop(wp);
@@ -207,8 +196,8 @@ fn test_random_schedules() -> anyhow::Result<()> {
         warn!("Running test with seed {}", seed);
 
         let schedule = generate_schedule(seed);
-        test.run_schedule(&schedule)?;
-
+        test.run_schedule(&schedule).unwrap();
+        validate_events(test.world.take_events());
         test.world.deallocate();
     }
 
@@ -231,7 +220,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // test.run_schedule(&schedule)?;
     // test.world.deallocate();
 
-    let seed = 11245530003696902397;
+    let seed = 3649773280641776194;
     config.network = generate_network_opts(seed);
     info!("network: {:?}", config.network);
     let test = config.start(seed);
@@ -240,6 +229,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     let schedule = generate_schedule(seed);
     info!("schedule: {:?}", schedule);
     test.run_schedule(&schedule).unwrap();
+    validate_events(test.world.take_events());
     test.world.deallocate();
 
     Ok(())
