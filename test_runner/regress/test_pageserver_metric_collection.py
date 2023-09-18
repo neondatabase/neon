@@ -1,5 +1,7 @@
 import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from queue import SimpleQueue
 from typing import Any, Dict, Set
 
@@ -250,19 +252,11 @@ def test_metric_collection_cleans_up_tempfile(
 
     env.pageserver.stop()
 
-    matching = []
-    other_files = set()
-    for entry in env.pageserver.workdir.iterdir():
-        if not entry.is_file():
-            continue
+    initially = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
 
-        if not entry.name.startswith("last_consumption_metrics.json"):
-            other_files.add(entry.name)
-            continue
-
-        matching.append(entry.name)
-
-    assert len(matching) == 2, f"expecting actual file and tempfile, but not found: {matching}"
+    assert (
+        len(initially.matching) == 2
+    ), f"expecting actual file and tempfile, but not found: {initially.matching}"
 
     uploads.put("ready")
     env.pageserver.start()
@@ -276,24 +270,42 @@ def test_metric_collection_cleans_up_tempfile(
 
     env.pageserver.stop()
 
-    matching = []
-    for entry in env.pageserver.workdir.iterdir():
+    later = iterate_pageserver_workdir(env.pageserver.workdir, "last_consumption_metrics.json")
+
+    # it is possible we shutdown the pageserver right at the correct time, so the old tempfile
+    # is gone, but we also have a new one.
+    only = set(["last_consumption_metrics.json"])
+    assert (
+        initially.matching.intersection(later.matching) == only
+    ), "only initial tempfile should had been removed"
+    assert initially.other.issuperset(later.other), "no other files should had been removed"
+
+
+@dataclass
+class PrefixPartitionedFiles:
+    matching: Set[str]
+    other: Set[str]
+
+
+def iterate_pageserver_workdir(path: Path, prefix: str) -> PrefixPartitionedFiles:
+    """
+    Iterates the files in the workdir, returns two sets:
+    - files with the prefix
+    - files without the prefix
+    """
+
+    matching = set()
+    other = set()
+    for entry in path.iterdir():
         if not entry.is_file():
             continue
 
-        if not entry.name.startswith("last_consumption_metrics.json"):
-            assert (
-                entry.name in other_files
-            ), f"some other file was created in directory: {entry.name}"
-            other_files.remove(entry.name)
-            continue
+        if not entry.name.startswith(prefix):
+            other.add(entry.name)
+        else:
+            matching.add(entry.name)
 
-        matching.append(entry.name)
-
-    assert len(matching) == 1, "expected the tempfile to be deleted"
-    assert (
-        len(other_files) == 0
-    ), f"expected to find all other files in directory, but missing: {other_files}"
+    return PrefixPartitionedFiles(matching, other)
 
 
 class MetricsVerifier:
