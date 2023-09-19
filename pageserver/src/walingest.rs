@@ -151,56 +151,50 @@ impl<'a> WalIngest<'a> {
                     }
                 }
             } else if self.timeline.pg_version == 15 {
-                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
-                {
-                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY
-                {
-                    // The XLOG record was renamed between v14 and v15,
-                    // but the record format is the same.
-                    // So we can reuse XlCreateDatabase here.
-                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
-                    let createdb = XlCreateDatabase::decode(&mut buf);
-                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
-                        .await?;
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
-                {
-                    let dropdb = XlDropDatabase::decode(&mut buf);
-                    for tablespace_id in dropdb.tablespace_ids {
-                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification
-                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                match decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK {
+                    postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
+                    | postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY => {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
                             .await?;
                     }
+                    postgres_ffi::v15::bindings::XLOG_DBASE_DROP => {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                    _ => {}
                 }
             } else if self.timeline.pg_version == 16 {
-                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG
-                {
-                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY
-                {
-                    // The XLOG record was renamed between v14 and v15,
-                    // but the record format is the same.
-                    // So we can reuse XlCreateDatabase here.
-                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
-                    let createdb = XlCreateDatabase::decode(&mut buf);
-                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
-                        .await?;
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_DROP
-                {
-                    let dropdb = XlDropDatabase::decode(&mut buf);
-                    for tablespace_id in dropdb.tablespace_ids {
-                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification
-                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                match decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK {
+                    postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG
+                    | postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY => {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
                             .await?;
                     }
+                    postgres_ffi::v16::bindings::XLOG_DBASE_DROP => {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                    _ => {}
                 }
             }
         } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
