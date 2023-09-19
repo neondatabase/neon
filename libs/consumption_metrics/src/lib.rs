@@ -3,9 +3,9 @@
 //!
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]
@@ -27,7 +27,8 @@ impl EventType {
     }
 
     pub fn incremental_timerange(&self) -> Option<std::ops::Range<&DateTime<Utc>>> {
-        // these can most likely be thought of as Range or RangeFull
+        // these can most likely be thought of as Range or RangeFull, at least pageserver creates
+        // incremental ranges where the stop and next start are equal.
         use EventType::*;
         match self {
             Incremental {
@@ -41,15 +42,25 @@ impl EventType {
     pub fn is_incremental(&self) -> bool {
         matches!(self, EventType::Incremental { .. })
     }
+
+    /// Returns the absolute time, or for incremental ranges, the stop time.
+    pub fn recorded_at(&self) -> &DateTime<Utc> {
+        use EventType::*;
+
+        match self {
+            Absolute { time } => time,
+            Incremental { stop_time, .. } => stop_time,
+        }
+    }
 }
 
-#[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Event<Extra> {
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Event<Extra, Metric> {
     #[serde(flatten)]
     #[serde(rename = "type")]
     pub kind: EventType,
 
-    pub metric: &'static str,
+    pub metric: Metric,
     pub idempotency_key: String,
     pub value: u64,
 
@@ -58,12 +69,38 @@ pub struct Event<Extra> {
 }
 
 pub fn idempotency_key(node_id: &str) -> String {
-    format!(
-        "{}-{}-{:04}",
-        Utc::now(),
-        node_id,
-        rand::thread_rng().gen_range(0..=9999)
-    )
+    IdempotencyKey::generate(node_id).to_string()
+}
+
+/// Downstream users will use these to detect upload retries.
+pub struct IdempotencyKey<'a> {
+    now: chrono::DateTime<Utc>,
+    node_id: &'a str,
+    nonce: u16,
+}
+
+impl std::fmt::Display for IdempotencyKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}-{:04}", self.now, self.node_id, self.nonce)
+    }
+}
+
+impl<'a> IdempotencyKey<'a> {
+    pub fn generate(node_id: &'a str) -> Self {
+        IdempotencyKey {
+            now: Utc::now(),
+            node_id,
+            nonce: rand::thread_rng().gen_range(0..=9999),
+        }
+    }
+
+    pub fn for_tests(now: DateTime<Utc>, node_id: &'a str, nonce: u16) -> Self {
+        IdempotencyKey {
+            now,
+            node_id,
+            nonce,
+        }
+    }
 }
 
 pub const CHUNK_SIZE: usize = 1000;

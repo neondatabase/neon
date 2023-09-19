@@ -135,7 +135,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
 
     tenant_id = env.initial_tenant
 
-    timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
+    timelines_dir = env.pageserver.timeline_dir(tenant_id)
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
@@ -166,7 +166,7 @@ def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilde
 
     tenant_id = env.initial_tenant
 
-    timelines_dir = env.pageserver.workdir / "tenants" / str(tenant_id) / "timelines"
+    timelines_dir = env.pageserver.timeline_dir(tenant_id)
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 

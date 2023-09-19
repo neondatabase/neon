@@ -44,7 +44,7 @@ def measure_recovery_time(env: NeonCompare):
 
     # Stop pageserver and remove tenant data
     env.env.pageserver.stop()
-    timeline_dir = env.env.timeline_dir(env.tenant, env.timeline)
+    timeline_dir = env.env.pageserver.timeline_dir(env.tenant, env.timeline)
     shutil.rmtree(timeline_dir)
 
     # Start pageserver

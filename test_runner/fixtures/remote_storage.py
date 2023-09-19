@@ -115,6 +115,8 @@ class S3Storage:
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
+    """Is this MOCK_S3 (false) or REAL_S3 (true)"""
+    real: bool
     endpoint: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
@@ -265,6 +267,7 @@ class RemoteStorageKind(str, enum.Enum):
                 prefix_in_bucket="",
                 client=client,
                 cleanup=False,
+                real=False,
             )
 
         assert self == RemoteStorageKind.REAL_S3
@@ -300,6 +303,7 @@ class RemoteStorageKind(str, enum.Enum):
             prefix_in_bucket=prefix_in_bucket,
             client=client,
             cleanup=True,
+            real=True,
         )
 
 

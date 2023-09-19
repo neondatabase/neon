@@ -119,65 +119,6 @@ def test_tenant_reattach(
 
 num_connections = 10
 num_rows = 100000
-updates_to_perform = 0
-
-updates_started = 0
-updates_finished = 0
-
-
-# Run random UPDATEs on test table. On failure, try again.
-async def update_table(pg_conn: asyncpg.Connection):
-    global updates_started, updates_finished, updates_to_perform
-
-    while updates_started < updates_to_perform or updates_to_perform == 0:
-        updates_started += 1
-        id = random.randrange(1, num_rows)
-
-        # Loop to retry until the UPDATE succeeds
-        while True:
-            try:
-                await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
-                updates_finished += 1
-                if updates_finished % 1000 == 0:
-                    log.info(f"update {updates_finished} / {updates_to_perform}")
-                break
-            except asyncpg.PostgresError as e:
-                # Received error from Postgres. Log it, sleep a little, and continue
-                log.info(f"UPDATE error: {e}")
-                await asyncio.sleep(0.1)
-
-
-async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
-    global updates_started, updates_finished, updates_to_perform
-
-    # Wait until we have performed some updates
-    wait_until(20, 0.5, lambda: updates_finished > 500)
-
-    log.info("Detaching tenant")
-    pageserver_http.tenant_detach(tenant_id)
-    await asyncio.sleep(1)
-    log.info("Re-attaching tenant")
-    pageserver_http.tenant_attach(tenant_id)
-    log.info("Re-attach finished")
-
-    # Continue with 5000 more updates
-    updates_to_perform = updates_started + 5000
-
-
-# async guts of test_tenant_reattach_while_bysy test
-async def reattach_while_busy(
-    env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
-):
-    workers = []
-    for _ in range(num_connections):
-        pg_conn = await endpoint.connect_async()
-        workers.append(asyncio.create_task(update_table(pg_conn)))
-
-    workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
-    await asyncio.gather(*workers)
-
-    assert updates_finished == updates_to_perform
-
 
 # Detach and re-attach tenant, while compute is busy running queries.
 #
@@ -226,6 +167,62 @@ def test_tenant_reattach_while_busy(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
+    updates_started = 0
+    updates_finished = 0
+    updates_to_perform = 0
+
+    # Run random UPDATEs on test table. On failure, try again.
+    async def update_table(pg_conn: asyncpg.Connection):
+        nonlocal updates_started, updates_finished, updates_to_perform
+
+        while updates_started < updates_to_perform or updates_to_perform == 0:
+            updates_started += 1
+            id = random.randrange(1, num_rows)
+
+            # Loop to retry until the UPDATE succeeds
+            while True:
+                try:
+                    await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
+                    updates_finished += 1
+                    if updates_finished % 1000 == 0:
+                        log.info(f"update {updates_finished} / {updates_to_perform}")
+                    break
+                except asyncpg.PostgresError as e:
+                    # Received error from Postgres. Log it, sleep a little, and continue
+                    log.info(f"UPDATE error: {e}")
+                    await asyncio.sleep(0.1)
+
+    async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
+        nonlocal updates_started, updates_finished, updates_to_perform
+
+        # Wait until we have performed some updates
+        wait_until(20, 0.5, lambda: updates_finished > 500)
+
+        log.info("Detaching tenant")
+        pageserver_http.tenant_detach(tenant_id)
+        await asyncio.sleep(1)
+        log.info("Re-attaching tenant")
+        pageserver_http.tenant_attach(tenant_id)
+        log.info("Re-attach finished")
+
+        # Continue with 5000 more updates
+        updates_to_perform = updates_started + 5000
+
+    # async guts of test_tenant_reattach_while_bysy test
+    async def reattach_while_busy(
+        env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
+    ):
+        nonlocal updates_to_perform, updates_finished
+        workers = []
+        for _ in range(num_connections):
+            pg_conn = await endpoint.connect_async()
+            workers.append(asyncio.create_task(update_table(pg_conn)))
+
+        workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
+        await asyncio.gather(*workers)
+
+        assert updates_finished == updates_to_perform
+
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
     env = neon_env_builder.init_start()
 
@@ -289,7 +286,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -332,7 +329,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("gc thread returned")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     with pytest.raises(
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
@@ -357,7 +354,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -386,7 +383,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     log.info("ignored tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
@@ -413,7 +410,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     )
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -430,7 +427,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     log.info("regular tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
@@ -531,7 +528,7 @@ def test_ignored_tenant_reattach(
     pageserver_http = env.pageserver.http_client()
 
     ignored_tenant_id, _ = env.neon_cli.create_tenant()
-    tenant_dir = env.pageserver.workdir / "tenants" / str(ignored_tenant_id)
+    tenant_dir = env.pageserver.tenant_dir(ignored_tenant_id)
     tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_before_ignore.sort()
     timelines_before_ignore = [
@@ -622,7 +619,7 @@ def test_ignored_tenant_download_missing_layers(
 
     # ignore the tenant and remove its layers
     pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
     layers_removed = False
     for dir_entry in timeline_dir.iterdir():
         if dir_entry.name.startswith("00000"):
@@ -675,7 +672,7 @@ def test_ignored_tenant_stays_broken_without_metadata(
 
     # ignore the tenant and remove its metadata
     pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
     metadata_removed = False
     for dir_entry in timeline_dir.iterdir():
         if dir_entry.name == "metadata":
