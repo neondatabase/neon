@@ -471,7 +471,7 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn).await {
+        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
@@ -2518,13 +2518,18 @@ impl Timeline {
         }
     }
 
-    async fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    async fn lookup_cached_page(
+        &self,
+        key: &Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)
+            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn, ctx)
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -2558,10 +2563,16 @@ impl Timeline {
         Ok(layer)
     }
 
-    async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
+    async fn put_value(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        val: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val).await?;
+        layer.put_value(key, lsn, val, ctx).await?;
         Ok(())
     }
 
@@ -2733,7 +2744,7 @@ impl Timeline {
                 // Normal case, write out a L0 delta layer file.
                 // `create_delta_layer` will not modify the layer map.
                 // We will remove frozen layer and add delta layer in one atomic operation later.
-                let layer = self.create_delta_layer(&frozen_layer).await?;
+                let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
                 (
                     HashMap::from([(
                         layer.filename(),
@@ -2856,19 +2867,21 @@ impl Timeline {
     async fn create_delta_layer(
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<DeltaLayer> {
         let span = tracing::info_span!("blocking");
         let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
             let frozen_layer = Arc::clone(frozen_layer);
+            let ctx = ctx.attached_child();
             move || {
                 // Write it out
                 // Keep this inside `spawn_blocking` and `Handle::current`
                 // as long as the write path is still sync and the read impl
                 // is still not fully async. Otherwise executor threads would
                 // be blocked.
-                let new_delta = Handle::current().block_on(frozen_layer.write_to_disk())?;
+                let new_delta = Handle::current().block_on(frozen_layer.write_to_disk(&ctx))?;
                 let new_delta_path = new_delta.path();
 
                 // Sync it to disk.
@@ -3574,7 +3587,7 @@ impl Timeline {
             key, lsn, ref val, ..
         } in all_values_iter
         {
-            let value = val.load().await?;
+            let value = val.load(ctx).await?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -4699,8 +4712,14 @@ impl<'a> TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    pub async fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value).await
+    pub async fn put(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        value: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.tl.put_value(key, lsn, value, ctx).await
     }
 
     pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {

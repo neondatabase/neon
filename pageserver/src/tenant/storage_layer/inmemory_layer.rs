@@ -106,7 +106,7 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
-    pub async fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
@@ -125,7 +125,7 @@ impl InMemoryLayer {
         for (key, vec_map) in inner.index.iter() {
             for (lsn, pos) in vec_map.as_slice() {
                 let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf).await?;
+                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                 let val = Value::des(&buf);
                 match val {
                     Ok(Value::Image(img)) => {
@@ -158,7 +158,7 @@ impl InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
@@ -171,7 +171,7 @@ impl InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos).await?;
+                let buf = reader.read_blob(*pos, ctx).await?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
@@ -263,7 +263,13 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> Result<()> {
+    pub async fn put_value(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        val: &Value,
+        ctx: &RequestContext,
+    ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
         let inner: &mut _ = &mut *self.inner.write().await;
         self.assert_writable();
@@ -275,7 +281,7 @@ impl InMemoryLayer {
             let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
             buf.clear();
             val.ser_into(&mut buf)?;
-            inner.file.write_blob(&buf).await?
+            inner.file.write_blob(&buf, ctx).await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
@@ -313,7 +319,7 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(&self) -> Result<DeltaLayer> {
+    pub(crate) async fn write_to_disk(&self, ctx: &RequestContext) -> Result<DeltaLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -347,7 +353,7 @@ impl InMemoryLayer {
             let key = **key;
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf).await?;
+                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 delta_layer_writer
                     .put_value_bytes(key, *lsn, &buf, will_init)

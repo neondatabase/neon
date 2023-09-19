@@ -4,6 +4,7 @@
 
 use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
+use crate::context::RequestContext;
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
@@ -82,12 +83,16 @@ pub(crate) enum BlockReaderRef<'a> {
 
 impl<'a> BlockReaderRef<'a> {
     #[inline(always)]
-    async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
-            FileBlockReader(r) => r.read_blk(blknum).await,
-            EphemeralFile(r) => r.read_blk(blknum).await,
-            Adapter(r) => r.read_blk(blknum).await,
+            FileBlockReader(r) => r.read_blk(blknum, ctx).await,
+            EphemeralFile(r) => r.read_blk(blknum, ctx).await,
+            Adapter(r) => r.read_blk(blknum, ctx).await,
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
@@ -134,8 +139,12 @@ impl<'a> BlockCursor<'a> {
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     #[inline(always)]
-    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.reader.read_blk(blknum).await
+    pub async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum, ctx).await
     }
 }
 
@@ -169,11 +178,15 @@ impl FileBlockReader {
     /// Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
-    pub async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    pub async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
         loop {
             match cache
-                .read_immutable_buf(self.file_id, blknum)
+                .read_immutable_buf(self.file_id, blknum, ctx)
                 .await
                 .map_err(|e| {
                     std::io::Error::new(
