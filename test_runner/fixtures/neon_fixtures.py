@@ -2758,6 +2758,20 @@ class Safekeeper:
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
 
+    def timeline_dir(self, tenant_id, timeline_id) -> str:
+        return os.path.join(self.data_dir(), str(tenant_id), str(timeline_id))
+
+    def list_segments(self, tenant_id, timeline_id) -> List[str]:
+        """
+        Get list of segment names of the given timeline.
+        """
+        tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        segments = []
+        for _, _, filenames in os.walk(tli_dir):
+            segments.extend([f for f in filenames if f != "safekeeper.control"])
+        segments.sort()
+        return segments
+
 
 @dataclass
 class SafekeeperTimelineStatus:

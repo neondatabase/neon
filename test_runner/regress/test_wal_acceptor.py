@@ -1,3 +1,4 @@
+import filecmp
 import os
 import pathlib
 import random
@@ -1060,7 +1061,36 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
         partial(is_flush_lsn_aligned, sk1_http_cli, sk2_http_cli, tenant_id, timeline_id),
         "flush_lsn to get aligned",
     )
-    # stop one of safekeepers which weren't recovering and insert a bit more
+
+    # check that WALs are identic after recovery
+    segs = sk1.list_segments(tenant_id, timeline_id)
+    log.info(f"segs are {segs}")
+
+    (_, mismatch, not_regular) = filecmp.cmpfiles(
+        sk1.timeline_dir(tenant_id, timeline_id),
+        sk2.timeline_dir(tenant_id, timeline_id),
+        segs,
+        shallow=False,
+    )
+    log.info(
+        f"filecmp result mismatch and not regular files:\n\t mismatch={mismatch}\n\t not_regular={not_regular}"
+    )
+
+    for f in mismatch:
+        f1 = os.path.join(sk1.timeline_dir(tenant_id, timeline_id), f)
+        f2 = os.path.join(sk2.timeline_dir(tenant_id, timeline_id), f)
+        stdout_filename = "{}.filediff".format(f2)
+
+        with open(stdout_filename, "w") as stdout_f:
+            subprocess.run("xxd {} > {}.hex ".format(f1, f1), shell=True)
+            subprocess.run("xxd {} > {}.hex ".format(f2, f2), shell=True)
+
+            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            subprocess.run([cmd], stdout=stdout_f, shell=True)
+
+    assert (mismatch, not_regular) == ([], [])
+
+    # stop one of safekeepers which weren't recovering and insert a bit more to check we can commit
     env.safekeepers[2].stop()
     endpoint = env.endpoints.create_start("test_peer_recovery")
     endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
