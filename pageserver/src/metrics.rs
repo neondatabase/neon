@@ -129,10 +129,8 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
 
 pub struct PageCacheMetrics {
     pub read_accesses_materialized_page: IntCounter,
-    pub read_accesses_ephemeral: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
-    pub read_hits_ephemeral: IntCounter,
     pub read_hits_immutable: IntCounter,
     pub read_hits_materialized_page_exact: IntCounter,
     pub read_hits_materialized_page_older_lsn: IntCounter,
@@ -163,21 +161,9 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
             .unwrap()
     },
 
-    read_accesses_ephemeral: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["ephemeral"])
-            .unwrap()
-    },
-
     read_accesses_immutable: {
         PAGE_CACHE_READ_ACCESSES
             .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
-
-    read_hits_ephemeral: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["ephemeral", "-"])
             .unwrap()
     },
 
