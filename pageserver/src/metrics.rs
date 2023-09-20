@@ -167,7 +167,7 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
             .unwrap()
     },
 
-   read_hits_immutable: {
+    read_hits_immutable: {
         PAGE_CACHE_READ_HITS
             .get_metric_with_label_values(&["immutable", "-"])
             .unwrap()
