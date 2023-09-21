@@ -226,7 +226,7 @@ where
                     content[offs..offs + 8].try_into().unwrap(),
                 ));
                 min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
-                let header = new_tar_header(&path, 0)?;
+                let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
                     .append(&header, &*content)
                     .await
