@@ -779,7 +779,6 @@ impl<'a> WalIngest<'a> {
                     }
                     pg_constants::XLOG_NEON_HEAP_DELETE => {
                         let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
