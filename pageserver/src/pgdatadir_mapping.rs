@@ -803,7 +803,6 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
-        assert!(spcnode != 0);
         let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
