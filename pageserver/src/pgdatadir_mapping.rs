@@ -573,7 +573,7 @@ impl Timeline {
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
-        for &(spcnode, dbnode) in &dbs {
+        for (spcnode, dbnode) in dbs {
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
@@ -630,7 +630,9 @@ impl Timeline {
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
 
-        for &(_spcnode, dbnode) in &dbs {
+        let mut dbs: Vec<Oid> = dbdir.dbdirs.keys().map(|pair| pair.1).collect();
+        dbs.sort_unstable();
+        for dbnode in dbs {
             result.add_key(aux_files_key(dbnode));
         }
 
@@ -1621,7 +1623,7 @@ fn twophase_key_range(xid: TransactionId) -> Range<Key> {
 
 fn aux_files_key(db_id: Oid) -> Key {
     Key {
-        field1: 4,
+        field1: 0x04,
         field2: 0,
         field3: db_id,
         field4: 0,
@@ -1632,14 +1634,14 @@ fn aux_files_key(db_id: Oid) -> Key {
 
 fn aux_files_key_range(db_id: Oid) -> Range<Key> {
     Key {
-        field1: 4,
+        field1: 0x04,
         field2: 0,
         field3: db_id,
         field4: 0,
         field5: 0,
         field6: 0,
     }..Key {
-        field1: 4,
+        field1: 0x04,
         field2: 0,
         field3: db_id,
         field4: 0,
