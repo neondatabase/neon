@@ -49,7 +49,7 @@ if __name__ == "__main__":
         "--pageserver-connstr",
         dest="pageserver_connstr",
         required=True,
-        help="libpq connections tring of the pageserver",
+        help="libpq connection string of the pageserver",
     )
     parser.add_argument(
         "--output",
