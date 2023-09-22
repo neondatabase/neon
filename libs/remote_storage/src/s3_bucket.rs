@@ -144,7 +144,7 @@ impl S3Bucket {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
         let path_string = path
             .get_path()
-            .to_string_lossy()
+            .to_string()
             .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
             .to_string();
         match &self.prefix_in_bucket {
@@ -566,8 +566,8 @@ fn start_measuring_requests(
 
 #[cfg(test)]
 mod tests {
+    use camino::Utf8Path;
     use std::num::NonZeroUsize;
-    use std::path::Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
 
@@ -576,7 +576,7 @@ mod tests {
         let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
-            .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
+            .map(|x| RemotePath::new(Utf8Path::new(x)).expect("bad path"))
             .collect();
         let prefixes = [
             None,
