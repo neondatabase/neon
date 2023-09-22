@@ -1549,7 +1549,7 @@ mod tests {
 
     /// Arbitrary relation tag, for testing.
     const TESTREL_A: RelTag = RelTag {
-        spcnode: 0,
+        spcnode: 123,
         dbnode: 111,
         relnode: 1000,
         forknum: 0,
