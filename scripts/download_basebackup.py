@@ -18,12 +18,13 @@ def main(args: argparse.Namespace):
     output_path = args.output_path
 
     psconn: PgConnection = psycopg2.connect(pageserver_connstr)
-    psconn.autocommit=True
+    psconn.autocommit = True
 
     output = open(output_path, "wb")
 
     with psconn.cursor() as pscur:
         pscur.copy_expert(f"basebackup {tenant_id} {timeline_id} {lsn}", output)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
