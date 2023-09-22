@@ -387,7 +387,6 @@ lfc_init(void)
 							&lfc_enabled,
 							true, /* enabled by default */
 							PGC_POSTMASTER,
-							0,
 							NULL,
 							lfc_change_state,
 							NULL);
