@@ -574,6 +574,7 @@ impl Timeline {
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
         for (spcnode, dbnode) in dbs {
+            result.add_key(aux_files_key(dbnode));
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
@@ -799,6 +800,7 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
+        assert!(spcnode != 0);
         let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
@@ -893,6 +895,9 @@ impl<'a> DatadirModification<'a> {
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
+
+        // Delete aux files (replications slots, snapshots,...)
+        self.delete(aux_files_key_range(dbnode));
         Ok(())
     }
 
@@ -1346,6 +1351,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 00 Relation data and metadata
 //
 //   DbDir    () -> (dbnode, spcnode)
+//   AuxFiles () -> (dbnode)
 //   Filenodemap
 //   RelDir   -> relnode forknum
 //       RelBlocks
@@ -1364,12 +1370,13 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //    checkpoint
 //    pg_version
 //
-// 04 aux_files (replication slots, snapshots, mappings, ...)
-//
 // Below is a full list of the keyspace allocation:
 //
 // DbDir:
 // 00 00000000 00000000 00000000 00   00000000
+//
+// AuxFile:
+// 00 00000000 DBNODE   00000000 00   00000000
 //
 // Filenodemap:
 // 00 SPCNODE  DBNODE   00000000 00   00000000
@@ -1404,8 +1411,6 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
 //
-// Aux-files:
-// 04 00000000 DBNODE 00000000 00   00000000
 
 //-- Section 01: relation data and metadata
 
@@ -1613,12 +1618,30 @@ fn twophase_key_range(xid: TransactionId) -> Range<Key> {
 
 fn aux_files_key(db_id: Oid) -> Key {
     Key {
-        field1: 0x04,
+        field1: 0,
         field2: 0,
         field3: db_id,
         field4: 0,
         field5: 0,
         field6: 0,
+    }
+}
+
+fn aux_files_key_range(db_id: Oid) -> Key {
+    Key {
+        field1: 0,
+        field2: 0,
+        field3: db_id,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: 0,
+        field2: 0,
+        field3: db_id,
+        field4: 0,
+        field5: 0,
+        field6: 1,
     }
 }
 
