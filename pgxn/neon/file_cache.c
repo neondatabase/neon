@@ -661,9 +661,6 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
-		return;
-
 	if (!lfc_is_enabled()) /* fast exit if file cache is disabled */
 		return;
 

@@ -1,17 +1,11 @@
-import os
-import pathlib
 import random
-import signal
 import threading
 import time
+from typing import List
 
-from psycopg2.extensions import connection as PgConnection
-
-import pytest
-from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
-from fixtures.pg_version import PgVersion
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import query_scalar
+
 
 def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -35,7 +29,7 @@ def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
     n_total_updates = n_threads * n_updates_per_thread
 
     cur.execute("CREATE TABLE lfctest (id int4 PRIMARY KEY, n int) WITH (fillfactor=10)")
-    cur.execute(f"INSERT INTO lfctest SELECT g, 1 FROM generate_series(1, {n_rows}) g");
+    cur.execute(f"INSERT INTO lfctest SELECT g, 1 FROM generate_series(1, {n_rows}) g")
 
     # Start threads that will perform random UPDATEs. Each UPDATE
     # increments the counter on the row, so that we can check at the
@@ -49,7 +43,7 @@ def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
         cur = conn.cursor()
         for _ in range(n_updates_per_thread):
             id = random.randint(1, n_rows)
-            cur.execute(f"UPDATE lfctest SET n = n + 1 WHERE id = {id}");
+            cur.execute(f"UPDATE lfctest SET n = n + 1 WHERE id = {id}")
             n_updates_performed += 1
             if n_updates_performed % n_updates_per_connection == 0:
                 cur.close()
@@ -58,7 +52,7 @@ def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
                 cur = conn.cursor()
 
     threads: List[threading.Thread] = []
-    for i in range(n_threads):
+    for _i in range(n_threads):
         thread = threading.Thread(target=run_updates, args=(), daemon=True)
         thread.start()
         threads.append(thread)
