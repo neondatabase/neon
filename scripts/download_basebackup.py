@@ -55,7 +55,6 @@ if __name__ == "__main__":
         "--output",
         dest="output_path",
         required=True,
-        default="basebackup.tar",
         help="output path to write the basebackup to",
     )
     args = parser.parse_args()
