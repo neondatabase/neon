@@ -381,15 +381,16 @@ lfc_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		elog(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
-	DefineCustomIntVariable("neon.local_file_cache",
-							"Enable ort disable local file cache",
-							NULL,
-							&lfc_enabled,
-							true, /* enabled by default */
-							PGC_POSTMASTER,
-							NULL,
-							lfc_change_state,
-							NULL);
+	DefineCustomBoolVariable("neon.local_file_cache",
+							 "Enable ort disable local file cache",
+							 NULL,
+							 &lfc_enabled,
+							 true, /* enabled by default */
+							 PGC_POSTMASTER,
+							 0,
+							 NULL,
+							 lfc_change_state,
+							 NULL);
 
 	DefineCustomIntVariable("neon.max_file_cache_size",
 							"Maximal size of Neon local file cache",
