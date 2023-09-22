@@ -573,8 +573,10 @@ impl Timeline {
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
-        for (spcnode, dbnode) in dbs {
+        for &(_spcnode, dbnode) in &dbs {
             result.add_key(aux_files_key(dbnode));
+        }
+        for (spcnode, dbnode) in dbs {
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
