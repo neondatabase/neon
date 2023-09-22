@@ -630,25 +630,27 @@ impl ComputeNode {
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip_all)]
-    pub fn start_postgres(
-        &self,
-        storage_auth_token: Option<String>,
-    ) -> Result<std::process::Child> {
+    pub fn start_postgres(&self, pspec: &ParsedSpec) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
+        let spec = &pspec.spec;
         // Run postgres as a child process.
-        let mut pg = maybe_cgexec(&self.pgbin)
-            .args(["-D", &self.pgdata])
-            .envs(if let Some(storage_auth_token) = &storage_auth_token {
-                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
-            } else {
-                vec![]
-            })
-            .spawn()
-            .expect("cannot start postgres process");
+        let mut pg_command = maybe_cgexec(&self.pgbin);
+        pg_command.args(["-D", &self.pgdata]);
 
+        if let Some(storage_auth_token) = &spec.storage_auth_token {
+            pg_command.env("NEON_AUTH_TOKEN", storage_auth_token);
+        }
+        if let Some(env_vars) = &spec.env_vars {
+            pg_command.envs(
+                env_vars
+                    .iter()
+                    .map(|(k, v)| (k, v.clone().unwrap_or(String::new()))),
+            );
+        }
+
+        let mut pg = pg_command.spawn().expect("cannot start postgres process");
         wait_for_postgres(&mut pg, pgdata_path)?;
-
         Ok(pg)
     }
 
@@ -797,7 +799,7 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
-        let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
+        let pg = self.start_postgres(&pspec)?;
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {

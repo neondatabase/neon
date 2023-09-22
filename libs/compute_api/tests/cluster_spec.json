@@ -243,5 +243,9 @@
         "public_extensions": [
           "postgis"
         ]
-      }
+    },
+    "env_vars": {
+        "OPENAI_API_KEY" : "i hope heikki has a good day today",
+        "MY_NULL_ENV_VAR" : null
+    }
 }

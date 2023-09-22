@@ -58,7 +58,6 @@ pub struct ComputeSpec {
     pub pageserver_connstring: Option<String>,
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
-
     #[serde(default)]
     pub mode: ComputeMode,
 
@@ -68,6 +67,9 @@ pub struct ComputeSpec {
 
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
+
+    // Environment variables to set on the compute
+    pub env_vars: Option<HashMap<String, Option<String>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
