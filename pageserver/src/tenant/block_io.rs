@@ -110,11 +110,13 @@ impl<'a> BlockReaderRef<'a> {
 ///
 /// ```no_run
 /// # use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
+/// # use pageserver::context::RequestContext;
 /// # let reader: FileBlockReader = unimplemented!("stub");
+/// # let ctx: RequestContext = unimplemented!("stub");
 /// let cursor = reader.block_cursor();
-/// let buf = cursor.read_blk(1);
+/// let buf = cursor.read_blk(1, &ctx);
 /// // do stuff with 'buf'
-/// let buf = cursor.read_blk(2);
+/// let buf = cursor.read_blk(2, &ctx);
 /// // do stuff with 'buf'
 /// ```
 ///
