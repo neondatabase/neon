@@ -799,7 +799,7 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
-        let pg = self.start_postgres(&pspec)?;
+        let pg = self.start_postgres(pspec)?;
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
