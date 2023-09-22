@@ -32,7 +32,7 @@ use utils::measured_stream::MeasuredStream;
 pub const NUM_RETRIES_CONNECT: u32 = 16;
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(25);
-const RETRY_WAIT_EXPONENT_BASE: f64 = 1.4142135624; // sqrt(2)
+const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
