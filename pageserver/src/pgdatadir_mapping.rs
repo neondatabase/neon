@@ -1627,7 +1627,7 @@ fn aux_files_key(db_id: Oid) -> Key {
     }
 }
 
-fn aux_files_key_range(db_id: Oid) -> Key {
+fn aux_files_key_range(db_id: Oid) -> Range<Key> {
     Key {
         field1: 0,
         field2: 0,

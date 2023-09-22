@@ -72,7 +72,9 @@ pub async fn import_timeline_from_postgres_datadir(
             let mut file = tokio::fs::File::open(absolute_path).await?;
             let len = metadata.len() as usize;
             if let Some(control_file) =
-                import_file(&mut modification, relative_path, &mut file, len, ctx).await?
+                import_file(&mut modification, relative_path, &mut file, len, ctx)
+                    .await
+                    .unwrap()
             {
                 pg_control = Some(control_file);
             }
@@ -355,7 +357,9 @@ pub async fn import_basebackup_from_tar(
         match header.entry_type() {
             tokio_tar::EntryType::Regular => {
                 if let Some(res) =
-                    import_file(&mut modification, file_path.as_ref(), &mut entry, len, ctx).await?
+                    import_file(&mut modification, file_path.as_ref(), &mut entry, len, ctx)
+                        .await
+                        .unwrap()
                 {
                     // We found the pg_control file.
                     pg_control = Some(res);
