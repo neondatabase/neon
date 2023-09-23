@@ -505,9 +505,11 @@ impl Timeline {
         db_id: Oid,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        let buf = self.get(aux_files_key(db_id), lsn, ctx).await?;
-        match AuxFilesDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.files),
+        match self.get(aux_files_key(db_id), lsn, ctx).await {
+            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                Ok(dir) => Ok(dir.files),
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
             Err(e) => {
                 warn!("Failed to get info about AUX files: {}", e);
                 Ok(HashMap::new())
