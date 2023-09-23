@@ -632,6 +632,7 @@ impl Timeline {
 
         let mut dbs: Vec<Oid> = dbdir.dbdirs.keys().map(|pair| pair.1).collect();
         dbs.sort_unstable();
+        dbs.dedup();
         for dbnode in dbs {
             result.add_key(aux_files_key(dbnode));
         }
