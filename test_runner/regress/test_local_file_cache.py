@@ -11,7 +11,6 @@ from fixtures.utils import query_scalar
 def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-
     cache_dir = os.path.join(env.repo_dir, "file_cache")
     os.mkdir(cache_dir)
 
