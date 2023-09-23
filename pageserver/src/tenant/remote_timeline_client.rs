@@ -1460,9 +1460,9 @@ pub fn remote_path(
         .strip_prefix(&conf.workdir)
         .context("Failed to strip workdir prefix")?;
 
-    let suffixed = format!("{0}{1}", stripped.to_string(), generation.get_suffix());
+    let suffixed = format!("{0}{1}", stripped, generation.get_suffix());
 
-    RemotePath::new(&Utf8Path::new(&suffixed)).with_context(|| {
+    RemotePath::new(Utf8Path::new(&suffixed)).with_context(|| {
         format!(
             "to resolve remote part of path {:?} for base {:?}",
             local_path, conf.workdir

@@ -8,7 +8,6 @@ use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
 use reqwest::Url;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tracing::*;

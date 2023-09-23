@@ -3263,7 +3263,7 @@ fn run_initdb(
     );
 
     let initdb_output = Command::new(&initdb_bin_path)
-        .args(["-D", &initdb_target_dir.to_string()])
+        .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
         .arg("--no-instructions")

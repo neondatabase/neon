@@ -143,7 +143,7 @@ impl PhysicalStorage {
             dispatch_pgversion!(
                 version,
                 pgv::xlog_utils::find_end_of_wal(
-                    &timeline_dir.as_std_path(),
+                    timeline_dir.as_std_path(),
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
