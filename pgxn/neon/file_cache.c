@@ -83,14 +83,13 @@ typedef struct FileCacheControl
 	uint64 generation; /* generation is needed to handle correct hash reenabling */
 	uint32 size; /* size of cache file in chunks */
 	uint32 used; /* number of used chunks */
-	bool   enabled; /* local file cache state */
+	uint32 limit; /* shared copy of lfc_size_limit */
 	dlist_head lru; /* double linked list for LRU replacement algorithm */
 } FileCacheControl;
 
 static HTAB* lfc_hash;
 static int   lfc_desc = 0;
 static LWLockId lfc_lock;
-static bool  lfc_enabled;
 static int   lfc_max_size;
 static int   lfc_size_limit;
 static int   lfc_free_space_watermark;
@@ -101,6 +100,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
+
+#define LFC_ENABLED() (lfc_ctl->limit != 0)
 
 void FileCacheMonitorMain(Datum main_arg);
 
@@ -126,7 +127,7 @@ lfc_disable(char const* op)
 	/* Invalidate hash */
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	if (lfc_ctl->enabled)
+	if (LFC_ENABLED())
 	{
 		HASH_SEQ_STATUS status;
 		FileCacheEntry* entry;
@@ -140,22 +141,25 @@ lfc_disable(char const* op)
 		lfc_ctl->generation += 1;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
-		lfc_ctl->enabled = false;
+		lfc_ctl->limit = 0;
 		dlist_init(&lfc_ctl->lru);
 	}
 	LWLockRelease(lfc_lock);
 }
 
+/*
+ * This check is done without granting lfc_lock, so it is unreliable
+ */
 static bool
-lfc_is_enabled(void)
+lfc_maybe_disabled(void)
 {
-	return lfc_ctl && lfc_ctl->enabled;
+	return !lfc_ctl || !LFC_ENABLED();
 }
 
 static bool
 lfc_ensure_opened(void)
 {
-	bool enabled = lfc_is_enabled();
+	bool enabled = !lfc_maybe_disabled();
 	/* Open cache file if not done yet */
 	if (lfc_desc <= 0 && enabled)
 	{
@@ -197,7 +201,7 @@ lfc_shmem_startup(void)
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
-		lfc_ctl->enabled = lfc_enabled;
+		lfc_ctl->limit = lfc_size_limit;
 		dlist_init(&lfc_ctl->lru);
 
 		/* Remove file cache on restart */
@@ -229,28 +233,6 @@ is_normal_backend(void)
 	return lfc_ctl && MyProc && UsedShmemSegAddr && !IsParallelWorker();
 }
 
-static void
-lfc_change_state(bool newval, void *extra)
-{
-	if (!is_normal_backend())
-		return;
-
-	if (!newval)
-	{
-		if (lfc_ctl)
-			lfc_disable(NULL);
-		else
-			elog(LOG, "Local file cache disabled");
-	}
-	else
-	{
-		elog(LOG, "Local file cache enabled");
-		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-		lfc_ctl->enabled = newval;
-		LWLockRelease(lfc_lock);
-	}
-}
-
 static bool
 lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 {
@@ -275,11 +257,6 @@ lfc_change_limit_hook(int newval, void *extra)
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	if (!lfc_ctl->enabled)
-	{
-		LWLockRelease(lfc_lock);
-		return;
-	}
 	while (new_size < lfc_ctl->used && !dlist_is_empty(&lfc_ctl->lru))
 	{
 		/* Shrink cache by throwing away least recently accessed chunks and returning their space to file system */
@@ -292,6 +269,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
+	lfc_ctl->limit = new_size;
 	elog(DEBUG1, "set local file cache limit to %d", new_size);
 
 	LWLockRelease(lfc_lock);
@@ -329,7 +307,7 @@ FileCacheMonitorMain(Datum main_arg)
 	/* Periodically dump buffers until terminated. */
 	while (!ShutdownRequestPending)
 	{
-		if (lfc_is_enabled())
+		if (!lfc_maybe_disabled())
 		{
 			struct statvfs sfs;
 			if (statvfs(lfc_path, &sfs) < 0)
@@ -381,16 +359,6 @@ lfc_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		elog(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
-	DefineCustomBoolVariable("neon.local_file_cache",
-							 "Enable ort disable local file cache",
-							 NULL,
-							 &lfc_enabled,
-							 true, /* enabled by default */
-							 PGC_POSTMASTER,
-							 0,
-							 NULL,
-							 lfc_change_state,
-							 NULL);
 
 	DefineCustomIntVariable("neon.max_file_cache_size",
 							"Maximal size of Neon local file cache",
@@ -471,7 +439,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	bool found = false;
 	uint32 hash;
 
-	if (!lfc_is_enabled()) /* fast exit if file cache is disabled */
+	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return false;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
@@ -480,7 +448,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
-	if (lfc_ctl->enabled)
+	if (LFC_ENABLED())
 	{
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
 		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
@@ -501,7 +469,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
-	if (!lfc_is_enabled()) /* fast exit if file cache is disabled */
+	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
@@ -512,7 +480,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	if (!lfc_ctl->enabled)
+	if (!LFC_ENABLED())
 	{
 		LWLockRelease(lfc_lock);
 		return;
@@ -583,7 +551,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint64 generation;
 	uint32 entry_offset;
 
-	if (!lfc_is_enabled()) /* fast exit if file cache is disabled */
+	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return false;
 
 	if (!lfc_ensure_opened())
@@ -596,7 +564,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	if (!lfc_ctl->enabled)
+	if (!LFC_ENABLED())
 	{
 		LWLockRelease(lfc_lock);
 		return false;
@@ -629,7 +597,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	if (lfc_ctl->generation == generation)
 	{
-		Assert(lfc_ctl->enabled);
+		Assert(LFC_ENABLED());
 		Assert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
@@ -661,7 +629,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
 
-	if (!lfc_is_enabled()) /* fast exit if file cache is disabled */
+	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return;
 
 	tag.forkNum = forkNum;
@@ -671,7 +639,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-	if (!lfc_ctl->enabled)
+	if (!LFC_ENABLED())
 	{
 		LWLockRelease(lfc_lock);
 		return;
@@ -827,7 +795,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 
 		LWLockAcquire(lfc_lock, LW_SHARED);
 
-		if (lfc_ctl->enabled)
+		if (LFC_ENABLED())
 		{
 			hash_seq_init(&status, lfc_hash);
 			while ((entry = hash_seq_search(&status)) != NULL)
