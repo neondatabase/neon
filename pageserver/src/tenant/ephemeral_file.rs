@@ -5,11 +5,11 @@ use crate::config::PageServerConf;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
+use camino::Utf8PathBuf;
 use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
@@ -39,7 +39,9 @@ impl EphemeralFile {
 
         let filename = conf
             .timeline_path(&tenant_id, &timeline_id)
-            .join(PathBuf::from(format!("ephemeral-{filename_disambiguator}")));
+            .join(Utf8PathBuf::from(format!(
+                "ephemeral-{filename_disambiguator}"
+            )));
 
         let file = VirtualFile::open_with_options(
             &filename,
@@ -76,7 +78,7 @@ impl EphemeralFile {
                             format!(
                                 "ephemeral file: read immutable page #{}: {}: {:#}",
                                 blknum,
-                                self.file.path.display(),
+                                self.file.path.as_std_path().display(),
                                 e,
                             ),
                         )
@@ -181,7 +183,7 @@ impl EphemeralFile {
                                         "ephemeral_file: write_blob: write-back full tail blk #{}: {:#}: {}",
                                         self.blknum,
                                         e,
-                                        self.ephemeral_file.file.path.display(),
+                                        self.ephemeral_file.file.path.as_std_path().display(),
                                     ),
                                 ));
                             }
@@ -244,7 +246,7 @@ impl Drop for EphemeralFile {
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 error!(
                     "could not remove ephemeral file '{}': {}",
-                    self.file.path.display(),
+                    self.file.path.as_std_path().display(),
                     e
                 );
             }

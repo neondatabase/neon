@@ -1,10 +1,10 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use camino::{Utf8Path, Utf8PathBuf};
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 
@@ -75,7 +75,7 @@ async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<(
     fs::remove_dir_all(tmp_path).await
 }
 
-async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<Utf8PathBuf> {
     let parent = path
         .as_ref()
         .parent()
@@ -132,18 +132,19 @@ pub async fn init_tenant_mgr(
         match dir_entries.next_entry().await {
             Ok(None) => break,
             Ok(Some(dir_entry)) => {
-                let tenant_dir_path = dir_entry.path();
+                let tenant_dir_path =
+                    Utf8PathBuf::from_path_buf(dir_entry.path()).expect("non-Unicode path");
                 if crate::is_temporary(&tenant_dir_path) {
                     info!(
                         "Found temporary tenant directory, removing: {}",
-                        tenant_dir_path.display()
+                        tenant_dir_path.as_std_path().display()
                     );
                     // No need to use safe_remove_tenant_dir_all because this is already
                     // a temporary path
                     if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
-                            tenant_dir_path.display(),
+                            tenant_dir_path.as_std_path().display(),
                             e
                         );
                     }
@@ -159,7 +160,7 @@ pub async fn init_tenant_mgr(
                         if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
                             error!(
                                 "Failed to remove empty tenant directory '{}': {e:#}",
-                                tenant_dir_path.display()
+                                tenant_dir_path.as_std_path().display()
                             )
                         }
                         continue;
@@ -173,7 +174,6 @@ pub async fn init_tenant_mgr(
 
                     let tenant_id = match tenant_dir_path
                         .file_name()
-                        .and_then(OsStr::to_str)
                         .unwrap_or_default()
                         .parse::<TenantId>()
                     {
@@ -181,7 +181,7 @@ pub async fn init_tenant_mgr(
                         Err(_) => {
                             warn!(
                                 "Invalid tenant path (garbage in our repo directory?): {}",
-                                tenant_dir_path.display()
+                                tenant_dir_path.as_std_path().display()
                             );
                             continue;
                         }
@@ -197,7 +197,7 @@ pub async fn init_tenant_mgr(
                             if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
                                 error!(
                                     "Failed to remove detached tenant directory '{}': {:?}",
-                                    tenant_dir_path.display(),
+                                    tenant_dir_path.as_std_path().display(),
                                     e
                                 );
                             }
@@ -208,7 +208,7 @@ pub async fn init_tenant_mgr(
                         // on local disk may activate
                         info!(
                             "Starting tenant {} in legacy mode, no generation",
-                            tenant_dir_path.display()
+                            tenant_dir_path.as_std_path().display()
                         );
                         Generation::none()
                     };
@@ -255,7 +255,7 @@ pub async fn init_tenant_mgr(
 pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-    tenant_path: &Path,
+    tenant_path: &Utf8Path,
     generation: Generation,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
@@ -589,7 +589,7 @@ async fn detach_tenant0(
     tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
-) -> Result<PathBuf, TenantStateError> {
+) -> Result<Utf8PathBuf, TenantStateError> {
     let tenant_dir_rename_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
         safe_rename_tenant_dir(&local_tenant_directory)

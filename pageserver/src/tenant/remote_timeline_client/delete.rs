@@ -1,6 +1,6 @@
 //! Helper functions to delete files from remote storage with a RemoteStorage
 use anyhow::Context;
-use std::path::Path;
+use camino::Utf8Path;
 use tracing::debug;
 
 use remote_storage::GenericRemoteStorage;
@@ -13,7 +13,7 @@ use crate::{
 pub(super) async fn delete_layer<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    local_layer_path: &'a Path,
+    local_layer_path: &'a Utf8Path,
     generation: Generation,
 ) -> anyhow::Result<()> {
     fail::fail_point!("before-delete-layer", |_| {

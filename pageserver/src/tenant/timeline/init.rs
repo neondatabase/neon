@@ -12,7 +12,8 @@ use crate::{
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
-use std::{collections::HashMap, ffi::OsString, path::Path, str::FromStr};
+use camino::{Utf8Path, Utf8PathBuf};
+use std::{collections::HashMap, ffi::OsString, str::FromStr};
 use utils::lsn::Lsn;
 
 /// Identified files in the timeline directory.
@@ -34,12 +35,12 @@ pub(super) enum Discovered {
 }
 
 /// Scans the timeline directory for interesting files.
-pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> {
+pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
     for direntry in std::fs::read_dir(path)? {
         let direntry = direntry?;
-        let direntry_path = direntry.path();
+        let direntry_path = Utf8PathBuf::from_path_buf(direntry.path()).expect("non-Unicode path");
         let file_name = direntry.file_name();
 
         let fname = file_name.to_string_lossy();
@@ -162,15 +163,19 @@ pub(super) fn reconcile(
         .collect::<Vec<_>>()
 }
 
-pub(super) fn cleanup(path: &Path, kind: &str) -> anyhow::Result<()> {
+pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
     let file_name = path.file_name().expect("must be file path");
     tracing::debug!(kind, ?file_name, "cleaning up");
-    std::fs::remove_file(path)
-        .with_context(|| format!("failed to remove {kind} at {}", path.display()))
+    std::fs::remove_file(path).with_context(|| {
+        format!(
+            "failed to remove {kind} at {}",
+            path.as_std_path().display()
+        )
+    })
 }
 
 pub(super) fn cleanup_local_file_for_remote(
-    path: &Path,
+    path: &Utf8Path,
     local: &LayerFileMetadata,
     remote: &LayerFileMetadata,
 ) -> anyhow::Result<()> {
@@ -183,7 +188,7 @@ pub(super) fn cleanup_local_file_for_remote(
         assert!(
             path.exists(),
             "we would leave the local_layer without a file if this does not hold: {}",
-            path.display()
+            path.as_std_path().display()
         );
         Err(err)
     } else {
@@ -192,7 +197,7 @@ pub(super) fn cleanup_local_file_for_remote(
 }
 
 pub(super) fn cleanup_future_layer(
-    path: &Path,
+    path: &Utf8Path,
     name: &LayerFileName,
     disk_consistent_lsn: Lsn,
 ) -> anyhow::Result<()> {
