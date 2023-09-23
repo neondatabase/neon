@@ -630,7 +630,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		return;
 
 	if (!lfc_ensure_opened())
-		return false;
+		return;
 
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
