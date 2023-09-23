@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use camino::Utf8Path;
 use clap::Subcommand;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
@@ -45,7 +46,7 @@ pub(crate) enum LayerCmd {
 }
 
 async fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
-    let path = path.as_ref();
+    let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(10);
     page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path).await?);

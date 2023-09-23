@@ -8,6 +8,7 @@ mod draw_timeline_dir;
 mod layer_map_analyzer;
 mod layers;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use layers::LayerCmd;
 use pageserver::{
@@ -18,7 +19,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_ffi::ControlFileData;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -90,19 +91,20 @@ async fn main() -> anyhow::Result<()> {
             layer_map_analyzer::main(&cmd).await?;
         }
         Commands::PrintLayerFile(cmd) => {
-            if let Err(e) = read_pg_control_file(&cmd.path) {
+            let cmd_path = Utf8PathBuf::from_path_buf(cmd.path).expect("non-Unicode path");
+            if let Err(e) = read_pg_control_file(&cmd_path) {
                 println!(
                     "Failed to read input file as a pg control one: {e:#}\n\
                     Attempting to read it as layer file"
                 );
-                print_layerfile(&cmd.path).await?;
+                print_layerfile(&cmd_path).await?;
             }
         }
     };
     Ok(())
 }
 
-fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
+fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
     let control_file = ControlFileData::decode(&std::fs::read(control_file_path)?)?;
     println!("{control_file:?}");
     let control_file_initdb = Lsn(control_file.checkPoint);
@@ -114,7 +116,7 @@ fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn print_layerfile(path: &Path) -> anyhow::Result<()> {
+async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
     page_cache::init(100);

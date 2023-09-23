@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
@@ -68,6 +69,7 @@ fn main() -> anyhow::Result<()> {
     let workdir = workdir
         .canonicalize()
         .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+    let workdir = Utf8PathBuf::from_path_buf(workdir).expect("non-Unicode path");
 
     let cfg_file_path = workdir.join("pageserver.toml");
 
@@ -75,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     env::set_current_dir(&workdir).with_context(|| {
         format!(
             "Failed to set application's current dir to '{}'",
-            workdir.display()
+            workdir.as_std_path().display()
         )
     })?;
 
@@ -116,7 +118,7 @@ fn main() -> anyhow::Result<()> {
         utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
             format!(
                 "Failed to create tenants root dir at '{}'",
-                tenants_path.display()
+                tenants_path.as_std_path().display()
             )
         })?;
     }
@@ -135,9 +137,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
-    cfg_file_path: &Path,
+    cfg_file_path: &Utf8Path,
     arg_matches: clap::ArgMatches,
-    workdir: &Path,
+    workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
     let update_config = init || arg_matches.get_flag("update-config");
@@ -146,14 +148,14 @@ fn initialize_config(
         if init {
             anyhow::bail!(
                 "Config file '{}' already exists, cannot init it, use --update-config to update it",
-                cfg_file_path.display()
+                cfg_file_path.as_std_path().display()
             );
         }
         // Supplement the CLI arguments with the config file
         let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
             format!(
                 "Failed to read pageserver config at '{}'",
-                cfg_file_path.display()
+                cfg_file_path.as_std_path().display()
             )
         })?;
         (
@@ -162,7 +164,7 @@ fn initialize_config(
                 .with_context(|| {
                     format!(
                         "Failed to parse '{}' as pageserver config",
-                        cfg_file_path.display()
+                        cfg_file_path.as_std_path().display()
                     )
                 })?,
             true,
@@ -170,7 +172,7 @@ fn initialize_config(
     } else if cfg_file_path.exists() {
         anyhow::bail!(
             "Config file '{}' exists but is not a regular file",
-            cfg_file_path.display()
+            cfg_file_path.as_std_path().display()
         );
     } else {
         // We're initializing the tenant, so there's no config file yet
@@ -190,7 +192,7 @@ fn initialize_config(
 
             for (key, item) in doc.iter() {
                 if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.display());
+                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.as_std_path().display());
                 }
                 toml.insert(key, item.clone());
             }
@@ -202,17 +204,20 @@ fn initialize_config(
         .context("Failed to parse pageserver configuration")?;
 
     if update_config {
-        info!("Writing pageserver config to '{}'", cfg_file_path.display());
+        info!(
+            "Writing pageserver config to '{}'",
+            cfg_file_path.as_std_path().display()
+        );
 
         std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
             format!(
                 "Failed to write pageserver config to '{}'",
-                cfg_file_path.display()
+                cfg_file_path.as_std_path().display()
             )
         })?;
         info!(
             "Config successfully written to '{}'",
-            cfg_file_path.display()
+            cfg_file_path.as_std_path().display()
         )
     }
 

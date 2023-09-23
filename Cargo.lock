@@ -1059,6 +1059,7 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino",
  "clap",
  "comfy-table",
  "compute_api",
@@ -2656,6 +2657,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "clap",
  "git-version",
  "pageserver",
@@ -2676,6 +2678,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
+ "camino",
  "chrono",
  "clap",
  "close_fds",
@@ -3779,6 +3782,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
+ "camino",
  "chrono",
  "clap",
  "const_format",
@@ -5137,6 +5141,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "bytes",
+ "camino",
  "chrono",
  "const_format",
  "criterion",

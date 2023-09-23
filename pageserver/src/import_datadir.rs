@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::Utf8Path;
 use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
@@ -29,7 +30,7 @@ use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
 // Returns checkpoint LSN from controlfile
-pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
     // Read control file to extract the LSN
     let controlfile_path = path.join("global").join("pg_control");
     let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
@@ -46,7 +47,7 @@ pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 /// cluster was not shut down cleanly.
 pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
-    pgdata_path: &Path,
+    pgdata_path: &Utf8Path,
     pgdata_lsn: Lsn,
     ctx: &RequestContext,
 ) -> Result<()> {
@@ -256,7 +257,7 @@ async fn import_slru(
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
 async fn import_wal(
-    walpath: &Path,
+    walpath: &Utf8Path,
     tline: &Timeline,
     startpoint: Lsn,
     endpoint: Lsn,

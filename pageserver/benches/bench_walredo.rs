@@ -10,6 +10,7 @@
 use std::sync::{Arc, Barrier};
 
 use bytes::{Buf, Bytes};
+use camino::Utf8PathBuf;
 use pageserver::{
     config::PageServerConf,
     repository::Key,
@@ -26,8 +27,10 @@ fn redo_scenarios(c: &mut Criterion) {
     // utils::logging::init(utils::logging::LogFormat::Plain).unwrap();
 
     let repo_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repo_dir_pathbuf =
+        Utf8PathBuf::from_path_buf(repo_dir.path().to_path_buf()).expect("non-Unicode path");
 
-    let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+    let conf = PageServerConf::dummy_conf(repo_dir_pathbuf);
     let conf = Box::leak(Box::new(conf));
     let tenant_id = TenantId::generate();
 
