@@ -22,6 +22,7 @@ use std::time::Duration;
 use std::{fs, io, thread};
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag};
 use nix::sys::signal::{kill, Signal};
@@ -45,9 +46,9 @@ const NOTICE_AFTER_RETRIES: u64 = 50;
 /// it itself.
 pub enum InitialPidFile<'t> {
     /// Create a pidfile, to allow future CLI invocations to manipulate the process.
-    Create(&'t Path),
+    Create(&'t Utf8Path),
     /// The process will create the pidfile itself, need to wait for that event.
-    Expect(&'t Path),
+    Expect(&'t Utf8Path),
 }
 
 /// Start a background child process using the parameters given.
@@ -137,7 +138,11 @@ where
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
-pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
+pub fn stop_process(
+    immediate: bool,
+    process_name: &str,
+    pid_file: &Utf8Path,
+) -> anyhow::Result<()> {
     let pid = match pid_file::read(pid_file)
         .with_context(|| format!("read pid_file {pid_file:?}"))?
     {
@@ -254,7 +259,7 @@ fn pre_exec_create_pidfile<P>(cmd: &mut Command, path: P) -> &mut Command
 where
     P: Into<PathBuf>,
 {
-    let path: PathBuf = path.into();
+    let path: Utf8PathBuf = Utf8PathBuf::from_path_buf(path.into()).expect("non-Unicode path");
     // SAFETY
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
@@ -311,7 +316,7 @@ where
 
 fn process_started<F>(
     pid: Pid,
-    pid_file_to_check: Option<&Path>,
+    pid_file_to_check: Option<&Utf8Path>,
     status_check: &F,
 ) -> anyhow::Result<bool>
 where
