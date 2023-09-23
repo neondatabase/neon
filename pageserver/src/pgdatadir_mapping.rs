@@ -508,7 +508,10 @@ impl Timeline {
         let buf = self.get(aux_files_key(db_id), lsn, ctx).await?;
         match AuxFilesDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.files),
-            Err(e) => Err(PageReconstructError::from(e)),
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                Ok(HashMap::new())
+            }
         }
     }
 
