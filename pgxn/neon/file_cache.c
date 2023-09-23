@@ -103,7 +103,7 @@ static int   lfc_shrinking_factor; /* power of two by which local cache size wil
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
-void FileCacheMonitorMain(Datum main_arg);
+extern void PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
 
 /*
  * Local file cache is mandatory and Neon can work without it.
@@ -133,7 +133,6 @@ lfc_disable(char const* op)
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			hash_search(lfc_hash, &entry->key, HASH_REMOVE, NULL);
-			memset(entry->bitmap, 0, sizeof entry->bitmap);
 		}
 		lfc_ctl->generation += 1;
 		lfc_ctl->size = 0;
@@ -286,7 +285,7 @@ lfc_change_limit_hook(int newval, void *extra)
  * disk space with maximal possible disk write speed (1Gb/sec). But not larger than 1 second.
  * Calling statvfs each second should not add any noticeable overhead.
  */
-void
+PGDLLEXPORT void
 FileCacheMonitorMain(Datum main_arg)
 {
 	/*

@@ -10,12 +10,18 @@ from fixtures.utils import query_scalar
 
 def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
     env = neon_simple_env
+
+
+    cache_dir = os.path.join(env.repo_dir, "file_cache")
+    os.mkdir(cache_dir)
+
     env.neon_cli.create_branch("test_local_file_cache_unlink", "empty")
 
     endpoint = env.endpoints.create_start(
         "test_local_file_cache_unlink",
         config_lines=[
             "shared_buffers='1MB'",
+            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='64MB'",
             "neon.file_cache_size_limit='10MB'",
         ],
@@ -60,7 +66,8 @@ def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
 
     time.sleep(5)
 
-    os.unlink(os.path.join(endpoint.pg_data_dir_path(), "file.cache"))
+    new_cache_dir = os.path.join(env.repo_dir, "file_cache_new")
+    os.rename(cache_dir, new_cache_dir)
 
     for thread in threads:
         thread.join()
