@@ -114,10 +114,7 @@ void FileCacheMonitorMain(Datum main_arg);
 static void
 lfc_disable(char const* op)
 {
-	if (op)
-		elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
-	else
-		elog(LOG, "Disable local file cache");
+	elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
 
 	if (lfc_desc > 0)
 		close(lfc_desc);
@@ -148,7 +145,7 @@ lfc_disable(char const* op)
 }
 
 /*
- * This check is done without granting lfc_lock, so it is unreliable
+ * This check is done without obtaining lfc_lock, so it is unreliable
  */
 static bool
 lfc_maybe_disabled(void)
@@ -201,7 +198,7 @@ lfc_shmem_startup(void)
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
-		lfc_ctl->limit = lfc_size_limit;
+		lfc_ctl->limit = SIZE_MB_TO_CHUNKS(lfc_size_limit);
 		dlist_init(&lfc_ctl->lru);
 
 		/* Remove file cache on restart */
@@ -321,7 +318,7 @@ FileCacheMonitorMain(Datum main_arg)
 					if (lfc_shrinking_factor < 31) {
 						lfc_shrinking_factor += 1;
 					}
-					lfc_change_limit_hook(lfc_size_limit >> lfc_shrinking_factor, NULL);
+					lfc_change_limit_hook(lfc_ctl->limit >> lfc_shrinking_factor, NULL);
 				}
 				else
 					lfc_shrinking_factor = 0; /* reset to initial value */
@@ -536,7 +533,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 /*
  * Try to read page from local cache.
  * Returns true if page is found in local cache.
- * In case of error lfc_size_limit is set to zero to disable any further opera-tins with cache.
+ * In case of error local file cache is disabled (lfc->limit is set to zero).
  */
 bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
@@ -632,6 +629,9 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return;
 
+	if (!lfc_ensure_opened())
+		return false;
+
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
 	CopyNRelFileInfoToBufTag(tag, rinfo);
@@ -663,7 +663,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
-		if (lfc_ctl->used >= SIZE_MB_TO_CHUNKS(lfc_size_limit) && !dlist_is_empty(&lfc_ctl->lru))
+		if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
 			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
