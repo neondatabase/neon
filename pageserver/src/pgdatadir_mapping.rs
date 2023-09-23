@@ -1170,8 +1170,15 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let key = aux_files_key(db_id);
-        let buf = self.get(key, ctx).await?;
-        let mut dir = AuxFilesDirectory::des(&buf)?;
+        let mut dir = match self.get(key, ctx).await {
+            Ok(buf) => AuxFilesDirectory::des(&buf)?,
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                AuxFilesDirectory {
+                    files: HashMap::new(),
+                }
+            }
+        };
         let path = path.to_string();
         if content.is_empty() {
             dir.files.remove(&path);
