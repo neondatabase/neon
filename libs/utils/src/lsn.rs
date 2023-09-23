@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
 
+use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -44,10 +44,10 @@ impl Lsn {
     /// Parse an LSN from a filename in the form `0000000000000000`
     pub fn from_filename<F>(filename: F) -> Result<Self, LsnParseError>
     where
-        F: AsRef<Path>,
+        F: AsRef<Utf8Path>,
     {
-        let filename: &Path = filename.as_ref();
-        let filename = filename.to_str().ok_or(LsnParseError)?;
+        let filename: &Utf8Path = filename.as_ref();
+        let filename = filename.as_std_path().to_str().ok_or(LsnParseError)?;
         Lsn::from_hex(filename)
     }
 

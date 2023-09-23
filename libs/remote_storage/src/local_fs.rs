@@ -242,7 +242,7 @@ impl RemoteStorage for LocalFs {
             .with_context(|| {
                 format!(
                     "Failed to upload file (write temp) to the local storage at '{}'",
-                    temp_file_path.display()
+                    temp_file_path.as_std_path().display()
                 )
             })?;
 
@@ -260,7 +260,7 @@ impl RemoteStorage for LocalFs {
         destination.flush().await.with_context(|| {
             format!(
                 "Failed to upload (flush temp) file to the local storage at '{}'",
-                temp_file_path.display()
+                temp_file_path.as_std_path().display()
             )
         })?;
 
@@ -391,8 +391,7 @@ impl RemoteStorage for LocalFs {
 }
 
 fn storage_metadata_path(original_path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
-    Utf8PathBuf::from_path_buf(path_with_suffix_extension(original_path, "metadata"))
-        .map_err(|pb| anyhow::Error::msg(format!("non-Unicode path: {}", pb.to_string_lossy())))
+    Ok(path_with_suffix_extension(original_path, "metadata"))
 }
 
 fn get_all_files<'a, P>(

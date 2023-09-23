@@ -55,7 +55,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::path::PathBuf;
+    use camino::Utf8PathBuf;
 
     use crate::fs_ext::{is_directory_empty, list_dir};
 
@@ -75,7 +75,8 @@ mod test {
         );
 
         // invoke on a file to ensure it returns an error
-        let file_path: PathBuf = dir_path.join("testfile");
+        let file_path: Utf8PathBuf =
+            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
         let f = std::fs::File::create(&file_path).unwrap();
         drop(f);
         assert!(file_path.is_empty_dir().is_err());
@@ -97,7 +98,8 @@ mod test {
         );
 
         // invoke on a file to ensure it returns an error
-        let file_path: PathBuf = dir_path.join("testfile");
+        let file_path: Utf8PathBuf =
+            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
         let f = std::fs::File::create(&file_path).unwrap();
         drop(f);
         assert!(is_directory_empty(&file_path).await.is_err());
@@ -112,7 +114,8 @@ mod test {
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path();
 
-        let file_path: PathBuf = dir_path.join("testfile");
+        let file_path: Utf8PathBuf =
+            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
 
         ignore_absent_files(|| std::fs::remove_file(&file_path)).expect("should execute normally");
 
@@ -131,12 +134,14 @@ mod test {
 
         assert!(list_dir(dir_path).await.unwrap().is_empty());
 
-        let file_path: PathBuf = dir_path.join("testfile");
+        let file_path: Utf8PathBuf =
+            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
         let _ = std::fs::File::create(&file_path).unwrap();
 
         assert_eq!(&list_dir(dir_path).await.unwrap(), &["testfile"]);
 
-        let another_dir_path: PathBuf = dir_path.join("testdir");
+        let another_dir_path: Utf8PathBuf =
+            Utf8PathBuf::from_path_buf(dir_path.join("testdir")).expect("non-Unicode path");
         std::fs::create_dir(another_dir_path).unwrap();
 
         let expected = &["testdir", "testfile"];

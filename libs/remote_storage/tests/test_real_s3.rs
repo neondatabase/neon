@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::env;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -424,11 +424,9 @@ async fn upload_s3_data(
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
         upload_tasks.spawn(async move {
-            let prefix = PathBuf::from(format!("{base_prefix_str}/sub_prefix_{i}/"));
-            let blob_prefix = RemotePath::new(
-                Utf8Path::from_path(prefix.as_path()).expect("must be valid prefix"),
-            )
-            .with_context(|| format!("{prefix:?} to RemotePath conversion"))?;
+            let prefix = format!("{base_prefix_str}/sub_prefix_{i}/");
+            let blob_prefix = RemotePath::new(Utf8Path::new(&prefix))
+                .with_context(|| format!("{prefix:?} to RemotePath conversion"))?;
             let blob_path = blob_prefix.join(Utf8Path::new(&format!("blob_{i}")));
             debug!("Creating remote item {i} at path {blob_path:?}");
 
