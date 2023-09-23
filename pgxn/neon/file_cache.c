@@ -116,11 +116,6 @@ lfc_disable(char const* op)
 {
 	elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
 
-	if (lfc_desc > 0)
-		close(lfc_desc);
-
-	lfc_desc = -1;
-
 	/* Invalidate hash */
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -139,8 +134,22 @@ lfc_disable(char const* op)
 		lfc_ctl->used = 0;
 		lfc_ctl->limit = 0;
 		dlist_init(&lfc_ctl->lru);
+
+		if (lfc_desc > 0)
+		{
+			/* If the reason of error is ENOSPC, then truncation of file may help to reclaim some space */
+			int rc = ftruncate(lfc_desc, 0);
+			if (rc < 0)
+				elog(WARNING, "Failed to truncate local file cache %s: %m", lfc_path);
+		}
 	}
 	LWLockRelease(lfc_lock);
+
+
+	if (lfc_desc > 0)
+		close(lfc_desc);
+
+	lfc_desc = -1;
 }
 
 /*
@@ -159,7 +168,7 @@ lfc_ensure_opened(void)
 	/* Open cache file if not done yet */
 	if (lfc_desc <= 0 && enabled)
 	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
+		lfc_desc = BasicOpenFile(lfc_path, O_RDWR);
 
 		if (lfc_desc < 0) {
 			lfc_disable("open");
@@ -185,6 +194,7 @@ lfc_shmem_startup(void)
 	lfc_ctl = (FileCacheControl*)ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
 	{
+		int fd;
 		uint32 lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
 		lfc_lock = (LWLockId)GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
@@ -197,11 +207,20 @@ lfc_shmem_startup(void)
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
-		lfc_ctl->limit = SIZE_MB_TO_CHUNKS(lfc_size_limit);
 		dlist_init(&lfc_ctl->lru);
 
-		/* Remove file cache on restart */
-		(void)unlink(lfc_path);
+		/* Recreate file cache on restart */
+		fd = BasicOpenFile(lfc_path, O_RDWR|O_CREAT|O_TRUNC);
+		if (fd < 0)
+		{
+			elog(WARNING, "Failed to create local file cache %s: %m", lfc_path);
+			lfc_ctl->limit = 0;
+		}
+		else
+		{
+			close(fd);
+			lfc_ctl->limit = SIZE_MB_TO_CHUNKS(lfc_size_limit);
+		}
 	}
 	LWLockRelease(AddinShmemInitLock);
 }
