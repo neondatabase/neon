@@ -844,7 +844,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          curl -fL https://workstation-ubuntu.tail888fb.ts.net/vm-builder -o vm-builder
           chmod +x vm-builder
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
