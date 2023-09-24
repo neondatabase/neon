@@ -221,11 +221,14 @@ where
                 .list_aux_files(self.lsn, dbnode, self.ctx)
                 .await?
             {
-                let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
-                let restart_lsn = Lsn(u64::from_le_bytes(
-                    content[offs..offs + 8].try_into().unwrap(),
-                ));
-                min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                if path.starts_with("pg_replslot") {
+                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                    let restart_lsn = Lsn(u64::from_le_bytes(
+                        content[offs..offs + 8].try_into().unwrap(),
+                    ));
+                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                }
                 let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
                     .append(&header, &*content)
