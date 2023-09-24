@@ -861,7 +861,27 @@ RecvVoteResponse(Safekeeper *sk)
 static void
 HandleElectedProposer(WalProposer *wp)
 {
+	FILE* f;
+	XLogRecPtr lrRestartLsn;
+
 	DetermineEpochStartLsn(wp);
+
+	/*
+	 * If there are active logical replication subscription we need
+	 * to provide enough WAL for their WAL senders based on th position
+	 * of their replication slots.
+	 */
+	f = fopen("restart.lsn", "rb");
+	if (f != NULL)
+	{
+		fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+		fclose(f);
+		if (lrRestartLsn != InvalidXLogRecPtr)
+		{
+			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
+			truncateLsn = Min(truncateLsn, lrRestartLsn);
+		}
+	}
 
 	/*
 	 * Check if not all safekeepers are up-to-date, we need to download WAL

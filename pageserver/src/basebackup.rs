@@ -233,6 +233,18 @@ where
                     .context("could not add aux file to basebackup tarball")?;
             }
         }
+        if min_restart_lsn != Lsn::MAX {
+            info!(
+                "Min restart LSN for logical replication is {}",
+                min_restart_lsn
+            );
+            let data = min_restart_lsn.0.to_le_bytes();
+            let header = new_tar_header("restart.lsn", data.len() as u64)?;
+            self.ar
+                .append(&header, &data[..])
+                .await
+                .context("could not add restart.lsn file to basebackup tarball")?;
+        }
         for xid in self
             .timeline
             .list_twophase_files(self.lsn, self.ctx)
