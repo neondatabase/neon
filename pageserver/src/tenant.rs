@@ -1504,7 +1504,7 @@ impl Tenant {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit()
+            .commit(ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 
@@ -3538,14 +3538,24 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x10),
+                &Value::Image(TEST_IMG("foo at 0x10")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(TEST_IMG("foo at 0x20")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
@@ -3619,19 +3629,19 @@ mod tests {
 
         // Insert a value on the timeline
         writer
-            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"), &ctx)
             .await?;
         writer
-            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x20));
 
         writer
-            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x30));
         writer
-            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x40));
 
@@ -3646,7 +3656,7 @@ mod tests {
             .expect("Should have a local timeline");
         let new_writer = newtline.writer().await;
         new_writer
-            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
         new_writer.finish_write(Lsn(0x40));
 
@@ -3669,7 +3679,11 @@ mod tests {
         Ok(())
     }
 
-    async fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> anyhow::Result<()> {
+    async fn make_some_layers(
+        tline: &Timeline,
+        start_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -3680,6 +3694,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3689,6 +3704,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3702,6 +3718,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3711,6 +3728,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3727,7 +3745,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         // FIXME: this doesn't actually remove any layer currently, given how the flushing
@@ -3801,7 +3819,7 @@ mod tests {
             .load();
 
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
@@ -3823,7 +3841,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3832,7 +3850,7 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
         tline.set_broken("test".to_owned());
 
@@ -3873,7 +3891,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3898,7 +3916,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3907,7 +3925,7 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
         // run gc on parent
         tenant
@@ -3932,7 +3950,7 @@ mod tests {
             let tline = tenant
                 .create_test_timeline(TIMELINE_ID, Lsn(0x7000), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-            make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
+            make_some_layers(tline.as_ref(), Lsn(0x8000), &ctx).await?;
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
@@ -3961,7 +3979,7 @@ mod tests {
                 .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
                 .await?;
 
-            make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+            make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
             let child_tline = tenant
                 .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3972,7 +3990,7 @@ mod tests {
                 .get_timeline(NEW_TIMELINE_ID, true)
                 .expect("Should have a local timeline");
 
-            make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+            make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
             // so that all uploads finish & we can call harness.load() below again
             tenant
@@ -4004,7 +4022,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
@@ -4087,7 +4105,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x10),
+                &Value::Image(TEST_IMG("foo at 0x10")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
@@ -4097,7 +4120,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(TEST_IMG("foo at 0x20")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
@@ -4107,7 +4135,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x30),
+                &Value::Image(TEST_IMG("foo at 0x30")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
@@ -4117,7 +4150,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x40),
+                &Value::Image(TEST_IMG("foo at 0x40")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
@@ -4175,6 +4213,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 writer.finish_write(lsn);
@@ -4227,6 +4266,7 @@ mod tests {
                     test_key,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -4247,6 +4287,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 writer.finish_write(lsn);
@@ -4306,6 +4347,7 @@ mod tests {
                     test_key,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -4334,6 +4376,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 println!("updating {} at {}", blknum, lsn);
@@ -4402,6 +4445,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
@@ -4474,7 +4518,7 @@ mod tests {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit()
+            .commit(&ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 

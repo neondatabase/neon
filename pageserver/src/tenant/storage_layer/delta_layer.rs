@@ -317,11 +317,11 @@ impl DeltaLayer {
 
         tree_reader.dump().await?;
 
-        let keys = DeltaLayerInner::load_keys(&inner).await?;
+        let keys = DeltaLayerInner::load_keys(&inner, ctx).await?;
 
         // A subroutine to dump a single blob
-        async fn dump_blob(val: ValueRef<'_>) -> Result<String> {
-            let buf = val.reader.read_blob(val.blob_ref.pos()).await?;
+        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> Result<String> {
+            let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
                 Value::Image(img) => {
@@ -342,7 +342,7 @@ impl DeltaLayer {
 
         for entry in keys {
             let DeltaEntry { key, lsn, val, .. } = entry;
-            let desc = match dump_blob(val).await {
+            let desc = match dump_blob(val, ctx).await {
                 Ok(desc) => desc,
                 Err(err) => {
                     let err: anyhow::Error = err;
@@ -370,7 +370,7 @@ impl DeltaLayer {
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
         inner
-            .get_value_reconstruct_data(key, lsn_range, reconstruct_state)
+            .get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
             .await
     }
 
@@ -453,12 +453,12 @@ impl DeltaLayer {
         self.access_stats.record_access(access_kind, ctx);
         // Quick exit if already loaded
         self.inner
-            .get_or_try_init(|| self.load_inner())
+            .get_or_try_init(|| self.load_inner(ctx))
             .await
             .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
     }
 
-    async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let summary = match &self.path_or_conf {
@@ -466,7 +466,7 @@ impl DeltaLayer {
             PathOrConf::Path(_) => None,
         };
 
-        let loaded = DeltaLayerInner::load(&path, summary).await?;
+        let loaded = DeltaLayerInner::load(&path, summary, ctx).await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
@@ -554,7 +554,7 @@ impl DeltaLayer {
             .load(LayerAccessKind::KeyIter, ctx)
             .await
             .context("load delta layer keys")?;
-        DeltaLayerInner::load_keys(inner)
+        DeltaLayerInner::load_keys(inner, ctx)
             .await
             .context("Layer index is corrupted")
     }
@@ -849,13 +849,14 @@ impl DeltaLayerInner {
     pub(super) async fn load(
         path: &std::path::Path,
         summary: Option<Summary>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
 
-        let summary_blk = file.read_blk(0).await?;
+        let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -883,6 +884,7 @@ impl DeltaLayerInner {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
         // Scan the page versions backwards, starting from `lsn`.
@@ -897,19 +899,24 @@ impl DeltaLayerInner {
         let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
         tree_reader
-            .visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                let blob_ref = BlobRef(value);
-                if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                    return false;
-                }
-                let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                if entry_lsn < lsn_range.start {
-                    return false;
-                }
-                offsets.push((entry_lsn, blob_ref.pos()));
+            .visit(
+                &search_key.0,
+                VisitDirection::Backwards,
+                |key, value| {
+                    let blob_ref = BlobRef(value);
+                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                        return false;
+                    }
+                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                    if entry_lsn < lsn_range.start {
+                        return false;
+                    }
+                    offsets.push((entry_lsn, blob_ref.pos()));
 
-                !blob_ref.will_init()
-            })
+                    !blob_ref.will_init()
+                },
+                ctx,
+            )
             .await?;
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
@@ -917,7 +924,7 @@ impl DeltaLayerInner {
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor
-                .read_blob_into_buf(pos, &mut buf)
+                .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
                 .with_context(|| {
                     format!(
@@ -958,9 +965,10 @@ impl DeltaLayerInner {
         }
     }
 
-    pub(super) async fn load_keys<T: AsRef<DeltaLayerInner> + Clone>(
-        this: &T,
-    ) -> Result<Vec<DeltaEntry<'_>>> {
+    pub(super) async fn load_keys<'a, 'b, T: AsRef<DeltaLayerInner> + Clone>(
+        this: &'a T,
+        ctx: &'b RequestContext,
+    ) -> Result<Vec<DeltaEntry<'a>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
@@ -997,6 +1005,7 @@ impl DeltaLayerInner {
                     all_keys.push(entry);
                     true
                 },
+                ctx,
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
@@ -1026,9 +1035,9 @@ pub struct ValueRef<'a> {
 
 impl<'a> ValueRef<'a> {
     /// Loads the value from disk
-    pub async fn load(&self) -> Result<Value> {
+    pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
-        let buf = self.reader.read_blob(self.blob_ref.pos()).await?;
+        let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
         let val = Value::des(&buf)?;
         Ok(val)
     }
@@ -1037,7 +1046,11 @@ impl<'a> ValueRef<'a> {
 pub(crate) struct Adapter<T>(T);
 
 impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
-    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum).await
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, std::io::Error> {
+        self.0.as_ref().file.read_blk(blknum, ctx).await
     }
 }
