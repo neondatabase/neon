@@ -273,7 +273,7 @@ where
         while let Some((node_blknum, opt_iter)) = stack.pop() {
             // Locate the node.
             let node_buf = block_cursor
-                .read_blk(self.start_blk + node_blknum, ctx)
+                .read_blk(self.start_blk + node_blknum, &ctx)
                 .await?;
 
             let node = OnDiskNode::deparse(node_buf.as_ref())?;
