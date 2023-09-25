@@ -105,6 +105,7 @@ pub enum PageContentKind {
     DeltaLayerValue,
     ImageLayerBtreeNode,
     ImageLayerValue,
+    InMemoryLayer,
 }
 
 /// Desired behavior if the operation requires an on-demand download

@@ -5,7 +5,7 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
@@ -163,6 +163,10 @@ impl InMemoryLayer {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::InMemoryLayer)
+            .build();
+
         let inner = self.inner.read().await;
 
         let reader = inner.file.block_cursor();
@@ -171,7 +175,7 @@ impl InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos, ctx).await?;
+                let buf = reader.read_blob(*pos, &ctx).await?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
@@ -281,7 +285,15 @@ impl InMemoryLayer {
             let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
             buf.clear();
             val.ser_into(&mut buf)?;
-            inner.file.write_blob(&buf, ctx).await?
+            inner
+                .file
+                .write_blob(
+                    &buf,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::InMemoryLayer)
+                        .build(),
+                )
+                .await?
         };
 
         let vec_map = inner.index.entry(key).or_default();
@@ -349,11 +361,14 @@ impl InMemoryLayer {
         let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
         keys.sort_by_key(|k| k.0);
 
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::InMemoryLayer)
+            .build();
         for (key, vec_map) in keys.iter() {
             let key = **key;
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
+                cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 delta_layer_writer
                     .put_value_bytes(key, *lsn, &buf, will_init)
