@@ -147,9 +147,7 @@ where
 
         let pending_lsn_updates = {
             let mut lsn_table = self.lsn_table.write().expect("Lock should not be poisoned");
-            let mut pending_updates = VisibleLsnUpdates::new();
-            std::mem::swap(&mut pending_updates, &mut lsn_table);
-            pending_updates
+            std::mem::take(&mut *lsn_table)
         };
         for (tenant_id, update) in &pending_lsn_updates.tenants {
             let entry = tenant_generations
