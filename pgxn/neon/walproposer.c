@@ -425,7 +425,7 @@ WalProposerPoll(void)
 
 			break;
 		}
-
+		
 		/*
 		 * If the event contains something that one of our safekeeper states
 		 * was waiting for, we'll advance its state.
@@ -1089,7 +1089,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
 
-	/*
+	/* 
 	 * Note: it would be better to track the counter on per safekeeper basis,
 	 * but at worst walproposer would restart with 'term rejected', so leave as
 	 * is for now.
@@ -2300,12 +2300,12 @@ HandleSafekeeperResponse(void)
 		if (n_synced >= quorum)
 		{
 			/* A quorum of safekeepers has been synced! */
-
+			
 			/*
 			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
 			 * This helps to finish next sync-safekeepers eailier, by skipping recovery
 			 * step.
-			 *
+			 * 
 			 * We don't need to wait for response because it doesn't affect correctness,
 			 * and TCP should be able to deliver the message to safekeepers in case of
 			 * network working properly.
@@ -2547,9 +2547,9 @@ backpressure_lag_impl(void)
 {
 	if (max_replication_apply_lag > 0 || max_replication_flush_lag > 0 || max_replication_write_lag > 0)
 	{
-		XLogRecPtr	writePtr; // last_received_lsn
-		XLogRecPtr	flushPtr; // disk_consistent_lsn
-		XLogRecPtr	applyPtr; // remote_consistent_lsn
+		XLogRecPtr	writePtr;
+		XLogRecPtr	flushPtr;
+		XLogRecPtr	applyPtr;
 #if PG_VERSION_NUM >= 150000
 		XLogRecPtr	myFlushLsn = GetFlushRecPtr(NULL);
 #else
@@ -2597,7 +2597,7 @@ backpressure_throttling_impl(void)
 	/*
 	 * Don't throttle read only transactions or wal sender.
 	 * Do throttle CREATE INDEX CONCURRENTLY, however. It performs some
-	 * stages outside a transaction, even though it writes a lot of WAL.
+	 * stages outside a transaction, even though it writes a lot of WAL. 
 	 * Check PROC_IN_SAFE_IC flag to cover that case.
 	 */
 	if (am_walsender
