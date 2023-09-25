@@ -78,7 +78,7 @@ impl EphemeralFile {
                             format!(
                                 "ephemeral file: read immutable page #{}: {}: {:#}",
                                 blknum,
-                                self.file.path.as_std_path().display(),
+                                self.file.path,
                                 e,
                             ),
                         )
@@ -183,7 +183,7 @@ impl EphemeralFile {
                                         "ephemeral_file: write_blob: write-back full tail blk #{}: {:#}: {}",
                                         self.blknum,
                                         e,
-                                        self.ephemeral_file.file.path.as_std_path().display(),
+                                        self.ephemeral_file.file.path,
                                     ),
                                 ));
                             }
@@ -246,7 +246,7 @@ impl Drop for EphemeralFile {
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 error!(
                     "could not remove ephemeral file '{}': {}",
-                    self.file.path.as_std_path().display(),
+                    self.file.path,
                     e
                 );
             }

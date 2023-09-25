@@ -224,8 +224,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!(
-                "loading pg auth JWT key from {}",
-                path.as_std_path().display()
+                "loading pg auth JWT key from {path}"
             );
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
@@ -239,8 +238,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!(
-                "loading pg tenant only auth JWT key from {}",
-                path.as_std_path().display()
+                "loading pg tenant only auth JWT key from {path}"
             );
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
@@ -254,8 +252,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!(
-                "loading http auth JWT key from {}",
-                path.as_std_path().display()
+                "loading http auth JWT key from {path}"
             );
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,

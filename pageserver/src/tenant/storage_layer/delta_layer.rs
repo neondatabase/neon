@@ -458,7 +458,7 @@ impl DeltaLayer {
             .with_context(|| {
                 format!(
                     "Failed to load delta layer {}",
-                    self.path().as_std_path().display()
+                    self.path()
                 )
             })
     }
@@ -716,7 +716,7 @@ impl DeltaLayerWriterInner {
         ensure!(
             metadata.len() <= S3_UPLOAD_LIMIT,
             "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
-            file.path.as_std_path().display(),
+            file.path,
             metadata.len()
         );
 
@@ -753,7 +753,7 @@ impl DeltaLayerWriterInner {
         );
         std::fs::rename(self.path, &final_path)?;
 
-        trace!("created delta layer {}", final_path.as_std_path().display());
+        trace!("created delta layer {final_path}");
 
         Ok(layer)
     }
@@ -854,7 +854,7 @@ impl DeltaLayerInner {
     pub(super) async fn load(path: &Utf8Path, summary: Option<Summary>) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
-            .with_context(|| format!("Failed to open file '{}'", path.as_std_path().display()))?;
+            .with_context(|| format!("Failed to open file '{path}'"))?;
         let file = FileBlockReader::new(file);
 
         let summary_blk = file.read_blk(0).await?;
@@ -924,13 +924,13 @@ impl DeltaLayerInner {
                 .with_context(|| {
                     format!(
                         "Failed to read blob from virtual file {}",
-                        file.file.path.as_std_path().display()
+                        file.file.path
                     )
                 })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
-                    file.file.path.as_std_path().display()
+                    file.file.path
                 )
             })?;
             match val {

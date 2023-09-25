@@ -198,14 +198,14 @@ impl Drop for TimelineUninitMark {
             if self.timeline_path.exists() {
                 error!(
                     "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path.as_std_path().display(),
-                    self.timeline_path.as_std_path().display()
+                    self.uninit_mark_path,
+                    self.timeline_path
                 )
             } else {
                 // unblock later timeline creation attempts
                 warn!(
                     "Removing intermediate uninit mark file {}",
-                    self.uninit_mark_path.as_std_path().display()
+                    self.uninit_mark_path
                 );
                 if let Err(e) = self.delete_mark_file_if_present() {
                     error!("Failed to remove the uninit mark file: {e}")

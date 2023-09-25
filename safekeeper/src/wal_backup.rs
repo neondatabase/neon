@@ -433,7 +433,7 @@ async fn backup_single_segment(
     res?;
     debug!(
         "Backup of {} done",
-        segment_file_path.as_std_path().display()
+        segment_file_path
     );
 
     Ok(*seg)
@@ -498,7 +498,7 @@ async fn backup_object(
     let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
         format!(
             "Failed to open file {} for wal backup",
-            source_file.as_std_path().display()
+            source_file
         )
     })?);
 

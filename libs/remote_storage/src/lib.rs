@@ -52,7 +52,7 @@ pub struct RemotePath(Utf8PathBuf);
 
 impl std::fmt::Display for RemotePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.as_std_path().display())
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -285,8 +285,7 @@ impl GenericRemoteStorage {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
                 info!(
-                    "Using fs root '{}' as a remote storage",
-                    root.as_std_path().display()
+                    "Using fs root '{root}' as a remote storage",
                 );
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }

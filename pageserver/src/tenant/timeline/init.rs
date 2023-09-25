@@ -168,8 +168,7 @@ pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
     tracing::debug!(kind, ?file_name, "cleaning up");
     std::fs::remove_file(path).with_context(|| {
         format!(
-            "failed to remove {kind} at {}",
-            path.as_std_path().display()
+            "failed to remove {kind} at {path}"
         )
     })
 }
@@ -187,8 +186,7 @@ pub(super) fn cleanup_local_file_for_remote(
     if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
         assert!(
             path.exists(),
-            "we would leave the local_layer without a file if this does not hold: {}",
-            path.as_std_path().display()
+            "we would leave the local_layer without a file if this does not hold: {path}",
         );
         Err(err)
     } else {

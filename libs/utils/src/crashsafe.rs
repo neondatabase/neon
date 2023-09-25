@@ -33,8 +33,7 @@ pub fn create_dir_all(path: impl AsRef<Utf8Path>) -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(
-                        "non-directory found in path: {}",
-                        path.as_std_path().display()
+                        "non-directory found in path: {path}",
                     ),
                 ));
             }
@@ -50,8 +49,7 @@ pub fn create_dir_all(path: impl AsRef<Utf8Path>) -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "can't find parent of path '{}'",
-                        path.as_std_path().display()
+                        "can't find parent of path '{path}'",
                     )
                     .as_str(),
                 ));

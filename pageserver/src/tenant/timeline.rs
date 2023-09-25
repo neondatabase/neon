@@ -2184,7 +2184,7 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
                 debug_assert!(local_path.to_string().contains(&format!("{}", timeline_id)),
                     "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
-                format!("{}", local_path.as_std_path().display())
+                format!("{local_path}")
             }
             None => {
                 format!("remote {}/{self}", timeline_id)
@@ -3805,8 +3805,7 @@ impl Timeline {
 
             let metadata = new_delta_path.metadata().with_context(|| {
                 format!(
-                    "read file metadata for new created layer {}",
-                    new_delta_path.as_std_path().display()
+                    "read file metadata for new created layer {new_delta_path}",
                 )
             })?;
 
@@ -4740,8 +4739,7 @@ fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
         .file_name()
         .ok_or_else(|| {
             anyhow!(
-                "Path {} don't have a file name",
-                path.as_std_path().display()
+                "Path {path} don't have a file name",
             )
         })?
         .to_string();

@@ -63,16 +63,14 @@ impl LocalFs {
         if metadata_path.exists() && metadata_path.is_file() {
             let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
                 format!(
-                    "Failed to read metadata from the local storage at '{}'",
-                    metadata_path.as_std_path().display()
+                    "Failed to read metadata from the local storage at '{metadata_path}'",
                 )
             })?;
 
             serde_json::from_str(&metadata_string)
                 .with_context(|| {
                     format!(
-                        "Failed to deserialize metadata from the local storage at '{}'",
-                        metadata_path.as_std_path().display()
+                        "Failed to deserialize metadata from the local storage at '{metadata_path}'",
                     )
                 })
                 .map(|metadata| Some(StorageMetadata(metadata)))
@@ -228,8 +226,7 @@ impl RemoteStorage for LocalFs {
                 .await
                 .with_context(|| {
                     format!(
-                        "Failed to open target fs destination at '{}'",
-                        target_file_path.as_std_path().display()
+                        "Failed to open target fs destination at '{target_file_path}'",
                     )
                 })?,
         );
@@ -241,8 +238,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to upload file (write temp) to the local storage at '{}'",
-                    temp_file_path.as_std_path().display()
+                    "Failed to upload file (write temp) to the local storage at '{temp_file_path}'",
                 )
             })?;
 
@@ -259,8 +255,7 @@ impl RemoteStorage for LocalFs {
 
         destination.flush().await.with_context(|| {
             format!(
-                "Failed to upload (flush temp) file to the local storage at '{}'",
-                temp_file_path.as_std_path().display()
+                "Failed to upload (flush temp) file to the local storage at '{temp_file_path}'",
             )
         })?;
 
@@ -268,8 +263,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to upload (rename) file to the local storage at '{}'",
-                    target_file_path.as_std_path().display()
+                    "Failed to upload (rename) file to the local storage at '{target_file_path}'",
                 )
             })?;
 
@@ -283,8 +277,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to write metadata to the local storage at '{}'",
-                    storage_metadata_path.as_std_path().display()
+                    "Failed to write metadata to the local storage at '{storage_metadata_path}'",
                 )
             })?;
         }
@@ -442,8 +435,7 @@ async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<
     let target_dir = match target_file_path.parent() {
         Some(parent_dir) => parent_dir,
         None => bail!(
-            "File path '{}' has no parent directory",
-            target_file_path.as_std_path().display()
+            "File path '{target_file_path}' has no parent directory",
         ),
     };
     if !target_dir.exists() {
@@ -456,8 +448,7 @@ fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
     if file_path.exists() {
         ensure!(
             file_path.is_file(),
-            "file path '{}' is not a file",
-            file_path.as_std_path().display()
+            "file path '{file_path}' is not a file",
         );
         Ok(true)
     } else {

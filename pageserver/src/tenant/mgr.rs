@@ -136,15 +136,14 @@ pub async fn init_tenant_mgr(
                     Utf8PathBuf::from_path_buf(dir_entry.path()).expect("non-Unicode path");
                 if crate::is_temporary(&tenant_dir_path) {
                     info!(
-                        "Found temporary tenant directory, removing: {}",
-                        tenant_dir_path.as_std_path().display()
+                        "Found temporary tenant directory, removing: {tenant_dir_path}",
                     );
                     // No need to use safe_remove_tenant_dir_all because this is already
                     // a temporary path
                     if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
-                            tenant_dir_path.as_std_path().display(),
+                            tenant_dir_path,
                             e
                         );
                     }
@@ -160,7 +159,7 @@ pub async fn init_tenant_mgr(
                         if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
                             error!(
                                 "Failed to remove empty tenant directory '{}': {e:#}",
-                                tenant_dir_path.as_std_path().display()
+                                tenant_dir_path
                             )
                         }
                         continue;
@@ -181,7 +180,7 @@ pub async fn init_tenant_mgr(
                         Err(_) => {
                             warn!(
                                 "Invalid tenant path (garbage in our repo directory?): {}",
-                                tenant_dir_path.as_std_path().display()
+                                tenant_dir_path
                             );
                             continue;
                         }
@@ -197,7 +196,7 @@ pub async fn init_tenant_mgr(
                             if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
                                 error!(
                                     "Failed to remove detached tenant directory '{}': {:?}",
-                                    tenant_dir_path.as_std_path().display(),
+                                    tenant_dir_path,
                                     e
                                 );
                             }
@@ -208,7 +207,7 @@ pub async fn init_tenant_mgr(
                         // on local disk may activate
                         info!(
                             "Starting tenant {} in legacy mode, no generation",
-                            tenant_dir_path.as_std_path().display()
+                            tenant_dir_path
                         );
                         Generation::none()
                     };

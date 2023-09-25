@@ -194,8 +194,7 @@ async fn cleanup_remaining_fs_traces(
         }
         .or_else(fs_ext::ignore_not_found)
         .with_context(|| {
-            let to_display = p.as_std_path().display();
-            format!("failed to delete {to_display}")
+            format!("failed to delete {p}")
         })
     };
 

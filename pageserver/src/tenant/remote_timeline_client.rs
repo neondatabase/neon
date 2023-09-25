@@ -1635,14 +1635,13 @@ mod tests {
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
-        println!("workdir: {}", harness.conf.workdir.as_std_path().display());
+        println!("workdir: {}", harness.conf.workdir);
 
         let remote_timeline_dir = harness
             .remote_fs_dir
             .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
         println!(
-            "remote_timeline_dir: {}",
-            remote_timeline_dir.as_std_path().display()
+            "remote_timeline_dir: {remote_timeline_dir}",
         );
 
         let generation = harness.generation;
@@ -1889,7 +1888,7 @@ mod tests {
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
         );
-        eprintln!("Writing {}", index_path.as_std_path().display());
+        eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
         example_index_part
     }

@@ -91,7 +91,7 @@ impl GlobalTimelines {
         for tenants_dir_entry in std::fs::read_dir(&tenants_dir).with_context(|| {
             format!(
                 "failed to list tenants dir {}",
-                tenants_dir.as_std_path().display()
+                tenants_dir
             )
         })? {
             match &tenants_dir_entry {
@@ -106,7 +106,7 @@ impl GlobalTimelines {
                 Err(e) => error!(
                     "failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
                     tenants_dir_entry,
-                    tenants_dir.as_std_path().display(),
+                    tenants_dir,
                     e
                 ),
             }
@@ -141,7 +141,7 @@ impl GlobalTimelines {
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir).with_context(|| {
             format!(
                 "failed to list timelines dir {}",
-                timelines_dir.as_std_path().display()
+                timelines_dir
             )
         })? {
             match &timelines_dir_entry {
@@ -175,7 +175,7 @@ impl GlobalTimelines {
                 Err(e) => error!(
                     "failed to list timelines dir entry {:?} in directory {}, reason: {:?}",
                     timelines_dir_entry,
-                    timelines_dir.as_std_path().display(),
+                    timelines_dir,
                     e
                 ),
             }

@@ -76,8 +76,7 @@ fn main() -> anyhow::Result<()> {
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir).with_context(|| {
         format!(
-            "Failed to set application's current dir to '{}'",
-            workdir.as_std_path().display()
+            "Failed to set application's current dir to '{workdir}'",
         )
     })?;
 
@@ -117,8 +116,7 @@ fn main() -> anyhow::Result<()> {
     if !tenants_path.exists() {
         utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
             format!(
-                "Failed to create tenants root dir at '{}'",
-                tenants_path.as_std_path().display()
+                "Failed to create tenants root dir at '{tenants_path}'",
             )
         })?;
     }
@@ -147,15 +145,13 @@ fn initialize_config(
     let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
         if init {
             anyhow::bail!(
-                "Config file '{}' already exists, cannot init it, use --update-config to update it",
-                cfg_file_path.as_std_path().display()
+                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
             );
         }
         // Supplement the CLI arguments with the config file
         let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
             format!(
-                "Failed to read pageserver config at '{}'",
-                cfg_file_path.as_std_path().display()
+                "Failed to read pageserver config at '{cfg_file_path}'",
             )
         })?;
         (
@@ -163,16 +159,14 @@ fn initialize_config(
                 .parse::<toml_edit::Document>()
                 .with_context(|| {
                     format!(
-                        "Failed to parse '{}' as pageserver config",
-                        cfg_file_path.as_std_path().display()
+                        "Failed to parse '{cfg_file_path}' as pageserver config",
                     )
                 })?,
             true,
         )
     } else if cfg_file_path.exists() {
         anyhow::bail!(
-            "Config file '{}' exists but is not a regular file",
-            cfg_file_path.as_std_path().display()
+            "Config file '{cfg_file_path}' exists but is not a regular file",
         );
     } else {
         // We're initializing the tenant, so there's no config file yet
@@ -192,7 +186,7 @@ fn initialize_config(
 
             for (key, item) in doc.iter() {
                 if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.as_std_path().display());
+                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
                 }
                 toml.insert(key, item.clone());
             }
@@ -205,19 +199,16 @@ fn initialize_config(
 
     if update_config {
         info!(
-            "Writing pageserver config to '{}'",
-            cfg_file_path.as_std_path().display()
+            "Writing pageserver config to '{cfg_file_path}'",
         );
 
         std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
             format!(
-                "Failed to write pageserver config to '{}'",
-                cfg_file_path.as_std_path().display()
+                "Failed to write pageserver config to '{cfg_file_path}'",
             )
         })?;
         info!(
-            "Config successfully written to '{}'",
-            cfg_file_path.as_std_path().display()
+            "Config successfully written to '{cfg_file_path}'",
         )
     }
 

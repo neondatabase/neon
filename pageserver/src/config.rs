@@ -763,8 +763,7 @@ impl PageServerConf {
             ensure!(
                 auth_validation_public_key_path.exists(),
                 format!(
-                    "Can't find auth_validation_public_key at '{}'",
-                    auth_validation_public_key_path.as_std_path().display()
+                    "Can't find auth_validation_public_key at '{auth_validation_public_key_path}'",
                 )
             );
         }
@@ -1091,8 +1090,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
         let config_string = format!(
-            "pg_distrib_dir='{}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.as_std_path().display()
+            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1157,8 +1155,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
 
         let config_string = format!(
-            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.as_std_path().display()
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1219,23 +1216,20 @@ background_task_maximum_delay = '334 s'
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-local_path = '{}'"#,
-                local_storage_path.as_std_path().display()
+local_path = '{local_storage_path}'"#,
             ),
             format!(
-                "remote_storage={{local_path='{}'}}",
-                local_storage_path.as_std_path().display()
+                "remote_storage={{local_path='{local_storage_path}'}}",
             ),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.as_std_path().display(),
             );
 
             let toml = config_string.parse()?;
@@ -1298,11 +1292,10 @@ concurrency_limit = {s3_concurrency_limit}"#
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.as_std_path().display(),
             );
 
             let toml = config_string.parse()?;
@@ -1344,12 +1337,11 @@ broker_endpoint = '{broker_endpoint}'
 
         let config_string = format!(
             r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
 trace_read_requests = {trace_read_requests}"#,
-            pg_distrib_dir.as_std_path().display(),
         );
 
         let toml = config_string.parse()?;
@@ -1369,7 +1361,7 @@ trace_read_requests = {trace_read_requests}"#,
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
 
         let pageserver_conf_toml = format!(
-            r#"pg_distrib_dir = "{}"
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
 id = 222
@@ -1387,7 +1379,6 @@ kind = "LayerAccessThreshold"
 period = "20m"
 threshold = "20m"
 "#,
-            pg_distrib_dir.as_std_path().display(),
         );
         let toml: Document = pageserver_conf_toml.parse()?;
         let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;

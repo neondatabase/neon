@@ -71,8 +71,7 @@ pub async fn download_layer_file<'a>(
                 .await
                 .with_context(|| {
                     format!(
-                        "create a destination file for layer '{}'",
-                        temp_file_path.as_std_path().display()
+                        "create a destination file for layer '{temp_file_path}'",
                     )
                 })
                 .map_err(DownloadError::Other)?;
@@ -118,8 +117,7 @@ pub async fn download_layer_file<'a>(
         .await
         .with_context(|| {
             format!(
-                "flush source file at {}",
-                temp_file_path.as_std_path().display()
+                "flush source file at {temp_file_path}",
             )
         })
         .map_err(DownloadError::Other)?;
@@ -137,8 +135,7 @@ pub async fn download_layer_file<'a>(
         .await
         .with_context(|| {
             format!(
-                "failed to fsync source file at {}",
-                temp_file_path.as_std_path().display()
+                "failed to fsync source file at {temp_file_path}",
             )
         })
         .map_err(DownloadError::Other)?;
@@ -154,18 +151,17 @@ pub async fn download_layer_file<'a>(
         .await
         .with_context(|| {
             format!(
-                "rename download layer file to {}",
-                local_path.as_std_path().display(),
+                "rename download layer file to {local_path}",
             )
         })
         .map_err(DownloadError::Other)?;
 
     crashsafe::fsync_async(&local_path)
         .await
-        .with_context(|| format!("fsync layer file {}", local_path.as_std_path().display(),))
+        .with_context(|| format!("fsync layer file {local_path}"))
         .map_err(DownloadError::Other)?;
 
-    tracing::debug!("download complete: {}", local_path.as_std_path().display());
+    tracing::debug!("download complete: {local_path}");
 
     Ok(bytes_amount)
 }

@@ -264,7 +264,7 @@ impl ImageLayer {
             .get_value_reconstruct_data(key, reconstruct_state)
             .await
             // FIXME: makes no sense to dump paths
-            .with_context(|| format!("read {}", self.path().as_std_path().display()))
+            .with_context(|| format!("read {}", self.path()))
     }
 
     pub(crate) fn local_path(&self) -> Option<Utf8PathBuf> {
@@ -340,7 +340,7 @@ impl ImageLayer {
             .with_context(|| {
                 format!(
                     "Failed to load image layer {}",
-                    self.path().as_std_path().display()
+                    self.path()
                 )
             })
     }
@@ -444,7 +444,7 @@ impl ImageLayerInner {
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
-            .with_context(|| format!("Failed to open file '{}'", path.as_std_path().display()))?;
+            .with_context(|| format!("Failed to open file '{}'", path))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -542,7 +542,7 @@ impl ImageLayerWriterInner {
                 lsn,
             },
         );
-        info!("new image layer {}", path.as_std_path().display());
+        info!("new image layer {path}");
         let mut file = VirtualFile::open_with_options(
             &path,
             std::fs::OpenOptions::new().write(true).create_new(true),
@@ -671,7 +671,7 @@ impl ImageLayerWriterInner {
 
         trace!(
             "created image layer {}",
-            layer.path().as_std_path().display()
+            layer.path()
         );
 
         Ok(layer)

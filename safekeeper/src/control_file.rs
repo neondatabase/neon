@@ -175,7 +175,7 @@ impl Storage for FileStorage {
         let mut control_partial = File::create(&control_partial_path).await.with_context(|| {
             format!(
                 "failed to create partial control file at: {}",
-                &control_partial_path.as_std_path().display()
+                &control_partial_path
             )
         })?;
         let mut buf: Vec<u8> = Vec::new();
@@ -190,13 +190,13 @@ impl Storage for FileStorage {
         control_partial.write_all(&buf).await.with_context(|| {
             format!(
                 "failed to write safekeeper state into control file at: {}",
-                control_partial_path.as_std_path().display()
+                control_partial_path
             )
         })?;
         control_partial.flush().await.with_context(|| {
             format!(
                 "failed to flush safekeeper state into control file at: {}",
-                control_partial_path.as_std_path().display()
+                control_partial_path
             )
         })?;
 
@@ -205,7 +205,7 @@ impl Storage for FileStorage {
             control_partial.sync_all().await.with_context(|| {
                 format!(
                     "failed to sync partial control file at {}",
-                    control_partial_path.as_std_path().display()
+                    control_partial_path
                 )
             })?;
         }
@@ -220,7 +220,7 @@ impl Storage for FileStorage {
             new_f.sync_all().await.with_context(|| {
                 format!(
                     "failed to sync control file at: {}",
-                    &control_path.as_std_path().display()
+                    &control_path
                 )
             })?;
 

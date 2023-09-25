@@ -223,8 +223,8 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     info!(
         "Moving timeline {} from {} to {}",
         ttid,
-        tli_dir_path.as_std_path().display(),
-        timeline_path.as_std_path().display()
+        tli_dir_path,
+        timeline_path
     );
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
     tokio::fs::rename(tli_dir_path, &timeline_path).await?;

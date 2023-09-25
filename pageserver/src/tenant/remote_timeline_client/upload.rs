@@ -69,7 +69,7 @@ pub(super) async fn upload_timeline_layer<'a>(
             // upload. However, a nonexistent file can also be indicative of
             // something worse, like when a file is scheduled for upload before
             // it has been written to disk yet.
-            info!(path = %source_path.as_std_path().display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
+            info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
         Err(e) => {
@@ -96,8 +96,7 @@ pub(super) async fn upload_timeline_layer<'a>(
         .await
         .with_context(|| {
             format!(
-                "upload layer from local path '{}'",
-                source_path.as_std_path().display()
+                "upload layer from local path '{source_path}'",
             )
         })?;
 
