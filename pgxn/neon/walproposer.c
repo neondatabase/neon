@@ -174,7 +174,7 @@ WalProposerMain(Datum main_arg)
 
 	WalProposerInit(walprop_pg.get_flush_rec_ptr(), systemId);
 
-	last_reconnect_attempt = GetCurrentTimestamp();
+	last_reconnect_attempt = walprop_pg.get_current_timestamp();
 
 	walprop_pg.init_walsender();
 
@@ -208,7 +208,7 @@ WalProposerPoll(void)
 		bool		late_cv_trigger = false;
 		WaitEvent	event = {0};
 		int			rc = 0;
-		TimestampTz now = GetCurrentTimestamp();
+		TimestampTz now = walprop_pg.get_current_timestamp();
 		long		timeout = TimeToReconnect(now);
 
 #if PG_MAJORVERSION_NUM >= 16
@@ -276,7 +276,7 @@ WalProposerPoll(void)
 			}
 		}
 
-		now = GetCurrentTimestamp();
+		now = walprop_pg.get_current_timestamp();
 		if (rc == 0 || TimeToReconnect(now) <= 0)			/* timeout expired: poll state */
 		{
 			TimestampTz now;
@@ -293,7 +293,7 @@ WalProposerPoll(void)
 			/*
 			 * Abandon connection attempts which take too long.
 			 */
-			now = GetCurrentTimestamp();
+			now = walprop_pg.get_current_timestamp();
 			for (int i = 0; i < n_safekeepers; i++)
 			{
 				Safekeeper *sk = &safekeeper[i];
@@ -317,9 +317,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	char	   *sep;
 	char	   *port;
 
-	load_file("libpqwalreceiver", false);
-	if (WalReceiverFunctions == NULL)
-		elog(ERROR, "libpqwalreceiver didn't initialize correctly");
+	walprop_pg.load_libpqwalreceiver();
 
 	for (host = wal_acceptors_list; host != NULL && *host != '\0'; host = sep)
 	{
@@ -384,12 +382,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 		!HexDecodeString(greetRequest.tenant_id, neon_tenant, 16))
 		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant);
 
-#if PG_VERSION_NUM >= 150000
-	/* FIXME don't use hardcoded timeline id */
-	greetRequest.timeline = 1;
-#else
-	greetRequest.timeline = ThisTimeLineID;
-#endif
+	greetRequest.timeline = walprop_pg.get_timeline_id();
 	greetRequest.walSegSize = wal_segment_size;
 
 	InitEventSet();
@@ -482,7 +475,7 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 		if (sk->conn != NULL)
 		{
 			desired_events = SafekeeperStateDesiredEvents(sk->state);
-			sk->eventPos = AddWaitEventToSet(waitEvents, desired_events, walprop_socket(sk->conn), NULL, sk);
+			sk->eventPos = AddWaitEventToSet(waitEvents, desired_events, walprop_pg.conn_socket(sk->conn), NULL, sk);
 		}
 	}
 }
@@ -492,7 +485,7 @@ static void
 ShutdownConnection(Safekeeper *sk)
 {
 	if (sk->conn)
-		walprop_finish(sk->conn);
+		walprop_pg.conn_finish(sk->conn);
 	sk->conn = NULL;
 	sk->state = SS_OFFLINE;
 	sk->flushWrite = false;
@@ -524,7 +517,7 @@ ResetConnection(Safekeeper *sk)
 	/*
 	 * Try to establish new connection
 	 */
-	sk->conn = walprop_connect_start((char *) &sk->conninfo, neon_auth_token);
+	sk->conn = walprop_pg.conn_connect_start((char *) &sk->conninfo, neon_auth_token);
 
 	/*
 	 * "If the result is null, then libpq has been unable to allocate a new
@@ -538,7 +531,7 @@ ResetConnection(Safekeeper *sk)
 	 * PQconnectPoll. Before we do that though, we need to check that it
 	 * didn't immediately fail.
 	 */
-	if (walprop_status(sk->conn) == WP_CONNECTION_BAD)
+	if (walprop_pg.conn_status(sk->conn) == WP_CONNECTION_BAD)
 	{
 		/*---
 		 * According to libpq docs:
@@ -550,13 +543,13 @@ ResetConnection(Safekeeper *sk)
 		 * https://www.postgresql.org/docs/devel/libpq-connect.html#LIBPQ-PQCONNECTSTARTPARAMS
 		 */
 		elog(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
-			 sk->host, sk->port, walprop_error_message(sk->conn));
+			 sk->host, sk->port, walprop_pg.conn_error_message(sk->conn));
 
 		/*
 		 * Even though the connection failed, we still need to clean up the
 		 * object
 		 */
-		walprop_finish(sk->conn);
+		walprop_pg.conn_finish(sk->conn);
 		sk->conn = NULL;
 		return;
 	}
@@ -577,9 +570,9 @@ ResetConnection(Safekeeper *sk)
 	elog(LOG, "connecting with node %s:%s", sk->host, sk->port);
 
 	sk->state = SS_CONNECTING_WRITE;
-	sk->latestMsgReceivedAt = GetCurrentTimestamp();
+	sk->latestMsgReceivedAt = walprop_pg.get_current_timestamp();
 
-	sock = walprop_socket(sk->conn);
+	sock = walprop_pg.conn_socket(sk->conn);
 	sk->eventPos = AddWaitEventToSet(waitEvents, WL_SOCKET_WRITEABLE, sock, NULL, sk);
 	return;
 }
@@ -609,7 +602,7 @@ TimeToReconnect(TimestampTz now)
 static void
 ReconnectSafekeepers(void)
 {
-	TimestampTz now = GetCurrentTimestamp();
+	TimestampTz now = walprop_pg.get_current_timestamp();
 
 	if (TimeToReconnect(now) == 0)
 	{
@@ -725,7 +718,7 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 static void
 HandleConnectionEvent(Safekeeper *sk)
 {
-	WalProposerConnectPollStatusType result = walprop_connect_poll(sk->conn);
+	WalProposerConnectPollStatusType result = walprop_pg.conn_connect_poll(sk->conn);
 
 	/* The new set of events we'll wait on, after updating */
 	uint32		new_events = WL_NO_EVENTS;
@@ -735,7 +728,7 @@ HandleConnectionEvent(Safekeeper *sk)
 		case WP_CONN_POLLING_OK:
 			elog(LOG, "connected with node %s:%s", sk->host,
 				 sk->port);
-			sk->latestMsgReceivedAt = GetCurrentTimestamp();
+			sk->latestMsgReceivedAt = walprop_pg.get_current_timestamp();
 			/*
 			 * We have to pick some event to update event set. We'll
 			 * eventually need the socket to be readable, so we go with that.
@@ -757,7 +750,7 @@ HandleConnectionEvent(Safekeeper *sk)
 
 		case WP_CONN_POLLING_FAILED:
 			elog(WARNING, "failed to connect to node '%s:%s': %s",
-				 sk->host, sk->port, walprop_error_message(sk->conn));
+				 sk->host, sk->port, walprop_pg.conn_error_message(sk->conn));
 
 			/*
 			 * If connecting failed, we don't want to restart the connection
@@ -774,7 +767,7 @@ HandleConnectionEvent(Safekeeper *sk)
 	 * old event and re-register an event on the new socket.
 	 */
 	HackyRemoveWalProposerEvent(sk);
-	sk->eventPos = AddWaitEventToSet(waitEvents, new_events, walprop_socket(sk->conn), NULL, sk);
+	sk->eventPos = AddWaitEventToSet(waitEvents, new_events, walprop_pg.conn_socket(sk->conn), NULL, sk);
 
 	/* If we successfully connected, send START_WAL_PUSH query */
 	if (result == WP_CONN_POLLING_OK)
@@ -789,10 +782,10 @@ HandleConnectionEvent(Safekeeper *sk)
 static void
 SendStartWALPush(Safekeeper *sk)
 {
-	if (!walprop_send_query(sk->conn, "START_WAL_PUSH"))
+	if (!walprop_pg.conn_send_query(sk->conn, "START_WAL_PUSH"))
 	{
 		elog(WARNING, "Failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
-			 sk->host, sk->port, walprop_error_message(sk->conn));
+			 sk->host, sk->port, walprop_pg.conn_error_message(sk->conn));
 		ShutdownConnection(sk);
 		return;
 	}
@@ -803,7 +796,7 @@ SendStartWALPush(Safekeeper *sk)
 static void
 RecvStartWALPushResult(Safekeeper *sk)
 {
-	switch (walprop_get_query_result(sk->conn))
+	switch (walprop_pg.conn_get_query_result(sk->conn))
 	{
 			/*
 			 * Successful result, move on to starting the handshake
@@ -827,7 +820,7 @@ RecvStartWALPushResult(Safekeeper *sk)
 
 		case WP_EXEC_FAILED:
 			elog(WARNING, "Failed to send query to safekeeper %s:%s: %s",
-				 sk->host, sk->port, walprop_error_message(sk->conn));
+				 sk->host, sk->port, walprop_pg.conn_error_message(sk->conn));
 			ShutdownConnection(sk);
 			return;
 
@@ -1611,19 +1604,14 @@ SendAppendRequests(Safekeeper *sk)
 					 &sk->outbuf.data[sk->outbuf.len],
 					 req->beginLsn,
 					 req->endLsn - req->beginLsn,
-#if PG_VERSION_NUM >= 150000
-		/* FIXME don't use hardcoded timeline_id here */
-					 1,
-#else
-					 ThisTimeLineID,
-#endif
+					 walprop_pg.get_timeline_id(),
 					 &errinfo))
 		{
 			WALReadRaiseError(&errinfo);
 		}
 		sk->outbuf.len += req->endLsn - req->beginLsn;
 
-		writeResult = walprop_async_write(sk->conn, sk->outbuf.data, sk->outbuf.len);
+		writeResult = walprop_pg.conn_async_write(sk->conn, sk->outbuf.data, sk->outbuf.len);
 
 		/* Mark current message as sent, whatever the result is */
 		sk->streamingAt = endLsn;
@@ -1647,7 +1635,7 @@ SendAppendRequests(Safekeeper *sk)
 			case PG_ASYNC_WRITE_FAIL:
 				elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
 					 sk->host, sk->port, FormatSafekeeperState(sk->state),
-					 walprop_error_message(sk->conn));
+					 walprop_pg.conn_error_message(sk->conn));
 				ShutdownConnection(sk);
 				return false;
 			default:
@@ -1951,7 +1939,7 @@ HandleSafekeeperResponse(void)
 			 * pageserver.
 			 */
 								quorumFeedback.rf.disk_consistent_lsn,
-								GetCurrentTimestamp(), false);
+								walprop_pg.get_current_timestamp(), false);
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback);
@@ -2050,7 +2038,7 @@ HandleSafekeeperResponse(void)
 static bool
 AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
 {
-	switch (walprop_async_read(sk->conn, buf, buf_size))
+	switch (walprop_pg.conn_async_read(sk->conn, buf, buf_size))
 	{
 		case PG_ASYNC_READ_SUCCESS:
 			return true;
@@ -2062,7 +2050,7 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
 		case PG_ASYNC_READ_FAIL:
 			elog(WARNING, "Failed to read from node %s:%s in %s state: %s", sk->host,
 				 sk->port, FormatSafekeeperState(sk->state),
-				 walprop_error_message(sk->conn));
+				 walprop_pg.conn_error_message(sk->conn));
 			ShutdownConnection(sk);
 			return false;
 	}
@@ -2103,7 +2091,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 		ResetConnection(sk);
 		return false;
 	}
-	sk->latestMsgReceivedAt = GetCurrentTimestamp();
+	sk->latestMsgReceivedAt = walprop_pg.get_current_timestamp();
 	switch (tag)
 	{
 		case 'g':
@@ -2171,11 +2159,11 @@ BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState succes
 {
 	uint32		events;
 
-	if (!walprop_blocking_write(sk->conn, msg, msg_size))
+	if (!walprop_pg.conn_blocking_write(sk->conn, msg, msg_size))
 	{
 		elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
 			 sk->host, sk->port, FormatSafekeeperState(sk->state),
-			 walprop_error_message(sk->conn));
+			 walprop_pg.conn_error_message(sk->conn));
 		ShutdownConnection(sk);
 		return false;
 	}
@@ -2203,7 +2191,7 @@ BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState succes
 static bool
 AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_state)
 {
-	switch (walprop_async_write(sk->conn, msg, msg_size))
+	switch (walprop_pg.conn_async_write(sk->conn, msg, msg_size))
 	{
 		case PG_ASYNC_WRITE_SUCCESS:
 			return true;
@@ -2220,7 +2208,7 @@ AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_sta
 		case PG_ASYNC_WRITE_FAIL:
 			elog(WARNING, "Failed to send to node %s:%s in %s state: %s",
 				 sk->host, sk->port, FormatSafekeeperState(sk->state),
-				 walprop_error_message(sk->conn));
+				 walprop_pg.conn_error_message(sk->conn));
 			ShutdownConnection(sk);
 			return false;
 		default:
@@ -2246,7 +2234,7 @@ AsyncFlush(Safekeeper *sk)
 	 *   1 if unable to send everything yet [call PQflush again]
 	 *  -1 if it failed                     [emit an error]
 	 */
-	switch (walprop_flush(sk->conn))
+	switch (walprop_pg.conn_flush(sk->conn))
 	{
 		case 0:
 			/* flush is done */
@@ -2257,7 +2245,7 @@ AsyncFlush(Safekeeper *sk)
 		case -1:
 			elog(WARNING, "Failed to flush write to node %s:%s in %s state: %s",
 				 sk->host, sk->port, FormatSafekeeperState(sk->state),
-				 walprop_error_message(sk->conn));
+				 walprop_pg.conn_error_message(sk->conn));
 			ResetConnection(sk);
 			return false;
 		default:
