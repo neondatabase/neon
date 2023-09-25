@@ -27,9 +27,7 @@ use tracing::warn;
 use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::control_plane_client::RetryForeverError;
-use crate::metrics::DELETION_QUEUE_DROPPED;
-use crate::metrics::DELETION_QUEUE_DROPPED_LSN_UPDATES;
-use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
+use crate::metrics;
 
 use super::deleter::DeleterMessage;
 use super::DeletionHeader;
@@ -123,7 +121,7 @@ where
                 // pageservers will try and load it again: hopefully whatever storage
                 // issue (probably permissions) has been fixed by then.
                 tracing::error!("Failed to delete {}: {e:#}", list_path.display());
-                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                metrics::DELETION_QUEUE.unexpected_errors.inc();
                 break;
             }
         }
@@ -198,7 +196,7 @@ where
             } else {
                 // If we failed validation, then do not apply any of the projected updates
                 warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
-                DELETION_QUEUE_DROPPED_LSN_UPDATES.inc();
+                metrics::DELETION_QUEUE.dropped_lsn_updates.inc();
             }
         }
 
@@ -233,7 +231,7 @@ where
 
                 if !this_list_valid {
                     warn!("Dropping stale deletions for tenant {tenant_id} in generation {:?}, objects may be leaked", tenant.generation);
-                    DELETION_QUEUE_DROPPED.inc_by(tenant.len() as u64);
+                    metrics::DELETION_QUEUE.keys_dropped.inc_by(tenant.len() as u64);
                     mutated = true;
                 }
                 this_list_valid
@@ -247,7 +245,7 @@ where
                     // Highly unexpected.  Could happen if e.g. disk full.
                     // If we didn't save the trimmed list, it is _not_ valid to execute.
                     warn!("Failed to save modified deletion list {list}: {e:#}");
-                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                    metrics::DELETION_QUEUE.unexpected_errors.inc();
 
                     // Rather than have a complex retry process, just drop it and leak the objects,
                     // scrubber will clean up eventually.
@@ -286,7 +284,7 @@ where
                 // The save() function logs a warning on error.
                 if let Err(e) = header.save(self.conf).await {
                     warn!("Failed to write deletion queue header: {e:#}");
-                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                    metrics::DELETION_QUEUE.unexpected_errors.inc();
                 }
             }
         }

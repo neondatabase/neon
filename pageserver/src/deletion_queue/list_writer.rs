@@ -31,8 +31,7 @@ use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::deletion_queue::TEMP_SUFFIX;
-use crate::metrics::DELETION_QUEUE_SUBMITTED;
-use crate::metrics::DELETION_QUEUE_UNEXPECTED_ERRORS;
+use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
 
@@ -158,7 +157,7 @@ impl ListWriter {
                 }
             }
             Err(e) => {
-                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                metrics::DELETION_QUEUE.unexpected_errors.inc();
                 warn!(
                     sequence = self.pending.sequence,
                     "Failed to write deletion list, will retry later ({e:#})"
@@ -187,7 +186,7 @@ impl ListWriter {
                         // This should never happen unless we make a mistake with our serialization.
                         // Ignoring a deletion header is not consequential for correctnes because all deletions
                         // are ultimately allowed to fail: worst case we leak some objects for the scrubber to clean up.
-                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                        metrics::DELETION_QUEUE.unexpected_errors.inc();
                         Ok(None)
                     }
                 }
@@ -272,7 +271,7 @@ impl ListWriter {
                     .as_str()
             } else {
                 warn!("Unexpected key in deletion queue: {basename}");
-                DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                metrics::DELETION_QUEUE.unexpected_errors.inc();
                 continue;
             };
 
@@ -280,7 +279,7 @@ impl ListWriter {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Malformed key '{basename}': {e}");
-                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                    metrics::DELETION_QUEUE.unexpected_errors.inc();
                     continue;
                 }
             };
@@ -307,7 +306,7 @@ impl ListWriter {
                     // Drop the list on the floor: any objects it referenced will be left behind
                     // for scrubbing to clean up.  This should never happen unless we have a serialization bug.
                     warn!(sequence = s, "Failed to deserialize deletion list: {e}");
-                    DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                    metrics::DELETION_QUEUE.unexpected_errors.inc();
                     continue;
                 }
             };
@@ -339,7 +338,9 @@ impl ListWriter {
 
             // We will drop out of recovery if this fails: it indicates that we are shutting down
             // or the backend has panicked
-            DELETION_QUEUE_SUBMITTED.inc_by(deletion_list.len() as u64);
+            metrics::DELETION_QUEUE
+                .keys_submitted
+                .inc_by(deletion_list.len() as u64);
             self.tx
                 .send(ValidatorQueueMessage::Delete(deletion_list))
                 .await?;
@@ -361,7 +362,7 @@ impl ListWriter {
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
                 self.conf.deletion_prefix().display()
             );
-            DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+            metrics::DELETION_QUEUE.unexpected_errors.inc();
             return;
         }
 
@@ -429,7 +430,7 @@ impl ListWriter {
                             tracing::error!(
                                 "Failed to enqueue deletions, leaking objects.  This is a bug."
                             );
-                            DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                            metrics::DELETION_QUEUE.unexpected_errors.inc();
                         }
                     }
                 }
@@ -457,7 +458,7 @@ impl ListWriter {
                         tracing::error!(
                             "Deletion queue recovery called more than once.  This is a bug."
                         );
-                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                        metrics::DELETION_QUEUE.unexpected_errors.inc();
                         // Non-fatal: although this is a bug, since we did recovery at least once we may proceed.
                         continue;
                     }
@@ -469,7 +470,7 @@ impl ListWriter {
                         info!(
                             "Deletion queue recover aborted, deletion queue will not proceed ({e})"
                         );
-                        DELETION_QUEUE_UNEXPECTED_ERRORS.inc();
+                        metrics::DELETION_QUEUE.unexpected_errors.inc();
                         return;
                     } else {
                         self.recovered = true;

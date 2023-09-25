@@ -14,8 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
 
-use crate::metrics::DELETION_QUEUE_EXECUTED;
-use crate::metrics::DELETION_QUEUE_REMOTE_ERRORS;
+use crate::metrics;
 
 use super::DeletionQueueError;
 use super::FlushOp;
@@ -57,7 +56,8 @@ impl Deleter {
     async fn remote_delete(&self) -> Result<(), anyhow::Error> {
         fail::fail_point!("deletion-queue-before-execute", |_| {
             info!("Skipping execution, failpoint set");
-            DELETION_QUEUE_REMOTE_ERRORS
+            metrics::DELETION_QUEUE
+                .remote_errors
                 .with_label_values(&["failpoint"])
                 .inc();
             Err(anyhow::anyhow!("failpoint hit"))
@@ -73,7 +73,9 @@ impl Deleter {
                 Ok(()) => {
                     // Note: we assume that the remote storage layer returns Ok(()) if some
                     // or all of the deleted objects were already gone.
-                    DELETION_QUEUE_EXECUTED.inc_by(self.accumulator.len() as u64);
+                    metrics::DELETION_QUEUE
+                        .keys_executed
+                        .inc_by(self.accumulator.len() as u64);
                     info!(
                         "Executed deletion batch {}..{}",
                         self.accumulator
@@ -87,7 +89,8 @@ impl Deleter {
                 }
                 Err(e) => {
                     warn!("DeleteObjects request failed: {e:#}, will retry");
-                    DELETION_QUEUE_REMOTE_ERRORS
+                    metrics::DELETION_QUEUE
+                        .remote_errors
                         .with_label_values(&["execute"])
                         .inc();
                 }

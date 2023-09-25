@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::control_plane_client::ControlPlaneGenerationsApi;
-use crate::metrics::DELETION_QUEUE_SUBMITTED;
+use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
 use crate::virtual_file::VirtualFile;
@@ -519,7 +519,9 @@ impl DeletionQueueClient {
             return self.flush_immediate().await;
         }
 
-        DELETION_QUEUE_SUBMITTED.inc_by(layers.len() as u64);
+        metrics::DELETION_QUEUE
+            .keys_submitted
+            .inc_by(layers.len() as u64);
         self.do_push(
             &self.tx,
             ListWriterQueueMessage::Delete(DeletionOp {
@@ -598,7 +600,9 @@ impl DeletionQueueClient {
         &self,
         objects: Vec<RemotePath>,
     ) -> Result<(), DeletionQueueError> {
-        DELETION_QUEUE_SUBMITTED.inc_by(objects.len() as u64);
+        metrics::DELETION_QUEUE
+            .keys_submitted
+            .inc_by(objects.len() as u64);
         self.executor_tx
             .send(DeleterMessage::Delete(objects))
             .await
@@ -827,7 +831,6 @@ mod test {
             }
         }
     }
-
 
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {

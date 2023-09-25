@@ -869,53 +869,52 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
     .expect("failed to define a metric")
 });
 
-pub(crate) static DELETION_QUEUE_SUBMITTED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+pub(crate) struct DeletionQueueMetrics {
+    pub(crate) keys_submitted: IntCounter,
+    pub(crate) keys_dropped: IntCounter,
+    pub(crate) keys_executed: IntCounter,
+    pub(crate) dropped_lsn_updates: IntCounter,
+    pub(crate) unexpected_errors: IntCounter,
+    pub(crate) remote_errors: IntCounterVec,
+}
+pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
+    DeletionQueueMetrics{
+
+    keys_submitted: register_int_counter!(
         "pageserver_deletion_queue_submitted_total",
         "Number of objects submitted for deletion"
     )
-    .expect("failed to define a metric")
-});
+    .expect("failed to define a metric"),
 
-pub(crate) static DELETION_QUEUE_DROPPED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+    keys_dropped: register_int_counter!(
         "pageserver_deletion_queue_dropped_total",
         "Number of object deletions dropped due to stale generation."
     )
-    .expect("failed to define a metric")
-});
+    .expect("failed to define a metric"),
 
-pub(crate) static DELETION_QUEUE_EXECUTED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+    keys_executed: register_int_counter!(
         "pageserver_deletion_queue_executed_total",
         "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed."
     )
-    .expect("failed to define a metric")
-});
+    .expect("failed to define a metric"),
 
-pub(crate) static DELETION_QUEUE_DROPPED_LSN_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+    dropped_lsn_updates: register_int_counter!(
         "pageserver_deletion_queue_dropped_lsn_updates_total",
         "Updates to remote_consistent_lsn dropped due to stale generation number."
     )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static DELETION_QUEUE_UNEXPECTED_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
+    .expect("failed to define a metric"),
+    unexpected_errors: register_int_counter!(
         "pageserver_deletion_queue_unexpected_errors_total",
         "Number of unexpected condiions that may stall the queue: any value above zero is unexpected."
     )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static DELETION_QUEUE_REMOTE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+    .expect("failed to define a metric"),
+    remote_errors: register_int_counter_vec!(
         "pageserver_deletion_queue_remote_errors_total",
         "Retryable remote I/O errors while executing deletions, for example 503 responses to DeleteObjects",
         &["op_kind"],
     )
     .expect("failed to define a metric")
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1699,16 +1698,14 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_BROKER_UPDATES,
         &WALRECEIVER_CANDIDATES_ADDED,
         &WALRECEIVER_CANDIDATES_REMOVED,
-        &DELETION_QUEUE_SUBMITTED,
-        &DELETION_QUEUE_DROPPED,
-        &DELETION_QUEUE_EXECUTED,
-        &DELETION_QUEUE_DROPPED_LSN_UPDATES,
-        &DELETION_QUEUE_UNEXPECTED_ERRORS,
     ]
     .into_iter()
     .for_each(|c| {
         Lazy::force(c);
     });
+
+    // Deletion queue stats
+    Lazy::force(&DELETION_QUEUE);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
