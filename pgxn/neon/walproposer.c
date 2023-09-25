@@ -32,44 +32,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-
-#include <signal.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "access/xact.h"
-#include "access/xlogdefs.h"
-#include "access/xlogutils.h"
-#include "access/xloginsert.h"
-#if PG_VERSION_NUM >= 150000
-#include "access/xlogrecovery.h"
-#endif
-#include "storage/fd.h"
-#include "storage/latch.h"
-#include "miscadmin.h"
-#include "pgstat.h"
-#include "access/xlog.h"
 #include "libpq/pqformat.h"
-#include "replication/slot.h"
-#include "replication/walreceiver.h"
-#if PG_VERSION_NUM >= 160000
-#include "replication/walsender_private.h"
-#endif
-#include "postmaster/bgworker.h"
-#include "postmaster/interrupt.h"
-#include "postmaster/postmaster.h"
-#include "storage/pmsignal.h"
-#include "storage/proc.h"
-#include "storage/ipc.h"
-#include "storage/lwlock.h"
-#include "storage/shmem.h"
-#include "storage/spin.h"
-#include "tcop/tcopprot.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/memutils.h"
-#include "utils/ps_status.h"
-#include "utils/timestamp.h"
-
 #include "neon.h"
 #include "walproposer.h"
 #include "neon_utils.h"
