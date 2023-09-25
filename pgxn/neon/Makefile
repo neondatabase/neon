@@ -8,10 +8,10 @@ OBJS = \
 	file_cache.o \
 	libpagestore.o \
 	neon.o \
+	neon_utils.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
-	walproposer_utils.o \
 	walproposer_pg.o \
 	control_plane_connector.o
 

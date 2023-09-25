@@ -384,7 +384,6 @@ extern void WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(void);
 extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
 											PageserverFeedback *rf);
-extern void StartProposerReplication(StartReplicationCmd *cmd);
 
 extern void replication_feedback_set(PageserverFeedback *rf);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
@@ -474,6 +473,7 @@ typedef struct walproposer_api
 	PGAsyncReadResult		(*conn_async_read) (WalProposerConn * conn, char **buf, int *amount);
 	PGAsyncWriteResult		(*conn_async_write) (WalProposerConn * conn, void const *buf, size_t size);
 	bool					(*conn_blocking_write) (WalProposerConn * conn, void const *buf, size_t size);
+	bool					(*recovery_download) (Safekeeper * sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 } walproposer_api;
 
 extern const walproposer_api walprop_pg;

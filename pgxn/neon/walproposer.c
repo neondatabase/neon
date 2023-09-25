@@ -72,7 +72,7 @@
 
 #include "neon.h"
 #include "walproposer.h"
-#include "walproposer_utils.h"
+#include "neon_utils.h"
 
 static bool syncSafekeepers = false;
 
@@ -133,7 +133,6 @@ static void HandleElectedProposer(void);
 static term_t GetHighestTerm(TermHistory * th);
 static term_t GetEpoch(Safekeeper *sk);
 static void DetermineEpochStartLsn(void);
-static bool WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 static void SendProposerElected(Safekeeper *sk);
 static void StartStreaming(Safekeeper *sk);
 static void SendMessageToNode(Safekeeper *sk);
@@ -150,6 +149,12 @@ static bool AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg);
 static bool BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState success_state);
 static bool AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_state);
 static bool AsyncFlush(Safekeeper *sk);
+
+static int			CompareLsn(const void *a, const void *b);
+static char	   *FormatSafekeeperState(SafekeeperState state);
+static void		AssertEventsOkForState(uint32 events, Safekeeper *sk);
+static uint32		SafekeeperStateDesiredEvents(SafekeeperState state);
+static char	   *FormatEvents(uint32 events);
 
 /*
  * Entry point for `postgres --sync-safekeepers`.
@@ -1018,7 +1023,7 @@ HandleElectedProposer(void)
 			 LSN_FORMAT_ARGS(truncateLsn),
 			 LSN_FORMAT_ARGS(propEpochStartLsn));
 		/* Perform recovery */
-		if (!WalProposerRecovery(donor, greetRequest.timeline, truncateLsn, propEpochStartLsn))
+		if (!walprop_pg.recovery_download(&safekeeper[donor], greetRequest.timeline, truncateLsn, propEpochStartLsn))
 			elog(FATAL, "Failed to recover state");
 	}
 	else if (syncSafekeepers)
@@ -1213,111 +1218,6 @@ DetermineEpochStartLsn(void)
 		}
 		walprop_shared->mineLastElectedTerm = propTerm;
 	}
-}
-
-/*
- * Receive WAL from most advanced safekeeper
- */
-static bool
-WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
-{
-	char	   *err;
-	WalReceiverConn *wrconn;
-	WalRcvStreamOptions options;
-	char conninfo[MAXCONNINFO];
-
-	if (!neon_auth_token)
-	{
-		memcpy(conninfo, safekeeper[donor].conninfo, MAXCONNINFO);
-	}
-	else
-	{
-		int written = 0;
-
-		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, safekeeper[donor].conninfo);
-		if (written > MAXCONNINFO || written < 0)
-			elog(FATAL, "could not append password to the safekeeper connection string");
-	}
-
-#if PG_MAJORVERSION_NUM < 16
-	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
-#else
-	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
-#endif
-
-	if (!wrconn)
-	{
-		ereport(WARNING,
-				(errmsg("could not connect to WAL acceptor %s:%s: %s",
-						safekeeper[donor].host, safekeeper[donor].port,
-						err)));
-		return false;
-	}
-	elog(LOG,
-		 "start recovery from %s:%s starting from %X/%08X till %X/%08X timeline "
-		 "%d",
-		 safekeeper[donor].host, safekeeper[donor].port, (uint32) (startpos >> 32),
-		 (uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
-
-	options.logical = false;
-	options.startpoint = startpos;
-	options.slotname = NULL;
-	options.proto.physical.startpointTLI = timeline;
-
-	if (walrcv_startstreaming(wrconn, &options))
-	{
-		XLogRecPtr	rec_start_lsn;
-		XLogRecPtr	rec_end_lsn = 0;
-		int			len;
-		char	   *buf;
-		pgsocket	wait_fd = PGINVALID_SOCKET;
-
-		while ((len = walrcv_receive(wrconn, &buf, &wait_fd)) >= 0)
-		{
-			if (len == 0)
-			{
-				(void) WaitLatchOrSocket(
-										 MyLatch, WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE, wait_fd,
-										 -1, WAIT_EVENT_WAL_RECEIVER_MAIN);
-			}
-			else
-			{
-				Assert(buf[0] == 'w' || buf[0] == 'k');
-				if (buf[0] == 'k')
-					continue;	/* keepalive */
-				memcpy(&rec_start_lsn, &buf[XLOG_HDR_START_POS],
-					   sizeof rec_start_lsn);
-				rec_start_lsn = pg_ntoh64(rec_start_lsn);
-				rec_end_lsn = rec_start_lsn + len - XLOG_HDR_SIZE;
-
-				/* write WAL to disk */
-				XLogWalPropWrite(&buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
-
-				ereport(DEBUG1,
-						(errmsg("Recover message %X/%X length %d",
-								LSN_FORMAT_ARGS(rec_start_lsn), len)));
-				if (rec_end_lsn >= endpos)
-					break;
-			}
-		}
-		ereport(LOG,
-				(errmsg("end of replication stream at %X/%X: %m",
-						LSN_FORMAT_ARGS(rec_end_lsn))));
-		walrcv_disconnect(wrconn);
-
-		/* failed to receive all WAL till endpos */
-		if (rec_end_lsn < endpos)
-			return false;
-	}
-	else
-	{
-		ereport(LOG,
-				(errmsg("primary server contains no more WAL on requested timeline %u LSN %X/%08X",
-						timeline, (uint32) (startpos >> 32), (uint32) startpos)));
-		return false;
-	}
-
-	return true;
 }
 
 /*
@@ -2252,4 +2152,212 @@ AsyncFlush(Safekeeper *sk)
 			Assert(false);
 			return false;
 	}
+}
+
+static int
+CompareLsn(const void *a, const void *b)
+{
+	XLogRecPtr	lsn1 = *((const XLogRecPtr *) a);
+	XLogRecPtr	lsn2 = *((const XLogRecPtr *) b);
+
+	if (lsn1 < lsn2)
+		return -1;
+	else if (lsn1 == lsn2)
+		return 0;
+	else
+		return 1;
+}
+
+/* Returns a human-readable string corresonding to the SafekeeperState
+ *
+ * The string should not be freed.
+ *
+ * The strings are intended to be used as a prefix to "state", e.g.:
+ *
+ *   elog(LOG, "currently in %s state", FormatSafekeeperState(sk->state));
+ *
+ * If this sort of phrasing doesn't fit the message, instead use something like:
+ *
+ *   elog(LOG, "currently in state [%s]", FormatSafekeeperState(sk->state));
+ */
+static char *
+FormatSafekeeperState(SafekeeperState state)
+{
+	char	   *return_val = NULL;
+
+	switch (state)
+	{
+		case SS_OFFLINE:
+			return_val = "offline";
+			break;
+		case SS_CONNECTING_READ:
+		case SS_CONNECTING_WRITE:
+			return_val = "connecting";
+			break;
+		case SS_WAIT_EXEC_RESULT:
+			return_val = "receiving query result";
+			break;
+		case SS_HANDSHAKE_RECV:
+			return_val = "handshake (receiving)";
+			break;
+		case SS_VOTING:
+			return_val = "voting";
+			break;
+		case SS_WAIT_VERDICT:
+			return_val = "wait-for-verdict";
+			break;
+		case SS_SEND_ELECTED_FLUSH:
+			return_val = "send-announcement-flush";
+			break;
+		case SS_IDLE:
+			return_val = "idle";
+			break;
+		case SS_ACTIVE:
+			return_val = "active";
+			break;
+	}
+
+	Assert(return_val != NULL);
+
+	return return_val;
+}
+
+/* Asserts that the provided events are expected for given safekeeper's state */
+static void
+AssertEventsOkForState(uint32 events, Safekeeper *sk)
+{
+	uint32		expected = SafekeeperStateDesiredEvents(sk->state);
+
+	/*
+	 * The events are in-line with what we're expecting, under two conditions:
+	 * (a) if we aren't expecting anything, `events` has no read- or
+	 * write-ready component. (b) if we are expecting something, there's
+	 * overlap (i.e. `events & expected != 0`)
+	 */
+	bool		events_ok_for_state;	/* long name so the `Assert` is more
+										 * clear later */
+
+	if (expected == WL_NO_EVENTS)
+		events_ok_for_state = ((events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)) == 0);
+	else
+		events_ok_for_state = ((events & expected) != 0);
+
+	if (!events_ok_for_state)
+	{
+		/*
+		 * To give a descriptive message in the case of failure, we use elog
+		 * and then an assertion that's guaranteed to fail.
+		 */
+		elog(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
+			 FormatEvents(events), sk->host, sk->port, FormatSafekeeperState(sk->state));
+		Assert(events_ok_for_state);
+	}
+}
+
+/* Returns the set of events a safekeeper in this state should be waiting on
+ *
+ * This will return WL_NO_EVENTS (= 0) for some events. */
+static uint32
+SafekeeperStateDesiredEvents(SafekeeperState state)
+{
+	uint32		result = WL_NO_EVENTS;
+
+	/* If the state doesn't have a modifier, we can check the base state */
+	switch (state)
+	{
+			/* Connecting states say what they want in the name */
+		case SS_CONNECTING_READ:
+			result = WL_SOCKET_READABLE;
+			break;
+		case SS_CONNECTING_WRITE:
+			result = WL_SOCKET_WRITEABLE;
+			break;
+
+			/* Reading states need the socket to be read-ready to continue */
+		case SS_WAIT_EXEC_RESULT:
+		case SS_HANDSHAKE_RECV:
+		case SS_WAIT_VERDICT:
+			result = WL_SOCKET_READABLE;
+			break;
+
+			/*
+			 * Idle states use read-readiness as a sign that the connection
+			 * has been disconnected.
+			 */
+		case SS_VOTING:
+		case SS_IDLE:
+			result = WL_SOCKET_READABLE;
+			break;
+
+			/*
+			 * Flush states require write-ready for flushing. Active state
+			 * does both reading and writing.
+			 *
+			 * TODO: SS_ACTIVE sometimes doesn't need to be write-ready. We
+			 * should check sk->flushWrite here to set WL_SOCKET_WRITEABLE.
+			 */
+		case SS_SEND_ELECTED_FLUSH:
+		case SS_ACTIVE:
+			result = WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE;
+			break;
+
+			/* The offline state expects no events. */
+		case SS_OFFLINE:
+			result = WL_NO_EVENTS;
+			break;
+
+		default:
+			Assert(false);
+			break;
+	}
+
+	return result;
+}
+
+/* Returns a human-readable string corresponding to the event set
+ *
+ * If the events do not correspond to something set as the `events` field of a `WaitEvent`, the
+ * returned string may be meaingless.
+ *
+ * The string should not be freed. It should also not be expected to remain the same between
+ * function calls. */
+static char *
+FormatEvents(uint32 events)
+{
+	static char return_str[8];
+
+	/* Helper variable to check if there's extra bits */
+	uint32		all_flags = WL_LATCH_SET
+	| WL_SOCKET_READABLE
+	| WL_SOCKET_WRITEABLE
+	| WL_TIMEOUT
+	| WL_POSTMASTER_DEATH
+	| WL_EXIT_ON_PM_DEATH
+	| WL_SOCKET_CONNECTED;
+
+	/*
+	 * The formatting here isn't supposed to be *particularly* useful -- it's
+	 * just to give an sense of what events have been triggered without
+	 * needing to remember your powers of two.
+	 */
+
+	return_str[0] = (events & WL_LATCH_SET) ? 'L' : '_';
+	return_str[1] = (events & WL_SOCKET_READABLE) ? 'R' : '_';
+	return_str[2] = (events & WL_SOCKET_WRITEABLE) ? 'W' : '_';
+	return_str[3] = (events & WL_TIMEOUT) ? 'T' : '_';
+	return_str[4] = (events & WL_POSTMASTER_DEATH) ? 'D' : '_';
+	return_str[5] = (events & WL_EXIT_ON_PM_DEATH) ? 'E' : '_';
+	return_str[5] = (events & WL_SOCKET_CONNECTED) ? 'C' : '_';
+
+	if (events & (~all_flags))
+	{
+		elog(WARNING, "Event formatting found unexpected component %d",
+			 events & (~all_flags));
+		return_str[6] = '*';
+		return_str[7] = '\0';
+	}
+	else
+		return_str[6] = '\0';
+
+	return (char *) &return_str;
 }

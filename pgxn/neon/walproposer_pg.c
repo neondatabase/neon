@@ -18,9 +18,7 @@
 #include "libpq/pqformat.h"
 #include "replication/slot.h"
 #include "replication/walreceiver.h"
-#if PG_VERSION_NUM >= 160000
 #include "replication/walsender_private.h"
-#endif
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
@@ -39,7 +37,6 @@
 
 #include "neon.h"
 #include "walproposer.h"
-#include "walproposer_utils.h"
 #include "libpq-fe.h"
 
 char	   *wal_acceptors_list = "";
@@ -63,6 +60,15 @@ static shmem_startup_hook_type prev_shmem_startup_hook_type;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void walproposer_shmem_request(void);
 #endif
+
+static XLogRecPtr sentPtr = InvalidXLogRecPtr;
+
+static void StartProposerReplication(StartReplicationCmd *cmd);
+static void WalSndLoop(void);
+static void XLogBroadcastWalProposer(void);
+
+static void		XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr);
+static void		XLogWalPropClose(XLogRecPtr recptr);
 
 /*
  * Initialize GUCs, bgworker, shmem and backpressure.
@@ -883,6 +889,431 @@ walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size)
 }
 
 /*
+ * Subscribe for new WAL and stream it in the loop to safekeepers.
+ *
+ * At the moment, this never returns, but an ereport(ERROR) will take us back
+ * to the main loop.
+ */
+static void
+StartProposerReplication(StartReplicationCmd *cmd)
+{
+	XLogRecPtr	FlushPtr;
+	TimeLineID	currTLI;
+
+#if PG_VERSION_NUM < 150000
+	if (ThisTimeLineID == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+#endif
+
+	/*
+	 * We assume here that we're logging enough information in the WAL for
+	 * log-shipping, since this is checked in PostmasterMain().
+	 *
+	 * NOTE: wal_level can only change at shutdown, so in most cases it is
+	 * difficult for there to be WAL data that we can still see that was
+	 * written at wal_level='minimal'.
+	 */
+
+	if (cmd->slotname)
+	{
+		ReplicationSlotAcquire(cmd->slotname, true);
+		if (SlotIsLogical(MyReplicationSlot))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("cannot use a logical replication slot for physical replication")));
+
+		/*
+		 * We don't need to verify the slot's restart_lsn here; instead we
+		 * rely on the caller requesting the starting point to use.  If the
+		 * WAL segment doesn't exist, we'll fail later.
+		 */
+	}
+
+	/*
+	 * Select the timeline. If it was given explicitly by the client, use
+	 * that. Otherwise use the timeline of the last replayed record, which is
+	 * kept in ThisTimeLineID.
+	 *
+	 * Neon doesn't currently use PG Timelines, but it may in the future, so
+	 * we keep this code around to lighten the load for when we need it.
+	 */
+#if PG_VERSION_NUM >= 150000
+	FlushPtr = GetFlushRecPtr(&currTLI);
+#else
+	FlushPtr = GetFlushRecPtr();
+	currTLI = ThisTimeLineID;
+#endif
+
+	/*
+	 * When we first start replication the standby will be behind the
+	 * primary. For some applications, for example synchronous
+	 * replication, it is important to have a clear state for this initial
+	 * catchup mode, so we can trigger actions when we change streaming
+	 * state later. We may stay in this state for a long time, which is
+	 * exactly why we want to be able to monitor whether or not we are
+	 * still here.
+	 */
+	WalSndSetState(WALSNDSTATE_CATCHUP);
+
+	/*
+	 * Don't allow a request to stream from a future point in WAL that
+	 * hasn't been flushed to disk in this server yet.
+	 */
+	if (FlushPtr < cmd->startpoint)
+	{
+		ereport(ERROR,
+				(errmsg("requested starting point %X/%X is ahead of the WAL flush position of this server %X/%X",
+						LSN_FORMAT_ARGS(cmd->startpoint),
+						LSN_FORMAT_ARGS(FlushPtr))));
+	}
+
+	/* Start streaming from the requested point */
+	sentPtr = cmd->startpoint;
+
+	/* Initialize shared memory status, too */
+	SpinLockAcquire(&MyWalSnd->mutex);
+	MyWalSnd->sentPtr = sentPtr;
+	SpinLockRelease(&MyWalSnd->mutex);
+
+	SyncRepInitConfig();
+
+	/* Infinite send loop, never returns */
+	WalSndLoop();
+
+	WalSndSetState(WALSNDSTATE_STARTUP);
+
+	if (cmd->slotname)
+		ReplicationSlotRelease();
+}
+
+/*
+ * Main loop that waits for LSN updates and calls the walproposer.
+ * Synchronous replication sets latch in WalSndWakeup at walsender.c
+ */
+static void
+WalSndLoop(void)
+{
+	/* Clear any already-pending wakeups */
+	ResetLatch(MyLatch);
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		XLogBroadcastWalProposer();
+
+		if (MyWalSnd->state == WALSNDSTATE_CATCHUP)
+			WalSndSetState(WALSNDSTATE_STREAMING);
+		WalProposerPoll();
+	}
+}
+
+/*
+ * Notify walproposer about the new WAL position.
+ */
+static void
+XLogBroadcastWalProposer(void)
+{
+	XLogRecPtr	startptr;
+	XLogRecPtr	endptr;
+
+	/* Start from the last sent position */
+	startptr = sentPtr;
+
+	/*
+	 * Streaming the current timeline on a primary.
+	 *
+	 * Attempt to send all data that's already been written out and
+	 * fsync'd to disk.  We cannot go further than what's been written out
+	 * given the current implementation of WALRead().  And in any case
+	 * it's unsafe to send WAL that is not securely down to disk on the
+	 * primary: if the primary subsequently crashes and restarts, standbys
+	 * must not have applied any WAL that got lost on the primary.
+	 */
+#if PG_VERSION_NUM >= 150000
+	endptr = GetFlushRecPtr(NULL);
+#else
+	endptr = GetFlushRecPtr();
+#endif
+
+	/*
+	 * Record the current system time as an approximation of the time at which
+	 * this WAL location was written for the purposes of lag tracking.
+	 *
+	 * In theory we could make XLogFlush() record a time in shmem whenever WAL
+	 * is flushed and we could get that time as well as the LSN when we call
+	 * GetFlushRecPtr() above (and likewise for the cascading standby
+	 * equivalent), but rather than putting any new code into the hot WAL path
+	 * it seems good enough to capture the time here.  We should reach this
+	 * after XLogFlush() runs WalSndWakeupProcessRequests(), and although that
+	 * may take some time, we read the WAL flush pointer and take the time
+	 * very close to together here so that we'll get a later position if it is
+	 * still moving.
+	 *
+	 * Because LagTrackerWrite ignores samples when the LSN hasn't advanced,
+	 * this gives us a cheap approximation for the WAL flush time for this
+	 * LSN.
+	 *
+	 * Note that the LSN is not necessarily the LSN for the data contained in
+	 * the present message; it's the end of the WAL, which might be further
+	 * ahead.  All the lag tracking machinery cares about is finding out when
+	 * that arbitrary LSN is eventually reported as written, flushed and
+	 * applied, so that it can measure the elapsed time.
+	 */
+	LagTrackerWrite(endptr, GetCurrentTimestamp());
+
+	/* Do we have any work to do? */
+	Assert(startptr <= endptr);
+	if (endptr <= startptr)
+		return;
+
+	WalProposerBroadcast(startptr, endptr);
+	sentPtr = endptr;
+
+	/* Update shared memory status */
+	{
+		WalSnd	   *walsnd = MyWalSnd;
+
+		SpinLockAcquire(&walsnd->mutex);
+		walsnd->sentPtr = sentPtr;
+		SpinLockRelease(&walsnd->mutex);
+	}
+
+	/* Report progress of XLOG streaming in PS display */
+	if (update_process_title)
+	{
+		char		activitymsg[50];
+
+		snprintf(activitymsg, sizeof(activitymsg), "streaming %X/%X",
+				 LSN_FORMAT_ARGS(sentPtr));
+		set_ps_display(activitymsg);
+	}
+}
+
+/*
+ * Receive WAL from most advanced safekeeper
+ */
+static bool
+WalProposerRecovery(Safekeeper * sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
+{
+	char	   *err;
+	WalReceiverConn *wrconn;
+	WalRcvStreamOptions options;
+	char conninfo[MAXCONNINFO];
+
+	if (!neon_auth_token)
+	{
+		memcpy(conninfo, sk->conninfo, MAXCONNINFO);
+	}
+	else
+	{
+		int written = 0;
+
+		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->conninfo);
+		if (written > MAXCONNINFO || written < 0)
+			elog(FATAL, "could not append password to the safekeeper connection string");
+	}
+
+#if PG_MAJORVERSION_NUM < 16
+	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
+#else
+	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
+#endif
+
+	if (!wrconn)
+	{
+		ereport(WARNING,
+				(errmsg("could not connect to WAL acceptor %s:%s: %s",
+						sk->host, sk->port,
+						err)));
+		return false;
+	}
+	elog(LOG,
+		 "start recovery from %s:%s starting from %X/%08X till %X/%08X timeline "
+		 "%d",
+		 sk->host, sk->port, (uint32) (startpos >> 32),
+		 (uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
+
+	options.logical = false;
+	options.startpoint = startpos;
+	options.slotname = NULL;
+	options.proto.physical.startpointTLI = timeline;
+
+	if (walrcv_startstreaming(wrconn, &options))
+	{
+		XLogRecPtr	rec_start_lsn;
+		XLogRecPtr	rec_end_lsn = 0;
+		int			len;
+		char	   *buf;
+		pgsocket	wait_fd = PGINVALID_SOCKET;
+
+		while ((len = walrcv_receive(wrconn, &buf, &wait_fd)) >= 0)
+		{
+			if (len == 0)
+			{
+				(void) WaitLatchOrSocket(
+										 MyLatch, WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE, wait_fd,
+										 -1, WAIT_EVENT_WAL_RECEIVER_MAIN);
+			}
+			else
+			{
+				Assert(buf[0] == 'w' || buf[0] == 'k');
+				if (buf[0] == 'k')
+					continue;	/* keepalive */
+				memcpy(&rec_start_lsn, &buf[XLOG_HDR_START_POS],
+					   sizeof rec_start_lsn);
+				rec_start_lsn = pg_ntoh64(rec_start_lsn);
+				rec_end_lsn = rec_start_lsn + len - XLOG_HDR_SIZE;
+
+				/* write WAL to disk */
+				XLogWalPropWrite(&buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
+
+				ereport(DEBUG1,
+						(errmsg("Recover message %X/%X length %d",
+								LSN_FORMAT_ARGS(rec_start_lsn), len)));
+				if (rec_end_lsn >= endpos)
+					break;
+			}
+		}
+		ereport(LOG,
+				(errmsg("end of replication stream at %X/%X: %m",
+						LSN_FORMAT_ARGS(rec_end_lsn))));
+		walrcv_disconnect(wrconn);
+
+		/* failed to receive all WAL till endpos */
+		if (rec_end_lsn < endpos)
+			return false;
+	}
+	else
+	{
+		ereport(LOG,
+				(errmsg("primary server contains no more WAL on requested timeline %u LSN %X/%08X",
+						timeline, (uint32) (startpos >> 32), (uint32) startpos)));
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * These variables are used similarly to openLogFile/SegNo,
+ * but for walproposer to write the XLOG during recovery. walpropFileTLI is the TimeLineID
+ * corresponding the filename of walpropFile.
+ */
+static int	walpropFile = -1;
+static TimeLineID walpropFileTLI = 0;
+static XLogSegNo walpropSegNo = 0;
+
+/*
+ * Write XLOG data to disk.
+ */
+static void
+XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
+{
+	int			startoff;
+	int			byteswritten;
+
+	while (nbytes > 0)
+	{
+		int			segbytes;
+
+		/* Close the current segment if it's completed */
+		if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
+			XLogWalPropClose(recptr);
+
+		if (walpropFile < 0)
+		{
+#if PG_VERSION_NUM >= 150000
+			/* FIXME Is it ok to use hardcoded value here? */
+			TimeLineID	tli = 1;
+#else
+			bool		use_existent = true;
+#endif
+			/* Create/use new log file */
+			XLByteToSeg(recptr, walpropSegNo, wal_segment_size);
+#if PG_VERSION_NUM >= 150000
+			walpropFile = XLogFileInit(walpropSegNo, tli);
+			walpropFileTLI = tli;
+#else
+			walpropFile = XLogFileInit(walpropSegNo, &use_existent, false);
+			walpropFileTLI = ThisTimeLineID;
+#endif
+		}
+
+		/* Calculate the start offset of the received logs */
+		startoff = XLogSegmentOffset(recptr, wal_segment_size);
+
+		if (startoff + nbytes > wal_segment_size)
+			segbytes = wal_segment_size - startoff;
+		else
+			segbytes = nbytes;
+
+		/* OK to write the logs */
+		errno = 0;
+
+		byteswritten = pg_pwrite(walpropFile, buf, segbytes, (off_t) startoff);
+		if (byteswritten <= 0)
+		{
+			char		xlogfname[MAXFNAMELEN];
+			int			save_errno;
+
+			/* if write didn't set errno, assume no disk space */
+			if (errno == 0)
+				errno = ENOSPC;
+
+			save_errno = errno;
+			XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
+			errno = save_errno;
+			ereport(PANIC,
+					(errcode_for_file_access(),
+					 errmsg("could not write to log segment %s "
+							"at offset %u, length %lu: %m",
+							xlogfname, startoff, (unsigned long) segbytes)));
+		}
+
+		/* Update state for write */
+		recptr += byteswritten;
+
+		nbytes -= byteswritten;
+		buf += byteswritten;
+	}
+
+	/*
+	 * Close the current segment if it's fully written up in the last cycle of
+	 * the loop.
+	 */
+	if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
+	{
+		XLogWalPropClose(recptr);
+	}
+}
+
+/*
+ * Close the current segment.
+ */
+static void
+XLogWalPropClose(XLogRecPtr recptr)
+{
+	Assert(walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size));
+
+	if (close(walpropFile) != 0)
+	{
+		char		xlogfname[MAXFNAMELEN];
+
+		XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
+
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not close log segment %s: %m",
+						xlogfname)));
+	}
+
+	walpropFile = -1;
+}
+
+/*
  * Temporary globally exported walproposer API for postgres.
  */
 const walproposer_api walprop_pg = {
@@ -908,4 +1339,5 @@ const walproposer_api walprop_pg = {
 	.conn_async_read = walprop_async_read,
 	.conn_async_write = walprop_async_write,
 	.conn_blocking_write = walprop_blocking_write,
+	.recovery_download = WalProposerRecovery,
 };
