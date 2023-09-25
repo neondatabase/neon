@@ -1,3 +1,4 @@
+use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -127,7 +128,7 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub struct PageCacheMetrics {
+pub struct PageCacheMetricsForTaskKind {
     pub read_accesses_materialized_page: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
@@ -136,11 +137,15 @@ pub struct PageCacheMetrics {
     pub read_hits_materialized_page_older_lsn: IntCounter,
 }
 
+pub struct PageCacheMetrics {
+    by_task_kind: EnumMap<TaskKind, PageCacheMetricsForTaskKind>,
+}
+
 static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
         "Number of read accesses to the page cache that hit",
-        &["key_kind", "hit_kind"]
+        &["task_kind", "key_kind", "hit_kind"]
     )
     .expect("failed to define a metric")
 });
@@ -149,42 +154,54 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_accesses_total",
         "Number of read accesses to the page cache",
-        &["key_kind"]
+        &["task_kind", "key_kind"]
     )
     .expect("failed to define a metric")
 });
 
 pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
-    read_accesses_materialized_page: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["materialized_page"])
-            .unwrap()
-    },
+    by_task_kind: EnumMap::from_array(std::array::from_fn(|task_kind| {
+        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind: &'static str = task_kind.into();
+        PageCacheMetricsForTaskKind {
+            read_accesses_materialized_page: {
+                PAGE_CACHE_READ_ACCESSES
+                    .get_metric_with_label_values(&[task_kind, "materialized_page"])
+                    .unwrap()
+            },
 
-    read_accesses_immutable: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
+            read_accesses_immutable: {
+                PAGE_CACHE_READ_ACCESSES
+                    .get_metric_with_label_values(&[task_kind, "immutable"])
+                    .unwrap()
+            },
 
-    read_hits_immutable: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["immutable", "-"])
-            .unwrap()
-    },
+            read_hits_immutable: {
+                PAGE_CACHE_READ_HITS
+                    .get_metric_with_label_values(&[task_kind, "immutable", "-"])
+                    .unwrap()
+            },
 
-    read_hits_materialized_page_exact: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "exact"])
-            .unwrap()
-    },
+            read_hits_materialized_page_exact: {
+                PAGE_CACHE_READ_HITS
+                    .get_metric_with_label_values(&[task_kind, "materialized_page", "exact"])
+                    .unwrap()
+            },
 
-    read_hits_materialized_page_older_lsn: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "older_lsn"])
-            .unwrap()
-    },
+            read_hits_materialized_page_older_lsn: {
+                PAGE_CACHE_READ_HITS
+                    .get_metric_with_label_values(&[task_kind, "materialized_page", "older_lsn"])
+                    .unwrap()
+            },
+        }
+    })),
 });
+
+impl PageCacheMetrics {
+    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> &PageCacheMetricsForTaskKind {
+        &self.by_task_kind[task_kind]
+    }
+}
 
 pub struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
@@ -1265,6 +1282,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+use crate::task_mgr::TaskKind;
 
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,

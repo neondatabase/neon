@@ -4,6 +4,8 @@
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -97,9 +99,9 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-async fn get_holes(path: &Utf8Path, max_holes: usize) -> Result<Vec<Hole>> {
+async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path).await?);
-    let summary_blk = file.read_blk(0).await?;
+    let summary_blk = file.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
@@ -126,6 +128,7 @@ async fn get_holes(path: &Utf8Path, max_holes: usize) -> Result<Vec<Hole>> {
                 prev_key = Some(curr.next());
                 true
             },
+            ctx,
         )
         .await?;
     let mut holes = heap.into_vec();
@@ -136,6 +139,7 @@ async fn get_holes(path: &Utf8Path, max_holes: usize) -> Result<Vec<Hole>> {
 pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
+    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(10);
@@ -166,7 +170,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     if layer_file.is_delta {
                         let layer_path =
                             Utf8PathBuf::from_path_buf(layer.path()).expect("non-Unicode path");
-                        layer_file.holes = get_holes(&layer_path, max_holes).await?;
+                        layer_file.holes = get_holes(&layer_path, max_holes, &ctx).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

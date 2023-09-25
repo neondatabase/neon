@@ -85,7 +85,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{metrics::PageCacheSizeMetrics, repository::Key};
+use crate::{context::RequestContext, metrics::PageCacheSizeMetrics, repository::Key};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -346,8 +346,10 @@ impl PageCache {
         timeline_id: TimelineId,
         key: &Key,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Option<(Lsn, PageReadGuard)> {
         crate::metrics::PAGE_CACHE
+            .for_task_kind(ctx.task_kind())
             .read_accesses_materialized_page
             .inc();
 
@@ -368,10 +370,12 @@ impl PageCache {
             {
                 if available_lsn == lsn {
                     crate::metrics::PAGE_CACHE
+                        .for_task_kind(ctx.task_kind())
                         .read_hits_materialized_page_exact
                         .inc();
                 } else {
                     crate::metrics::PAGE_CACHE
+                        .for_task_kind(ctx.task_kind())
                         .read_hits_materialized_page_older_lsn
                         .inc();
                 }
@@ -426,10 +430,11 @@ impl PageCache {
         &self,
         file_id: FileId,
         blkno: u32,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
-        self.lock_for_read(&mut cache_key).await
+        self.lock_for_read(&mut cache_key, ctx).await
     }
 
     //
@@ -497,14 +502,22 @@ impl PageCache {
     /// }
     /// ```
     ///
-    async fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
+    async fn lock_for_read(
+        &self,
+        cache_key: &mut CacheKey,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ReadBufResult> {
         let (read_access, hit) = match cache_key {
             CacheKey::MaterializedPage { .. } => {
                 unreachable!("Materialized pages use lookup_materialized_page")
             }
             CacheKey::ImmutableFilePage { .. } => (
-                &crate::metrics::PAGE_CACHE.read_accesses_immutable,
-                &crate::metrics::PAGE_CACHE.read_hits_immutable,
+                &crate::metrics::PAGE_CACHE
+                    .for_task_kind(ctx.task_kind())
+                    .read_accesses_immutable,
+                &crate::metrics::PAGE_CACHE
+                    .for_task_kind(ctx.task_kind())
+                    .read_hits_immutable,
             ),
         };
         read_access.inc();

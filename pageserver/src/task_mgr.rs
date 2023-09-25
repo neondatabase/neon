@@ -187,6 +187,7 @@ task_local! {
     Debug,
     // NB: enumset::EnumSetType derives PartialEq, Eq, Clone, Copy
     enumset::EnumSetType,
+    enum_map::Enum,
     serde::Serialize,
     serde::Deserialize,
     strum_macros::IntoStaticStr,
