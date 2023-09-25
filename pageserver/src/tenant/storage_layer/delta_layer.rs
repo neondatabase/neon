@@ -930,7 +930,7 @@ impl DeltaLayerInner {
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor
-                .read_blob_into_buf(pos, &mut buf, &ctx)
+                .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
                 .with_context(|| {
                     format!(

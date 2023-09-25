@@ -172,20 +172,20 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
                         .get_metric_with_label_values(&[
                             task_kind,
                             "materialized_page",
-                            &content_kind,
+                            content_kind,
                         ])
                         .unwrap()
                 },
 
                 read_accesses_immutable: {
                     PAGE_CACHE_READ_ACCESSES
-                        .get_metric_with_label_values(&[task_kind, "immutable", &content_kind])
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
                         .unwrap()
                 },
 
                 read_hits_immutable: {
                     PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[task_kind, "immutable", &content_kind, "-"])
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
                         .unwrap()
                 },
 
@@ -194,7 +194,7 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
                         .get_metric_with_label_values(&[
                             task_kind,
                             "materialized_page",
-                            &content_kind,
+                            content_kind,
                             "exact",
                         ])
                         .unwrap()
@@ -205,7 +205,7 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
                         .get_metric_with_label_values(&[
                             task_kind,
                             "materialized_page",
-                            &content_kind,
+                            content_kind,
                             "older_lsn",
                         ])
                         .unwrap()
