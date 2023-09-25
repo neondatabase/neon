@@ -46,9 +46,7 @@ impl Lsn {
     where
         F: AsRef<Utf8Path>,
     {
-        let filename: &Utf8Path = filename.as_ref();
-        let filename = filename.as_std_path().to_str().ok_or(LsnParseError)?;
-        Lsn::from_hex(filename)
+        Lsn::from_hex(filename.as_ref().as_str())
     }
 
     /// Parse an LSN from a string in the form `0000000000000000`
