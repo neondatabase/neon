@@ -43,7 +43,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     tenant_id, _ = env.neon_cli.create_tenant()
 
     # assert tenant exists on disk
-    assert (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert (env.pageserver.tenant_dir(tenant_id)).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
@@ -101,7 +101,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
         pytest.fail(f"could not detach tenant: {last_error}")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.pageserver.workdir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # Pageserver schedules kill+wait of the WAL redo process to the background runtime,
     # asynchronously to tenant detach. Cut it some slack to complete kill+wait before

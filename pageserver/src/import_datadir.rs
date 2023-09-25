@@ -75,12 +75,12 @@ pub async fn import_timeline_from_postgres_datadir(
             {
                 pg_control = Some(control_file);
             }
-            modification.flush().await?;
+            modification.flush(ctx).await?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit().await?;
+    modification.commit(ctx).await?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -359,7 +359,7 @@ pub async fn import_basebackup_from_tar(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush().await?;
+                modification.flush(ctx).await?;
             }
             tokio_tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -377,7 +377,7 @@ pub async fn import_basebackup_from_tar(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit().await?;
+    modification.commit(ctx).await?;
     Ok(())
 }
 

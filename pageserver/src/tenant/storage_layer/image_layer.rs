@@ -237,10 +237,15 @@ impl ImageLayer {
         tree_reader.dump().await?;
 
         tree_reader
-            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-                println!("key: {} offset {}", hex::encode(key), value);
-                true
-            })
+            .visit(
+                &[0u8; KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, value| {
+                    println!("key: {} offset {}", hex::encode(key), value);
+                    true
+                },
+                ctx,
+            )
             .await?;
 
         Ok(())
@@ -261,7 +266,7 @@ impl ImageLayer {
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
         inner
-            .get_value_reconstruct_data(key, reconstruct_state)
+            .get_value_reconstruct_data(key, reconstruct_state, ctx)
             .await
             // FIXME: makes no sense to dump paths
             .with_context(|| format!("read {}", self.path().display()))
@@ -335,12 +340,12 @@ impl ImageLayer {
     ) -> Result<&ImageLayerInner> {
         self.access_stats.record_access(access_kind, ctx);
         self.inner
-            .get_or_try_init(|| self.load_inner())
+            .get_or_try_init(|| self.load_inner(ctx))
             .await
             .with_context(|| format!("Failed to load image layer {}", self.path().display()))
     }
 
-    async fn load_inner(&self) -> Result<ImageLayerInner> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
         let expected_summary = match &self.path_or_conf {
@@ -349,7 +354,8 @@ impl ImageLayer {
         };
 
         let loaded =
-            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary).await?;
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary, ctx)
+                .await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
@@ -436,12 +442,13 @@ impl ImageLayerInner {
         path: &std::path::Path,
         lsn: Lsn,
         summary: Option<Summary>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
             .with_context(|| format!("Failed to open file '{}'", path.display()))?;
         let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0).await?;
+        let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -470,16 +477,17 @@ impl ImageLayerInner {
         &self,
         key: Key,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf).await? {
+        if let Some(offset) = tree_reader.get(&keybuf, ctx).await? {
             let blob = file
                 .block_cursor()
-                .read_blob(offset)
+                .read_blob(offset, ctx)
                 .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
             let value = Bytes::from(blob);

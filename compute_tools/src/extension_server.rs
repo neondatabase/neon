@@ -107,19 +107,25 @@ fn get_pg_config(argument: &str, pgbin: &str) -> String {
 
 pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
-    // such as "PostgreSQL 15.4". We parse this to v14/v15
+    // such as "PostgreSQL 15.4". We parse this to v14/v15/v16 etc.
     let human_version = get_pg_config("--version", pgbin);
     return parse_pg_version(&human_version).to_string();
 }
 
 fn parse_pg_version(human_version: &str) -> &str {
-    match Regex::new(r"(?<major>\d+)\.(?<minor>\d+)")
+    // Normal releases have version strings like "PostgreSQL 15.4". But there
+    // are also pre-release versions like "PostgreSQL 17devel" or "PostgreSQL
+    // 16beta2" or "PostgreSQL 17rc1". And with the --with-extra-version
+    // configure option, you can tack any string to the version number,
+    // e.g. "PostgreSQL 15.4foobar".
+    match Regex::new(r"^PostgreSQL (?<major>\d+).+")
         .unwrap()
         .captures(human_version)
     {
-        Some(captures) if captures.len() == 3 => match &captures["major"] {
+        Some(captures) if captures.len() == 2 => match &captures["major"] {
             "14" => return "v14",
             "15" => return "v15",
+            "16" => return "v16",
             _ => {}
         },
         _ => {}
@@ -146,6 +152,11 @@ mod tests {
             parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
             "v14"
         );
+
+        assert_eq!(parse_pg_version("PostgreSQL 16devel"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16extra"), "v16");
     }
 
     #[test]

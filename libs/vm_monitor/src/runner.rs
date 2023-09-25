@@ -257,12 +257,11 @@ impl Runner {
                 new_cgroup_mem_high = cgroup.config.calculate_memory_high_value(available_memory);
             }
 
-            let limits = MemoryLimits::new(
+            let limits = MemoryLimits {
                 // new_cgroup_mem_high is initialized to 0 but it is guarancontextd to not be here
                 // since it is properly initialized in the previous cgroup if let block
-                new_cgroup_mem_high,
-                available_memory,
-            );
+                high: new_cgroup_mem_high,
+            };
             cgroup
                 .set_limits(&limits)
                 .context("failed to set cgroup memory limits")?;
@@ -328,7 +327,9 @@ impl Runner {
                 name = cgroup.path(),
                 "updating cgroup memory.high",
             );
-            let limits = MemoryLimits::new(new_cgroup_mem_high, available_memory);
+            let limits = MemoryLimits {
+                high: new_cgroup_mem_high,
+            };
             cgroup
                 .set_limits(&limits)
                 .context("failed to set file cache size")?;

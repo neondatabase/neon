@@ -2,6 +2,7 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
@@ -61,13 +62,17 @@ impl EphemeralFile {
         self.len
     }
 
-    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, io::Error> {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
             loop {
                 match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum)
+                    .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
                     .await
                     .map_err(|e| {
                         std::io::Error::new(
@@ -103,7 +108,11 @@ impl EphemeralFile {
         }
     }
 
-    pub(crate) async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, io::Error> {
+    pub(crate) async fn write_blob(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<u64, io::Error> {
         struct Writer<'a> {
             ephemeral_file: &'a mut EphemeralFile,
             /// The block to which the next [`push_bytes`] will write.
@@ -120,7 +129,11 @@ impl EphemeralFile {
                 })
             }
             #[inline(always)]
-            async fn push_bytes(&mut self, src: &[u8]) -> Result<(), io::Error> {
+            async fn push_bytes(
+                &mut self,
+                src: &[u8],
+                ctx: &RequestContext,
+            ) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
                     let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
@@ -146,6 +159,7 @@ impl EphemeralFile {
                                     .read_immutable_buf(
                                         self.ephemeral_file.page_cache_file_id,
                                         self.blknum,
+                                        ctx,
                                     )
                                     .await
                                 {
@@ -199,15 +213,15 @@ impl EphemeralFile {
         if srcbuf.len() < 0x80 {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
-            writer.push_bytes(&len_buf).await?;
+            writer.push_bytes(&len_buf, ctx).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            writer.push_bytes(&len_buf).await?;
+            writer.push_bytes(&len_buf, ctx).await?;
         }
 
         // Write the payload
-        writer.push_bytes(srcbuf).await?;
+        writer.push_bytes(srcbuf, ctx).await?;
 
         if srcbuf.len() < 0x80 {
             self.len += 1;
@@ -261,6 +275,8 @@ impl BlockReader for EphemeralFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
     use rand::{thread_rng, RngCore};
     use std::fs;
@@ -268,7 +284,15 @@ mod tests {
 
     fn harness(
         test_name: &str,
-    ) -> Result<(&'static PageServerConf, TenantId, TimelineId), io::Error> {
+    ) -> Result<
+        (
+            &'static PageServerConf,
+            TenantId,
+            TimelineId,
+            RequestContext,
+        ),
+        io::Error,
+    > {
         let repo_dir = PageServerConf::test_repo_dir(test_name);
         let _ = fs::remove_dir_all(&repo_dir);
         let conf = PageServerConf::dummy_conf(repo_dir);
@@ -280,46 +304,57 @@ mod tests {
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
         fs::create_dir_all(conf.timeline_path(&tenant_id, &timeline_id))?;
 
-        Ok((conf, tenant_id, timeline_id))
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+
+        Ok((conf, tenant_id, timeline_id, ctx))
     }
 
     #[tokio::test]
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
-        let (conf, tenant_id, timeline_id) = harness("ephemeral_blobs")?;
+        let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
 
         let mut file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
 
-        let pos_foo = file.write_blob(b"foo").await?;
+        let pos_foo = file.write_blob(b"foo", &ctx).await?;
         assert_eq!(
             b"foo",
-            file.block_cursor().read_blob(pos_foo).await?.as_slice()
+            file.block_cursor()
+                .read_blob(pos_foo, &ctx)
+                .await?
+                .as_slice()
         );
-        let pos_bar = file.write_blob(b"bar").await?;
+        let pos_bar = file.write_blob(b"bar", &ctx).await?;
         assert_eq!(
             b"foo",
-            file.block_cursor().read_blob(pos_foo).await?.as_slice()
+            file.block_cursor()
+                .read_blob(pos_foo, &ctx)
+                .await?
+                .as_slice()
         );
         assert_eq!(
             b"bar",
-            file.block_cursor().read_blob(pos_bar).await?.as_slice()
+            file.block_cursor()
+                .read_blob(pos_bar, &ctx)
+                .await?
+                .as_slice()
         );
 
         let mut blobs = Vec::new();
         for i in 0..10000 {
             let data = Vec::from(format!("blob{}", i).as_bytes());
-            let pos = file.write_blob(&data).await?;
+            let pos = file.write_blob(&data, &ctx).await?;
             blobs.push((pos, data));
         }
         // also test with a large blobs
         for i in 0..100 {
             let data = format!("blob{}", i).as_bytes().repeat(100);
-            let pos = file.write_blob(&data).await?;
+            let pos = file.write_blob(&data, &ctx).await?;
             blobs.push((pos, data));
         }
 
         let cursor = BlockCursor::new(BlockReaderRef::EphemeralFile(&file));
         for (pos, expected) in blobs {
-            let actual = cursor.read_blob(pos).await?;
+            let actual = cursor.read_blob(pos, &ctx).await?;
             assert_eq!(actual, expected);
         }
 
@@ -327,8 +362,8 @@ mod tests {
         let mut large_data = Vec::new();
         large_data.resize(20000, 0);
         thread_rng().fill_bytes(&mut large_data);
-        let pos_large = file.write_blob(&large_data).await?;
-        let result = file.block_cursor().read_blob(pos_large).await?;
+        let pos_large = file.write_blob(&large_data, &ctx).await?;
+        let result = file.block_cursor().read_blob(pos_large, &ctx).await?;
         assert_eq!(result, large_data);
 
         Ok(())

@@ -3,7 +3,6 @@
 
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, DefaultDict, Dict, Tuple
 
 import pytest
@@ -115,7 +114,7 @@ def test_ondemand_download_large_rel(
     env.pageserver.stop()
 
     # remove all the layer files
-    for layer in (Path(env.pageserver.workdir) / "tenants").glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer}")
         layer.unlink()
 
@@ -237,7 +236,7 @@ def test_ondemand_download_timetravel(
     env.pageserver.stop()
 
     # remove all the layer files
-    for layer in (Path(env.pageserver.workdir) / "tenants").glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer}")
         layer.unlink()
 
@@ -301,6 +300,7 @@ def test_ondemand_download_timetravel(
         # they are present only in the remote storage, only locally, or both.
         # It should not change.
         assert filled_current_physical == get_api_current_physical_size()
+        endpoint_old.stop()
 
 
 #
@@ -323,8 +323,8 @@ def test_download_remote_layers_api(
             "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
-            "compaction_threshold": "1",
-            "image_creation_threshold": "1",
+            "compaction_threshold": "999999",
+            "image_creation_threshold": "999999",
             "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
@@ -357,8 +357,20 @@ def test_download_remote_layers_api(
             tenant_id, timeline_id, "pageserver_resident_physical_size"
         )
 
+    # Shut down safekeepers before starting the pageserver.
+    # If we don't, they might stream us more WAL.
+    for sk in env.safekeepers:
+        sk.stop()
+
+    # it is sad we cannot do a flush inmem layer without compaction, but
+    # working around with very high layer0 count and image layer creation
+    # threshold
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    wait_for_upload_queue_empty(client, tenant_id, timeline_id)
+
     filled_current_physical = get_api_current_physical_size()
-    log.info(filled_current_physical)
+    log.info(f"filled_current_physical: {filled_current_physical}")
     filled_size = get_resident_physical_size()
     log.info(f"filled_size: {filled_size}")
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
@@ -366,17 +378,9 @@ def test_download_remote_layers_api(
     env.pageserver.stop()
 
     # remove all the layer files
-    # XXX only delete some of the layer files, to show that it really just downloads all the layers
-    for layer in (Path(env.pageserver.workdir) / "tenants").glob("*/timelines/*/*-*_*"):
+    for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
         log.info(f"unlinking layer {layer.name}")
         layer.unlink()
-
-    # Shut down safekeepers before starting the pageserver.
-    # If we don't, the tenant's walreceiver handler will trigger the
-    # the logical size computation task, and that downloads layes,
-    # which makes our assertions on size fail.
-    for sk in env.safekeepers:
-        sk.stop(immediate=True)
 
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
@@ -391,32 +395,21 @@ def test_download_remote_layers_api(
 
     ###### Phase 1: exercise download error code path
 
-    # comparison here is requiring the size to be at least the previous size, because it's possible received WAL after last_flush_lsn_upload
-    # witnessed for example difference of 29827072 (filled_current_physical) to 29868032 (here) is no good reason to fail a test.
     this_time = get_api_current_physical_size()
     assert (
-        filled_current_physical <= this_time
+        filled_current_physical == this_time
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
-    if filled_current_physical != this_time:
-        log.info(
-            f"fixing up filled_current_physical from {filled_current_physical} to {this_time} ({this_time - filled_current_physical})"
-        )
-        filled_current_physical = this_time
 
     post_unlink_size = get_resident_physical_size()
     log.info(f"post_unlink_size: {post_unlink_size}")
     assert (
         post_unlink_size < filled_size
     ), "we just deleted layers and didn't cause anything to re-download them yet"
-    assert filled_size - post_unlink_size > 5 * (
-        1024**2
-    ), "we may be downloading some layers as part of tenant activation"
 
     # issue downloads that we know will fail
     info = client.timeline_download_remote_layers(
         tenant_id,
         timeline_id,
-        # allow some concurrency to unveil potential concurrency bugs
         max_concurrent_downloads=10,
         errors_ok=True,
         at_least_one_download=False,
@@ -425,9 +418,9 @@ def test_download_remote_layers_api(
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
     assert info["successful_download_count"] == 0
-    assert (
-        info["failed_download_count"] > 0
-    )  # can't assert == total_layer_count because attach + tenant status downloads some layers
+    # can't assert == total_layer_count because timeline_detail also tries to
+    # download layers for logical size, but this might not always hold.
+    assert info["failed_download_count"] > 0
     assert (
         info["total_layer_count"]
         == info["successful_download_count"] + info["failed_download_count"]
@@ -436,7 +429,6 @@ def test_download_remote_layers_api(
     assert (
         get_resident_physical_size() == post_unlink_size
     ), "didn't download anything new due to failpoint"
-    # would be nice to assert that the layers in the layer map are still RemoteLayer
 
     ##### Retry, this time without failpoints
     client.configure_failpoints(("remote-storage-download-pre-rename", "off"))

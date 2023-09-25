@@ -11,6 +11,7 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
@@ -19,9 +20,13 @@ use std::io::{Error, ErrorKind};
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
-    pub async fn read_blob(&self, offset: u64) -> Result<Vec<u8>, std::io::Error> {
+    pub async fn read_blob(
+        &self,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
-        self.read_blob_into_buf(offset, &mut buf).await?;
+        self.read_blob_into_buf(offset, &mut buf, ctx).await?;
         Ok(buf)
     }
     /// Read blob into the given buffer. Any previous contents in the buffer
@@ -30,11 +35,12 @@ impl<'a> BlockCursor<'a> {
         &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
+        ctx: &RequestContext,
     ) -> Result<(), std::io::Error> {
         let mut blknum = (offset / PAGE_SZ as u64) as u32;
         let mut off = (offset % PAGE_SZ as u64) as usize;
 
-        let mut buf = self.read_blk(blknum).await?;
+        let mut buf = self.read_blk(blknum, ctx).await?;
 
         // peek at the first byte, to determine if it's a 1- or 4-byte length
         let first_len_byte = buf[off];
@@ -50,7 +56,7 @@ impl<'a> BlockCursor<'a> {
                 // it is split across two pages
                 len_buf[..thislen].copy_from_slice(&buf[off..PAGE_SZ]);
                 blknum += 1;
-                buf = self.read_blk(blknum).await?;
+                buf = self.read_blk(blknum, ctx).await?;
                 len_buf[thislen..].copy_from_slice(&buf[0..4 - thislen]);
                 off = 4 - thislen;
             } else {
@@ -71,7 +77,7 @@ impl<'a> BlockCursor<'a> {
             if page_remain == 0 {
                 // continue on next page
                 blknum += 1;
-                buf = self.read_blk(blknum).await?;
+                buf = self.read_blk(blknum, ctx).await?;
                 off = 0;
                 page_remain = PAGE_SZ;
             }
@@ -228,12 +234,13 @@ impl BlobWriter<false> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tenant::block_io::BlockReaderRef;
+    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("file");
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
@@ -255,7 +262,7 @@ mod tests {
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
-            let blob_read = rdr.read_blob(*offset).await?;
+            let blob_read = rdr.read_blob(*offset, &ctx).await?;
             assert_eq!(
                 blob, &blob_read,
                 "mismatch for idx={idx} at offset={offset}"

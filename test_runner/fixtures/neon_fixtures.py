@@ -223,12 +223,6 @@ def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistrib
     return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
-@pytest.fixture(scope="session")
-def httpserver_listen_address(port_distributor: PortDistributor):
-    port = port_distributor.get_port()
-    return ("localhost", port)
-
-
 @pytest.fixture(scope="function")
 def default_broker(
     port_distributor: PortDistributor,
@@ -852,18 +846,6 @@ class NeonEnv:
     def get_safekeeper_connstrs(self) -> str:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join(f"localhost:{wa.port.pg}" for wa in self.safekeepers)
-
-    def timeline_dir(
-        self, tenant_id: TenantId, timeline_id: TimelineId, pageserver_id: Optional[int] = None
-    ) -> Path:
-        """Get a timeline directory's path based on the repo directory of the test environment"""
-        return (
-            self.tenant_dir(tenant_id, pageserver_id=pageserver_id) / "timelines" / str(timeline_id)
-        )
-
-    def tenant_dir(self, tenant_id: TenantId, pageserver_id: Optional[int] = None) -> Path:
-        """Get a tenant directory's path based on the repo directory of the test environment"""
-        return self.get_pageserver(pageserver_id).workdir / "tenants" / str(tenant_id)
 
     def get_pageserver_version(self) -> str:
         bin_pageserver = str(self.neon_binpath / "pageserver")
@@ -1593,7 +1575,23 @@ class NeonPageserver(PgProtocol):
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
+            '.*registered custom resource manager "neon".*',
         ]
+
+    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
+        """Get a timeline directory's path based on the repo directory of the test environment"""
+        if timeline_id is None:
+            return self.tenant_dir(tenant_id) / "timelines"
+        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+
+    def tenant_dir(
+        self,
+        tenant_id: Optional[TenantId] = None,
+    ) -> Path:
+        """Get a tenant directory's path based on the repo directory of the test environment"""
+        if tenant_id is None:
+            return self.workdir / "tenants"
+        return self.workdir / "tenants" / str(tenant_id)
 
     def start(
         self,
@@ -2139,6 +2137,28 @@ class NeonProxy(PgProtocol):
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
+
+    def http_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"query": query, "params": args}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+        )
+
+        if expected_code is not None:
+            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+        return response.json()
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")

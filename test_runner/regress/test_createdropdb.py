@@ -1,16 +1,22 @@
 import os
 import pathlib
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
+from fixtures.pg_version import PgVersion
 from fixtures.utils import query_scalar
 
 
 #
 # Test CREATE DATABASE when there have been relmapper changes
 #
-def test_createdb(neon_simple_env: NeonEnv):
+@pytest.mark.parametrize("strategy", ["file_copy", "wal_log"])
+def test_createdb(neon_simple_env: NeonEnv, strategy: str):
     env = neon_simple_env
+    if env.pg_version == PgVersion.V14 and strategy == "wal_log":
+        pytest.skip("wal_log strategy not supported on PostgreSQL 14")
+
     env.neon_cli.create_branch("test_createdb", "empty")
 
     endpoint = env.endpoints.create_start("test_createdb")
@@ -20,7 +26,10 @@ def test_createdb(neon_simple_env: NeonEnv):
         # Cause a 'relmapper' change in the original branch
         cur.execute("VACUUM FULL pg_class")
 
-        cur.execute("CREATE DATABASE foodb")
+        if env.pg_version == PgVersion.V14:
+            cur.execute("CREATE DATABASE foodb")
+        else:
+            cur.execute(f"CREATE DATABASE foodb STRATEGY={strategy}")
 
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 

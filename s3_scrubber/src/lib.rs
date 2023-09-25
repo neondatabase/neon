@@ -19,6 +19,7 @@ use aws_sdk_s3::{Client, Config};
 
 use reqwest::Url;
 pub use s3_deletion::S3Deleter;
+use std::io::IsTerminal;
 use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -179,6 +180,7 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
         .with_ansi(false)
         .with_writer(file_writer);
     let stdout_logs = fmt::Layer::new()
+        .with_ansi(std::io::stdout().is_terminal())
         .with_target(false)
         .with_writer(std::io::stdout);
     tracing_subscriber::registry()

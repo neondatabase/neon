@@ -534,6 +534,9 @@ fn start_pageserver(
             // creates a child context with the right DownloadBehavior.
             DownloadBehavior::Error,
         );
+
+        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
+
         task_mgr::spawn(
             crate::BACKGROUND_RUNTIME.handle(),
             TaskKind::MetricsCollection,
@@ -560,6 +563,7 @@ fn start_pageserver(
                     conf.cached_metric_collection_interval,
                     conf.synthetic_size_calculation_interval,
                     conf.id,
+                    local_disk_storage,
                     metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))
