@@ -64,6 +64,7 @@ toml_edit = { version = "0.19", features = ["serde"] }
 tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
+tungstenite = { version = "0.20" }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
