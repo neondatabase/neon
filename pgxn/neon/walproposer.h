@@ -299,23 +299,6 @@ typedef struct WalproposerShmemState
 }			WalproposerShmemState;
 
 /*
- * Collection of hooks for walproposer, to call postgres functions,
- * read WAL and send it over the network.
- */
-typedef struct walproposer_api
-{
-	WalproposerShmemState *	(*get_shmem_state) (void);
-	void					(*replication_feedback_set) (PageserverFeedback * rf);
-	void					(*start_streaming) (XLogRecPtr startpos, TimeLineID timeline);
-	void					(*init_walsender) (void);
-	void					(*init_standalone_sync_safekeepers) (void);
-	uint64					(*init_bgworker) (void);
-	XLogRecPtr				(*get_flush_rec_ptr) (void);
-} walproposer_api;
-
-extern const walproposer_api walprop_pg;
-
-/*
  * Report safekeeper state to proposer
  */
 typedef struct AppendResponse
@@ -461,65 +444,38 @@ typedef enum
 	WP_CONNECTION_IN_PROGRESS,
 }			WalProposerConnStatusType;
 
-/* Re-exported PQerrorMessage */
-extern char *walprop_error_message(WalProposerConn *conn);
-
-/* Re-exported PQstatus */
-extern WalProposerConnStatusType walprop_status(WalProposerConn *conn);
-
-/* Re-exported PQconnectStart */
-extern WalProposerConn * walprop_connect_start(char *conninfo, char *password);
-
-/* Re-exported PQconectPoll */
-extern WalProposerConnectPollStatusType walprop_connect_poll(WalProposerConn *conn);
-
-/* Blocking wrapper around PQsendQuery */
-extern bool walprop_send_query(WalProposerConn *conn, char *query);
-
-/* Wrapper around PQconsumeInput + PQisBusy + PQgetResult */
-extern WalProposerExecStatusType walprop_get_query_result(WalProposerConn *conn);
-
-/* Re-exported PQsocket */
-extern pgsocket walprop_socket(WalProposerConn *conn);
-
-/* Wrapper around PQconsumeInput (if socket's read-ready) + PQflush */
-extern int	walprop_flush(WalProposerConn *conn);
-
-/* Re-exported PQfinish */
-extern void walprop_finish(WalProposerConn *conn);
-
-/*
- * Ergonomic wrapper around PGgetCopyData
- *
- * Reads a CopyData block from a safekeeper, setting *amount to the number
- * of bytes returned.
- *
- * This function is allowed to assume certain properties specific to the
- * protocol with the safekeepers, so it should not be used as-is for any
- * other purpose.
- *
- * Note: If possible, using <AsyncRead> is generally preferred, because it
- * performs a bit of extra checking work that's always required and is normally
- * somewhat verbose.
- */
-extern PGAsyncReadResult walprop_async_read(WalProposerConn *conn, char **buf, int *amount);
-
-/*
- * Ergonomic wrapper around PQputCopyData + PQflush
- *
- * Starts to write a CopyData block to a safekeeper.
- *
- * For information on the meaning of return codes, refer to PGAsyncWriteResult.
- */
-extern PGAsyncWriteResult walprop_async_write(WalProposerConn *conn, void const *buf, size_t size);
-
-/*
- * Blocking equivalent to walprop_async_write_fn
- *
- * Returns 'true' if successful, 'false' on failure.
- */
-extern bool walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size);
-
 extern uint64 BackpressureThrottlingTime(void);
+
+/*
+ * Collection of hooks for walproposer, to call postgres functions,
+ * read WAL and send it over the network.
+ */
+typedef struct walproposer_api
+{
+	WalproposerShmemState *	(*get_shmem_state) (void);
+	void					(*replication_feedback_set) (PageserverFeedback * rf);
+	void					(*start_streaming) (XLogRecPtr startpos, TimeLineID timeline);
+	void					(*init_walsender) (void);
+	void					(*init_standalone_sync_safekeepers) (void);
+	uint64					(*init_bgworker) (void);
+	XLogRecPtr				(*get_flush_rec_ptr) (void);
+	TimestampTz				(*get_current_timestamp) (void);
+	TimeLineID				(*get_timeline_id) (void);
+	void					(*load_libpqwalreceiver) (void);
+	char *					(*conn_error_message) (WalProposerConn * conn);
+	WalProposerConnStatusType (*conn_status) (WalProposerConn * conn);
+	WalProposerConn *		(*conn_connect_start) (char *conninfo, char *password);
+	WalProposerConnectPollStatusType (*conn_connect_poll) (WalProposerConn * conn);
+	bool					(*conn_send_query) (WalProposerConn * conn, char * query);
+	WalProposerExecStatusType (*conn_get_query_result) (WalProposerConn * conn);
+	pgsocket				(*conn_socket) (WalProposerConn * conn);
+	int						(*conn_flush) (WalProposerConn * conn);
+	void					(*conn_finish) (WalProposerConn * conn);
+	PGAsyncReadResult		(*conn_async_read) (WalProposerConn * conn, char **buf, int *amount);
+	PGAsyncWriteResult		(*conn_async_write) (WalProposerConn * conn, void const *buf, size_t size);
+	bool					(*conn_blocking_write) (WalProposerConn * conn, void const *buf, size_t size);
+} walproposer_api;
+
+extern const walproposer_api walprop_pg;
 
 #endif							/* __NEON_WALPROPOSER_H__ */
