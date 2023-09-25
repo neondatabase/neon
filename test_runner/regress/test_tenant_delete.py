@@ -1,7 +1,6 @@
 import enum
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -41,9 +40,7 @@ def test_tenant_delete_smoke(
 ):
     neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -92,7 +89,7 @@ def test_tenant_delete_smoke(
 
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
 
-    tenant_path = env.tenant_dir(tenant_id=tenant_id)
+    tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():
@@ -176,7 +173,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if simulate_failures:
         neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -272,7 +269,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
         tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
 
-    tenant_dir = env.tenant_dir(tenant_id)
+    tenant_dir = env.pageserver.tenant_dir(tenant_id)
     # Check local is empty
     assert not tenant_dir.exists()
 
@@ -295,9 +292,7 @@ def test_tenant_delete_is_resumed_on_attach(
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -371,7 +366,7 @@ def test_tenant_delete_is_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -384,7 +379,7 @@ def test_tenant_delete_is_resumed_on_attach(
     wait_tenant_status_404(ps_http, tenant_id, iterations)
 
     # we shouldn've created tenant dir on disk
-    tenant_path = env.tenant_dir(tenant_id=tenant_id)
+    tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():

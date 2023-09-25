@@ -25,6 +25,7 @@ use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
@@ -323,14 +324,25 @@ where
                 .timeline
                 .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
-            ensure!(img.len() == 512);
+
+            ensure!(
+                img.len()
+                    == dispatch_pgversion!(
+                        self.timeline.pg_version,
+                        pgv::bindings::SIZEOF_RELMAPFILE
+                    )
+            );
+
             Some(img)
         } else {
             None
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = self.timeline.pg_version.to_string();
+            let pg_version_str = match self.timeline.pg_version {
+                14 | 15 => self.timeline.pg_version.to_string(),
+                ver => format!("{ver}\x0A"),
+            };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar.append(&header, pg_version_str.as_bytes()).await?;
 
@@ -374,7 +386,10 @@ where
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-                let pg_version_str = self.timeline.pg_version.to_string();
+                let pg_version_str = match self.timeline.pg_version {
+                    14 | 15 => self.timeline.pg_version.to_string(),
+                    ver => format!("{ver}\x0A"),
+                };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar.append(&header, pg_version_str.as_bytes()).await?;
 

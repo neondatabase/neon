@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
@@ -298,7 +300,9 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
 async fn serve(port: u16, state: Arc<ComputeNode>) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // this usually binds to both IPv4 and IPv6 on linux
+    // see e.g. https://github.com/rust-lang/rust/pull/34440
+    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port);
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();

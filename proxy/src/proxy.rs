@@ -28,10 +28,11 @@ use tracing::{error, info, info_span, warn, Instrument};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
-/// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
-pub const NUM_RETRIES_CONNECT: u32 = 10;
+/// Retry duration is BASE_RETRY_WAIT_DURATION * RETRY_WAIT_EXPONENT_BASE ^ n, where n starts at 0
+pub const NUM_RETRIES_CONNECT: u32 = 16;
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
-const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
+const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(25);
+const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -553,8 +554,7 @@ impl ShouldRetry for compute::ConnectionError {
 }
 
 pub fn retry_after(num_retries: u32) -> time::Duration {
-    // 1.5 seems to be an ok growth factor heuristic
-    BASE_RETRY_WAIT_DURATION.mul_f64(1.5_f64.powi(num_retries as i32))
+    BASE_RETRY_WAIT_DURATION.mul_f64(RETRY_WAIT_EXPONENT_BASE.powi((num_retries as i32) - 1))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.

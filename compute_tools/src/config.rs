@@ -46,8 +46,6 @@ pub fn write_postgres_conf(
         writeln!(file, "{}", conf)?;
     }
 
-    write!(file, "{}", &spec.cluster.settings.as_pg_settings())?;
-
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     if let Some(s) = &spec.pageserver_connstring {

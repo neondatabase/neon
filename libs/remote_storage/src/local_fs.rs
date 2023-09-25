@@ -148,21 +148,55 @@ impl RemoteStorage for LocalFs {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
         };
-        let mut files = vec![];
-        let mut directory_queue = vec![full_path.clone()];
 
+        // If we were given a directory, we may use it as our starting point.
+        // Otherwise, we must go up to the parent directory.  This is because
+        // S3 object list prefixes can be arbitrary strings, but when reading
+        // the local filesystem we need a directory to start calling read_dir on.
+        let mut initial_dir = full_path.clone();
+        match fs::metadata(full_path.clone()).await {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    // It's not a directory: strip back to the parent
+                    initial_dir.pop();
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // It's not a file that exists: strip the prefix back to the parent directory
+                initial_dir.pop();
+            }
+            Err(e) => {
+                // Unexpected I/O error
+                anyhow::bail!(e)
+            }
+        }
+
+        // Note that PathBuf starts_with only considers full path segments, but
+        // object prefixes are arbitrary strings, so we need the strings for doing
+        // starts_with later.
+        let prefix = full_path.to_string_lossy();
+
+        let mut files = vec![];
+        let mut directory_queue = vec![initial_dir.clone()];
         while let Some(cur_folder) = directory_queue.pop() {
             let mut entries = fs::read_dir(cur_folder.clone()).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let file_name: PathBuf = entry.file_name().into();
                 let full_file_name = cur_folder.clone().join(&file_name);
-                let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
-                files.push(file_remote_path.clone());
-                if full_file_name.is_dir() {
-                    directory_queue.push(full_file_name);
+                if full_file_name
+                    .to_str()
+                    .map(|s| s.starts_with(prefix.as_ref()))
+                    .unwrap_or(false)
+                {
+                    let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
+                    files.push(file_remote_path.clone());
+                    if full_file_name.is_dir() {
+                        directory_queue.push(full_file_name);
+                    }
                 }
             }
         }
+
         Ok(files)
     }
 

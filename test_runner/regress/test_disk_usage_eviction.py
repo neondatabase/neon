@@ -135,7 +135,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     log.info(f"setting up eviction_env for test {request.node.name}")
 
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # initial tenant will not be present on this pageserver
     env = neon_env_builder.init_configs()
@@ -417,7 +417,7 @@ def poor_mans_du(
     largest_layer = 0
     smallest_layer = None
     for tenant_id, timeline_id in timelines:
-        timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+        timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
         assert timeline_dir.exists(), f"timeline dir does not exist: {timeline_dir}"
         total = 0
         for file in timeline_dir.iterdir():

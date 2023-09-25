@@ -388,6 +388,7 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
         },
         order,
+        shutdown_pageserver.clone(),
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
@@ -476,16 +477,19 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(
-            conf,
-            launch_ts,
-            http_auth,
-            broker_client.clone(),
-            remote_storage,
-            disk_usage_eviction_state,
-        )?
-        .build()
-        .map_err(|err| anyhow!(err))?;
+        let router_state = Arc::new(
+            http::routes::State::new(
+                conf,
+                http_auth.clone(),
+                remote_storage,
+                broker_client.clone(),
+                disk_usage_eviction_state,
+            )
+            .context("Failed to initialize router state")?,
+        );
+        let router = http::make_router(router_state, launch_ts, http_auth.clone())?
+            .build()
+            .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
@@ -514,6 +518,9 @@ fn start_pageserver(
             // creates a child context with the right DownloadBehavior.
             DownloadBehavior::Error,
         );
+
+        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
+
         task_mgr::spawn(
             crate::BACKGROUND_RUNTIME.handle(),
             TaskKind::MetricsCollection,
@@ -540,6 +547,7 @@ fn start_pageserver(
                     conf.cached_metric_collection_interval,
                     conf.synthetic_size_calculation_interval,
                     conf.id,
+                    local_disk_storage,
                     metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))

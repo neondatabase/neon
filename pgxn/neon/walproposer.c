@@ -51,6 +51,9 @@
 #include "libpq/pqformat.h"
 #include "replication/slot.h"
 #include "replication/walreceiver.h"
+#if PG_VERSION_NUM >= 160000
+#include "replication/walsender_private.h"
+#endif
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
@@ -73,10 +76,10 @@
 
 static bool syncSafekeepers = false;
 
-char	   *wal_acceptors_list;
-int			wal_acceptor_reconnect_timeout;
-int			wal_acceptor_connection_timeout;
-bool		am_wal_proposer;
+char	   *wal_acceptors_list = "";
+int			wal_acceptor_reconnect_timeout = 1000;
+int			wal_acceptor_connection_timeout = 10000;
+bool		am_wal_proposer = false;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
@@ -191,7 +194,7 @@ pg_init_walproposer(void)
 /*
  * Entry point for `postgres --sync-safekeepers`.
  */
-void
+PGDLLEXPORT void
 WalProposerSync(int argc, char *argv[])
 {
 	struct stat stat_buf;
@@ -315,7 +318,7 @@ nwp_shmem_startup_hook(void)
 /*
  * WAL proposer bgworker entry point.
  */
-void
+PGDLLEXPORT void
 WalProposerMain(Datum main_arg)
 {
 #if PG_VERSION_NUM >= 150000
@@ -383,21 +386,55 @@ WalProposerPoll(void)
 {
 	while (true)
 	{
-		Safekeeper *sk;
-		int			rc;
-		WaitEvent	event;
+		Safekeeper *sk = NULL;
+		bool		wait_timeout = false;
+		bool		late_cv_trigger = false;
+		WaitEvent	event = {0};
+		int			rc = 0;
 		TimestampTz now = GetCurrentTimestamp();
+		long		timeout = TimeToReconnect(now);
 
-		rc = WaitEventSetWait(waitEvents, TimeToReconnect(now),
+#if PG_MAJORVERSION_NUM >= 16
+		if (WalSndCtl != NULL)
+			ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+#endif
+
+		/*
+		 * Wait for a wait event to happen, or timeout:
+		 *  - Safekeeper socket can become available for READ or WRITE
+		 *  - Our latch got set, because
+		 *     * PG15-: We got woken up by a process triggering the WalSender
+		 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
+		 */
+		rc = WaitEventSetWait(waitEvents, timeout,
 							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
-		sk = (Safekeeper *) event.user_data;
+#if PG_MAJORVERSION_NUM >= 16
+		if (WalSndCtl != NULL)
+			late_cv_trigger = ConditionVariableCancelSleep();
+#endif
 
+		/*
+		 * If wait is terminated by latch set (walsenders' latch is set on
+		 * each wal flush), then exit loop. (no need for pm death check due to
+		 * WL_EXIT_ON_PM_DEATH)
+		 */
+		if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
+		{
+			/* Reset our latch */
+			ResetLatch(MyLatch);
+
+			break;
+		}
+		
 		/*
 		 * If the event contains something that one of our safekeeper states
 		 * was waiting for, we'll advance its state.
 		 */
-		if (rc != 0 && (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)))
+		if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
+		{
+			sk = (Safekeeper *) event.user_data;
 			AdvancePollState(sk, event.events);
+		}
 
 		/*
 		 * If the timeout expired, attempt to reconnect to any safekeepers
@@ -405,15 +442,26 @@ WalProposerPoll(void)
 		 */
 		ReconnectSafekeepers();
 
-		/*
-		 * If wait is terminated by latch set (walsenders' latch is set on
-		 * each wal flush), then exit loop. (no need for pm death check due to
-		 * WL_EXIT_ON_PM_DEATH)
-		 */
-		if (rc != 0 && (event.events & WL_LATCH_SET))
+		if (rc == 0) /* timeout expired */
 		{
-			ResetLatch(MyLatch);
-			break;
+			wait_timeout = true;
+
+			/*
+			 * Ensure flushrecptr is set to a recent value. This fixes a case
+			 * where we've not been notified of new WAL records when we were
+			 * planning on consuming them.
+			 */
+			if (!syncSafekeepers) {
+				XLogRecPtr flushed;
+
+#if PG_MAJORVERSION_NUM < 15
+				flushed = GetFlushRecPtr();
+#else
+				flushed = GetFlushRecPtr(NULL);
+#endif
+				if (flushed > availableLsn)
+					break;
+			}
 		}
 
 		now = GetCurrentTimestamp();
@@ -611,7 +659,8 @@ UpdateEventSet(Safekeeper *sk, uint32 events)
 	ModifyWaitEvent(waitEvents, sk->eventPos, events, NULL);
 }
 
-/* Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
+/*
+ * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
  *
  * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
  */
@@ -1408,7 +1457,12 @@ WalProposerRecovery(int donor, TimeLineID timeline, XLogRecPtr startpos, XLogRec
 			elog(FATAL, "could not append password to the safekeeper connection string");
 	}
 
+#if PG_MAJORVERSION_NUM < 16
 	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
+#else
+	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
+#endif
+
 	if (!wrconn)
 	{
 		ereport(WARNING,
@@ -2242,9 +2296,10 @@ HandleSafekeeperResponse(void)
 			if (synced)
 				n_synced++;
 		}
+
 		if (n_synced >= quorum)
 		{
-			/* All safekeepers synced! */
+			/* A quorum of safekeepers has been synced! */
 			
 			/*
 			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
@@ -2539,8 +2594,15 @@ backpressure_throttling_impl(void)
 	? PrevProcessInterruptsCallback()
 	: false;
 
-	/* Don't throttle read only transactions and wal sender. */
-	if (am_walsender || !TransactionIdIsValid(GetCurrentTransactionIdIfAny()))
+	/*
+	 * Don't throttle read only transactions or wal sender.
+	 * Do throttle CREATE INDEX CONCURRENTLY, however. It performs some
+	 * stages outside a transaction, even though it writes a lot of WAL. 
+	 * Check PROC_IN_SAFE_IC flag to cover that case.
+	 */
+	if (am_walsender
+		|| (!(MyProc->statusFlags & PROC_IN_SAFE_IC)
+			&& !TransactionIdIsValid(GetCurrentTransactionIdIfAny())))
 		return retry;
 
 	/* Calculate replicas lag */

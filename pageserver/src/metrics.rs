@@ -129,10 +129,8 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
 
 pub struct PageCacheMetrics {
     pub read_accesses_materialized_page: IntCounter,
-    pub read_accesses_ephemeral: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
-    pub read_hits_ephemeral: IntCounter,
     pub read_hits_immutable: IntCounter,
     pub read_hits_materialized_page_exact: IntCounter,
     pub read_hits_materialized_page_older_lsn: IntCounter,
@@ -163,21 +161,9 @@ pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
             .unwrap()
     },
 
-    read_accesses_ephemeral: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["ephemeral"])
-            .unwrap()
-    },
-
     read_accesses_immutable: {
         PAGE_CACHE_READ_ACCESSES
             .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
-
-    read_hits_ephemeral: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["ephemeral", "-"])
             .unwrap()
     },
 
@@ -537,7 +523,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-/// Tracks time taken by fs operations near VirtualFile.
+/// VirtualFile fs operation variants.
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
@@ -548,15 +534,66 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 /// - seek (modify internal position or file length query)
 /// - fsync ([`std::fs::File::sync_all`])
 /// - metadata ([`std::fs::File::metadata`])
-pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_io_operations_seconds",
-        "Time spent in IO operations",
-        &["operation"],
-        STORAGE_IO_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
+#[derive(
+    Debug, Clone, Copy, strum_macros::EnumCount, strum_macros::EnumIter, strum_macros::FromRepr,
+)]
+pub(crate) enum StorageIoOperation {
+    Open,
+    Close,
+    CloseByReplace,
+    Read,
+    Write,
+    Seek,
+    Fsync,
+    Metadata,
+}
+
+impl StorageIoOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageIoOperation::Open => "open",
+            StorageIoOperation::Close => "close",
+            StorageIoOperation::CloseByReplace => "close-by-replace",
+            StorageIoOperation::Read => "read",
+            StorageIoOperation::Write => "write",
+            StorageIoOperation::Seek => "seek",
+            StorageIoOperation::Fsync => "fsync",
+            StorageIoOperation::Metadata => "metadata",
+        }
+    }
+}
+
+/// Tracks time taken by fs operations near VirtualFile.
+#[derive(Debug)]
+pub(crate) struct StorageIoTime {
+    metrics: [Histogram; StorageIoOperation::COUNT],
+}
+
+impl StorageIoTime {
+    fn new() -> Self {
+        let storage_io_histogram_vec = register_histogram_vec!(
+            "pageserver_io_operations_seconds",
+            "Time spent in IO operations",
+            &["operation"],
+            STORAGE_IO_TIME_BUCKETS.into()
+        )
+        .expect("failed to define a metric");
+        let metrics = std::array::from_fn(|i| {
+            let op = StorageIoOperation::from_repr(i).unwrap();
+            let metric = storage_io_histogram_vec
+                .get_metric_with_label_values(&[op.as_str()])
+                .unwrap();
+            metric
+        });
+        Self { metrics }
+    }
+
+    pub(crate) fn get(&self, op: StorageIoOperation) -> &Histogram {
+        &self.metrics[op as usize]
+    }
+}
+
+pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
@@ -1164,6 +1201,12 @@ impl TimelineMetrics {
                 evictions_with_low_residence_duration,
             ),
         }
+    }
+
+    pub fn record_new_file_metrics(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        self.num_persistent_files_created.inc_by(1);
+        self.persistent_bytes_written.inc_by(sz);
     }
 }
 

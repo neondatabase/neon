@@ -346,23 +346,13 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
     def get_pid(status: int, pw: str) -> Any:
-        connstr = (
-            f"postgresql://http_auth:{pw}@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        return static_proxy.http_query(
+            "SELECT pid FROM pg_stat_activity WHERE state = 'active'",
+            [],
+            user="http_auth",
+            password=pw,
+            expected_code=status,
         )
-        response = requests.post(
-            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
-            data=json.dumps(
-                {"query": "SELECT pid FROM pg_stat_activity WHERE state = 'active'", "params": []}
-            ),
-            headers={
-                "Content-Type": "application/sql",
-                "Neon-Connection-String": connstr,
-                "Neon-Pool-Opt-In": "true",
-            },
-            verify=str(static_proxy.test_output_dir / "proxy.crt"),
-        )
-        assert response.status_code == status
-        return response.json()
 
     pid1 = get_pid(200, "http")["rows"][0]["pid"]
 
@@ -387,3 +377,23 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     # old password should not work
     res = get_pid(400, "http")
     assert "password authentication failed for user" in res["message"]
+
+
+# Beginning a transaction should not impact the next query,
+# which might come from a completely different client.
+@pytest.mark.xfail(reason="not implemented")
+def test_http_pool_begin(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    def query(status: int, query: str, *args) -> Any:
+        static_proxy.http_query(
+            query,
+            args,
+            user="http_auth",
+            password="http",
+            expected_code=status,
+        )
+
+    query(200, "BEGIN;")
+    query(400, "garbage-lol(&(&(&(&")  # Intentional error to break the transaction
+    query(200, "SELECT 1;")  # Query that should succeed regardless of the transaction
