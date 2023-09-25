@@ -144,7 +144,7 @@ impl S3Bucket {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
         let path_string = path
             .get_path()
-            .to_string()
+            .as_str()
             .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
             .to_string();
         match &self.prefix_in_bucket {

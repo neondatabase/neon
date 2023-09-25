@@ -638,7 +638,7 @@ impl CgroupWatcher {
 
     /// Set cgroup memory.high and memory.max.
     pub fn set_limits(&self, limits: &MemoryLimits) -> anyhow::Result<()> {
-        info!(limits.high, path = self.path(), "writing new memory limits",);
+        info!(limits.high, path = self.path(), "writing new memory limits");
         self.memory()
             .context("failed to get memory subsystem while setting memory limits")?
             .set_mem(cgroups_rs::memory::SetMemory {

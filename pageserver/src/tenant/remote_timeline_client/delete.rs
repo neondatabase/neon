@@ -19,7 +19,7 @@ pub(super) async fn delete_layer<'a>(
     fail::fail_point!("before-delete-layer", |_| {
         anyhow::bail!("failpoint before-delete-layer")
     });
-    debug!("Deleting layer from remote storage: {local_layer_path:?}",);
+    debug!("Deleting layer from remote storage: {local_layer_path:?}");
 
     let path_to_delete = remote_path(conf, local_layer_path, generation)?;
 

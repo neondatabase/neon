@@ -145,7 +145,7 @@ impl PageServerNode {
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
         self.pageserver_init(config_overrides)
-            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id,))
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
     pub fn repo_path(&self) -> PathBuf {

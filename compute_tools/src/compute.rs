@@ -1039,7 +1039,7 @@ LIMIT 100",
         let remote_extensions = spec
             .remote_extensions
             .as_ref()
-            .ok_or(anyhow::anyhow!("Remote extensions are not configured",))?;
+            .ok_or(anyhow::anyhow!("Remote extensions are not configured"))?;
 
         info!("parse shared_preload_libraries from spec.cluster.settings");
         let mut libs_vec = Vec::new();

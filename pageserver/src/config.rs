@@ -1218,7 +1218,7 @@ background_task_maximum_delay = '334 s'
                 r#"[remote_storage]
 local_path = '{local_storage_path}'"#,
             ),
-            format!("remote_storage={{local_path='{local_storage_path}'}}",),
+            format!("remote_storage={{local_path='{local_storage_path}'}}"),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {

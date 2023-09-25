@@ -59,7 +59,7 @@ impl LocalFs {
         let metadata_path = storage_metadata_path(file_path)?;
         if metadata_path.exists() && metadata_path.is_file() {
             let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
-                format!("Failed to read metadata from the local storage at '{metadata_path}'",)
+                format!("Failed to read metadata from the local storage at '{metadata_path}'")
             })?;
 
             serde_json::from_str(&metadata_string)
@@ -217,7 +217,7 @@ impl RemoteStorage for LocalFs {
                 .open(&temp_file_path)
                 .await
                 .with_context(|| {
-                    format!("Failed to open target fs destination at '{target_file_path}'",)
+                    format!("Failed to open target fs destination at '{target_file_path}'")
                 })?,
         );
 
@@ -424,7 +424,7 @@ where
 async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<()> {
     let target_dir = match target_file_path.parent() {
         Some(parent_dir) => parent_dir,
-        None => bail!("File path '{target_file_path}' has no parent directory",),
+        None => bail!("File path '{target_file_path}' has no parent directory"),
     };
     if !target_dir.exists() {
         fs::create_dir_all(target_dir).await?;
@@ -434,7 +434,7 @@ async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<
 
 fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
     if file_path.exists() {
-        ensure!(file_path.is_file(), "file path '{file_path}' is not a file",);
+        ensure!(file_path.is_file(), "file path '{file_path}' is not a file");
         Ok(true)
     } else {
         Ok(false)

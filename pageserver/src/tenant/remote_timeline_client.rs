@@ -1640,7 +1640,7 @@ mod tests {
         let remote_timeline_dir = harness
             .remote_fs_dir
             .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
-        println!("remote_timeline_dir: {remote_timeline_dir}",);
+        println!("remote_timeline_dir: {remote_timeline_dir}");
 
         let generation = harness.generation;
 

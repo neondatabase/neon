@@ -3804,7 +3804,7 @@ impl Timeline {
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata().with_context(|| {
-                format!("read file metadata for new created layer {new_delta_path}",)
+                format!("read file metadata for new created layer {new_delta_path}")
             })?;
 
             if let Some(remote_client) = &self.remote_client {
@@ -4735,8 +4735,7 @@ fn is_send() {
 fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
     let filename = path
         .file_name()
-        .ok_or_else(|| anyhow!("Path {path} don't have a file name",))?
-        .to_string();
+        .ok_or_else(|| anyhow!("Path {path} don't have a file name"))?;
     let mut new_path = path.to_owned();
 
     for i in 0u32.. {

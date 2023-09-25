@@ -150,7 +150,7 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
     };
 
     let path = RemotePath::new(Utf8Path::new(
-        format!("{}/for_sure_there_is_nothing_there_really", ctx.base_prefix,).as_str(),
+        format!("{}/for_sure_there_is_nothing_there_really", ctx.base_prefix).as_str(),
     ))
     .with_context(|| "RemotePath conversion")?;
 
@@ -168,19 +168,17 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     };
 
     let path1 = RemotePath::new(&Utf8Path::new(
-        format!("{}/path1", ctx.base_prefix,).as_str(),
+        format!("{}/path1", ctx.base_prefix).as_str(),
     ))
     .with_context(|| "RemotePath conversion")?;
 
     let path2 = RemotePath::new(&Utf8Path::new(
-        format!("{}/path2", ctx.base_prefix,).as_str(),
+        format!("{}/path2", ctx.base_prefix).as_str(),
     ))
     .with_context(|| "RemotePath conversion")?;
 
-    let path3 = RemotePath::new(Utf8Path::new(
-        format!("{}/path3", ctx.base_prefix,).as_str(),
-    ))
-    .with_context(|| "RemotePath conversion")?;
+    let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
 
     let data1 = "remote blob data1".as_bytes();
     let data1_len = data1.len();

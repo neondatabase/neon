@@ -30,7 +30,7 @@ pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
         || {
             let url = broker.client_url();
             let status_url = url.join("status").with_context(|| {
-                format!("Failed to append /status path to broker endpoint {url}",)
+                format!("Failed to append /status path to broker endpoint {url}")
             })?;
             let request = client
                 .get(status_url)
