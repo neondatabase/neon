@@ -170,13 +170,10 @@ impl RemoteStorage for LocalFs {
         let mut files = vec![];
         let mut directory_queue = vec![initial_dir.clone()];
         while let Some(cur_folder) = directory_queue.pop() {
-            let mut entries = fs::read_dir(cur_folder.clone()).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let file_name: Utf8PathBuf = Utf8PathBuf::from_path_buf(entry.file_name().into())
-                    .map_err(|pb| {
-                    anyhow::Error::msg(format!("non-Unicode path: {}", pb.to_string_lossy()))
-                })?;
-                let full_file_name = cur_folder.clone().join(&file_name);
+            let mut entries = cur_folder.read_dir_utf8()?;
+            while let Some(Ok(entry)) = entries.next() {
+                let file_name = entry.file_name();
+                let full_file_name = cur_folder.clone().join(file_name);
                 if full_file_name.starts_with(&prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
                     files.push(file_remote_path.clone());
