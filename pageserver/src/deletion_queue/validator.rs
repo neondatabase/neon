@@ -132,7 +132,7 @@ where
     /// Process any outstanding validations of generations of pending LSN updates or pending
     /// DeletionLists.
     ///
-    /// Valid LSN updates propagate back to their result channel immediately, valid DeletionLists
+    /// Valid LSN updates propagate back to Timelines immediately, valid DeletionLists
     /// go into the queue of ready-to-execute lists.
     async fn validate(&mut self) -> Result<(), DeletionQueueError> {
         let mut tenant_generations = HashMap::new();
@@ -195,13 +195,11 @@ where
 
             if valid && *validated_generation == tenant_lsn_state.generation {
                 for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
-                    // Drop result of send: it is legal for the Timeline to have been dropped along
-                    // with its queue receiver while we were doing validation.
                     pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
-                warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {0:?}", tenant_lsn_state.generation);
+                warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
                 DELETION_QUEUE_DROPPED_LSN_UPDATES.inc();
             }
         }
@@ -371,7 +369,6 @@ where
                 Err(_) => {
                     // Timeout, we hit deadline to execute whatever we have in hand.  These functions will
                     // return immediately if no work is pending.
-                    // Drop result, because it' a background flush and we don't care whether it really worked.
                     match self.flush().await {
                         Ok(()) => {}
                         Err(DeletionQueueError::ShuttingDown) => {

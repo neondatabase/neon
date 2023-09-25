@@ -698,24 +698,16 @@ impl DeletionQueue {
         self.cancel.cancel();
 
         match tokio::time::timeout(timeout, self.client.flush()).await {
-            Ok(flush_r) => {
-                match flush_r {
-                    Ok(()) => {
-                        tracing::info!("Deletion queue flushed successfully on shutdown")
-                    }
-                    Err(e) => {
-                        match e {
-                            DeletionQueueError::ShuttingDown => {
-                                // This is not harmful for correctness, but is unexpected: the deletion
-                                // queue's workers should stay alive as long as there are any client handles instantiated.
-                                tracing::warn!("Deletion queue stopped prematurely");
-                            }
-                        }
-                    }
-                }
+            Ok(Ok(())) => {
+                tracing::info!("Deletion queue flushed successfully on shutdown")
             }
-            Err(e) => {
-                tracing::warn!("Timed out flushing deletion queue on shutdown ({e})")
+            Ok(Err(DeletionQueueError::ShuttingDown)) => {
+                // This is not harmful for correctness, but is unexpected: the deletion
+                // queue's workers should stay alive as long as there are any client handles instantiated.
+                tracing::warn!("Deletion queue stopped prematurely");
+            }
+            Err(_timeout) => {
+                tracing::warn!("Timed out flushing deletion queue on shutdown")
             }
         }
     }
@@ -831,13 +823,11 @@ mod test {
     impl MockControlPlane {
         fn new() -> Self {
             Self {
-                latest_generation: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                latest_generation: Arc::default(),
             }
         }
     }
 
-    unsafe impl Send for MockControlPlane {}
-    unsafe impl Sync for MockControlPlane {}
 
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
@@ -1171,7 +1161,7 @@ mod test {
 /// A lightweight queue which can issue ordinary DeletionQueueClient objects, but doesn't do any persistence
 /// or coalescing, and doesn't actually execute any deletions unless you call pump() to kick it.
 #[cfg(test)]
-pub mod mock {
+pub(crate) mod mock {
     use tracing::info;
 
     use crate::tenant::remote_timeline_client::remote_layer_path;
