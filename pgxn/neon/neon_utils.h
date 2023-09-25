@@ -2,7 +2,6 @@
 #define __NEON_UTILS_H__
 
 #include "postgres.h"
-#include "libpq/pqformat.h"
 
 bool		HexDecodeString(uint8 *result, char *input, int nbytes);
 uint32		pq_getmsgint32_le(StringInfo msg);
