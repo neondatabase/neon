@@ -43,6 +43,8 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
+static AppendResponse quorumFeedback;
+
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
 static WalproposerShmemState * walprop_shared;
@@ -1432,6 +1434,141 @@ walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
 	return rc;
 }
 
+static void
+walprop_pg_finish_sync_safekeepers(XLogRecPtr lsn)
+{
+	fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(lsn));
+	exit(0);
+}
+
+/*
+ * Get PageserverFeedback fields from the most advanced safekeeper
+ */
+static void
+GetLatestNeonFeedback(PageserverFeedback * rf, Safekeeper * safekeepers, int n_safekeepers)
+{
+	int			latest_safekeeper = 0;
+	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
+
+	for (int i = 0; i < n_safekeepers; i++)
+	{
+		if (safekeepers[i].appendResponse.rf.last_received_lsn > last_received_lsn)
+		{
+			latest_safekeeper = i;
+			last_received_lsn = safekeepers[i].appendResponse.rf.last_received_lsn;
+		}
+	}
+
+	rf->currentClusterSize = safekeepers[latest_safekeeper].appendResponse.rf.currentClusterSize;
+	rf->last_received_lsn = safekeepers[latest_safekeeper].appendResponse.rf.last_received_lsn;
+	rf->disk_consistent_lsn = safekeepers[latest_safekeeper].appendResponse.rf.disk_consistent_lsn;
+	rf->remote_consistent_lsn = safekeepers[latest_safekeeper].appendResponse.rf.remote_consistent_lsn;
+	rf->replytime = safekeepers[latest_safekeeper].appendResponse.rf.replytime;
+
+	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
+		 " last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
+		 rf->currentClusterSize,
+		 LSN_FORMAT_ARGS(rf->last_received_lsn),
+		 LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
+		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
+		 rf->replytime);
+
+	walprop_pg.replication_feedback_set(rf);
+}
+
+/*
+ * Combine hot standby feedbacks from all safekeepers.
+ */
+static void
+CombineHotStanbyFeedbacks(HotStandbyFeedback * hs, Safekeeper * safekeepers, int n_safekeepers)
+{
+	hs->ts = 0;
+	hs->xmin.value = ~0;		/* largest unsigned value */
+	hs->catalog_xmin.value = ~0;	/* largest unsigned value */
+
+	for (int i = 0; i < n_safekeepers; i++)
+	{
+		if (safekeepers[i].appendResponse.hs.ts != 0)
+		{
+			HotStandbyFeedback *skhs = &safekeepers[i].appendResponse.hs;
+			if (FullTransactionIdIsNormal(skhs->xmin)
+				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
+			{
+				hs->xmin = skhs->xmin;
+				hs->ts = skhs->ts;
+			}
+			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
+				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
+			{
+				hs->catalog_xmin = skhs->catalog_xmin;
+				hs->ts = skhs->ts;
+			}
+		}
+	}
+
+	if (hs->xmin.value == ~0)
+		hs->xmin = InvalidFullTransactionId;
+	if (hs->catalog_xmin.value == ~0)
+		hs->catalog_xmin = InvalidFullTransactionId;
+}
+
+static void
+walprop_pg_process_safekeeper_feedback(Safekeeper * safekeepers, int n_safekeepers, bool isSync, XLogRecPtr commitLsn)
+{
+	HotStandbyFeedback hsFeedback;
+	XLogRecPtr	diskConsistentLsn;
+
+	diskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
+
+	if (!isSync)
+	{
+		/* Get PageserverFeedback fields from the most advanced safekeeper */
+		GetLatestNeonFeedback(&quorumFeedback.rf, safekeepers, n_safekeepers);
+		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
+	}
+
+	if (commitLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
+	{
+
+		if (commitLsn > quorumFeedback.flushLsn)
+			quorumFeedback.flushLsn = commitLsn;
+
+		/* advance the replication slot */
+		if (!isSync)
+			ProcessStandbyReply(
+			/* write_lsn -  This is what durably stored in WAL service. */
+								quorumFeedback.flushLsn,
+			/* flush_lsn - This is what durably stored in WAL service. */
+								quorumFeedback.flushLsn,
+
+			/*
+			 * apply_lsn - This is what processed and durably saved at*
+			 * pageserver.
+			 */
+								quorumFeedback.rf.disk_consistent_lsn,
+								walprop_pg.get_current_timestamp(), false);
+	}
+
+	CombineHotStanbyFeedbacks(&hsFeedback, safekeepers, n_safekeepers);
+	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
+	{
+		quorumFeedback.hs = hsFeedback;
+		if (!isSync)
+			ProcessStandbyHSFeedback(hsFeedback.ts,
+									 XidFromFullTransactionId(hsFeedback.xmin),
+									 EpochFromFullTransactionId(hsFeedback.xmin),
+									 XidFromFullTransactionId(hsFeedback.catalog_xmin),
+									 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+	}
+}
+
+static void
+walprop_pg_confirm_wal_streamed(XLogRecPtr lsn)
+{
+	if (MyReplicationSlot)
+		PhysicalConfirmReceivedLocation(lsn);
+}
+
 /*
  * Temporary globally exported walproposer API for postgres.
  */
@@ -1466,4 +1603,9 @@ const walproposer_api walprop_pg = {
 	.update_event_set = walprop_pg_update_event_set,
 	.add_safekeeper_event_set = walprop_pg_add_safekeeper_event_set,
 	.wait_event_set = walprop_pg_wait_event_set,
+	.strong_random = pg_strong_random,
+	.get_redo_start_lsn = GetRedoStartLsn,
+	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
+	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
+	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
 };
