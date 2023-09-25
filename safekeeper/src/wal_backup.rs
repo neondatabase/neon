@@ -431,10 +431,7 @@ async fn backup_single_segment(
         BACKUP_ERRORS.inc();
     }
     res?;
-    debug!(
-        "Backup of {} done",
-        segment_file_path
-    );
+    debug!("Backup of {} done", segment_file_path);
 
     Ok(*seg)
 }
@@ -495,12 +492,11 @@ async fn backup_object(
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
-        format!(
-            "Failed to open file {} for wal backup",
-            source_file
-        )
-    })?);
+    let file = tokio::io::BufReader::new(
+        File::open(&source_file)
+            .await
+            .with_context(|| format!("Failed to open file {} for wal backup", source_file))?,
+    );
 
     storage
         .upload_storage_object(Box::new(file), size, target_file)

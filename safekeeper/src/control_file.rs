@@ -217,12 +217,10 @@ impl Storage for FileStorage {
         // this sync is not required by any standard but postgres does this (see durable_rename)
         if !self.conf.no_sync {
             let new_f = File::open(&control_path).await?;
-            new_f.sync_all().await.with_context(|| {
-                format!(
-                    "failed to sync control file at: {}",
-                    &control_path
-                )
-            })?;
+            new_f
+                .sync_all()
+                .await
+                .with_context(|| format!("failed to sync control file at: {}", &control_path))?;
 
             // fsync the directory (linux specific)
             let tli_dir = File::open(&self.timeline_dir).await?;

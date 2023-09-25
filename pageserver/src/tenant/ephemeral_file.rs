@@ -77,9 +77,7 @@ impl EphemeralFile {
                             // order path before error because error is anyhow::Error => might have many contexts
                             format!(
                                 "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.file.path,
-                                e,
+                                blknum, self.file.path, e,
                             ),
                         )
                     })? {
@@ -246,8 +244,7 @@ impl Drop for EphemeralFile {
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 error!(
                     "could not remove ephemeral file '{}': {}",
-                    self.file.path,
-                    e
+                    self.file.path, e
                 );
             }
         }

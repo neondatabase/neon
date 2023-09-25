@@ -193,9 +193,7 @@ async fn cleanup_remaining_fs_traces(
             tokio::fs::remove_file(&p).await
         }
         .or_else(fs_ext::ignore_not_found)
-        .with_context(|| {
-            format!("failed to delete {p}")
-        })
+        .with_context(|| format!("failed to delete {p}"))
     };
 
     rm(conf.tenant_config_path(tenant_id), false).await?;

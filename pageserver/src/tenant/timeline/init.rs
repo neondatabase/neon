@@ -166,11 +166,7 @@ pub(super) fn reconcile(
 pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
     let file_name = path.file_name().expect("must be file path");
     tracing::debug!(kind, ?file_name, "cleaning up");
-    std::fs::remove_file(path).with_context(|| {
-        format!(
-            "failed to remove {kind} at {path}"
-        )
-    })
+    std::fs::remove_file(path).with_context(|| format!("failed to remove {kind} at {path}"))
 }
 
 pub(super) fn cleanup_local_file_for_remote(

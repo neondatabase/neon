@@ -455,12 +455,7 @@ impl DeltaLayer {
         self.inner
             .get_or_try_init(|| self.load_inner())
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to load delta layer {}",
-                    self.path()
-                )
-            })
+            .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
     async fn load_inner(&self) -> Result<Arc<DeltaLayerInner>> {
@@ -922,10 +917,7 @@ impl DeltaLayerInner {
                 .read_blob_into_buf(pos, &mut buf)
                 .await
                 .with_context(|| {
-                    format!(
-                        "Failed to read blob from virtual file {}",
-                        file.file.path
-                    )
+                    format!("Failed to read blob from virtual file {}", file.file.path)
                 })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(

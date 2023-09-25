@@ -198,8 +198,7 @@ impl Drop for TimelineUninitMark {
             if self.timeline_path.exists() {
                 error!(
                     "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path,
-                    self.timeline_path
+                    self.uninit_mark_path, self.timeline_path
                 )
             } else {
                 // unblock later timeline creation attempts

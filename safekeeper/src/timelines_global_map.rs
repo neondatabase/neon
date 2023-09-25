@@ -88,12 +88,9 @@ impl GlobalTimelines {
             state.get_conf().workdir.clone()
         };
         let mut tenant_count = 0;
-        for tenants_dir_entry in std::fs::read_dir(&tenants_dir).with_context(|| {
-            format!(
-                "failed to list tenants dir {}",
-                tenants_dir
-            )
-        })? {
+        for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
+            .with_context(|| format!("failed to list tenants dir {}", tenants_dir))?
+        {
             match &tenants_dir_entry {
                 Ok(tenants_dir_entry) => {
                     if let Ok(tenant_id) =
@@ -105,9 +102,7 @@ impl GlobalTimelines {
                 }
                 Err(e) => error!(
                     "failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
-                    tenants_dir_entry,
-                    tenants_dir,
-                    e
+                    tenants_dir_entry, tenants_dir, e
                 ),
             }
         }
@@ -138,12 +133,9 @@ impl GlobalTimelines {
         };
 
         let timelines_dir = conf.tenant_dir(&tenant_id);
-        for timelines_dir_entry in std::fs::read_dir(&timelines_dir).with_context(|| {
-            format!(
-                "failed to list timelines dir {}",
-                timelines_dir
-            )
-        })? {
+        for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
+            .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
+        {
             match &timelines_dir_entry {
                 Ok(timeline_dir_entry) => {
                     if let Ok(timeline_id) =
@@ -174,9 +166,7 @@ impl GlobalTimelines {
                 }
                 Err(e) => error!(
                     "failed to list timelines dir entry {:?} in directory {}, reason: {:?}",
-                    timelines_dir_entry,
-                    timelines_dir,
-                    e
+                    timelines_dir_entry, timelines_dir, e
                 ),
             }
         }

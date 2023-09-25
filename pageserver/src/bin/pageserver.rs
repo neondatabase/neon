@@ -74,11 +74,8 @@ fn main() -> anyhow::Result<()> {
     let cfg_file_path = workdir.join("pageserver.toml");
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir).with_context(|| {
-        format!(
-            "Failed to set application's current dir to '{workdir}'",
-        )
-    })?;
+    env::set_current_dir(&workdir)
+        .with_context(|| format!("Failed to set application's current dir to '{workdir}'",))?;
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -114,11 +111,8 @@ fn main() -> anyhow::Result<()> {
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
-            format!(
-                "Failed to create tenants root dir at '{tenants_path}'",
-            )
-        })?;
+        utils::crashsafe::create_dir_all(conf.tenants_path())
+            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'",))?;
     }
 
     // Initialize up failpoints support
@@ -149,25 +143,18 @@ fn initialize_config(
             );
         }
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
-            format!(
-                "Failed to read pageserver config at '{cfg_file_path}'",
-            )
-        })?;
+        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
+            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'",))?;
         (
             cfg_file_contents
                 .parse::<toml_edit::Document>()
                 .with_context(|| {
-                    format!(
-                        "Failed to parse '{cfg_file_path}' as pageserver config",
-                    )
+                    format!("Failed to parse '{cfg_file_path}' as pageserver config",)
                 })?,
             true,
         )
     } else if cfg_file_path.exists() {
-        anyhow::bail!(
-            "Config file '{cfg_file_path}' exists but is not a regular file",
-        );
+        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file",);
     } else {
         // We're initializing the tenant, so there's no config file yet
         (
@@ -198,18 +185,11 @@ fn initialize_config(
         .context("Failed to parse pageserver configuration")?;
 
     if update_config {
-        info!(
-            "Writing pageserver config to '{cfg_file_path}'",
-        );
+        info!("Writing pageserver config to '{cfg_file_path}'",);
 
-        std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
-            format!(
-                "Failed to write pageserver config to '{cfg_file_path}'",
-            )
-        })?;
-        info!(
-            "Config successfully written to '{cfg_file_path}'",
-        )
+        std::fs::write(cfg_file_path, toml.to_string())
+            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'",))?;
+        info!("Config successfully written to '{cfg_file_path}'",)
     }
 
     Ok(if init {

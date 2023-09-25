@@ -757,11 +757,8 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
-        std::fs::remove_file(&marker_file).with_context(|| {
-            format!(
-                "unlink attach marker file {marker_file}",
-            )
-        })?;
+        std::fs::remove_file(&marker_file)
+            .with_context(|| format!("unlink attach marker file {marker_file}",))?;
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
@@ -1018,19 +1015,13 @@ impl Tenant {
             let timeline_dir = Utf8PathBuf::from_path_buf(entry.path()).expect("non-Unicode path");
 
             if crate::is_temporary(&timeline_dir) {
-                info!(
-                    "Found temporary timeline directory, removing: {timeline_dir}",
-                );
+                info!("Found temporary timeline directory, removing: {timeline_dir}",);
                 if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                    error!(
-                        "Failed to remove temporary directory '{timeline_dir}': {e:?}",
-                    );
+                    error!("Failed to remove temporary directory '{timeline_dir}': {e:?}",);
                 }
             } else if is_uninit_mark(&timeline_dir) {
                 if !timeline_dir.exists() {
-                    warn!(
-                        "Timeline dir entry become invalid: {timeline_dir}",
-                    );
+                    warn!("Timeline dir entry become invalid: {timeline_dir}",);
                     continue;
                 }
 
@@ -1095,9 +1086,7 @@ impl Tenant {
                 }
             } else {
                 if !timeline_dir.exists() {
-                    warn!(
-                        "Timeline dir entry become invalid: {timeline_dir}",
-                    );
+                    warn!("Timeline dir entry become invalid: {timeline_dir}",);
                     continue;
                 }
                 let timeline_id = TimelineId::try_from(timeline_dir.as_std_path().file_name())
@@ -2339,9 +2328,8 @@ impl Tenant {
         }
 
         // load and parse file
-        let config = fs::read_to_string(&target_config_path).with_context(|| {
-            format!("Failed to load config from path '{target_config_path}'")
-        })?;
+        let config = fs::read_to_string(&target_config_path)
+            .with_context(|| format!("Failed to load config from path '{target_config_path}'"))?;
 
         let toml = config.parse::<toml_edit::Document>().with_context(|| {
             format!("Failed to parse config from file '{target_config_path}' as toml file")
@@ -2355,8 +2343,9 @@ impl Tenant {
                         format!("Failed to parse config from file '{target_config_path}' as pageserver config")
                     })?;
                 }
-                _ => bail!("config file {target_config_path} has unrecognized pageserver option '{key}'"),
-
+                _ => bail!(
+                    "config file {target_config_path} has unrecognized pageserver option '{key}'"
+                ),
             }
         }
 
@@ -2370,9 +2359,7 @@ impl Tenant {
         tenant_conf: TenantConfOpt,
     ) -> anyhow::Result<()> {
         // imitate a try-block with a closure
-        info!(
-            "persisting tenantconf to {target_config_path}",
-        );
+        info!("persisting tenantconf to {target_config_path}",);
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
@@ -2389,11 +2376,7 @@ impl Tenant {
         let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
         VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
             .await
-            .with_context(|| {
-                format!(
-                    "write tenant {tenant_id} config to {target_config_path}",
-                )
-            })?;
+            .with_context(|| format!("write tenant {tenant_id} config to {target_config_path}",))?;
         Ok(())
     }
 
@@ -2760,9 +2743,7 @@ impl Tenant {
         // current initdb was not run yet, so remove whatever was left from the previous runs
         if initdb_path.exists() {
             fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!(
-                    "Failed to remove already existing initdb directory: {initdb_path}",
-                )
+                format!("Failed to remove already existing initdb directory: {initdb_path}",)
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
@@ -3058,15 +3039,10 @@ fn remove_timeline_and_uninit_mark(
             }
         })
         .with_context(|| {
-            format!(
-                "Failed to remove unit marked timeline directory {timeline_dir}",
-            )
+            format!("Failed to remove unit marked timeline directory {timeline_dir}",)
         })?;
-    fs::remove_file(uninit_mark).with_context(|| {
-        format!(
-            "Failed to remove timeline uninit mark file {uninit_mark}",
-        )
-    })?;
+    fs::remove_file(uninit_mark)
+        .with_context(|| format!("Failed to remove timeline uninit mark file {uninit_mark}",))?;
 
     Ok(())
 }
@@ -3092,15 +3068,11 @@ pub(crate) async fn create_tenant_files(
 
     let temporary_tenant_dir =
         path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
-    debug!(
-        "Creating temporary directory structure in {temporary_tenant_dir}",
-    );
+    debug!("Creating temporary directory structure in {temporary_tenant_dir}",);
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!(
-            "could not create temporary tenant directory {temporary_tenant_dir}",
-        )
+        format!("could not create temporary tenant directory {temporary_tenant_dir}",)
     })?;
 
     let creation_result = try_create_target_tenant_dir(
@@ -3173,8 +3145,7 @@ async fn try_create_target_tenant_dir(
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
             "create tenant {} temporary timelines directory {}",
-            tenant_id,
-            temporary_tenant_timelines_dir,
+            tenant_id, temporary_tenant_timelines_dir,
         )
     })?;
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
@@ -3189,23 +3160,19 @@ async fn try_create_target_tenant_dir(
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
             "move tenant {} temporary directory {} into the permanent one {}",
-            tenant_id,
-            temporary_tenant_dir,
-            target_tenant_directory
+            tenant_id, temporary_tenant_dir, target_tenant_directory
         )
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
             "get tenant {} dir parent for {}",
-            tenant_id,
-            target_tenant_directory,
+            tenant_id, target_tenant_directory,
         )
     })?;
     crashsafe::fsync(target_dir_parent).with_context(|| {
         format!(
             "fsync renamed directory's parent {} for tenant {}",
-            target_dir_parent,
-            tenant_id,
+            target_dir_parent, tenant_id,
         )
     })?;
 
@@ -3220,8 +3187,7 @@ fn rebase_directory(
     let relative_path = original_path.strip_prefix(base).with_context(|| {
         format!(
             "Failed to strip base prefix '{}' off path '{}'",
-            base,
-            original_path
+            base, original_path
         )
     })?;
     Ok(new_base.join(relative_path))
@@ -3238,9 +3204,7 @@ fn run_initdb(
     let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
         "running {} in {}, libdir: {}",
-        initdb_bin_path,
-        initdb_target_dir,
-        initdb_lib_dir,
+        initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
     let initdb_output = Command::new(&initdb_bin_path)
@@ -3259,8 +3223,7 @@ fn run_initdb(
         .with_context(|| {
             format!(
                 "failed to execute {} at target dir {}",
-                initdb_bin_path,
-                initdb_target_dir,
+                initdb_bin_path, initdb_target_dir,
             )
         })?;
     if !initdb_output.status.success() {

@@ -337,12 +337,7 @@ impl ImageLayer {
         self.inner
             .get_or_try_init(|| self.load_inner())
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to load image layer {}",
-                    self.path()
-                )
-            })
+            .with_context(|| format!("Failed to load image layer {}", self.path()))
     }
 
     async fn load_inner(&self) -> Result<ImageLayerInner> {
@@ -669,10 +664,7 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        trace!(
-            "created image layer {}",
-            layer.path()
-        );
+        trace!("created image layer {}", layer.path());
 
         Ok(layer)
     }

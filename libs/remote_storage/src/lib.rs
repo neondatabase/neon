@@ -284,9 +284,7 @@ impl GenericRemoteStorage {
     pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
-                info!(
-                    "Using fs root '{root}' as a remote storage",
-                );
+                info!("Using fs root '{root}' as a remote storage",);
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {

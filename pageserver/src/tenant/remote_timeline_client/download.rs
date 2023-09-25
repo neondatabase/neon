@@ -69,11 +69,7 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path)
                 .await
-                .with_context(|| {
-                    format!(
-                        "create a destination file for layer '{temp_file_path}'",
-                    )
-                })
+                .with_context(|| format!("create a destination file for layer '{temp_file_path}'",))
                 .map_err(DownloadError::Other)?;
             let mut download = storage
                 .download(&remote_path)
@@ -115,11 +111,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .flush()
         .await
-        .with_context(|| {
-            format!(
-                "flush source file at {temp_file_path}",
-            )
-        })
+        .with_context(|| format!("flush source file at {temp_file_path}",))
         .map_err(DownloadError::Other)?;
 
     let expected = layer_metadata.file_size();
@@ -133,11 +125,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .sync_all()
         .await
-        .with_context(|| {
-            format!(
-                "failed to fsync source file at {temp_file_path}",
-            )
-        })
+        .with_context(|| format!("failed to fsync source file at {temp_file_path}",))
         .map_err(DownloadError::Other)?;
     drop(destination_file);
 
@@ -149,11 +137,7 @@ pub async fn download_layer_file<'a>(
 
     fs::rename(&temp_file_path, &local_path)
         .await
-        .with_context(|| {
-            format!(
-                "rename download layer file to {local_path}",
-            )
-        })
+        .with_context(|| format!("rename download layer file to {local_path}",))
         .map_err(DownloadError::Other)?;
 
     crashsafe::fsync_async(&local_path)

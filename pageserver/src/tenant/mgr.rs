@@ -135,16 +135,13 @@ pub async fn init_tenant_mgr(
                 let tenant_dir_path =
                     Utf8PathBuf::from_path_buf(dir_entry.path()).expect("non-Unicode path");
                 if crate::is_temporary(&tenant_dir_path) {
-                    info!(
-                        "Found temporary tenant directory, removing: {tenant_dir_path}",
-                    );
+                    info!("Found temporary tenant directory, removing: {tenant_dir_path}",);
                     // No need to use safe_remove_tenant_dir_all because this is already
                     // a temporary path
                     if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
                         error!(
                             "Failed to remove temporary directory '{}': {:?}",
-                            tenant_dir_path,
-                            e
+                            tenant_dir_path, e
                         );
                     }
                 } else {
@@ -196,8 +193,7 @@ pub async fn init_tenant_mgr(
                             if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
                                 error!(
                                     "Failed to remove detached tenant directory '{}': {:?}",
-                                    tenant_dir_path,
-                                    e
+                                    tenant_dir_path, e
                                 );
                             }
                             continue;
