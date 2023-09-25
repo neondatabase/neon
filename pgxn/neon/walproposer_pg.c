@@ -1313,6 +1313,125 @@ XLogWalPropClose(XLogRecPtr recptr)
 	walpropFile = -1;
 }
 
+static void
+walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count)
+{
+	WALReadError errinfo;
+
+	if (!WALRead(state,
+				buf,
+				startptr,
+				count,
+				walprop_pg_get_timeline_id(),
+				&errinfo))
+	{
+		WALReadRaiseError(&errinfo);
+	}
+}
+
+static XLogReaderState *
+walprop_pg_wal_reader_allocate(void)
+{
+	return XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+}
+
+static WaitEventSet *waitEvents;
+
+static void
+walprop_pg_free_event_set(void)
+{
+	if (waitEvents)
+	{
+		FreeWaitEventSet(waitEvents);
+		waitEvents = NULL;
+	}
+}
+
+static void
+walprop_pg_init_event_set(int n_safekeepers)
+{
+	if (waitEvents)
+		elog(FATAL, "double-initialization of event set");
+
+	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + n_safekeepers);
+	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
+					  MyLatch, NULL);
+	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+					  NULL, NULL);
+}
+
+static void
+walprop_pg_update_event_set(Safekeeper * sk, uint32 events)
+{
+	/* eventPos = -1 when we don't have an event */
+	Assert(sk->eventPos != -1);
+
+	ModifyWaitEvent(waitEvents, sk->eventPos, events, NULL);
+}
+
+static void
+walprop_pg_add_safekeeper_event_set(Safekeeper * sk, uint32 events)
+{
+	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk->conn), NULL, sk);
+}
+
+static int
+walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
+{
+	WaitEvent	event = {0};
+	int			rc = 0;
+	bool		late_cv_trigger = false;
+
+	*sk = NULL;
+	*events = 0;
+
+#if PG_MAJORVERSION_NUM >= 16
+	if (WalSndCtl != NULL)
+		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+#endif
+
+	/*
+	 * Wait for a wait event to happen, or timeout:
+	 *  - Safekeeper socket can become available for READ or WRITE
+	 *  - Our latch got set, because
+	 *     * PG15-: We got woken up by a process triggering the WalSender
+	 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
+	 */
+	rc = WaitEventSetWait(waitEvents, timeout,
+							&event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
+#if PG_MAJORVERSION_NUM >= 16
+	if (WalSndCtl != NULL)
+		late_cv_trigger = ConditionVariableCancelSleep();
+#endif
+
+	/*
+	 * If wait is terminated by latch set (walsenders' latch is set on
+	 * each wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
+	 */
+	if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
+	{
+		/* Reset our latch */
+		ResetLatch(MyLatch);
+		*events = WL_LATCH_SET;
+		return 1;
+	}
+
+	/*
+	 * If the event contains something about the socket, it means we got
+	 * an event from a safekeeper socket.
+	 */
+	if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
+	{
+		*sk = (Safekeeper *) event.user_data;
+		*events = event.events;
+		return 1;
+	}
+
+	/* XXX: Can we have non-timeout event here? */
+	*events = event.events;
+	return rc;
+}
+
 /*
  * Temporary globally exported walproposer API for postgres.
  */
@@ -1340,4 +1459,11 @@ const walproposer_api walprop_pg = {
 	.conn_async_write = walprop_async_write,
 	.conn_blocking_write = walprop_blocking_write,
 	.recovery_download = WalProposerRecovery,
+	.wal_read = walprop_pg_wal_read,
+	.wal_reader_allocate = walprop_pg_wal_reader_allocate,
+	.free_event_set = walprop_pg_free_event_set,
+	.init_event_set = walprop_pg_init_event_set,
+	.update_event_set = walprop_pg_update_event_set,
+	.add_safekeeper_event_set = walprop_pg_add_safekeeper_event_set,
+	.wait_event_set = walprop_pg_wait_event_set,
 };
