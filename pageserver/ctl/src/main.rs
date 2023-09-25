@@ -19,7 +19,6 @@ use pageserver::{
     virtual_file,
 };
 use postgres_ffi::ControlFileData;
-use std::path::PathBuf;
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -50,7 +49,7 @@ enum Commands {
 #[derive(Parser)]
 struct MetadataCmd {
     /// Input metadata file path
-    metadata_path: PathBuf,
+    metadata_path: Utf8PathBuf,
     /// Replace disk consistent Lsn
     disk_consistent_lsn: Option<Lsn>,
     /// Replace previous record Lsn
@@ -62,13 +61,13 @@ struct MetadataCmd {
 #[derive(Parser)]
 struct PrintLayerFileCmd {
     /// Pageserver data path
-    path: PathBuf,
+    path: Utf8PathBuf,
 }
 
 #[derive(Parser)]
 struct AnalyzeLayerMapCmd {
     /// Pageserver data path
-    path: PathBuf,
+    path: Utf8PathBuf,
     /// Max holes
     max_holes: Option<usize>,
 }
@@ -91,13 +90,12 @@ async fn main() -> anyhow::Result<()> {
             layer_map_analyzer::main(&cmd).await?;
         }
         Commands::PrintLayerFile(cmd) => {
-            let cmd_path = Utf8PathBuf::from_path_buf(cmd.path).expect("non-Unicode path");
-            if let Err(e) = read_pg_control_file(&cmd_path) {
+            if let Err(e) = read_pg_control_file(&cmd.path) {
                 println!(
                     "Failed to read input file as a pg control one: {e:#}\n\
                     Attempting to read it as layer file"
                 );
-                print_layerfile(&cmd_path).await?;
+                print_layerfile(&cmd.path).await?;
             }
         }
     };

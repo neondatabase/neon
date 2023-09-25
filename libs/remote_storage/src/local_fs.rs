@@ -36,11 +36,9 @@ impl LocalFs {
             })?;
         }
         if !storage_root.is_absolute() {
-            storage_root = storage_root
-                .canonicalize_utf8()
-                .with_context(|| {
-                    format!("Failed to represent path {storage_root:?} as an absolute path")
-                })?;
+            storage_root = storage_root.canonicalize_utf8().with_context(|| {
+                format!("Failed to represent path {storage_root:?} as an absolute path")
+            })?;
         }
 
         Ok(Self { storage_root })
