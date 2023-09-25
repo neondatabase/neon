@@ -84,7 +84,6 @@ static XLogRecPtr lastSentCommitLsn;	/* last commitLsn broadcast to*
 										 * safekeepers */
 static ProposerGreeting greetRequest;
 static VoteRequest voteRequest; /* Vote request for safekeeper */
-static AppendResponse quorumFeedback;
 /*
  *  Minimal LSN which may be needed for recovery of some safekeeper,
  *  record-aligned (first record which might not yet received by someone).
@@ -137,7 +136,6 @@ static void BroadcastAppendRequest(void);
 static void HandleActiveState(Safekeeper *sk, uint32 events);
 static bool SendAppendRequests(Safekeeper *sk);
 static bool RecvAppendResponses(Safekeeper *sk);
-static void CombineHotStanbyFeedbacks(HotStandbyFeedback * hs);
 static XLogRecPtr CalculateMinFlushLsn(void);
 static XLogRecPtr GetAcknowledgedByQuorumWALPosition(void);
 static void HandleSafekeeperResponse(void);
@@ -341,7 +339,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	greetRequest.tag = 'g';
 	greetRequest.protocolVersion = SK_PROTOCOL_VERSION;
 	greetRequest.pgVersion = PG_VERSION_NUM;
-	pg_strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
+	walprop_pg.strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
 	greetRequest.systemId = systemId;
 	if (!neon_timeline)
 		elog(FATAL, "neon.timeline_id is not provided");
@@ -959,8 +957,8 @@ HandleElectedProposer(void)
 	else if (syncSafekeepers)
 	{
 		/* Sync is not needed: just exit */
-		fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
-		exit(0);
+		walprop_pg.finish_sync_safekeepers(propEpochStartLsn);
+		/* unreachable */
 	}
 
 	for (int i = 0; i < n_safekeepers; i++)
@@ -1076,10 +1074,10 @@ DetermineEpochStartLsn(void)
 	 */
 	if (propEpochStartLsn == InvalidXLogRecPtr && !syncSafekeepers)
 	{
-		propEpochStartLsn = truncateLsn = GetRedoStartLsn();
+		propEpochStartLsn = truncateLsn = walprop_pg.get_redo_start_lsn();
 		if (timelineStartLsn == InvalidXLogRecPtr)
 		{
-			timelineStartLsn = GetRedoStartLsn();
+			timelineStartLsn = walprop_pg.get_redo_start_lsn();
 		}
 		elog(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(propEpochStartLsn));
 	}
@@ -1130,7 +1128,7 @@ DetermineEpochStartLsn(void)
 		 * Safekeepers don't skip header as they need continious stream of
 		 * data, so correct LSN for comparison.
 		 */
-		if (SkipXLogPageHeader(propEpochStartLsn) != GetRedoStartLsn())
+		if (SkipXLogPageHeader(propEpochStartLsn) != walprop_pg.get_redo_start_lsn())
 		{
 			/*
 			 * However, allow to proceed if previously elected leader was me;
@@ -1143,7 +1141,7 @@ DetermineEpochStartLsn(void)
 				elog(PANIC,
 					 "collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
 					 LSN_FORMAT_ARGS(propEpochStartLsn),
-					 LSN_FORMAT_ARGS(GetRedoStartLsn()));
+					 LSN_FORMAT_ARGS(walprop_pg.get_redo_start_lsn()));
 			}
 		}
 		walprop_shared->mineLastElectedTerm = propTerm;
@@ -1429,7 +1427,7 @@ SendAppendRequests(Safekeeper *sk)
 
 		/* write the WAL itself */
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
-		/* will raise error on failure */
+		/* wal_read will raise error on failure */
 		walprop_pg.wal_read(sk->xlogreader,
 					 &sk->outbuf.data[sk->outbuf.len],
 					 req->beginLsn,
@@ -1612,42 +1610,6 @@ ParsePageserverFeedbackMessage(StringInfo reply_message, PageserverFeedback * rf
 }
 
 /*
- * Combine hot standby feedbacks from all safekeepers.
- */
-static void
-CombineHotStanbyFeedbacks(HotStandbyFeedback * hs)
-{
-	hs->ts = 0;
-	hs->xmin.value = ~0;		/* largest unsigned value */
-	hs->catalog_xmin.value = ~0;	/* largest unsigned value */
-
-	for (int i = 0; i < n_safekeepers; i++)
-	{
-		if (safekeeper[i].appendResponse.hs.ts != 0)
-		{
-			HotStandbyFeedback *skhs = &safekeeper[i].appendResponse.hs;
-			if (FullTransactionIdIsNormal(skhs->xmin)
-				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
-			{
-				hs->xmin = skhs->xmin;
-				hs->ts = skhs->ts;
-			}
-			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
-				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
-			{
-				hs->catalog_xmin = skhs->catalog_xmin;
-				hs->ts = skhs->ts;
-			}
-		}
-	}
-
-	if (hs->xmin.value == ~0)
-		hs->xmin = InvalidFullTransactionId;
-	if (hs->catalog_xmin.value == ~0)
-		hs->catalog_xmin = InvalidFullTransactionId;
-}
-
-/*
  * Get minimum of flushed LSNs of all safekeepers, which is the LSN of the
  * last WAL record that can be safely discarded.
  */
@@ -1692,92 +1654,14 @@ GetAcknowledgedByQuorumWALPosition(void)
 	return responses[n_safekeepers - quorum];
 }
 
-/*
- * Get PageserverFeedback fields from the most advanced safekeeper
- */
-static void
-GetLatestNeonFeedback(PageserverFeedback * rf)
-{
-	int			latest_safekeeper = 0;
-	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
-
-	for (int i = 0; i < n_safekeepers; i++)
-	{
-		if (safekeeper[i].appendResponse.rf.last_received_lsn > last_received_lsn)
-		{
-			latest_safekeeper = i;
-			last_received_lsn = safekeeper[i].appendResponse.rf.last_received_lsn;
-		}
-	}
-
-	rf->currentClusterSize = safekeeper[latest_safekeeper].appendResponse.rf.currentClusterSize;
-	rf->last_received_lsn = safekeeper[latest_safekeeper].appendResponse.rf.last_received_lsn;
-	rf->disk_consistent_lsn = safekeeper[latest_safekeeper].appendResponse.rf.disk_consistent_lsn;
-	rf->remote_consistent_lsn = safekeeper[latest_safekeeper].appendResponse.rf.remote_consistent_lsn;
-	rf->replytime = safekeeper[latest_safekeeper].appendResponse.rf.replytime;
-
-	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
-		 " last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
-		 rf->currentClusterSize,
-		 LSN_FORMAT_ARGS(rf->last_received_lsn),
-		 LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
-		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
-		 rf->replytime);
-
-	walprop_pg.replication_feedback_set(rf);
-}
-
 static void
 HandleSafekeeperResponse(void)
 {
-	HotStandbyFeedback hsFeedback;
 	XLogRecPtr	minQuorumLsn;
-	XLogRecPtr	diskConsistentLsn;
 	XLogRecPtr	minFlushLsn;
 
 	minQuorumLsn = GetAcknowledgedByQuorumWALPosition();
-	diskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
-
-	if (!syncSafekeepers)
-	{
-		/* Get PageserverFeedback fields from the most advanced safekeeper */
-		GetLatestNeonFeedback(&quorumFeedback.rf);
-		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
-	}
-
-	if (minQuorumLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
-	{
-
-		if (minQuorumLsn > quorumFeedback.flushLsn)
-			quorumFeedback.flushLsn = minQuorumLsn;
-
-		/* advance the replication slot */
-		if (!syncSafekeepers)
-			ProcessStandbyReply(
-			/* write_lsn -  This is what durably stored in WAL service. */
-								quorumFeedback.flushLsn,
-			/* flush_lsn - This is what durably stored in WAL service. */
-								quorumFeedback.flushLsn,
-
-			/*
-			 * apply_lsn - This is what processed and durably saved at*
-			 * pageserver.
-			 */
-								quorumFeedback.rf.disk_consistent_lsn,
-								walprop_pg.get_current_timestamp(), false);
-	}
-
-	CombineHotStanbyFeedbacks(&hsFeedback);
-	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
-	{
-		quorumFeedback.hs = hsFeedback;
-		if (!syncSafekeepers)
-			ProcessStandbyHSFeedback(hsFeedback.ts,
-									 XidFromFullTransactionId(hsFeedback.xmin),
-									 EpochFromFullTransactionId(hsFeedback.xmin),
-									 XidFromFullTransactionId(hsFeedback.catalog_xmin),
-									 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
-	}
+	walprop_pg.process_safekeeper_feedback(safekeeper, n_safekeepers, syncSafekeepers, minQuorumLsn);
 
 	/*
 	 * Try to advance truncateLsn to minFlushLsn, which is the last record
@@ -1802,8 +1686,7 @@ HandleSafekeeperResponse(void)
 		 * Advance the replication slot to free up old WAL files. Note that
 		 * slot doesn't exist if we are in syncSafekeepers mode.
 		 */
-		if (MyReplicationSlot)
-			PhysicalConfirmReceivedLocation(truncateLsn);
+		walprop_pg.confirm_wal_streamed(truncateLsn);
 	}
 
 	/*
@@ -1850,8 +1733,8 @@ HandleSafekeeperResponse(void)
 			 */
 			BroadcastAppendRequest();
 
-			fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(propEpochStartLsn));
-			exit(0);
+			walprop_pg.finish_sync_safekeepers(propEpochStartLsn);
+			/* unreachable */
 		}
 	}
 }

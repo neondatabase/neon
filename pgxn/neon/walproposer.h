@@ -481,6 +481,11 @@ typedef struct walproposer_api
 	void					(*update_event_set) (Safekeeper * sk, uint32 events);
 	void					(*add_safekeeper_event_set) (Safekeeper * sk, uint32 events);
 	int						(*wait_event_set) (long timeout, Safekeeper **sk, uint32 *events);
+	bool					(*strong_random) (void *buf, size_t len);
+	XLogRecPtr				(*get_redo_start_lsn) (void);
+	void					(*finish_sync_safekeepers) (XLogRecPtr lsn);
+	void					(*process_safekeeper_feedback) (Safekeeper * safekeepers, int n_safekeepers, bool isSync, XLogRecPtr commitLsn);
+	void					(*confirm_wal_streamed) (XLogRecPtr lsn);
 } walproposer_api;
 
 extern const walproposer_api walprop_pg;
