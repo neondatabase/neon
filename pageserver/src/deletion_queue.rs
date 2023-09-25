@@ -381,6 +381,7 @@ struct TenantLsnState {
     generation: Generation,
 }
 
+#[derive(Default)]
 struct VisibleLsnUpdates {
     tenants: HashMap<TenantId, TenantLsnState>,
 }
@@ -413,7 +414,7 @@ impl DeletionQueueClient {
         Self {
             tx,
             executor_tx,
-            lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
+            lsn_table: Arc::default(),
         }
     }
 
