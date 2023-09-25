@@ -126,12 +126,24 @@ where
     }
 }
 
+/// A FlushOp is just a oneshot channel, where we send the transmit side down
+/// another channel, and the receive side will receive a message when the channel
+/// we're flushing has reached the FlushOp we sent into it.
+///
+/// The only extra behavior beyond the channel is that the notify() method does not
+/// return an error when the receive side has been dropped, because in this use case
+/// it is harmless (the code that initiated the flush no longer cares about the result).
 #[derive(Debug)]
 struct FlushOp {
     tx: tokio::sync::oneshot::Sender<()>,
 }
 
 impl FlushOp {
+    fn new() -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        (Self { tx }, rx)
+    }
+
     fn notify(self) {
         if self.tx.send(()).is_err() {
             // oneshot channel closed. This is legal: a client could be destroyed while waiting for a flush.
@@ -558,8 +570,8 @@ impl DeletionQueueClient {
     ///
     /// This is cancel-safe.  If you drop the future the flush may still happen in the background.
     pub async fn flush(&self) -> Result<(), DeletionQueueError> {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        self.do_flush(&self.tx, ListWriterQueueMessage::Flush(FlushOp { tx }), rx)
+        let (flush_op, rx) = FlushOp::new();
+        self.do_flush(&self.tx, ListWriterQueueMessage::Flush(flush_op), rx)
             .await
     }
 
@@ -570,21 +582,17 @@ impl DeletionQueueClient {
         self.flush().await?;
 
         // Flush the backend into the executor of deletion lists
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (flush_op, rx) = FlushOp::new();
         debug!("flush_execute: flushing backend...");
-        self.do_flush(
-            &self.tx,
-            ListWriterQueueMessage::FlushExecute(FlushOp { tx }),
-            rx,
-        )
-        .await?;
+        self.do_flush(&self.tx, ListWriterQueueMessage::FlushExecute(flush_op), rx)
+            .await?;
         debug!("flush_execute: finished flushing backend...");
 
         // Flush any immediate-mode deletions (the above backend flush will only flush
         // the executor if deletions had flowed through the backend)
         debug!("flush_execute: flushing execution...");
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        self.do_flush(&self.executor_tx, DeleterMessage::Flush(FlushOp { tx }), rx)
+        let (flush_op, rx) = FlushOp::new();
+        self.do_flush(&self.executor_tx, DeleterMessage::Flush(flush_op), rx)
             .await?;
         debug!("flush_execute: finished flushing execution...");
         Ok(())
@@ -612,9 +620,9 @@ impl DeletionQueueClient {
     /// Companion to push_immediate.  When this returns Ok, all prior objects sent
     /// into push_immediate have been deleted from remote storage.
     pub(crate) async fn flush_immediate(&self) -> Result<(), DeletionQueueError> {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (flush_op, rx) = FlushOp::new();
         self.executor_tx
-            .send(DeleterMessage::Flush(FlushOp { tx }))
+            .send(DeleterMessage::Flush(flush_op))
             .await
             .map_err(|_| DeletionQueueError::ShuttingDown)?;
 

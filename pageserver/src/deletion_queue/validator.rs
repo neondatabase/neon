@@ -341,8 +341,7 @@ where
         // Flush the executor, so that all the keys referenced by these deletion lists
         // are actually removed from remote storage.  This is a precondition to deleting
         // the deletion lists themselves.
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let flush_op = FlushOp { tx };
+        let (flush_op, rx) = FlushOp::new();
         self.tx
             .send(DeleterMessage::Flush(flush_op))
             .await
