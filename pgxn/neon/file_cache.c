@@ -72,6 +72,7 @@
 typedef struct FileCacheEntry
 {
 	BufferTag	key;
+	uint32      hash;
 	uint32		offset;
 	uint32		access_count;
 	uint32		bitmap[BLOCKS_PER_CHUNK/32];
@@ -103,7 +104,7 @@ static int   lfc_shrinking_factor; /* power of two by which local cache size wil
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
-extern void PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
+void PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
 
 /*
  * Local file cache is mandatory and Neon can work without it.
@@ -127,7 +128,7 @@ lfc_disable(char const* op)
 		hash_seq_init(&status, lfc_hash);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
-			hash_search(lfc_hash, &entry->key, HASH_REMOVE, NULL);
+			hash_search_with_hash_value(lfc_hash, &entry->key, entry->hash, HASH_REMOVE, NULL);
 		}
 		lfc_ctl->generation += 1;
 		lfc_ctl->size = 0;
@@ -281,7 +282,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*BLOCKS_PER_CHUNK*BLCKSZ, BLOCKS_PER_CHUNK*BLCKSZ) < 0)
 			elog(LOG, "Failed to punch hole in file: %m");
 #endif
-		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
+		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
 	lfc_ctl->limit = new_size;
@@ -687,7 +688,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
 			Assert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
-			hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
+			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 			elog(DEBUG2, "Swap file cache page");
 		}
 		else
@@ -696,6 +697,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			entry->offset = lfc_ctl->size++; /* allocate new chunk at end of file */
 		}
 		entry->access_count = 1;
+		entry->hash = hash;
 		memset(entry->bitmap, 0, sizeof entry->bitmap);
 	}
 
