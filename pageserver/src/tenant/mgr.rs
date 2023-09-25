@@ -4,7 +4,6 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
-use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 
@@ -70,12 +69,12 @@ impl TenantsMap {
 ///
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
-async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+async fn safe_remove_tenant_dir_all(path: impl AsRef<Utf8Path>) -> std::io::Result<()> {
     let tmp_path = safe_rename_tenant_dir(path).await?;
     fs::remove_dir_all(tmp_path).await
 }
 
-async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<Utf8PathBuf> {
+async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<Utf8PathBuf> {
     let parent = path
         .as_ref()
         .parent()
@@ -92,7 +91,7 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<Utf8P
         .collect::<String>()
         + TEMP_FILE_SUFFIX;
     let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
-    fs::rename(&path, &tmp_path).await?;
+    fs::rename(path.as_ref(), &tmp_path).await?;
     fs::File::open(parent).await?.sync_all().await?;
     Ok(tmp_path)
 }

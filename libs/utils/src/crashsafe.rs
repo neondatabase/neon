@@ -1,9 +1,7 @@
 use std::{
     borrow::Cow,
-    ffi::OsStr,
     fs::{self, File},
     io,
-    path::Path,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -72,21 +70,15 @@ pub fn create_dir_all(path: impl AsRef<Utf8Path>) -> io::Result<()> {
 
 /// Adds a suffix to the file(directory) name, either appending the suffix to the end of its extension,
 /// or if there's no extension, creates one and puts a suffix there.
-pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> Utf8PathBuf {
-    let new_extension = match original_path
-        .as_ref()
-        .extension()
-        .map(OsStr::to_string_lossy)
-    {
+pub fn path_with_suffix_extension(
+    original_path: impl AsRef<Utf8Path>,
+    suffix: &str,
+) -> Utf8PathBuf {
+    let new_extension = match original_path.as_ref().extension() {
         Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
         None => Cow::Borrowed(suffix),
     };
-    Utf8PathBuf::from_path_buf(
-        original_path
-            .as_ref()
-            .with_extension(new_extension.as_ref()),
-    )
-    .expect("non-Unicode path")
+    original_path.as_ref().with_extension(new_extension)
 }
 
 pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {

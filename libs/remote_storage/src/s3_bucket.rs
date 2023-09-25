@@ -145,11 +145,10 @@ impl S3Bucket {
         let path_string = path
             .get_path()
             .as_str()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
-            .to_string();
+            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
         match &self.prefix_in_bucket {
-            Some(prefix) => prefix.clone() + "/" + &path_string,
-            None => path_string,
+            Some(prefix) => prefix.clone() + "/" + path_string,
+            None => path_string.to_string(),
         }
     }
 
