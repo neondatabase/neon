@@ -13,6 +13,7 @@ OBJS = \
 	relsize_cache.o \
 	walproposer.o \
 	walproposer_utils.o \
+	walproposer_pg.o \
 	control_plane_connector.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
