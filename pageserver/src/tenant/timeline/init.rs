@@ -12,8 +12,8 @@ use crate::{
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
-use std::{collections::HashMap, ffi::OsString, str::FromStr};
+use camino::Utf8Path;
+use std::{collections::HashMap, str::FromStr};
 use utils::lsn::Lsn;
 
 /// Identified files in the timeline directory.
@@ -21,46 +21,43 @@ pub(super) enum Discovered {
     /// The only one we care about
     Layer(LayerFileName, u64),
     /// Old ephmeral files from previous launches, should be removed
-    Ephemeral(OsString),
+    Ephemeral(String),
     /// Old temporary timeline files, unsure what these really are, should be removed
-    Temporary(OsString),
+    Temporary(String),
     /// Temporary on-demand download files, should be removed
-    TemporaryDownload(OsString),
+    TemporaryDownload(String),
     /// "metadata" file we persist locally and include in `index_part.json`
     Metadata,
     /// Backup file from previously future layers
     IgnoredBackup,
     /// Unrecognized, warn about these
-    Unknown(OsString),
+    Unknown(String),
 }
 
 /// Scans the timeline directory for interesting files.
 pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
-    for direntry in std::fs::read_dir(path)? {
+    for direntry in path.read_dir_utf8()? {
         let direntry = direntry?;
-        let direntry_path = Utf8PathBuf::from_path_buf(direntry.path()).expect("non-Unicode path");
-        let file_name = direntry.file_name();
+        let file_name = direntry.file_name().to_string();
 
-        let fname = file_name.to_string_lossy();
-
-        let discovered = match LayerFileName::from_str(&fname) {
+        let discovered = match LayerFileName::from_str(&file_name) {
             Ok(file_name) => {
                 let file_size = direntry.metadata()?.len();
                 Discovered::Layer(file_name, file_size)
             }
             Err(_) => {
-                if fname == METADATA_FILE_NAME {
+                if file_name == METADATA_FILE_NAME {
                     Discovered::Metadata
-                } else if fname.ends_with(".old") {
+                } else if file_name.ends_with(".old") {
                     // ignore these
                     Discovered::IgnoredBackup
-                } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
+                } else if remote_timeline_client::is_temp_download_file(direntry.path()) {
                     Discovered::TemporaryDownload(file_name)
-                } else if is_ephemeral_file(&fname) {
+                } else if is_ephemeral_file(&file_name) {
                     Discovered::Ephemeral(file_name)
-                } else if is_temporary(&direntry_path) {
+                } else if is_temporary(direntry.path()) {
                     Discovered::Temporary(file_name)
                 } else {
                     Discovered::Unknown(file_name)

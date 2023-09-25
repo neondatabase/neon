@@ -1697,8 +1697,7 @@ impl Timeline {
                         Discovered::Temporary(name) => (name, "temporary timeline file"),
                         Discovered::TemporaryDownload(name) => (name, "temporary download"),
                     };
-                    let name_path = name.to_str().map(Utf8Path::new).expect("non-Unicode path");
-                    path.push(name_path);
+                    path.push(Utf8Path::new(&name));
                     init::cleanup(&path, kind)?;
                     path.pop();
                 }

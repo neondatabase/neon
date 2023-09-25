@@ -8,7 +8,6 @@ use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -412,8 +411,7 @@ async fn backup_single_segment(
     timeline_dir: &Utf8Path,
     workspace_dir: &Utf8Path,
 ) -> Result<Segment> {
-    let segment_file_path = Utf8PathBuf::from_path_buf(seg.file_path(timeline_dir.as_std_path())?)
-        .expect("non-Unicode path");
+    let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
         .strip_prefix(workspace_dir)
         .context("Failed to strip workspace dir prefix")
@@ -456,7 +454,7 @@ impl Segment {
         XLogFileName(PG_TLI, self.seg_no, self.size())
     }
 
-    pub fn file_path(self, timeline_dir: &Path) -> Result<PathBuf> {
+    pub fn file_path(self, timeline_dir: &Utf8Path) -> Result<Utf8PathBuf> {
         Ok(timeline_dir.join(self.object_name()))
     }
 
