@@ -110,23 +110,6 @@ where
             cancel,
         }
     }
-
-    async fn cleanup_lists(&mut self, list_paths: Vec<PathBuf>) {
-        for list_path in list_paths {
-            debug!("Removing deletion list {}", list_path.display());
-
-            if let Err(e) = tokio::fs::remove_file(&list_path).await {
-                // Unexpected: we should have permissions and nothing else should
-                // be touching these files.  We will leave the file behind.  Subsequent
-                // pageservers will try and load it again: hopefully whatever storage
-                // issue (probably permissions) has been fixed by then.
-                tracing::error!("Failed to delete {}: {e:#}", list_path.display());
-                metrics::DELETION_QUEUE.unexpected_errors.inc();
-                break;
-            }
-        }
-    }
-
     /// Process any outstanding validations of generations of pending LSN updates or pending
     /// DeletionLists.
     ///
@@ -293,6 +276,22 @@ where
         self.validated_lists.append(&mut self.pending_lists);
 
         Ok(())
+    }
+
+    async fn cleanup_lists(&mut self, list_paths: Vec<PathBuf>) {
+        for list_path in list_paths {
+            debug!("Removing deletion list {}", list_path.display());
+
+            if let Err(e) = tokio::fs::remove_file(&list_path).await {
+                // Unexpected: we should have permissions and nothing else should
+                // be touching these files.  We will leave the file behind.  Subsequent
+                // pageservers will try and load it again: hopefully whatever storage
+                // issue (probably permissions) has been fixed by then.
+                tracing::error!("Failed to delete {}: {e:#}", list_path.display());
+                metrics::DELETION_QUEUE.unexpected_errors.inc();
+                break;
+            }
+        }
     }
 
     async fn flush(&mut self) -> Result<(), DeletionQueueError> {
