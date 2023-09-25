@@ -474,6 +474,13 @@ typedef struct walproposer_api
 	PGAsyncWriteResult		(*conn_async_write) (WalProposerConn * conn, void const *buf, size_t size);
 	bool					(*conn_blocking_write) (WalProposerConn * conn, void const *buf, size_t size);
 	bool					(*recovery_download) (Safekeeper * sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
+	void					(*wal_read) (XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count);
+	XLogReaderState *		(*wal_reader_allocate) (void);
+	void					(*free_event_set) (void);
+	void					(*init_event_set) (int n_safekeepers);
+	void					(*update_event_set) (Safekeeper * sk, uint32 events);
+	void					(*add_safekeeper_event_set) (Safekeeper * sk, uint32 events);
+	int						(*wait_event_set) (long timeout, Safekeeper **sk, uint32 *events);
 } walproposer_api;
 
 extern const walproposer_api walprop_pg;
