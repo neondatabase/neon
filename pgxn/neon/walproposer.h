@@ -31,7 +31,6 @@
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
-extern bool am_wal_proposer;
 
 struct WalProposerConn;			/* Defined in libpqwalproposer */
 typedef struct WalProposerConn WalProposerConn;
@@ -300,6 +299,23 @@ typedef struct WalproposerShmemState
 }			WalproposerShmemState;
 
 /*
+ * Collection of hooks for walproposer, to call postgres functions,
+ * read WAL and send it over the network.
+ */
+typedef struct walproposer_api
+{
+	WalproposerShmemState *	(*get_shmem_state) (void);
+	void					(*replication_feedback_set) (PageserverFeedback * rf);
+	void					(*start_streaming) (XLogRecPtr startpos, TimeLineID timeline);
+	void					(*init_walsender) (void);
+	void					(*init_standalone_sync_safekeepers) (void);
+	uint64					(*init_bgworker) (void);
+	XLogRecPtr				(*get_flush_rec_ptr) (void);
+} walproposer_api;
+
+extern const walproposer_api walprop_pg;
+
+/*
  * Report safekeeper state to proposer
  */
 typedef struct AppendResponse
@@ -387,8 +403,6 @@ extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
 											PageserverFeedback *rf);
 extern void StartProposerReplication(StartReplicationCmd *cmd);
 
-extern Size WalproposerShmemSize(void);
-extern bool WalproposerShmemInit(void);
 extern void replication_feedback_set(PageserverFeedback *rf);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
