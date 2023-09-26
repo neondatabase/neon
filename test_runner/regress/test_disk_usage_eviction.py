@@ -153,6 +153,7 @@ def human_bytes(amt: float) -> str:
 
     raise RuntimeError("unreachable")
 
+
 @pytest.fixture
 def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
     """
