@@ -89,7 +89,21 @@ class EvictionEnv:
         """
         lsn = self.pgbench_init_lsns[tenant_id]
         with self.neon_env.endpoints.create_start("main", tenant_id=tenant_id, lsn=lsn) as endpoint:
-            self.pg_bin.run(["pgbench", "--select-only", "--no-vacuum", endpoint.connstr()])
+            # instead of using pgbench --select-only which does point selects,
+            # run full table scans for all tables
+            with endpoint.connect() as conn:
+                cur = conn.cursor()
+
+                tables_cols = {
+                    "pgbench_accounts": "abalance",
+                    "pgbench_tellers": "tbalance",
+                    "pgbench_branches": "bbalance",
+                    "pgbench_history": "delta",
+                }
+
+                for table, column in tables_cols.items():
+                    cur.execute(f"select avg({column}) from {table}")
+                    _avg = cur.fetchone()
 
     def pageserver_start_with_disk_usage_eviction(
         self, period, max_usage_pct, min_avail_bytes, mock_behavior
