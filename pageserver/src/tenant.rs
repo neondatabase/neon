@@ -2762,7 +2762,7 @@ impl Tenant {
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
-    /// - after initialization complete, remove the temp dir.
+    /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
@@ -2805,6 +2805,18 @@ impl Tenant {
         }
         let pgdata_path = &initdb_path;
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+
+        // Upload the created data dir to S3
+        if let Some(storage) = &self.remote_storage {
+            let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
+            self::remote_timeline_client::upload_initdb_dir(
+                storage,
+                &self.tenant_id,
+                &timeline_id,
+                pgdata_zstd,
+            )
+            .await?;
+        }
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.

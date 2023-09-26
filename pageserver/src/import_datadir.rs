@@ -9,6 +9,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
+use tokio_tar::Builder;
+use tokio_tar::HeaderMode;
 use tracing::*;
 use walkdir::WalkDir;
 
@@ -616,4 +618,28 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     let mut buf: Vec<u8> = vec![];
     reader.read_to_end(&mut buf).await?;
     Ok(Bytes::from(buf))
+}
+
+pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(pgdata_path) {
+        let entry = entry?;
+        let metadata = entry.metadata().expect("error getting dir entry metadata");
+        if metadata.is_file() {
+            paths.push(entry.path().to_owned());
+        }
+    }
+    // Don't rely on file system order for listing as it may be non-deterministic
+    paths.sort();
+    let mut builder = Builder::new(Vec::new());
+    // Use reproducible header mode
+    builder.mode(HeaderMode::Deterministic);
+    for path in paths {
+        builder.append_path(path).await?;
+    }
+    builder.finish().await?;
+    let tar_data = builder.into_inner().await?;
+    let mut compressor = zstd::bulk::Compressor::new(zstd::DEFAULT_COMPRESSION_LEVEL)?;
+    let compressed = compressor.compress(&tar_data)?;
+    Ok(compressed)
 }

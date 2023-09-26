@@ -214,6 +214,7 @@ use chrono::{NaiveDateTime, Utc};
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
+pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -1426,6 +1427,14 @@ pub fn remote_layer_path(
     );
 
     RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
+    const INITDB_PATH: &str = "initdb.tar.zst";
+    RemotePath::from_string(&format!(
+        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_PATH}"
+    ))
+    .expect("Failed to construct path")
 }
 
 pub fn remote_index_path(

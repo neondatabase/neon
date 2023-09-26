@@ -2735,6 +2735,7 @@ dependencies = [
  "utils",
  "walkdir",
  "workspace_hack",
+ "zstd",
 ]
 
 [[package]]
