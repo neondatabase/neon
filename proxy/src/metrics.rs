@@ -3,7 +3,7 @@
 use crate::{config::MetricCollectionConfig, http};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::{
@@ -41,6 +41,44 @@ pub struct MetricCounter {
 impl MetricCounter {
     pub fn add(&self, bytes: u64) {
         self.transmitted.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// extract the value that should be reported
+    fn should_report(self: &Arc<Self>) -> Option<u64> {
+        // heuristic to see if the branch is still open
+        // if a clone happens while we are observing, the heurstic will be incorrect.
+        //
+        // Worst case is that we won't report an event for this endpoint.
+        // However, for the strong count to be 1 it must have occured that at one instant
+        // all the endpoints were closed, so missing a report because the endpoints are closed is valid.
+        let is_open = Arc::strong_count(self) > 1;
+        let opened = self.opened_connections.swap(0, Ordering::AcqRel);
+
+        // update cached metrics eagerly, even if they can't get sent
+        // (to avoid sending the same metrics twice)
+        // see the relevant discussion on why to do so even if the status is not success:
+        // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
+        let value = self.transmitted.swap(0, Ordering::AcqRel);
+
+        // Our only requirement is that we report in every interval if there was an open connection
+        // if there were no opened connections since, then we don't need to report
+        if value == 0 && !is_open && opened == 0 {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    //. determine whether the counter should be cleared from the global map.
+    fn should_clear(self: &mut Arc<Self>) -> bool {
+        // we can't clear this entry if it's acquired elsewhere
+        let Some(counter) = Arc::get_mut(self) else {
+            return false;
+        };
+        let opened = *counter.opened_connections.get_mut();
+        let value = *counter.transmitted.get_mut();
+        // clear if there's no data to report
+        value == 0 && opened == 0
     }
 }
 
@@ -91,14 +129,8 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         ticker.tick().await;
 
         let now = Utc::now();
-        let res =
-            collect_metrics_iteration(&http_client, &config.endpoint, &hostname, prev, now).await;
+        collect_metrics_iteration(&http_client, &config.endpoint, &hostname, prev, now).await;
         prev = now;
-
-        match res {
-            Err(e) => error!("failed to send consumption metrics: {e} "),
-            Ok(_) => trace!("periodic metrics collection completed successfully"),
-        }
     }
 }
 
@@ -109,43 +141,30 @@ async fn collect_metrics_iteration(
     hostname: &str,
     prev: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> anyhow::Result<()> {
+) {
     info!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
         metric_collection_endpoint
     );
 
+    let mut metrics_to_clear = Vec::new();
+
     let metrics_to_send: Vec<(Ids, u64)> = USAGE_METRICS
         .endpoints
         .iter()
         .filter_map(|counter| {
-            // heuristic to see if the branch is still open
-            // if a clone happens while we are observing, the heurstic will be incorrect.
-            //
-            // Worst case is that we won't report an event for this endpoint.
-            // However, for the strong count to be 1 it must have occured that at one instant
-            // all the endpoints were closed, so missing a report because the endpoints are closed is valid.
-            let is_open = Arc::strong_count(&*counter) > 1;
-            let opened = counter.transmitted.swap(0, Ordering::AcqRel);
-
-            // update cached metrics eagerly, even if they can't get sent
-            // (to avoid sending the same metrics twice)
-            // see the relevant discussion on why to do so even if the status is not success:
-            // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
-            let value = counter.transmitted.swap(0, Ordering::AcqRel);
-
-            // Our only requirement is that we report in every interval if there was an open connection
-            if value == 0 && !is_open && opened == 1 {
-                None
-            } else {
-                Some((counter.key().clone(), value))
-            }
+            let key = counter.key().clone();
+            let Some(value) = counter.should_report() else {
+                metrics_to_clear.push(key);
+                return None;
+            };
+            Some((key, value))
         })
         .collect();
 
     if metrics_to_send.is_empty() {
         trace!("no new metrics to send");
-        return Ok(());
+        return;
     }
 
     // Send metrics.
@@ -190,5 +209,15 @@ async fn collect_metrics_iteration(
             }
         }
     }
-    Ok(())
+
+    for metric in metrics_to_clear {
+        match USAGE_METRICS.endpoints.entry(metric) {
+            Entry::Occupied(mut counter) => {
+                if counter.get_mut().should_clear() {
+                    counter.remove_entry();
+                }
+            }
+            Entry::Vacant(_) => {}
+        }
+    }
 }
