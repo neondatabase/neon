@@ -291,6 +291,14 @@ static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_resident_physical_size_global",
+        "Like `pageserver_resident_physical_size`, but without tenant/timeline dimensions."
+    )
+    .expect("failed to define a metric")
+});
+
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
@@ -1161,7 +1169,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    pub resident_physical_size_gauge: UIntGauge,
+    resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -1239,9 +1247,28 @@ impl TimelineMetrics {
     }
 
     pub fn record_new_file_metrics(&self, sz: u64) {
-        self.resident_physical_size_gauge.add(sz);
+        self.physical_size_add(sz);
         self.num_persistent_files_created.inc_by(1);
         self.persistent_bytes_written.inc_by(sz);
+    }
+
+    pub fn physical_size_sub(&self, sz: u64) {
+        self.resident_physical_size_gauge.sub(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
+    }
+
+    pub fn physical_size_add(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
+    }
+
+    pub fn physical_size_set(&self, sz: u64) {
+        self.resident_physical_size_gauge.set(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.set(sz);
+    }
+
+    pub fn physical_size_get(&self) -> u64 {
+        self.resident_physical_size_gauge.get()
     }
 }
 
@@ -1250,7 +1277,10 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        {
+            RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.physical_size_get());
+            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
