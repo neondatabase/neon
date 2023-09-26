@@ -74,11 +74,13 @@ class EvictionEnv:
     pgbench_init_lsns: Dict[TenantId, Lsn]
 
     def timelines_du(self) -> Tuple[int, int, int]:
-        return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid in self.timelines])
+        return poor_mans_du(
+            self.neon_env, [(tid, tlid) for tid, tlid in self.timelines], verbose=False
+        )
 
     def du_by_timeline(self) -> Dict[Tuple[TenantId, TimelineId], int]:
         return {
-            (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)])[0]
+            (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)], verbose=True)[0]
             for tid, tlid in self.timelines
         }
 
@@ -445,7 +447,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
 
 def poor_mans_du(
-    env: NeonEnv, timelines: list[Tuple[TenantId, TimelineId]]
+    env: NeonEnv, timelines: list[Tuple[TenantId, TimelineId]], verbose: bool = False
 ) -> Tuple[int, int, int]:
     """
     Disk usage, largest, smallest layer for layer files over the given (tenant, timeline) tuples;
@@ -468,9 +470,11 @@ def poor_mans_du(
                 smallest_layer = min(smallest_layer, size)
             else:
                 smallest_layer = size
-            log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
+            if verbose:
+                log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
 
-        log.info(f"{tenant_id}/{timeline_id}: sum {total}")
+        if verbose:
+            log.info(f"{tenant_id}/{timeline_id}: sum {total}")
         total_on_disk += total
 
     assert smallest_layer is not None or total_on_disk == 0 and largest_layer == 0
