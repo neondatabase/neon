@@ -403,7 +403,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     ), "our warmed up tenant should be at about half capacity, part 2"
     assert (
         later_du_by_timeline[other_tenant] < 3 * env.layer_size
-    ), "the other tenant should be evicted to is 2-3 layers"
+    ), "the other tenant should be evicted to 2-3 layers"
 
 
 def poor_mans_du(
