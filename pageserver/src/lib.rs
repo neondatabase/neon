@@ -133,7 +133,7 @@ pub fn is_temporary(path: &Utf8Path) -> bool {
 
 fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string().ends_with(suffix),
+        Some(name) => name.as_str().ends_with(suffix),
         None => false,
     }
 }
