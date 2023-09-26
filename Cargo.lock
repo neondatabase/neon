@@ -805,6 +805,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c59e92b5a388f549b863a7bea62612c09f24c8393560709a54558a9abdfb3b9c"
 
 [[package]]
+name = "camino-tempfile"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2ab15a83d13f75dbd86f082bdefd160b628476ef58d3b900a0ef74e001bb097"
+dependencies = [
+ "camino",
+ "tempfile",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2679,6 +2689,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "camino",
+ "camino-tempfile",
  "chrono",
  "clap",
  "close_fds",
@@ -2730,7 +2741,6 @@ dependencies = [
  "strum_macros",
  "svg_fmt",
  "sync_wrapper",
- "tempfile",
  "tenant_size_model",
  "thiserror",
  "tokio",
@@ -3423,6 +3433,7 @@ dependencies = [
  "aws-smithy-http",
  "aws-types",
  "camino",
+ "camino-tempfile",
  "hyper",
  "metrics",
  "once_cell",
@@ -3430,7 +3441,6 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
- "tempfile",
  "test-context",
  "tokio",
  "tokio-util",
@@ -3783,6 +3793,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "camino",
+ "camino-tempfile",
  "chrono",
  "clap",
  "const_format",
@@ -3811,7 +3822,6 @@ dependencies = [
  "serde_with",
  "signal-hook",
  "storage_broker",
- "tempfile",
  "thiserror",
  "tokio",
  "tokio-io-timeout",
@@ -5111,6 +5121,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "camino",
+ "camino-tempfile",
  "chrono",
  "const_format",
  "criterion",
@@ -5136,7 +5147,6 @@ dependencies = [
  "signal-hook",
  "strum",
  "strum_macros",
- "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -5210,6 +5220,7 @@ name = "wal_craft"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino-tempfile",
  "clap",
  "env_logger",
  "log",
@@ -5217,7 +5228,6 @@ dependencies = [
  "postgres",
  "postgres_ffi",
  "regex",
- "tempfile",
  "utils",
  "workspace_hack",
 ]

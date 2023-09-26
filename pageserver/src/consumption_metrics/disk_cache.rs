@@ -83,7 +83,7 @@ pub(super) async fn flush_metrics_to_disk(
 
             let parent = path.parent().expect("existence checked");
             let file_name = path.file_name().expect("existence checked");
-            let mut tempfile = tempfile::Builder::new()
+            let mut tempfile = camino_tempfile::Builder::new()
                 .prefix(file_name)
                 .suffix(".tmp")
                 .tempfile_in(parent)?;

@@ -445,8 +445,8 @@ fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
 mod fs_tests {
     use super::*;
 
+    use camino_tempfile::tempdir;
     use std::{collections::HashMap, io::Write};
-    use tempfile::tempdir;
 
     async fn read_and_assert_remote_file_contents(
         storage: &LocalFs,
@@ -523,10 +523,7 @@ mod fs_tests {
     }
 
     fn create_storage() -> anyhow::Result<LocalFs> {
-        let storage_root =
-            Utf8PathBuf::from_path_buf(tempdir()?.path().to_owned()).map_err(|pb| {
-                anyhow::Error::msg(format!("non-Unicode path: {}", pb.to_string_lossy()))
-            })?;
+        let storage_root = tempdir()?.path().to_path_buf();
         LocalFs::new(storage_root)
     }
 

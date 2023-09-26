@@ -249,8 +249,7 @@ mod test {
     use utils::{id::TenantTimelineId, lsn::Lsn};
 
     fn stub_conf() -> SafeKeeperConf {
-        let workdir = Utf8PathBuf::from_path_buf(tempfile::tempdir().unwrap().into_path())
-            .expect("non-Unicode path");
+        let workdir = camino_tempfile::tempdir().unwrap().into_path();
         SafeKeeperConf {
             workdir,
             ..SafeKeeperConf::dummy()

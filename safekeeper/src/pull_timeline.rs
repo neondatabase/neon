@@ -1,4 +1,3 @@
-use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 use anyhow::{bail, Context, Result};
@@ -168,12 +167,11 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     tokio::fs::create_dir_all(&temp_base).await?;
 
-    let tli_dir = tempfile::Builder::new()
+    let tli_dir = camino_tempfile::Builder::new()
         .suffix("_temptli")
         .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
         .tempdir_in(temp_base)?;
-    let tli_dir_path =
-        Utf8PathBuf::from_path_buf(tli_dir.path().to_owned()).expect("non-Unicode path");
+    let tli_dir_path = tli_dir.path().to_path_buf();
 
     // Note: some time happens between fetching list of files and fetching files themselves.
     //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.

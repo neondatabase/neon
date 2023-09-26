@@ -28,5 +28,5 @@ pin-project-lite.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+camino-tempfile.workspace = true
 test-context.workspace = true

@@ -187,7 +187,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 criterion = "0.5.1"
 rcgen = "0.11"
 rstest = "0.18"
-tempfile = "3.4"
+camino-tempfile = "1.0.2"
 tonic-build = "0.9"
 
 [patch.crates-io]

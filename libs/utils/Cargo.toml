@@ -54,7 +54,7 @@ byteorder.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
-tempfile.workspace = true
+camino-tempfile.workspace = true
 
 [[bench]]
 name = "benchmarks"

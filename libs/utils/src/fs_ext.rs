@@ -55,8 +55,6 @@ where
 
 #[cfg(test)]
 mod test {
-    use camino::Utf8PathBuf;
-
     use crate::fs_ext::{is_directory_empty, list_dir};
 
     use super::ignore_absent_files;
@@ -65,7 +63,7 @@ mod test {
     fn is_empty_dir() {
         use super::PathExt;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
         let dir_path = dir.path();
 
         // test positive case
@@ -75,8 +73,7 @@ mod test {
         );
 
         // invoke on a file to ensure it returns an error
-        let file_path: Utf8PathBuf =
-            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
+        let file_path = dir_path.join("testfile");
         let f = std::fs::File::create(&file_path).unwrap();
         drop(f);
         assert!(file_path.is_empty_dir().is_err());
@@ -88,7 +85,7 @@ mod test {
 
     #[tokio::test]
     async fn is_empty_dir_async() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
         let dir_path = dir.path();
 
         // test positive case
@@ -98,8 +95,7 @@ mod test {
         );
 
         // invoke on a file to ensure it returns an error
-        let file_path: Utf8PathBuf =
-            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
+        let file_path = dir_path.join("testfile");
         let f = std::fs::File::create(&file_path).unwrap();
         drop(f);
         assert!(is_directory_empty(&file_path).await.is_err());
@@ -111,11 +107,9 @@ mod test {
 
     #[test]
     fn ignore_absent_files_works() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir_path = dir.path();
+        let dir = camino_tempfile::tempdir().unwrap();
 
-        let file_path: Utf8PathBuf =
-            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
+        let file_path = dir.path().join("testfile");
 
         ignore_absent_files(|| std::fs::remove_file(&file_path)).expect("should execute normally");
 
@@ -129,19 +123,17 @@ mod test {
 
     #[tokio::test]
     async fn list_dir_works() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
         let dir_path = dir.path();
 
         assert!(list_dir(dir_path).await.unwrap().is_empty());
 
-        let file_path: Utf8PathBuf =
-            Utf8PathBuf::from_path_buf(dir_path.join("testfile")).expect("non-Unicode path");
+        let file_path = dir_path.join("testfile");
         let _ = std::fs::File::create(&file_path).unwrap();
 
         assert_eq!(&list_dir(dir_path).await.unwrap(), &["testfile"]);
 
-        let another_dir_path: Utf8PathBuf =
-            Utf8PathBuf::from_path_buf(dir_path.join("testdir")).expect("non-Unicode path");
+        let another_dir_path = dir_path.join("testdir");
         std::fs::create_dir(another_dir_path).unwrap();
 
         let expected = &["testdir", "testfile"];

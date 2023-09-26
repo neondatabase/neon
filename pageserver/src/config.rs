@@ -1050,8 +1050,8 @@ mod tests {
         num::{NonZeroU32, NonZeroUsize},
     };
 
+    use camino_tempfile::{tempdir, Utf8TempDir};
     use remote_storage::{RemoteStorageKind, S3Config};
-    use tempfile::{tempdir, TempDir};
     use utils::serde_percent::Percent;
 
     use super::*;
@@ -1209,9 +1209,7 @@ background_task_maximum_delay = '334 s'
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         let broker_endpoint = "http://127.0.0.1:7777";
 
-        let local_storage_path =
-            Utf8PathBuf::from_path_buf(tempdir.path().join("local_remote_storage"))
-                .expect("non-Unicode path");
+        let local_storage_path = tempdir.path().join("local_remote_storage");
 
         let identical_toml_declarations = &[
             format!(
@@ -1417,8 +1415,8 @@ threshold = "20m"
         Ok(())
     }
 
-    fn prepare_fs(tempdir: &TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
-        let tempdir_path = Utf8Path::from_path(tempdir.path()).expect("non-Unicode path");
+    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
+        let tempdir_path = tempdir.path();
 
         let workdir = tempdir_path.join("workdir");
         fs::create_dir_all(&workdir)?;

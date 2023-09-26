@@ -235,13 +235,11 @@ impl BlobWriter<false> {
 mod tests {
     use super::*;
     use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
-    use camino::Utf8PathBuf;
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
-        let temp_dir = tempfile::tempdir()?;
-        let path = temp_dir.path().join("file");
-        let pathbuf = Utf8PathBuf::from_path_buf(path).expect("non-Unicode path");
+        let temp_dir = camino_tempfile::tempdir()?;
+        let pathbuf = temp_dir.path().join("file");
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)

@@ -114,15 +114,14 @@ pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Erro
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn test_create_dir_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
-        let existing_dir_path = Utf8Path::from_path(dir.path()).expect("non-Unicode path");
+        let existing_dir_path = dir.path();
         let err = create_dir(existing_dir_path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
@@ -136,9 +135,9 @@ mod tests {
 
     #[test]
     fn test_create_dir_all_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
-        let existing_dir_path = Utf8Path::from_path(dir.path()).expect("non-Unicode path");
+        let existing_dir_path = dir.path();
         create_dir_all(existing_dir_path).unwrap();
 
         let child_dir = existing_dir_path.join("child");
