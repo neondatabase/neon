@@ -879,6 +879,8 @@ HandleElectedProposer(WalProposer *wp)
 		if (lrRestartLsn != InvalidXLogRecPtr)
 		{
 			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
+			/* start from the beginning of the segment to fetch page headers verifed by XLogReader */
+			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
 			truncateLsn = Min(truncateLsn, lrRestartLsn);
 		}
 	}
