@@ -432,7 +432,9 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
     other_size = later_du_by_timeline[other_tenant]
 
-    log.info(f"later_du_by_timeline[other_tenant] = {other_size} ({human_bytes(other_size)}), before_relax = {other_size < 2 * env.layer_size}")
+    log.info(
+        f"later_du_by_timeline[other_tenant] = {other_size} ({human_bytes(other_size)}), before_relax = {other_size < 2 * env.layer_size}"
+    )
     assert (
         other_size < 3 * env.layer_size
     ), "the other tenant should be evicted to 2-3 layers"
