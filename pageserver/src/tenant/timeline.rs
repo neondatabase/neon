@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
@@ -143,6 +144,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
+    pub deletion_queue_client: DeletionQueueClient,
 }
 
 pub struct Timeline {
@@ -521,9 +523,23 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
-    pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+    /// remote_consistent_lsn from the perspective of the tenant's current generation,
+    /// not validated with control plane yet.
+    /// See [`Self::get_remote_consistent_lsn_visible`].
+    pub fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
-            remote_client.last_uploaded_consistent_lsn()
+            remote_client.remote_consistent_lsn_projected()
+        } else {
+            None
+        }
+    }
+
+    /// remote_consistent_lsn which the tenant is guaranteed not to go backward from,
+    /// i.e. a value of remote_consistent_lsn_projected which has undergone
+    /// generation validation in the deletion queue.
+    pub fn get_remote_consistent_lsn_visible(&self) -> Option<Lsn> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.remote_consistent_lsn_visible()
         } else {
             None
         }
@@ -1820,7 +1836,7 @@ impl Timeline {
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
+            rtc.schedule_layer_file_deletion(needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
@@ -3875,7 +3891,7 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+            remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
         }
 
         Ok(())
@@ -4210,7 +4226,7 @@ impl Timeline {
             }
 
             if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+                remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
             }
 
             apply.flush();

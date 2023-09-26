@@ -20,7 +20,10 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::ControlPlaneClient;
+use crate::control_plane_client::{
+    ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
+};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -116,7 +119,23 @@ pub async fn init_tenant_mgr(
 
     // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        Some(client.re_attach().await?)
+        let result = match client.re_attach().await {
+            Ok(tenants) => tenants,
+            Err(RetryForeverError::ShuttingDown) => {
+                anyhow::bail!("Shut down while waiting for control plane re-attach response")
+            }
+        };
+
+        // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
+        // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
+        // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
+        // are processed, even though we don't block on recovery completing here.
+        resources
+            .deletion_queue_client
+            .recover(result.clone())
+            .await?;
+
+        Some(result)
     } else {
         info!("Control plane API not configured, tenant generations are disabled");
         None
@@ -285,29 +304,21 @@ pub(crate) fn schedule_local_tenant_processing(
 
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
-        if let Some(remote_storage) = resources.remote_storage {
-            match Tenant::spawn_attach(
-                conf,
-                tenant_id,
-                generation,
-                resources.broker_client,
-                tenants,
-                remote_storage,
-                ctx,
-            ) {
-                Ok(tenant) => tenant,
-                Err(e) => {
-                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                }
-            }
-        } else {
+        if resources.remote_storage.is_none() {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
             Tenant::create_broken_tenant(
                 conf,
                 tenant_id,
                 "attaching mark file present but no remote storage configured".to_string(),
             )
+        } else {
+            match Tenant::spawn_attach(conf, tenant_id, generation, resources, tenants, ctx) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                }
+            }
         }
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
@@ -438,8 +449,7 @@ pub async fn create_tenant(
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
     generation: Generation,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
+    resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -450,13 +460,9 @@ pub async fn create_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let tenant_resources = TenantSharedResources {
-            broker_client,
-            remote_storage,
-        };
         let created_tenant =
             schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                generation, tenant_resources, None, &TENANTS, ctx)?;
+                generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -622,6 +628,7 @@ pub async fn load_tenant(
     generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -635,6 +642,7 @@ pub async fn load_tenant(
         let resources = TenantSharedResources {
             broker_client,
             remote_storage,
+            deletion_queue_client
         };
         let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, generation, resources, None,  &TENANTS, ctx)
             .with_context(|| {
@@ -702,8 +710,7 @@ pub async fn attach_tenant(
     tenant_id: TenantId,
     generation: Generation,
     tenant_conf: TenantConfOpt,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: GenericRemoteStorage,
+    resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -718,10 +725,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let resources = TenantSharedResources {
-            broker_client,
-            remote_storage: Some(remote_storage),
-        };
+
         let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233

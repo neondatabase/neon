@@ -267,7 +267,7 @@ def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional
 
 
 def list_prefix(
-    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None
+    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.
@@ -287,7 +287,7 @@ def list_prefix(
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = remote.client.list_objects_v2(
-        Delimiter="/",
+        Delimiter=delimiter,
         Bucket=remote.bucket_name,
         Prefix=prefix,
     )

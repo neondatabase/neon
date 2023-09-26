@@ -363,8 +363,15 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
+
+    /// The LSN that we have succesfully uploaded to remote storage
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+
+    /// The LSN that we are advertizing to safekeepers
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn_visible: Lsn,
+
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.

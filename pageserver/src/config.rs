@@ -475,8 +475,8 @@ impl PageServerConfigBuilder {
         self.background_task_maximum_delay = BuilderValue::Set(delay);
     }
 
-    pub fn control_plane_api(&mut self, api: Url) {
-        self.control_plane_api = BuilderValue::Set(Some(api))
+    pub fn control_plane_api(&mut self, api: Option<Url>) {
+        self.control_plane_api = BuilderValue::Set(api)
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -578,6 +578,27 @@ impl PageServerConf {
 
     pub fn tenants_path(&self) -> PathBuf {
         self.workdir.join(TENANTS_SEGMENT_NAME)
+    }
+
+    pub fn deletion_prefix(&self) -> PathBuf {
+        self.workdir.join("deletion")
+    }
+
+    pub fn deletion_list_path(&self, sequence: u64) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix()
+            .join(format!("{sequence:016x}-{VERSION:02x}.list"))
+    }
+
+    pub fn deletion_header_path(&self) -> PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix().join(format!("header-{VERSION:02x}"))
     }
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
@@ -747,7 +768,14 @@ impl PageServerConf {
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
-                "control_plane_api" => builder.control_plane_api(parse_toml_string(key, item)?.parse().context("failed to parse control plane URL")?),
+                "control_plane_api" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api(None)
+                    } else {
+                        builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
+                    }
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }

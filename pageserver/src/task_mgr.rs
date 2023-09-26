@@ -456,7 +456,7 @@ async fn task_finish(
     }
 
     if shutdown_process {
-        shutdown_pageserver(1).await;
+        shutdown_pageserver(None, 1).await;
     }
 }
 
