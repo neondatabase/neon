@@ -471,10 +471,10 @@ def poor_mans_du(
             else:
                 smallest_layer = size
             if verbose:
-                log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
+                log.info(f"{tenant_id}/{timeline_id} => {file.name} {size} ({human_bytes(size)})")
 
         if verbose:
-            log.info(f"{tenant_id}/{timeline_id}: sum {total}")
+            log.info(f"{tenant_id}/{timeline_id}: sum {total} ({human_bytes(total)})")
         total_on_disk += total
 
     assert smallest_layer is not None or total_on_disk == 0 and largest_layer == 0
