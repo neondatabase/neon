@@ -126,7 +126,7 @@ pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
 
 pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string().ends_with(TEMP_FILE_SUFFIX),
+        Some(name) => name.as_str().ends_with(TEMP_FILE_SUFFIX),
         None => false,
     }
 }
