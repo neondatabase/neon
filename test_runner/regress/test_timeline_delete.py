@@ -807,6 +807,8 @@ def test_delete_orphaned_objects(
     reason = timeline_info["state"]["Broken"]["reason"]
     assert reason.endswith(f"failpoint: {failpoint}"), reason
 
+    ps_http.deletion_queue_flush(execute=True)
+
     for orphan in orphans:
         assert not orphan.exists()
         assert env.pageserver.log_contains(

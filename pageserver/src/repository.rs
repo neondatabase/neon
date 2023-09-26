@@ -37,7 +37,7 @@ impl Key {
             | self.field6 as i128
     }
 
-    pub fn from_i128(x: i128) -> Self {
+    pub const fn from_i128(x: i128) -> Self {
         Key {
             field1: ((x >> 120) & 0xf) as u8,
             field2: ((x >> 104) & 0xFFFF) as u32,

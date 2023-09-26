@@ -56,6 +56,7 @@ use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -116,7 +117,7 @@ mod span;
 
 pub mod metadata;
 mod par_fsync;
-mod remote_timeline_client;
+pub mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
@@ -156,6 +157,7 @@ pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: Option<GenericRemoteStorage>,
+    pub deletion_queue_client: DeletionQueueClient,
 }
 
 ///
@@ -195,6 +197,9 @@ pub struct Tenant {
 
     // provides access to timeline data sitting in the remote storage
     pub(crate) remote_storage: Option<GenericRemoteStorage>,
+
+    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    deletion_queue_client: DeletionQueueClient,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -522,14 +527,19 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         generation: Generation,
-        broker_client: storage_broker::BrokerClientChannel,
+        resources: TenantSharedResources,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let tenant_conf =
             Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
+
+        let TenantSharedResources {
+            broker_client,
+            remote_storage,
+            deletion_queue_client,
+        } = resources;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -539,7 +549,8 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             generation,
-            Some(remote_storage.clone()),
+            remote_storage.clone(),
+            deletion_queue_client,
         ));
 
         // Do all the hard work in the background
@@ -570,7 +581,7 @@ impl Tenant {
                 let pending_deletion = {
                     match DeleteTenantFlow::should_resume_deletion(
                         conf,
-                        Some(&remote_storage),
+                        remote_storage.as_ref(),
                         &tenant_clone,
                     )
                     .await
@@ -659,6 +670,7 @@ impl Tenant {
         for timeline_id in remote_timeline_ids {
             let client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -725,6 +737,7 @@ impl Tenant {
                 remote_metadata,
                 TimelineResources {
                     remote_client: Some(remote_client),
+                    deletion_queue_client: self.deletion_queue_client.clone(),
                 },
                 ctx,
             )
@@ -749,6 +762,7 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 Some(remote_timeline_client),
+                self.deletion_queue_client.clone(),
                 None,
             )
             .await
@@ -850,6 +864,7 @@ impl Tenant {
             tenant_id,
             Generation::broken(),
             None,
+            DeletionQueueClient::broken(),
         ))
     }
 
@@ -894,6 +909,7 @@ impl Tenant {
             tenant_id,
             generation,
             remote_storage.clone(),
+            resources.deletion_queue_client.clone(),
         );
         let tenant = Arc::new(tenant);
 
@@ -1281,6 +1297,7 @@ impl Tenant {
                                 timeline_id,
                                 &local_metadata,
                                 Some(remote_client),
+                                self.deletion_queue_client.clone(),
                                 init_order,
                             )
                             .await
@@ -1330,6 +1347,7 @@ impl Tenant {
                         timeline_id,
                         &local_metadata,
                         None,
+                        self.deletion_queue_client.clone(),
                         init_order,
                     )
                     .await
@@ -2221,6 +2239,9 @@ impl Tenant {
         Ok(timeline)
     }
 
+    // Allow too_many_arguments because a constructor's argument list naturally grows with the
+    // number of attributes in the struct: breaking these out into a builder wouldn't be helpful.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
@@ -2229,6 +2250,7 @@ impl Tenant {
         tenant_id: TenantId,
         generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
 
@@ -2296,6 +2318,7 @@ impl Tenant {
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
+            deletion_queue_client,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
@@ -2826,6 +2849,7 @@ impl Tenant {
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
             let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -2836,7 +2860,10 @@ impl Tenant {
             None
         };
 
-        TimelineResources { remote_client }
+        TimelineResources {
+            remote_client,
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 
     /// Creates intermediate timeline structure and its files.
@@ -3276,6 +3303,7 @@ pub mod harness {
     use utils::logging;
     use utils::lsn::Lsn;
 
+    use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::{
         config::PageServerConf,
         repository::Key,
@@ -3337,6 +3365,7 @@ pub mod harness {
         pub generation: Generation,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: Utf8PathBuf,
+        pub deletion_queue: MockDeletionQueue,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3385,6 +3414,7 @@ pub mod harness {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+            let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
 
             Ok(Self {
                 conf,
@@ -3393,6 +3423,7 @@ pub mod harness {
                 generation: Generation::new(0xdeadbeef),
                 remote_storage,
                 remote_fs_dir,
+                deletion_queue,
             })
         }
 
@@ -3417,6 +3448,7 @@ pub mod harness {
                 self.tenant_id,
                 self.generation,
                 Some(self.remote_storage.clone()),
+                self.deletion_queue.new_client(),
             ));
             tenant
                 .load(None, ctx)
@@ -4147,7 +4179,8 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
+        let harness = TenantHarness::create("test_bulk_insert")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4194,7 +4227,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
+        let harness = TenantHarness::create("test_random_updates")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;

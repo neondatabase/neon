@@ -24,6 +24,9 @@ pub enum ApiError {
     #[error("Precondition failed: {0}")]
     PreconditionFailed(Box<str>),
 
+    #[error("Shutting down")]
+    ShuttingDown,
+
     #[error(transparent)]
     InternalServerError(anyhow::Error),
 }
@@ -51,6 +54,10 @@ impl ApiError {
             ApiError::PreconditionFailed(_) => HttpErrorBody::response_from_msg_and_status(
                 self.to_string(),
                 StatusCode::PRECONDITION_FAILED,
+            ),
+            ApiError::ShuttingDown => HttpErrorBody::response_from_msg_and_status(
+                "Shutting down".to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),

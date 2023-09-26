@@ -30,3 +30,4 @@ workspace_hack.workspace = true
 [dev-dependencies]
 camino-tempfile.workspace = true
 test-context.workspace = true
+rand.workspace = true

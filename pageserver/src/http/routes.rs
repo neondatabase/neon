@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use futures::TryFutureExt;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -24,6 +25,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -34,7 +36,7 @@ use crate::tenant::mgr::{
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::Timeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
@@ -61,6 +63,7 @@ pub struct State {
     remote_storage: Option<GenericRemoteStorage>,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+    deletion_queue_client: DeletionQueueClient,
 }
 
 impl State {
@@ -70,6 +73,7 @@ impl State {
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -82,7 +86,16 @@ impl State {
             remote_storage,
             broker_client,
             disk_usage_eviction_state,
+            deletion_queue_client,
         })
+    }
+
+    fn tenant_resources(&self) -> TenantSharedResources {
+        TenantSharedResources {
+            broker_client: self.broker_client.clone(),
+            remote_storage: self.remote_storage.clone(),
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 }
 
@@ -283,7 +296,12 @@ async fn build_timeline_info_common(
     };
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
-    let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+    let remote_consistent_lsn_projected = timeline
+        .get_remote_consistent_lsn_projected()
+        .unwrap_or(Lsn(0));
+    let remote_consistent_lsn_visible = timeline
+        .get_remote_consistent_lsn_visible()
+        .unwrap_or(Lsn(0));
 
     let walreceiver_status = timeline.walreceiver_status();
 
@@ -293,7 +311,8 @@ async fn build_timeline_info_common(
         ancestor_timeline_id,
         ancestor_lsn,
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-        remote_consistent_lsn,
+        remote_consistent_lsn: remote_consistent_lsn_projected,
+        remote_consistent_lsn_visible,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
@@ -492,23 +511,22 @@ async fn tenant_attach_handler(
 
     let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
 
-    if let Some(remote_storage) = &state.remote_storage {
-        mgr::attach_tenant(
-            state.conf,
-            tenant_id,
-            generation,
-            tenant_conf,
-            state.broker_client.clone(),
-            remote_storage.clone(),
-            &ctx,
-        )
-        .instrument(info_span!("tenant_attach", %tenant_id))
-        .await?;
-    } else {
+    if state.remote_storage.is_none() {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
         )));
     }
+
+    mgr::attach_tenant(
+        state.conf,
+        tenant_id,
+        generation,
+        tenant_conf,
+        state.tenant_resources(),
+        &ctx,
+    )
+    .instrument(info_span!("tenant_attach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -570,6 +588,7 @@ async fn tenant_load_handler(
         generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        state.deletion_queue_client.clone(),
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))
@@ -911,8 +930,7 @@ async fn tenant_create_handler(
         tenant_conf,
         target_tenant_id,
         generation,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
+        state.tenant_resources(),
         &ctx,
     )
     .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
@@ -1127,6 +1145,39 @@ async fn timeline_download_remote_layers_handler_get(
         .context("task never started since last pageserver process start")
         .map_err(|e| ApiError::NotFound(e.into()))?;
     json_response(StatusCode::OK, info)
+}
+
+async fn deletion_queue_flush(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if state.remote_storage.is_none() {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
+    let flush = async {
+        if execute {
+            state.deletion_queue_client.flush_execute().await
+        } else {
+            state.deletion_queue_client.flush().await
+        }
+    }
+    // DeletionQueueError's only case is shutting down.
+    .map_err(|_| ApiError::ShuttingDown);
+
+    tokio::select! {
+        res = flush => {
+            res.map(|()| json_response(StatusCode::OK, ()))?
+        }
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
 }
 
 async fn active_timeline_of_active_tenant(
@@ -1462,6 +1513,9 @@ pub fn make_router(
         )
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
+        })
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
