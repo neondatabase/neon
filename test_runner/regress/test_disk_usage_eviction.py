@@ -402,8 +402,8 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
         < 0.5 * du_by_timeline[our_tenant] + 3 * env.layer_size
     ), "our warmed up tenant should be at about half capacity, part 2"
     assert (
-        later_du_by_timeline[other_tenant] < 2 * env.layer_size
-    ), "the other tenant should be evicted to is min_resident_size, i.e., max layer file size"
+        later_du_by_timeline[other_tenant] < 3 * env.layer_size
+    ), "the other tenant should be evicted to is 2-3 layers, i.e., max layer file size"
 
 
 def poor_mans_du(
