@@ -317,11 +317,16 @@ typedef struct AppendResponse
 /*  Other fields are fixed part */
 #define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, rf)
 
+struct WalProposer;
+typedef struct WalProposer WalProposer;
+
 /*
  * Descriptor of safekeeper
  */
 typedef struct Safekeeper
 {
+	WalProposer *wp;
+
 	char const *host;
 	char const *port;
 
@@ -368,13 +373,6 @@ typedef struct Safekeeper
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
 } Safekeeper;
-
-extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
-extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
-extern void WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
-extern void WalProposerPoll(void);
-extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
-											PageserverFeedback *rf);
 
 /* Re-exported PostgresPollingStatusType */
 typedef enum
@@ -436,17 +434,13 @@ typedef enum
 typedef struct walproposer_api
 {
 	WalproposerShmemState *	(*get_shmem_state) (void);
-	void					(*start_streaming) (XLogRecPtr startpos, TimeLineID timeline);
-	void					(*init_walsender) (void);
-	void					(*init_standalone_sync_safekeepers) (void);
-	uint64					(*init_bgworker) (void);
+	void					(*start_streaming) (WalProposer *wp, XLogRecPtr startpos, TimeLineID timeline);
 	XLogRecPtr				(*get_flush_rec_ptr) (void);
 	TimestampTz				(*get_current_timestamp) (void);
 	TimeLineID				(*get_timeline_id) (void);
-	void					(*load_libpqwalreceiver) (void);
 	char *					(*conn_error_message) (WalProposerConn * conn);
 	WalProposerConnStatusType (*conn_status) (WalProposerConn * conn);
-	WalProposerConn *		(*conn_connect_start) (char *conninfo, char *password);
+	WalProposerConn *		(*conn_connect_start) (char *conninfo);
 	WalProposerConnectPollStatusType (*conn_connect_poll) (WalProposerConn * conn);
 	bool					(*conn_send_query) (WalProposerConn * conn, char * query);
 	WalProposerExecStatusType (*conn_get_query_result) (WalProposerConn * conn);
@@ -467,10 +461,67 @@ typedef struct walproposer_api
 	bool					(*strong_random) (void *buf, size_t len);
 	XLogRecPtr				(*get_redo_start_lsn) (void);
 	void					(*finish_sync_safekeepers) (XLogRecPtr lsn);
-	void					(*process_safekeeper_feedback) (Safekeeper * safekeepers, int n_safekeepers, bool isSync, XLogRecPtr commitLsn);
+	void					(*process_safekeeper_feedback) (WalProposer *wp, XLogRecPtr commitLsn);
 	void					(*confirm_wal_streamed) (XLogRecPtr lsn);
 } walproposer_api;
 
-extern const walproposer_api walprop_pg;
+typedef struct WalProposerConfig {
+	char *neon_tenant;
+	char *neon_timeline;
+	char *safekeepers_list;
+	int safekeeper_reconnect_timeout;
+	int safekeeper_connection_timeout;
+	int wal_segment_size;
+	bool syncSafekeepers;
+	uint64 systemId;
+} WalProposerConfig;
+
+typedef struct WalProposer {
+	WalProposerConfig *config;
+	int n_safekeepers;
+	int quorum;
+	Safekeeper safekeeper[MAX_SAFEKEEPERS];
+	/* WAL has been generated up to this point */
+	XLogRecPtr availableLsn;
+	/* last commitLsn broadcast to safekeepers */
+	XLogRecPtr lastSentCommitLsn;
+	ProposerGreeting greetRequest;
+	/* Vote request for safekeeper */
+	VoteRequest voteRequest;
+	/*
+	 *  Minimal LSN which may be needed for recovery of some safekeeper,
+	 *  record-aligned (first record which might not yet received by someone).
+	 */
+	XLogRecPtr truncateLsn;
+	/*
+	 * Term of the proposer. We want our term to be highest and unique,
+	 * so we collect terms from safekeepers quorum, choose max and +1.
+	 * After that our term is fixed and must not change. If we observe
+	 * that some safekeeper has higher term, it means that we have another
+	 * running compute, so we must stop immediately.
+	 */
+	term_t propTerm;
+	/* term history of the proposer */
+	TermHistory propTermHistory;
+	/* epoch start lsn of the proposer */
+	XLogRecPtr propEpochStartLsn;
+	/* Most advanced acceptor epoch */
+	term_t donorEpoch;
+	/* Most advanced acceptor */
+	int	donor;
+	/* timeline globally starts at this LSN */
+	XLogRecPtr timelineStartLsn;
+	int	n_votes;
+	int	n_connected;
+	TimestampTz last_reconnect_attempt;
+	walproposer_api api;
+} WalProposer;
+
+extern WalProposer *WalProposerCreate(WalProposerConfig *config, walproposer_api api);
+extern void WalProposerStart(WalProposer *wp);
+extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
+extern void WalProposerPoll(WalProposer *wp);
+extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
+											PageserverFeedback *rf);
 
 #endif							/* __NEON_WALPROPOSER_H__ */

@@ -33,4 +33,7 @@ extern bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 extern uint64 BackpressureThrottlingTime(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
+extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
+extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
+
 #endif							/* NEON_H */
