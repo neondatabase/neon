@@ -3417,6 +3417,7 @@ dependencies = [
  "metrics",
  "once_cell",
  "pin-project-lite",
+ "rand",
  "scopeguard",
  "serde",
  "serde_json",
