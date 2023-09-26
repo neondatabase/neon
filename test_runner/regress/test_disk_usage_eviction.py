@@ -89,7 +89,7 @@ class EvictionEnv:
         """
         lsn = self.pgbench_init_lsns[tenant_id]
         with self.neon_env.endpoints.create_start("main", tenant_id=tenant_id, lsn=lsn) as endpoint:
-            self.pg_bin.run(["pgbench", "-S", endpoint.connstr()])
+            self.pg_bin.run(["pgbench", "--select-only", "--no-vacuum", endpoint.connstr()])
 
     def pageserver_start_with_disk_usage_eviction(
         self, period, max_usage_pct, min_avail_bytes, mock_behavior
