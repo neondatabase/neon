@@ -222,8 +222,9 @@ lfc_change_limit_hook(int newval, void *extra)
 	/*
 	 * Stats collector detach shared memory, so we should not try to access shared memory here.
 	 * Parallel workers first assign default value (0), so not perform truncation in parallel workers.
+	 * The Postmaster can handle SIGHUP and it has access to shared memory (UsedShmemSegAddr != NULL), but has no PGPROC.
 	 */
-	if (!lfc_ctl || !UsedShmemSegAddr || IsParallelWorker())
+	if (!lfc_ctl || !MyProc || !UsedShmemSegAddr || IsParallelWorker())
 		return;
 
 	/* Open cache file if not done yet */

@@ -650,6 +650,12 @@ mod tests {
         File(File),
     }
 
+    impl From<VirtualFile> for MaybeVirtualFile {
+        fn from(vf: VirtualFile) -> Self {
+            MaybeVirtualFile::VirtualFile(vf)
+        }
+    }
+
     impl MaybeVirtualFile {
         async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
             match self {
@@ -886,5 +892,55 @@ mod tests {
         std::mem::forget(rt);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_atomic_overwrite_basic() {
+        let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
+        std::fs::create_dir_all(&testdir).unwrap();
+
+        let path = testdir.join("myfile");
+        let tmp_path = testdir.join("myfile.tmp");
+
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+            .await
+            .unwrap();
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let post = file.read_string().await.unwrap();
+        assert_eq!(post, "foo");
+        assert!(!tmp_path.exists());
+        drop(file);
+
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar")
+            .await
+            .unwrap();
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let post = file.read_string().await.unwrap();
+        assert_eq!(post, "bar");
+        assert!(!tmp_path.exists());
+        drop(file);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_overwrite_preexisting_tmp() {
+        let testdir =
+            crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
+        std::fs::create_dir_all(&testdir).unwrap();
+
+        let path = testdir.join("myfile");
+        let tmp_path = testdir.join("myfile.tmp");
+
+        std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
+        assert!(tmp_path.exists());
+
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+            .await
+            .unwrap();
+
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let post = file.read_string().await.unwrap();
+        assert_eq!(post, "foo");
+        assert!(!tmp_path.exists());
+        drop(file);
     }
 }
