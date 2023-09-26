@@ -29,18 +29,18 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev openssl python-poetry
+libcurl4-openssl-dev openssl python-poetry lsof libicu-dev
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
-  protobuf-devel libcurl-devel openssl poetry
+  protobuf-devel libcurl-devel openssl poetry lsof libicu-devel
 ```
 * On Arch based systems, these packages are needed:
 ```bash
 pacman -S base-devel readline zlib libseccomp openssl clang \
-postgresql-libs cmake postgresql protobuf curl
+postgresql-libs cmake postgresql protobuf curl lsof
 ```
 
 Building Neon requires 3.15+ version of `protoc` (protobuf-compiler). If your distribution provides an older version, you can install a newer version from [here](https://github.com/protocolbuffers/protobuf/releases).
@@ -55,7 +55,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf openssl flex bison
+brew install protobuf openssl flex bison icu4c pkg-config
 
 # add openssl to PATH, required for ed25519 keys generation in neon_local
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc

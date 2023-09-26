@@ -14,10 +14,12 @@
 !pgxn/
 !proxy/
 !safekeeper/
+!s3_scrubber/
 !storage_broker/
 !trace/
 !vendor/postgres-v14/
 !vendor/postgres-v15/
+!vendor/postgres-v16/
 !workspace_hack/
 !neon_local/
 !scripts/ninstall.sh

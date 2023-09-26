@@ -315,12 +315,8 @@ impl CgroupWatcher {
     where
         E: Stream<Item = Sequenced<u64>>,
     {
-        // There are several actions might do when receiving a `memory.high`,
-        // such as freezing the cgroup, or increasing its `memory.high`. We don't
-        // want to do these things too often (because postgres needs to run, and
-        // we only have so much memory). These timers serve as rate limits for this.
         let mut wait_to_freeze = pin!(tokio::time::sleep(Duration::ZERO));
-        let mut wait_to_increase_memory_high = pin!(tokio::time::sleep(Duration::ZERO));
+        let mut last_memory_high_increase_at: Option<Instant> = None;
         let mut events = pin!(events);
 
         // Are we waiting to be upscaled? Could be true if we request upscale due
@@ -332,6 +328,8 @@ impl CgroupWatcher {
                 upscale = upscales.recv() => {
                     let Sequenced { seqnum, data } = upscale
                         .context("failed to listen on upscale notification channel")?;
+                    waiting_on_upscale = false;
+                    last_memory_high_increase_at = None;
                     self.last_upscale_seqnum.store(seqnum, Ordering::Release);
                     info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
                 }
@@ -396,12 +394,17 @@ impl CgroupWatcher {
                             .send(())
                             .await
                             .context("failed to request upscale")?;
+                        waiting_on_upscale = true;
                         continue;
                     }
 
                     // Shoot, we can't freeze or and we're still waiting on upscale,
                     // increase memory.high to reduce throttling
-                    if wait_to_increase_memory_high.is_elapsed() {
+                    let can_increase_memory_high = match last_memory_high_increase_at {
+                        None => true,
+                        Some(t) => t.elapsed() > self.config.memory_high_increase_every,
+                    };
+                    if can_increase_memory_high {
                         info!(
                             "received memory.high event, \
                             but too soon to refreeze and already requested upscale \
@@ -437,12 +440,11 @@ impl CgroupWatcher {
                         );
                         self.set_high_bytes(new_high)
                             .context("failed to set memory.high")?;
-                        wait_to_increase_memory_high
-                            .as_mut()
-                            .reset(Instant::now() + self.config.memory_high_increase_every)
+                        last_memory_high_increase_at = Some(Instant::now());
+                        continue;
                     }
 
-                    // we can't do anything
+                    info!("received memory.high event, but can't do anything");
                 }
             };
         }
@@ -559,14 +561,7 @@ impl CgroupWatcher {
 /// Setting these values also affects the thresholds for receiving usage alerts.
 #[derive(Debug)]
 pub struct MemoryLimits {
-    high: u64,
-    max: u64,
-}
-
-impl MemoryLimits {
-    pub fn new(high: u64, max: u64) -> Self {
-        Self { max, high }
-    }
+    pub high: u64,
 }
 
 // Methods for manipulating the actual cgroup
@@ -643,12 +638,7 @@ impl CgroupWatcher {
 
     /// Set cgroup memory.high and memory.max.
     pub fn set_limits(&self, limits: &MemoryLimits) -> anyhow::Result<()> {
-        info!(
-            limits.high,
-            limits.max,
-            path = self.path(),
-            "writing new memory limits",
-        );
+        info!(limits.high, path = self.path(), "writing new memory limits",);
         self.memory()
             .context("failed to get memory subsystem while setting memory limits")?
             .set_mem(cgroups_rs::memory::SetMemory {
@@ -657,7 +647,7 @@ impl CgroupWatcher {
                 high: Some(MaxValue::Value(
                     u64::min(limits.high, i64::MAX as u64) as i64
                 )),
-                max: Some(MaxValue::Value(u64::min(limits.max, i64::MAX as u64) as i64)),
+                max: None,
             })
             .context("failed to set memory limits")
     }
@@ -665,7 +655,7 @@ impl CgroupWatcher {
     /// Given some amount of available memory, set the desired cgroup memory limits
     pub fn set_memory_limits(&mut self, available_memory: u64) -> anyhow::Result<()> {
         let new_high = self.config.calculate_memory_high_value(available_memory);
-        let limits = MemoryLimits::new(new_high, available_memory);
+        let limits = MemoryLimits { high: new_high };
         info!(
             path = self.path(),
             memory = ?limits,

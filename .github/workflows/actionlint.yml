@@ -1,0 +1,31 @@
+name: Lint GitHub Workflows
+
+on:
+  push:
+    branches:
+      - main
+      - release
+    paths:
+      - '.github/workflows/*.ya?ml'
+  pull_request:
+    paths:
+      - '.github/workflows/*.ya?ml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-actionlint@v1
+        env:
+          # SC2046 - Quote this to prevent word splitting. - https://www.shellcheck.net/wiki/SC2046
+          # SC2086 - Double quote to prevent globbing and word splitting. - https://www.shellcheck.net/wiki/SC2086
+          SHELLCHECK_OPTS: --exclude=SC2046,SC2086
+        with:
+          fail_on_error: true
+          filter_mode: nofilter
+          level: error

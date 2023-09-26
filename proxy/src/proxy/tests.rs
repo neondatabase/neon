@@ -137,6 +137,7 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let cancel_map = CancelMap::default();
+    let client = WithClientIp::new(client);
     let (mut stream, _params) = handshake(client, tls.as_ref(), &cancel_map)
         .await?
         .context("handshake failed")?;
@@ -302,7 +303,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 #[test]
 fn connect_compute_total_wait() {
     let mut total_wait = tokio::time::Duration::ZERO;
-    for num_retries in 1..10 {
+    for num_retries in 1..NUM_RETRIES_CONNECT {
         total_wait += retry_after(num_retries);
     }
     assert!(total_wait < tokio::time::Duration::from_secs(12));
@@ -493,11 +494,11 @@ async fn connect_to_compute_non_retry_2() {
 /// Retry for at most `NUM_RETRIES_CONNECT` times.
 #[tokio::test]
 async fn connect_to_compute_non_retry_3() {
-    assert_eq!(NUM_RETRIES_CONNECT, 10);
+    assert_eq!(NUM_RETRIES_CONNECT, 16);
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![
-        Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
-        /* the 11th time */ Retry,
+        Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
+        Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
     connect_to_compute(&mechanism, cache, &extra, &creds)

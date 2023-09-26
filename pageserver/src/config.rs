@@ -32,7 +32,8 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
+    TENANTS_SEGMENT_NAME, TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME,
+    TIMELINES_SEGMENT_NAME,
 };
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
@@ -63,7 +64,7 @@ pub mod defaults {
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
+    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
@@ -72,7 +73,7 @@ pub mod defaults {
     /// Default built-in configuration file.
     ///
     pub const DEFAULT_CONFIG_FILE: &str = formatcp!(
-        r###"
+        r#"
 # Initial configuration file created by 'pageserver --init'
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
@@ -117,7 +118,7 @@ pub mod defaults {
 
 [remote_storage]
 
-"###
+"#
     );
 }
 
@@ -204,6 +205,8 @@ pub struct PageServerConf {
     /// has it's initial logical size calculated. Not running background tasks for some seconds is
     /// not terrible.
     pub background_task_maximum_delay: Duration,
+
+    pub control_plane_api: Option<Url>,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -278,6 +281,8 @@ struct PageServerConfigBuilder {
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
 
     background_task_maximum_delay: BuilderValue<Duration>,
+
+    control_plane_api: BuilderValue<Option<Url>>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -340,6 +345,8 @@ impl Default for PageServerConfigBuilder {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+
+            control_plane_api: Set(None),
         }
     }
 }
@@ -468,6 +475,10 @@ impl PageServerConfigBuilder {
         self.background_task_maximum_delay = BuilderValue::Set(delay);
     }
 
+    pub fn control_plane_api(&mut self, api: Url) {
+        self.control_plane_api = BuilderValue::Set(Some(api))
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -553,6 +564,9 @@ impl PageServerConfigBuilder {
             background_task_maximum_delay: self
                 .background_task_maximum_delay
                 .ok_or(anyhow!("missing background_task_maximum_delay"))?,
+            control_plane_api: self
+                .control_plane_api
+                .ok_or(anyhow!("missing control_plane_api"))?,
         })
     }
 }
@@ -563,7 +577,7 @@ impl PageServerConf {
     //
 
     pub fn tenants_path(&self) -> PathBuf {
-        self.workdir.join("tenants")
+        self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
@@ -654,26 +668,18 @@ impl PageServerConf {
     pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
+        #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 => Ok(path.join(format!("v{pg_version}"))),
-            15 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
     pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
     /// Parse a configuration file (pageserver.toml) into a PageServerConf struct,
@@ -741,6 +747,7 @@ impl PageServerConf {
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
+                "control_plane_api" => builder.control_plane_api(parse_toml_string(key, item)?.parse().context("failed to parse control plane URL")?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -909,6 +916,7 @@ impl PageServerConf {
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
+            control_plane_api: None,
         }
     }
 }
@@ -1132,6 +1140,7 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: humantime::parse_duration(
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
+                control_plane_api: None
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1187,6 +1196,7 @@ background_task_maximum_delay = '334 s'
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
+                control_plane_api: None
             },
             "Should be able to parse all basic config values correctly"
         );

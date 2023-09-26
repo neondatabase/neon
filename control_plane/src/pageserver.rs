@@ -27,6 +27,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
 #[derive(Error, Debug)]
@@ -76,43 +77,40 @@ impl ResponseErrorMessageExt for Response {
 #[derive(Debug)]
 pub struct PageServerNode {
     pub pg_connection_config: PgConnectionConfig,
+    pub conf: PageServerConf,
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
 }
 
 impl PageServerNode {
-    pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
-            .expect("Unable to parse listen_pg_addr");
+    pub fn from_env(env: &LocalEnv, conf: &PageServerConf) -> PageServerNode {
+        let (host, port) =
+            parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
+            conf: conf.clone(),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
+            http_base_url: format!("http://{}/v1", conf.listen_http_addr),
         }
     }
 
     // pageserver conf overrides defined by neon_local configuration.
     fn neon_local_overrides(&self) -> Vec<String> {
-        let id = format!("id={}", self.env.pageserver.id);
+        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param =
-            format!("http_auth_type='{}'", self.env.pageserver.http_auth_type);
-        let listen_http_addr_param = format!(
-            "listen_http_addr='{}'",
-            self.env.pageserver.listen_http_addr
-        );
+        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.env.pageserver.pg_auth_type);
-        let listen_pg_addr_param =
-            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -126,10 +124,18 @@ impl PageServerNode {
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.http_auth_type != AuthType::Trust
-            || self.env.pageserver.pg_auth_type != AuthType::Trust
+        if let Some(control_plane_api) = &self.env.control_plane_api {
+            overrides.push(format!(
+                "control_plane_api='{}'",
+                control_plane_api.as_str()
+            ));
+        }
+
+        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
         {
-            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
+            // Keys are generated in the toplevel repo dir, pageservers' workdirs
+            // are one level below that, so refer to keys with ../
+            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
         overrides
     }
@@ -137,16 +143,12 @@ impl PageServerNode {
     /// Initializes a pageserver node by creating its config with the overrides provided.
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides).with_context(|| {
-            format!(
-                "Failed to run init for pageserver node {}",
-                self.env.pageserver.id,
-            )
-        })
+        self.pageserver_init(config_overrides)
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id,))
     }
 
     pub fn repo_path(&self) -> PathBuf {
-        self.env.pageserver_data_dir()
+        self.env.pageserver_data_dir(self.conf.id)
     }
 
     /// The pid file is created by the pageserver process, with its pid stored inside.
@@ -162,7 +164,7 @@ impl PageServerNode {
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         let datadir = self.repo_path();
-        let node_id = self.env.pageserver.id;
+        let node_id = self.conf.id;
         println!(
             "Initializing pageserver node {} at '{}' in {:?}",
             node_id,
@@ -170,6 +172,10 @@ impl PageServerNode {
             datadir
         );
         io::stdout().flush()?;
+
+        if !datadir.exists() {
+            std::fs::create_dir(&datadir)?;
+        }
 
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
@@ -201,7 +207,7 @@ impl PageServerNode {
         let datadir = self.repo_path();
         print!(
             "Starting pageserver node {} at '{}' in {:?}",
-            self.env.pageserver.id,
+            self.conf.id,
             self.pg_connection_config.raw_address(),
             datadir
         );
@@ -210,7 +216,7 @@ impl PageServerNode {
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!(
                 "Cannot start pageserver node {} in path that has no string representation: {:?}",
-                self.env.pageserver.id, datadir,
+                self.conf.id, datadir,
             )
         })?;
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
@@ -254,7 +260,7 @@ impl PageServerNode {
         // FIXME: why is this tied to pageserver's auth type? Whether or not the safekeeper
         // needs a token, and how to generate that token, seems independent to whether
         // the pageserver requires a token in incoming requests.
-        Ok(if self.env.pageserver.http_auth_type != AuthType::Trust {
+        Ok(if self.conf.http_auth_type != AuthType::Trust {
             // Generate a token to connect from the pageserver to a safekeeper
             let token = self
                 .env
@@ -279,7 +285,7 @@ impl PageServerNode {
 
     pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
         let mut config = self.pg_connection_config.clone();
-        if self.env.pageserver.pg_auth_type == AuthType::NeonJWT {
+        if self.conf.pg_auth_type == AuthType::NeonJWT {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
@@ -290,7 +296,7 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> anyhow::Result<RequestBuilder> {
         let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
+        if self.conf.http_auth_type == AuthType::NeonJWT {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
@@ -316,7 +322,8 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<TenantId>,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
@@ -382,11 +389,9 @@ impl PageServerNode {
                 .context("Failed to parse 'gc_feedback' as bool")?,
         };
 
-        // If tenant ID was not specified, generate one
-        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
-
         let request = models::TenantCreateRequest {
             new_tenant_id,
+            generation,
             config,
         };
         if !settings.is_empty() {

@@ -29,7 +29,7 @@ def test_wal_restore(
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
-    env.neon_cli.pageserver_stop()
+    env.pageserver.stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
     with VanillaPostgres(

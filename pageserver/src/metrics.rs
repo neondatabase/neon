@@ -1,3 +1,4 @@
+use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -127,22 +128,24 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub struct PageCacheMetrics {
+pub struct PageCacheMetricsForTaskKind {
     pub read_accesses_materialized_page: IntCounter,
-    pub read_accesses_ephemeral: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
-    pub read_hits_ephemeral: IntCounter,
     pub read_hits_immutable: IntCounter,
     pub read_hits_materialized_page_exact: IntCounter,
     pub read_hits_materialized_page_older_lsn: IntCounter,
+}
+
+pub struct PageCacheMetrics {
+    map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
 }
 
 static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
         "Number of read accesses to the page cache that hit",
-        &["key_kind", "hit_kind"]
+        &["task_kind", "key_kind", "content_kind", "hit_kind"]
     )
     .expect("failed to define a metric")
 });
@@ -151,54 +154,72 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_accesses_total",
         "Number of read accesses to the page cache",
-        &["key_kind"]
+        &["task_kind", "key_kind", "content_kind"]
     )
     .expect("failed to define a metric")
 });
 
 pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
-    read_accesses_materialized_page: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["materialized_page"])
-            .unwrap()
-    },
+    map: EnumMap::from_array(std::array::from_fn(|task_kind| {
+        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind: &'static str = task_kind.into();
+        EnumMap::from_array(std::array::from_fn(|content_kind| {
+            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind: &'static str = content_kind.into();
+            PageCacheMetricsForTaskKind {
+                read_accesses_materialized_page: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                        ])
+                        .unwrap()
+                },
 
-    read_accesses_ephemeral: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["ephemeral"])
-            .unwrap()
-    },
+                read_accesses_immutable: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
+                        .unwrap()
+                },
 
-    read_accesses_immutable: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
+                read_hits_immutable: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        .unwrap()
+                },
 
-    read_hits_ephemeral: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["ephemeral", "-"])
-            .unwrap()
-    },
+                read_hits_materialized_page_exact: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "exact",
+                        ])
+                        .unwrap()
+                },
 
-    read_hits_immutable: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["immutable", "-"])
-            .unwrap()
-    },
-
-    read_hits_materialized_page_exact: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "exact"])
-            .unwrap()
-    },
-
-    read_hits_materialized_page_older_lsn: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "older_lsn"])
-            .unwrap()
-    },
+                read_hits_materialized_page_older_lsn: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "older_lsn",
+                        ])
+                        .unwrap()
+                },
+            }
+        }))
+    })),
 });
+
+impl PageCacheMetrics {
+    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
+        &self.map[ctx.task_kind()][ctx.page_content_kind()]
+    }
+}
 
 pub struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
@@ -537,7 +558,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-/// Tracks time taken by fs operations near VirtualFile.
+/// VirtualFile fs operation variants.
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
@@ -548,15 +569,66 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 /// - seek (modify internal position or file length query)
 /// - fsync ([`std::fs::File::sync_all`])
 /// - metadata ([`std::fs::File::metadata`])
-pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_io_operations_seconds",
-        "Time spent in IO operations",
-        &["operation"],
-        STORAGE_IO_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
+#[derive(
+    Debug, Clone, Copy, strum_macros::EnumCount, strum_macros::EnumIter, strum_macros::FromRepr,
+)]
+pub(crate) enum StorageIoOperation {
+    Open,
+    Close,
+    CloseByReplace,
+    Read,
+    Write,
+    Seek,
+    Fsync,
+    Metadata,
+}
+
+impl StorageIoOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageIoOperation::Open => "open",
+            StorageIoOperation::Close => "close",
+            StorageIoOperation::CloseByReplace => "close-by-replace",
+            StorageIoOperation::Read => "read",
+            StorageIoOperation::Write => "write",
+            StorageIoOperation::Seek => "seek",
+            StorageIoOperation::Fsync => "fsync",
+            StorageIoOperation::Metadata => "metadata",
+        }
+    }
+}
+
+/// Tracks time taken by fs operations near VirtualFile.
+#[derive(Debug)]
+pub(crate) struct StorageIoTime {
+    metrics: [Histogram; StorageIoOperation::COUNT],
+}
+
+impl StorageIoTime {
+    fn new() -> Self {
+        let storage_io_histogram_vec = register_histogram_vec!(
+            "pageserver_io_operations_seconds",
+            "Time spent in IO operations",
+            &["operation"],
+            STORAGE_IO_TIME_BUCKETS.into()
+        )
+        .expect("failed to define a metric");
+        let metrics = std::array::from_fn(|i| {
+            let op = StorageIoOperation::from_repr(i).unwrap();
+            let metric = storage_io_histogram_vec
+                .get_metric_with_label_values(&[op.as_str()])
+                .unwrap();
+            metric
+        });
+        Self { metrics }
+    }
+
+    pub(crate) fn get(&self, op: StorageIoOperation) -> &Histogram {
+        &self.metrics[op as usize]
+    }
+}
+
+pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
@@ -1165,6 +1237,12 @@ impl TimelineMetrics {
             ),
         }
     }
+
+    pub fn record_new_file_metrics(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        self.num_persistent_files_created.inc_by(1);
+        self.persistent_bytes_written.inc_by(sz);
+    }
 }
 
 impl Drop for TimelineMetrics {
@@ -1222,6 +1300,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+use crate::context::{PageContentKind, RequestContext};
+use crate::task_mgr::TaskKind;
 
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,

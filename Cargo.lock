@@ -227,6 +227,7 @@ checksum = "de3d533e0263bf453cc80af4c8bcc4d64e2aca293bd16f81633a36f1bf4a97cb"
 dependencies = [
  "aws-credential-types",
  "aws-http",
+ "aws-sdk-sso",
  "aws-sdk-sts",
  "aws-smithy-async",
  "aws-smithy-client",
@@ -237,12 +238,15 @@ dependencies = [
  "aws-types",
  "bytes",
  "fastrand 2.0.0",
+ "hex",
  "http",
  "hyper",
+ "ring",
  "time",
  "tokio",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -330,6 +334,30 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sso"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f41bf2c28d32dbb9894a8fcfcb148265d034d3f4a170552a47553a09de890895"
+dependencies = [
+ "aws-credential-types",
+ "aws-http",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-client",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "http",
+ "regex",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -608,7 +636,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.20.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1029,6 +1057,8 @@ dependencies = [
  "comfy-table",
  "compute_api",
  "git-version",
+ "hex",
+ "hyper",
  "nix 0.26.2",
  "once_cell",
  "pageserver_api",
@@ -1044,6 +1074,7 @@ dependencies = [
  "storage_broker",
  "tar",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
  "url",
@@ -1778,6 +1809,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
 
 [[package]]
+name = "histogram"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e673d137229619d5c2c8903b6ed5852b43636c0017ff2e66b1aafb8ccf04b80b"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1900,15 +1941,15 @@ dependencies = [
 
 [[package]]
 name = "hyper-tungstenite"
-version = "0.9.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "880b8b1c98a5ec2a505c7c90db6d3f6f1f480af5655d9c5b55facc9382a5a5b5"
+checksum = "7cc7dcb1ab67cd336f468a12491765672e61a3b6b148634dbfe2fe8acd3fe7d9"
 dependencies = [
  "hyper",
- "pin-project",
+ "pin-project-lite",
  "tokio",
- "tokio-tungstenite 0.18.0",
- "tungstenite 0.18.0",
+ "tokio-tungstenite",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2867,9 +2908,9 @@ dependencies = [
 
 [[package]]
 name = "pin-project-lite"
-version = "0.2.9"
+version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0a7ae3ac2f1173085d398531c705756c94a4c56843785df85a60c1a0afac116"
+checksum = "8afb450f006bf6385ca15ef45d71d2288452bc3683ce2e2cacc0d18e4be60b58"
 
 [[package]]
 name = "pin-utils"
@@ -3684,6 +3725,43 @@ name = "ryu"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f91339c0467de62360649f8d3e185ca8de4224ff281f66000de5eb2a77a79041"
+
+[[package]]
+name = "s3_scrubber"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-http",
+ "aws-types",
+ "bincode",
+ "bytes",
+ "chrono",
+ "clap",
+ "crc32c",
+ "either",
+ "futures-util",
+ "hex",
+ "histogram",
+ "itertools",
+ "pageserver",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "utils",
+ "workspace_hack",
+]
 
 [[package]]
 name = "safekeeper"
@@ -4565,18 +4643,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54319c93411147bced34cb5609a80e0a8e44c5999c93903a81cd866630ec0bfd"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.18.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b2dbec703c26b00d74844519606ef15d09a7d6857860f84ad223dec002ddea2"
@@ -4584,7 +4650,7 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tungstenite 0.20.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -4769,6 +4835,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-appender"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09d48f71a791638519505cefafe162606f706c25592e4bde4d97600c0195312e"
+dependencies = [
+ "crossbeam-channel",
+ "time",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4888,28 +4965,9 @@ checksum = "3528ecfd12c466c6f163363caf2d02a71161dd5e1cc6ae7b34207ea2d42d81ed"
 
 [[package]]
 name = "tungstenite"
-version = "0.18.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30ee6ab729cd4cf0fd55218530c4522ed30b7b6081752839b68fcec8d0960788"
-dependencies = [
- "base64 0.13.1",
- "byteorder",
- "bytes",
- "http",
- "httparse",
- "log",
- "rand",
- "sha1",
- "thiserror",
- "url",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e862a1c4128df0112ab625f55cd5c934bcb4312ba80b39ae4b4835a3fd58e649"
+checksum = "9e3dac10fd62eaf6617d3a904ae222845979aec67c615d1c842b4002c7666fb9"
 dependencies = [
  "byteorder",
  "bytes",
@@ -5506,6 +5564,10 @@ name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-http",
  "axum",
  "base64 0.21.1",
  "bytes",
@@ -5514,7 +5576,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
- "digest",
  "either",
  "fail",
  "futures",
@@ -5523,6 +5584,7 @@ dependencies = [
  "futures-executor",
  "futures-sink",
  "futures-util",
+ "hex",
  "hyper",
  "itertools",
  "libc",
@@ -5546,6 +5608,7 @@ dependencies = [
  "socket2 0.4.9",
  "syn 1.0.109",
  "syn 2.0.28",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -5554,7 +5617,9 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
+ "tungstenite",
  "url",
+ "uuid",
 ]
 
 [[package]]

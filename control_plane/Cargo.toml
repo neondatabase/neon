@@ -12,6 +12,8 @@ git-version.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
+hex.workspace = true
+hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 serde.workspace = true
@@ -20,6 +22,7 @@ serde_with.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+tokio.workspace = true
 url.workspace = true
 # Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
 # instead, so that recompile times are better.

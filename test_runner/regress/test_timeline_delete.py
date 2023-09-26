@@ -3,7 +3,6 @@ import os
 import queue
 import shutil
 import threading
-from pathlib import Path
 
 import pytest
 import requests
@@ -72,9 +71,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
     )
 
-    timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(parent_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)
 
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
@@ -85,9 +82,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     assert exc.value.status_code == 412
 
-    timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
     assert timeline_path.exists()
 
     # retry deletes when compaction or gc is running in pageserver
@@ -119,6 +114,8 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     # See https://github.com/neondatabase/neon/issues/3560
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
 
     with pytest.raises(
         PageserverApiException,
@@ -191,9 +188,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     8. Retry or restart without the failpoint and check the result.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_timeline_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -231,7 +226,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
     # This happens when we fail before scheduling background operation.
     # Timeline is left in stopping state and retry tries to stop it again.
@@ -328,7 +323,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             ),
         )
 
-    timeline_dir = env.timeline_dir(env.initial_tenant, timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, timeline_id)
     # Check local is empty
     assert not timeline_dir.exists()
     # Check no delete mark present
@@ -348,10 +343,7 @@ def test_timeline_resurrection_on_attach(
     Original issue: https://github.com/neondatabase/neon/issues/3560
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_resurrection_on_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
@@ -411,7 +403,7 @@ def test_timeline_resurrection_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -436,10 +428,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     the deletion of the local state.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_timeline_delete_fail_before_local_delete",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
@@ -449,7 +438,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
     # this happens, because the stuck timeline is visible to shutdown
     env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.+: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
     )
 
     ps_http = env.pageserver.http_client()
@@ -465,9 +454,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         "test_timeline_delete_fail_before_local_delete",
     )
 
-    leaf_timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
-    )
+    leaf_timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
     timeline_info = wait_until_timeline_state(
@@ -556,10 +543,7 @@ def test_concurrent_timeline_delete_stuck_on(
     signalling to console that it should retry later.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name=f"concurrent_timeline_delete_stuck_on_{stuck_failpoint}",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
@@ -634,10 +618,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     This tests cancel safety up to the given failpoint.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_delete_timeline_client_hangup",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
@@ -704,10 +685,7 @@ def test_timeline_delete_works_for_remote_smoke(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_delete_works_for_remote_smoke",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
 
@@ -780,7 +758,7 @@ def test_delete_orphaned_objects(
     pg_bin: PgBin,
 ):
     remote_storage_kind = RemoteStorageKind.LOCAL_FS
-    neon_env_builder.enable_remote_storage(remote_storage_kind, "test_delete_orphaned_objects")
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -791,7 +769,7 @@ def test_delete_orphaned_objects(
         }
     )
 
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
 
@@ -802,7 +780,9 @@ def test_delete_orphaned_objects(
         last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
     # write orphaned file that is missing from the index
-    remote_timeline_path = env.remote_storage.timeline_path(env.initial_tenant, timeline_id)
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(
+        env.initial_tenant, timeline_id
+    )
     orphans = [remote_timeline_path / f"orphan_{i}" for i in range(3)]
     for orphan in orphans:
         orphan.write_text("I shouldnt be there")
@@ -833,7 +813,7 @@ def test_delete_orphaned_objects(
             f"deleting a file not referenced from index_part.json name={orphan.stem}"
         )
 
-    assert env.remote_storage.index_path(env.initial_tenant, timeline_id).exists()
+    assert env.pageserver_remote_storage.index_path(env.initial_tenant, timeline_id).exists()
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
@@ -842,10 +822,7 @@ def test_timeline_delete_resumed_on_attach(
     remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -881,7 +858,7 @@ def test_timeline_delete_resumed_on_attach(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
@@ -925,7 +902,7 @@ def test_timeline_delete_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -937,7 +914,7 @@ def test_timeline_delete_resumed_on_attach(
     # delete should be resumed
     wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id, iterations=iterations)
 
-    tenant_path = env.timeline_dir(tenant_id=tenant_id, timeline_id=timeline_id)
+    tenant_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():

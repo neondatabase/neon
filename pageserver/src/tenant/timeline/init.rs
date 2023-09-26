@@ -147,11 +147,7 @@ pub(super) fn reconcile(
                 Err(FutureLayer { local })
             } else {
                 Ok(match (local, remote) {
-                    (Some(local), Some(remote)) if local != remote => {
-                        assert_eq!(local.generation, remote.generation);
-
-                        UseRemote { local, remote }
-                    }
+                    (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
                     (Some(x), Some(_)) => UseLocal(x),
                     (None, Some(x)) => Evicted(x),
                     (Some(x), None) => NeedsUpload(x),

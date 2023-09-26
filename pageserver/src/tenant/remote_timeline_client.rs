@@ -342,7 +342,12 @@ impl RemoteTimelineClient {
     ) -> RemoteTimelineClient {
         RemoteTimelineClient {
             conf,
-            runtime: BACKGROUND_RUNTIME.handle().to_owned(),
+            runtime: if cfg!(test) {
+                // remote_timeline_client.rs tests rely on current-thread runtime
+                tokio::runtime::Handle::current()
+            } else {
+                BACKGROUND_RUNTIME.handle().clone()
+            },
             tenant_id,
             timeline_id,
             generation,
@@ -1425,6 +1430,30 @@ pub fn remote_index_path(
     .expect("Failed to construct path")
 }
 
+/// Given the key of an index, parse out the generation part of the name
+pub(crate) fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
+    let file_name = match path.get_path().file_name() {
+        Some(f) => f,
+        None => {
+            // Unexpected: we should be seeing index_part.json paths only
+            tracing::warn!("Malformed index key {}", path);
+            return None;
+        }
+    };
+
+    let file_name_str = match file_name.to_str() {
+        Some(s) => s,
+        None => {
+            tracing::warn!("Malformed index key {:?}", path);
+            return None;
+        }
+    };
+    match file_name_str.split_once('-') {
+        Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
+        None => None,
+    }
+}
+
 /// Files on the remote storage are stored with paths, relative to the workdir.
 /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
 ///
@@ -1463,11 +1492,8 @@ mod tests {
         },
         DEFAULT_PG_VERSION,
     };
-    use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::{
-        collections::HashSet,
-        path::{Path, PathBuf},
-    };
+
+    use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1524,8 +1550,6 @@ mod tests {
         tenant: Arc<Tenant>,
         timeline: Arc<Timeline>,
         tenant_ctx: RequestContext,
-        remote_fs_dir: PathBuf,
-        client: Arc<RemoteTimelineClient>,
     }
 
     impl TestSetup {
@@ -1535,53 +1559,43 @@ mod tests {
             let harness = TenantHarness::create(test_name)?;
             let (tenant, ctx) = harness.load().await;
 
-            // create an empty timeline directory
             let timeline = tenant
                 .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-
-            let remote_fs_dir = harness.conf.workdir.join("remote_fs");
-            std::fs::create_dir_all(remote_fs_dir)?;
-            let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
-
-            let storage_config = RemoteStorageConfig {
-                max_concurrent_syncs: std::num::NonZeroUsize::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                )
-                .unwrap(),
-                max_sync_errors: std::num::NonZeroU32::new(
-                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                )
-                .unwrap(),
-                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
-            };
-
-            let generation = Generation::new(0xdeadbeef);
-
-            let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
-
-            let client = Arc::new(RemoteTimelineClient {
-                conf: harness.conf,
-                runtime: tokio::runtime::Handle::current(),
-                tenant_id: harness.tenant_id,
-                timeline_id: TIMELINE_ID,
-                generation,
-                storage_impl: storage,
-                upload_queue: Mutex::new(UploadQueue::Uninitialized),
-                metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                    &harness.tenant_id,
-                    &TIMELINE_ID,
-                )),
-            });
 
             Ok(Self {
                 harness,
                 tenant,
                 timeline,
                 tenant_ctx: ctx,
-                remote_fs_dir,
-                client,
             })
+        }
+
+        /// Construct a RemoteTimelineClient in an arbitrary generation
+        fn build_client(&self, generation: Generation) -> Arc<RemoteTimelineClient> {
+            Arc::new(RemoteTimelineClient {
+                conf: self.harness.conf,
+                runtime: tokio::runtime::Handle::current(),
+                tenant_id: self.harness.tenant_id,
+                timeline_id: TIMELINE_ID,
+                generation,
+                storage_impl: self.harness.remote_storage.clone(),
+                upload_queue: Mutex::new(UploadQueue::Uninitialized),
+                metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                    &self.harness.tenant_id,
+                    &TIMELINE_ID,
+                )),
+            })
+        }
+
+        /// A tracing::Span that satisfies remote_timeline_client methods that assert tenant_id
+        /// and timeline_id are present.
+        fn span(&self) -> tracing::Span {
+            tracing::info_span!(
+                "test",
+                tenant_id = %self.harness.tenant_id,
+                timeline_id = %TIMELINE_ID
+            )
         }
     }
 
@@ -1602,29 +1616,44 @@ mod tests {
         // Schedule another deletion. Check that it's launched immediately.
         // Schedule index upload. Check that it's queued
 
+        let test_setup = TestSetup::new("upload_scheduling").await.unwrap();
+        let span = test_setup.span();
+        let _guard = span.enter();
+
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline: _timeline,
+            timeline,
             tenant_ctx: _tenant_ctx,
-            remote_fs_dir,
-            client,
-        } = TestSetup::new("upload_scheduling").await.unwrap();
+        } = test_setup;
+
+        let client = timeline.remote_client.as_ref().unwrap();
+
+        // Download back the index.json, and check that the list of files is correct
+        let initial_index_part = match client.download_index_file().await.unwrap() {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
+        };
+        let initial_layers = initial_index_part
+            .layer_metadata
+            .keys()
+            .map(|f| f.to_owned())
+            .collect::<HashSet<LayerFileName>>();
+        let initial_layer = {
+            assert!(initial_layers.len() == 1);
+            initial_layers.into_iter().next().unwrap()
+        };
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         println!("workdir: {}", harness.conf.workdir.display());
 
-        let remote_timeline_dir =
-            remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
+        let remote_timeline_dir = harness
+            .remote_fs_dir
+            .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
         println!("remote_timeline_dir: {}", remote_timeline_dir.display());
 
-        let metadata = dummy_metadata(Lsn(0x10));
-        client
-            .init_upload_queue_for_empty_remote(&metadata)
-            .unwrap();
-
-        let generation = Generation::new(0xdeadbeef);
+        let generation = harness.generation;
 
         // Create a couple of dummy files,  schedule upload for them
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
@@ -1705,6 +1734,7 @@ mod tests {
                 .map(|f| f.to_owned())
                 .collect(),
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_1.file_name(),
                 &layer_file_name_2.file_name(),
             ],
@@ -1734,6 +1764,7 @@ mod tests {
         }
         assert_remote_files(
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_1.file_name(),
                 &layer_file_name_2.file_name(),
                 "index_part.json",
@@ -1747,6 +1778,7 @@ mod tests {
 
         assert_remote_files(
             &[
+                &initial_layer.file_name(),
                 &layer_file_name_2.file_name(),
                 &layer_file_name_3.file_name(),
                 "index_part.json",
@@ -1763,16 +1795,10 @@ mod tests {
         let TestSetup {
             harness,
             tenant: _tenant,
-            timeline: _timeline,
-            client,
+            timeline,
             ..
         } = TestSetup::new("metrics").await.unwrap();
-
-        let metadata = dummy_metadata(Lsn(0x10));
-        client
-            .init_upload_queue_for_empty_remote(&metadata)
-            .unwrap();
-
+        let client = timeline.remote_client.as_ref().unwrap();
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
@@ -1783,10 +1809,19 @@ mod tests {
         )
         .unwrap();
 
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, Clone, Copy)]
         struct BytesStartedFinished {
             started: Option<usize>,
             finished: Option<usize>,
+        }
+        impl std::ops::Add for BytesStartedFinished {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self::Output {
+                Self {
+                    started: self.started.map(|v| v + rhs.started.unwrap_or(0)),
+                    finished: self.finished.map(|v| v + rhs.finished.unwrap_or(0)),
+                }
+            }
         }
         let get_bytes_started_stopped = || {
             let started = client
@@ -1804,47 +1839,140 @@ mod tests {
         };
 
         // Test
+        tracing::info!("now doing actual test");
 
-        let generation = Generation::new(0xdeadbeef);
-
-        let init = get_bytes_started_stopped();
+        let actual_a = get_bytes_started_stopped();
 
         client
             .schedule_layer_file_upload(
                 &layer_file_name_1,
-                &LayerFileMetadata::new(content_1.len() as u64, generation),
+                &LayerFileMetadata::new(content_1.len() as u64, harness.generation),
             )
             .unwrap();
 
-        let pre = get_bytes_started_stopped();
+        let actual_b = get_bytes_started_stopped();
 
         client.wait_completion().await.unwrap();
 
-        let post = get_bytes_started_stopped();
+        let actual_c = get_bytes_started_stopped();
 
         // Validate
 
-        assert_eq!(
-            init,
-            BytesStartedFinished {
-                started: None,
-                finished: None
-            }
-        );
-        assert_eq!(
-            pre,
-            BytesStartedFinished {
+        let expected_b = actual_a
+            + BytesStartedFinished {
                 started: Some(content_1.len()),
                 // assert that the _finished metric is created eagerly so that subtractions work on first sample
                 finished: Some(0),
-            }
-        );
-        assert_eq!(
-            post,
-            BytesStartedFinished {
+            };
+        assert_eq!(actual_b, expected_b);
+
+        let expected_c = actual_a
+            + BytesStartedFinished {
                 started: Some(content_1.len()),
-                finished: Some(content_1.len())
-            }
+                finished: Some(content_1.len()),
+            };
+        assert_eq!(actual_c, expected_c);
+    }
+
+    async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
+        // An empty IndexPart, just sufficient to ensure deserialization will succeed
+        let example_metadata = TimelineMetadata::example();
+        let example_index_part = IndexPart::new(
+            HashMap::new(),
+            example_metadata.disk_consistent_lsn(),
+            example_metadata,
         );
+
+        let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
+
+        let timeline_path = test_state.harness.timeline_path(&TIMELINE_ID);
+        let remote_timeline_dir = test_state.harness.remote_fs_dir.join(
+            timeline_path
+                .strip_prefix(&test_state.harness.conf.workdir)
+                .unwrap(),
+        );
+
+        std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
+
+        let index_path = test_state.harness.remote_fs_dir.join(
+            remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
+        );
+        eprintln!("Writing {}", index_path.display());
+        std::fs::write(&index_path, index_part_bytes).unwrap();
+        example_index_part
+    }
+
+    /// Assert that when a RemoteTimelineclient in generation `get_generation` fetches its
+    /// index, the IndexPart returned is equal to `expected`
+    async fn assert_got_index_part(
+        test_state: &TestSetup,
+        get_generation: Generation,
+        expected: &IndexPart,
+    ) {
+        let client = test_state.build_client(get_generation);
+
+        let download_r = client
+            .download_index_file()
+            .await
+            .expect("download should always succeed");
+        assert!(matches!(download_r, MaybeDeletedIndexPart::IndexPart(_)));
+        match download_r {
+            MaybeDeletedIndexPart::IndexPart(index_part) => {
+                assert_eq!(&index_part, expected);
+            }
+            MaybeDeletedIndexPart::Deleted(_index_part) => panic!("Test doesn't set deleted_at"),
+        }
+    }
+
+    #[tokio::test]
+    async fn index_part_download_simple() -> anyhow::Result<()> {
+        let test_state = TestSetup::new("index_part_download_simple").await.unwrap();
+        let span = test_state.span();
+        let _guard = span.enter();
+
+        // Simple case: we are in generation N, load the index from generation N - 1
+        let generation_n = 5;
+        let injected = inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
+
+        assert_got_index_part(&test_state, Generation::new(generation_n), &injected).await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn index_part_download_ordering() -> anyhow::Result<()> {
+        let test_state = TestSetup::new("index_part_download_ordering")
+            .await
+            .unwrap();
+
+        let span = test_state.span();
+        let _guard = span.enter();
+
+        // A generation-less IndexPart exists in the bucket, we should find it
+        let generation_n = 5;
+        let injected_none = inject_index_part(&test_state, Generation::none()).await;
+        assert_got_index_part(&test_state, Generation::new(generation_n), &injected_none).await;
+
+        // If a more recent-than-none generation exists, we should prefer to load that
+        let injected_1 = inject_index_part(&test_state, Generation::new(1)).await;
+        assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
+
+        // If a more-recent-than-me generation exists, we should ignore it.
+        let _injected_10 = inject_index_part(&test_state, Generation::new(10)).await;
+        assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
+
+        // If a directly previous generation exists, _and_ an index exists in my own
+        // generation, I should prefer my own generation.
+        let _injected_prev =
+            inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
+        let injected_current = inject_index_part(&test_state, Generation::new(generation_n)).await;
+        assert_got_index_part(
+            &test_state,
+            Generation::new(generation_n),
+            &injected_current,
+        )
+        .await;
+
+        Ok(())
     }
 }

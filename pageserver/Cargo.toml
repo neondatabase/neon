@@ -80,11 +80,11 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 hex-literal.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 
 [[bench]]

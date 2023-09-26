@@ -3,6 +3,9 @@
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
 use anyhow::Result;
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::task_mgr::TaskKind;
+use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -95,9 +98,9 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
-    let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0).await?;
+async fn get_holes(path: &Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
+    let file = FileBlockReader::new(VirtualFile::open(path).await?);
+    let summary_blk = file.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
@@ -124,6 +127,7 @@ async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
                 prev_key = Some(curr.next());
                 true
             },
+            ctx,
         )
         .await?;
     let mut holes = heap.into_vec();
@@ -134,6 +138,7 @@ async fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
 pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
+    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(10);
@@ -142,12 +147,12 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
-    for tenant in fs::read_dir(storage_path.join("tenants"))? {
+    for tenant in fs::read_dir(storage_path.join(TENANTS_SEGMENT_NAME))? {
         let tenant = tenant?;
         if !tenant.file_type()?.is_dir() {
             continue;
         }
-        for timeline in fs::read_dir(tenant.path().join("timelines"))? {
+        for timeline in fs::read_dir(tenant.path().join(TIMELINES_SEGMENT_NAME))? {
             let timeline = timeline?;
             if !timeline.file_type()?.is_dir() {
                 continue;
@@ -162,7 +167,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {
-                        layer_file.holes = get_holes(&layer.path(), max_holes).await?;
+                        layer_file.holes = get_holes(&layer.path(), max_holes, &ctx).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

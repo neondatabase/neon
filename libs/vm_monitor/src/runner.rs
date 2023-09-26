@@ -5,6 +5,7 @@
 //! all functionality.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{fmt::Debug, mem};
 
 use anyhow::{bail, Context};
@@ -35,6 +36,8 @@ pub struct Runner {
     /// **Note**: This counter is always odd, so that we avoid collisions between the IDs generated
     /// by us vs the autoscaler-agent.
     counter: usize,
+
+    last_upscale_request_at: Option<Instant>,
 
     /// A signal to kill the main thread produced by `self.run()`. This is triggered
     /// when the server receives a new connection. When the thread receives the
@@ -99,6 +102,7 @@ impl Runner {
             cgroup: None,
             dispatcher,
             counter: 1, // NB: must be odd, see the comment about the field for more.
+            last_upscale_request_at: None,
             kill,
         };
 
@@ -253,12 +257,11 @@ impl Runner {
                 new_cgroup_mem_high = cgroup.config.calculate_memory_high_value(available_memory);
             }
 
-            let limits = MemoryLimits::new(
+            let limits = MemoryLimits {
                 // new_cgroup_mem_high is initialized to 0 but it is guarancontextd to not be here
                 // since it is properly initialized in the previous cgroup if let block
-                new_cgroup_mem_high,
-                available_memory,
-            );
+                high: new_cgroup_mem_high,
+            };
             cgroup
                 .set_limits(&limits)
                 .context("failed to set cgroup memory limits")?;
@@ -324,7 +327,9 @@ impl Runner {
                 name = cgroup.path(),
                 "updating cgroup memory.high",
             );
-            let limits = MemoryLimits::new(new_cgroup_mem_high, available_memory);
+            let limits = MemoryLimits {
+                high: new_cgroup_mem_high,
+            };
             cgroup
                 .set_limits(&limits)
                 .context("failed to set file cache size")?;
@@ -397,6 +402,20 @@ impl Runner {
                     if request.is_none() {
                         bail!("failed to listen for upscale event from cgroup")
                     }
+
+                    // If it's been less than 1 second since the last time we requested upscaling,
+                    // ignore the event, to avoid spamming the agent (otherwise, this can happen
+                    // ~1k times per second).
+                    if let Some(t) = self.last_upscale_request_at {
+                        let elapsed = t.elapsed();
+                        if elapsed < Duration::from_secs(1) {
+                            info!(elapsed_millis = elapsed.as_millis(), "cgroup asked for upscale but too soon to forward the request, ignoring");
+                            continue;
+                        }
+                    }
+
+                    self.last_upscale_request_at = Some(Instant::now());
+
                     info!("cgroup asking for upscale; forwarding request");
                     self.counter += 2; // Increment, preserving parity (i.e. keep the
                                        // counter odd). See the field comment for more.

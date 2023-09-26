@@ -14,8 +14,10 @@
  */
 #include "postgres.h"
 
+#include "neon_pgversioncompat.h"
+
 #include "pagestore_client.h"
-#include "storage/relfilenode.h"
+#include RELFILEINFO_HDR
 #include "storage/smgr.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
@@ -30,7 +32,7 @@
 
 typedef struct
 {
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } RelTag;
 
@@ -75,7 +77,7 @@ neon_smgr_shmem_startup(void)
 }
 
 bool
-get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
+get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
@@ -84,7 +86,7 @@ get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
 		RelTag		tag;
 		RelSizeEntry *entry;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_SHARED);
 		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
@@ -99,14 +101,14 @@ get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
 }
 
 void
-set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
+set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
 		RelSizeEntry *entry;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_ENTER, NULL);
@@ -116,7 +118,7 @@ set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
 }
 
 void
-update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
+update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
 	if (relsize_hash_size > 0)
 	{
@@ -124,7 +126,7 @@ update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
 		RelSizeEntry *entry;
 		bool		found;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
@@ -135,13 +137,13 @@ update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
 }
 
 void
-forget_cached_relsize(RelFileNode rnode, ForkNumber forknum)
+forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		hash_search(relsize_hash, &tag, HASH_REMOVE, NULL);
