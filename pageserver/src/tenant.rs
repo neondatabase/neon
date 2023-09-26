@@ -2357,8 +2357,8 @@ impl Tenant {
         for (key, item) in toml.iter() {
             match key {
                 "tenant_config" => {
-                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
-                        format!("Failed to parse config from file '{target_config_display}' as pageserver config")
+                    tenant_conf = TenantConfOpt::try_from(item.to_owned()).with_context(|| {
+                        format!("Failed to parse '{key}' from file '{target_config_display}'")
                     })?;
                 }
                 _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),

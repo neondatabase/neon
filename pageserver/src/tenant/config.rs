@@ -8,7 +8,7 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use anyhow::Context;
+use anyhow::{bail, Context};
 use pageserver_api::models;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -382,6 +382,19 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
         tenant_conf.gc_feedback = request_data.gc_feedback;
 
         Ok(tenant_conf)
+    }
+}
+
+impl TryFrom<toml_edit::Item> for TenantConfOpt {
+    type Error = anyhow::Error;
+
+    fn try_from(item: toml_edit::Item) -> Result<Self, Self::Error> {
+        let toml_edit::Item::Table(table) = item else {
+            bail!("expected non-inline table but found {item}")
+        };
+        let deserializer = toml_edit::de::Deserializer::new(table.into());
+        serde_path_to_error::deserialize(deserializer)
+            .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()))
     }
 }
 
