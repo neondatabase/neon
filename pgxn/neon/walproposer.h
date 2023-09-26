@@ -1,8 +1,8 @@
 #ifndef __NEON_WALPROPOSER_H__
 #define __NEON_WALPROPOSER_H__
 
-#include "access/xlogdefs.h"
 #include "postgres.h"
+#include "access/xlogdefs.h"
 #include "port.h"
 #include "access/xlog_internal.h"
 #include "access/transam.h"
@@ -16,12 +16,6 @@
 #define MAX_SAFEKEEPERS 32
 #define MAX_SEND_SIZE (XLOG_BLCKSZ * 16)	/* max size of a single* WAL
 											 * message */
-#define XLOG_HDR_SIZE (1 + 8 * 3)	/* 'w' + startPos + walEnd + timestamp */
-#define XLOG_HDR_START_POS 1	/* offset of start position in wal sender*
-								 * message header */
-#define XLOG_HDR_END_POS (1 + 8)	/* offset of end position in wal sender*
-									 * message header */
-
 /*
  * In the spirit of WL_SOCKET_READABLE and others, this corresponds to no events having occurred,
  * because all WL_* events are given flags equal to some (1 << i), starting from i = 0
@@ -32,11 +26,8 @@ extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
 
-struct WalProposerConn;			/* Defined in libpqwalproposer */
+struct WalProposerConn;			/* Defined in implementation (walprop_pg.c) */
 typedef struct WalProposerConn WalProposerConn;
-
-struct WalMessage;
-typedef struct WalMessage WalMessage;
 
 /* Possible return values from ReadPGAsync */
 typedef enum
@@ -385,11 +376,6 @@ extern void WalProposerPoll(void);
 extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
 											PageserverFeedback *rf);
 
-extern void replication_feedback_set(PageserverFeedback *rf);
-extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
-
-/* libpqwalproposer hooks & helper type */
-
 /* Re-exported PostgresPollingStatusType */
 typedef enum
 {
@@ -443,8 +429,6 @@ typedef enum
 	WP_CONNECTION_IN_PROGRESS,
 }			WalProposerConnStatusType;
 
-extern uint64 BackpressureThrottlingTime(void);
-
 /*
  * Collection of hooks for walproposer, to call postgres functions,
  * read WAL and send it over the network.
@@ -452,7 +436,6 @@ extern uint64 BackpressureThrottlingTime(void);
 typedef struct walproposer_api
 {
 	WalproposerShmemState *	(*get_shmem_state) (void);
-	void					(*replication_feedback_set) (PageserverFeedback * rf);
 	void					(*start_streaming) (XLogRecPtr startpos, TimeLineID timeline);
 	void					(*init_walsender) (void);
 	void					(*init_standalone_sync_safekeepers) (void);

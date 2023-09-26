@@ -39,13 +39,17 @@
 #include "walproposer.h"
 #include "libpq-fe.h"
 
+#define XLOG_HDR_SIZE (1 + 8 * 3)	/* 'w' + startPos + walEnd + timestamp */
+#define XLOG_HDR_START_POS 1	/* offset of start position in wal sender*
+								 * message header */
+
+#define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
+
 char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
 static AppendResponse quorumFeedback;
-
-#define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
 static WalproposerShmemState * walprop_shared;
 
@@ -1473,7 +1477,7 @@ GetLatestNeonFeedback(PageserverFeedback * rf, Safekeeper * safekeepers, int n_s
 		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
 		 rf->replytime);
 
-	walprop_pg.replication_feedback_set(rf);
+	replication_feedback_set(rf);
 }
 
 /*
@@ -1546,7 +1550,7 @@ walprop_pg_process_safekeeper_feedback(Safekeeper * safekeepers, int n_safekeepe
 			 * pageserver.
 			 */
 								quorumFeedback.rf.disk_consistent_lsn,
-								walprop_pg.get_current_timestamp(), false);
+								walprop_pg_get_current_timestamp(), false);
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, safekeepers, n_safekeepers);
@@ -1574,7 +1578,6 @@ walprop_pg_confirm_wal_streamed(XLogRecPtr lsn)
  */
 const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
-	.replication_feedback_set = replication_feedback_set,
 	.start_streaming = walprop_pg_start_streaming,
 	.init_walsender = walprop_pg_init_walsender,
 	.init_standalone_sync_safekeepers = walprop_pg_init_standalone_sync_safekeepers,
