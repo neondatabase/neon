@@ -388,7 +388,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
     # Build up enough pressure to require evictions from both tenants,
     # but not enough to fall into global LRU.
-    # So, set target to all occipied space, except 2*env.layer_size per tenant
+    # So, set target to all occupied space, except 2*env.layer_size per tenant
     target = (
         du_by_timeline[other_tenant] + (du_by_timeline[our_tenant] // 2) - 2 * 2 * env.layer_size
     )
