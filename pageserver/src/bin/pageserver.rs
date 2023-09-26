@@ -2,10 +2,10 @@
 
 use std::env::{var, VarError};
 use std::sync::Arc;
-use std::{env, ops::ControlFlow, path::Path, str::FromStr};
+use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
@@ -64,12 +64,11 @@ fn main() -> anyhow::Result<()> {
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new(".neon"));
+        .map(Utf8Path::new)
+        .unwrap_or_else(|| Utf8Path::new(".neon"));
     let workdir = workdir
-        .canonicalize()
-        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
-    let workdir = Utf8PathBuf::from_path_buf(workdir).expect("non-Unicode path");
+        .canonicalize_utf8()
+        .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
 

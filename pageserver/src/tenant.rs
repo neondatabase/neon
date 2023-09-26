@@ -1008,11 +1008,12 @@ impl Tenant {
 
         let timelines_dir = self.conf.timelines_path(&self.tenant_id);
 
-        for entry in
-            std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+        for entry in timelines_dir
+            .read_dir_utf8()
+            .context("list timelines directory for tenant")?
         {
             let entry = entry.context("read timeline dir entry")?;
-            let timeline_dir = Utf8PathBuf::from_path_buf(entry.path()).expect("non-Unicode path");
+            let timeline_dir = entry.path();
 
             if crate::is_temporary(&timeline_dir) {
                 info!("Found temporary timeline directory, removing: {timeline_dir}");
@@ -1120,18 +1121,13 @@ impl Tenant {
                 }
 
                 let file_name = entry.file_name();
-                if let Ok(timeline_id) =
-                    file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                {
+                if let Ok(timeline_id) = file_name.parse::<TimelineId>() {
                     let metadata = load_metadata(self.conf, &self.tenant_id, &timeline_id)
                         .context("failed to load metadata")?;
                     timelines_to_load.insert(timeline_id, metadata);
                 } else {
                     // A file or directory that doesn't look like a timeline ID
-                    warn!(
-                        "unexpected file or directory in timelines directory: {}",
-                        file_name.to_string_lossy()
-                    );
+                    warn!("unexpected file or directory in timelines directory: {file_name}");
                 }
             }
         }

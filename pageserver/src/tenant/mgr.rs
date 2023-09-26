@@ -121,18 +121,16 @@ pub async fn init_tenant_mgr(
         None
     };
 
-    let mut dir_entries = fs::read_dir(&tenants_dir)
-        .await
+    let mut dir_entries = tenants_dir.read_dir_utf8()
         .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
 
     loop {
-        match dir_entries.next_entry().await {
-            Ok(None) => break,
-            Ok(Some(dir_entry)) => {
-                let tenant_dir_path =
-                    Utf8PathBuf::from_path_buf(dir_entry.path()).expect("non-Unicode path");
+        match dir_entries.next() {
+            None => break,
+            Some(Ok(dir_entry)) => {
+                let tenant_dir_path = dir_entry.path().to_path_buf();
                 if crate::is_temporary(&tenant_dir_path) {
                     info!("Found temporary tenant directory, removing: {tenant_dir_path}");
                     // No need to use safe_remove_tenant_dir_all because this is already
@@ -226,7 +224,7 @@ pub async fn init_tenant_mgr(
                     }
                 }
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 // On error, print it, but continue with the other tenants. If we error out
                 // here, the pageserver startup fails altogether, causing outage for *all*
                 // tenants. That seems worse.

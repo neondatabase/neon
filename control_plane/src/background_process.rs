@@ -257,9 +257,9 @@ fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
 ///    will remain held until the cmd exits.
 fn pre_exec_create_pidfile<P>(cmd: &mut Command, path: P) -> &mut Command
 where
-    P: Into<PathBuf>,
+    P: Into<Utf8PathBuf>,
 {
-    let path: Utf8PathBuf = Utf8PathBuf::from_path_buf(path.into()).expect("non-Unicode path");
+    let path: Utf8PathBuf = path.into();
     // SAFETY
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
