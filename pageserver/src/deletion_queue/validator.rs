@@ -168,9 +168,13 @@ where
                 .get(&tenant_id)
                 .expect("Map was built from the same keys we're reading");
 
-            // If the tenant was missing from the validation response, it has been deleted.  We may treat
-            // deletions as valid as the tenant's remote storage is all to be wiped anyway.
-            let valid = tenants_valid.get(&tenant_id).copied().unwrap_or(true);
+            let valid = tenants_valid
+                .get(&tenant_id)
+                .copied()
+                // If the tenant was missing from the validation response, it has been deleted.
+                // The Timeline that requested the LSN update is probably already torn down,
+                // or will be torn down soon.  In this case, drop the update by setting valid=false.
+                .unwrap_or(false);
 
             if valid && *validated_generation == tenant_lsn_state.generation {
                 for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
