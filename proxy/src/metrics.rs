@@ -39,7 +39,8 @@ pub struct MetricCounter {
 }
 
 impl MetricCounter {
-    pub fn add(&self, bytes: u64) {
+    /// Record that some bytes were sent from the proxy to the client
+    pub fn record_egress(&self, bytes: u64) {
         self.transmitted.fetch_add(bytes, Ordering::AcqRel);
     }
 
@@ -90,7 +91,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn open(&self, ids: Ids) -> Arc<MetricCounter> {
+    /// Register a new byte metrics counter for this endpoint
+    pub fn register(&self, ids: Ids) -> Arc<MetricCounter> {
         let entry = if let Some(entry) = self.endpoints.get(&ids) {
             entry.clone()
         } else {

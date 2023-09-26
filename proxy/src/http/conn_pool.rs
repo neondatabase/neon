@@ -466,6 +466,6 @@ pub struct Client {
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.open(self.ids.clone())
+        USAGE_METRICS.register(self.ids.clone())
     }
 }

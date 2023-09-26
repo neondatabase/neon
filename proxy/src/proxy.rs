@@ -603,7 +603,7 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
-    let usage = USAGE_METRICS.open(Ids {
+    let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id.to_string(),
         branch_id: aux.branch_id.to_string(),
     });
@@ -615,7 +615,7 @@ pub async fn proxy_pass(
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
-            usage.add(cnt as u64);
+            usage.record_egress(cnt as u64);
         },
     );
 

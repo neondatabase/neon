@@ -356,7 +356,7 @@ async fn handle_inner(
 
             // count the egress bytes - we miss the TLS and header overhead but oh well...
             // moving this later in the stack is going to be a lot of effort and ehhhh
-            metrics.add(len as u64);
+            metrics.record_egress(len as u64);
             Ok(response)
         }
         Err(e) => Err(e),
