@@ -138,14 +138,14 @@ pub struct PageCacheMetricsForTaskKind {
 }
 
 pub struct PageCacheMetrics {
-    by_task_kind: EnumMap<TaskKind, PageCacheMetricsForTaskKind>,
+    map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
 }
 
 static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
         "Number of read accesses to the page cache that hit",
-        &["task_kind", "key_kind", "hit_kind"]
+        &["task_kind", "key_kind", "content_kind", "hit_kind"]
     )
     .expect("failed to define a metric")
 });
@@ -154,52 +154,70 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_accesses_total",
         "Number of read accesses to the page cache",
-        &["task_kind", "key_kind"]
+        &["task_kind", "key_kind", "content_kind"]
     )
     .expect("failed to define a metric")
 });
 
 pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
-    by_task_kind: EnumMap::from_array(std::array::from_fn(|task_kind| {
+    map: EnumMap::from_array(std::array::from_fn(|task_kind| {
         let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
         let task_kind: &'static str = task_kind.into();
-        PageCacheMetricsForTaskKind {
-            read_accesses_materialized_page: {
-                PAGE_CACHE_READ_ACCESSES
-                    .get_metric_with_label_values(&[task_kind, "materialized_page"])
-                    .unwrap()
-            },
+        EnumMap::from_array(std::array::from_fn(|content_kind| {
+            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind: &'static str = content_kind.into();
+            PageCacheMetricsForTaskKind {
+                read_accesses_materialized_page: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                        ])
+                        .unwrap()
+                },
 
-            read_accesses_immutable: {
-                PAGE_CACHE_READ_ACCESSES
-                    .get_metric_with_label_values(&[task_kind, "immutable"])
-                    .unwrap()
-            },
+                read_accesses_immutable: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
+                        .unwrap()
+                },
 
-            read_hits_immutable: {
-                PAGE_CACHE_READ_HITS
-                    .get_metric_with_label_values(&[task_kind, "immutable", "-"])
-                    .unwrap()
-            },
+                read_hits_immutable: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        .unwrap()
+                },
 
-            read_hits_materialized_page_exact: {
-                PAGE_CACHE_READ_HITS
-                    .get_metric_with_label_values(&[task_kind, "materialized_page", "exact"])
-                    .unwrap()
-            },
+                read_hits_materialized_page_exact: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "exact",
+                        ])
+                        .unwrap()
+                },
 
-            read_hits_materialized_page_older_lsn: {
-                PAGE_CACHE_READ_HITS
-                    .get_metric_with_label_values(&[task_kind, "materialized_page", "older_lsn"])
-                    .unwrap()
-            },
-        }
+                read_hits_materialized_page_older_lsn: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "older_lsn",
+                        ])
+                        .unwrap()
+                },
+            }
+        }))
     })),
 });
 
 impl PageCacheMetrics {
-    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> &PageCacheMetricsForTaskKind {
-        &self.by_task_kind[task_kind]
+    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
+        &self.map[ctx.task_kind()][ctx.page_content_kind()]
     }
 }
 
@@ -1283,6 +1301,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 
 pub struct RemoteTimelineClientMetrics {

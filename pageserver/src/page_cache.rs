@@ -349,7 +349,7 @@ impl PageCache {
         ctx: &RequestContext,
     ) -> Option<(Lsn, PageReadGuard)> {
         crate::metrics::PAGE_CACHE
-            .for_task_kind(ctx.task_kind())
+            .for_ctx(ctx)
             .read_accesses_materialized_page
             .inc();
 
@@ -370,12 +370,12 @@ impl PageCache {
             {
                 if available_lsn == lsn {
                     crate::metrics::PAGE_CACHE
-                        .for_task_kind(ctx.task_kind())
+                        .for_ctx(ctx)
                         .read_hits_materialized_page_exact
                         .inc();
                 } else {
                     crate::metrics::PAGE_CACHE
-                        .for_task_kind(ctx.task_kind())
+                        .for_ctx(ctx)
                         .read_hits_materialized_page_older_lsn
                         .inc();
                 }
@@ -513,11 +513,9 @@ impl PageCache {
             }
             CacheKey::ImmutableFilePage { .. } => (
                 &crate::metrics::PAGE_CACHE
-                    .for_task_kind(ctx.task_kind())
+                    .for_ctx(ctx)
                     .read_accesses_immutable,
-                &crate::metrics::PAGE_CACHE
-                    .for_task_kind(ctx.task_kind())
-                    .read_hits_immutable,
+                &crate::metrics::PAGE_CACHE.for_ctx(ctx).read_hits_immutable,
             ),
         };
         read_access.inc();

@@ -24,7 +24,7 @@
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
@@ -484,10 +484,23 @@ impl ImageLayerInner {
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf, ctx).await? {
+        if let Some(offset) = tree_reader
+            .get(
+                &keybuf,
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+                    .build(),
+            )
+            .await?
+        {
             let blob = file
                 .block_cursor()
-                .read_blob(offset, ctx)
+                .read_blob(
+                    offset,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::ImageLayerValue)
+                        .build(),
+                )
                 .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
             let value = Bytes::from(blob);
