@@ -28,7 +28,7 @@
 //! "values" part.
 //!
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
@@ -915,9 +915,15 @@ impl DeltaLayerInner {
 
                     !blob_ref.will_init()
                 },
-                ctx,
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+                    .build(),
             )
             .await?;
+
+        let ctx = &RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerValue)
+            .build();
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
         let cursor = file.block_cursor();
@@ -1005,7 +1011,9 @@ impl DeltaLayerInner {
                     all_keys.push(entry);
                     true
                 },
-                ctx,
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+                    .build(),
             )
             .await?;
         if let Some(last) = all_keys.last_mut() {
