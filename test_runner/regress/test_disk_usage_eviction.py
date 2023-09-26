@@ -141,6 +141,18 @@ class EvictionEnv:
         self.neon_env.pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
 
 
+def human_bytes(amt: float) -> str:
+    suffixes = ["", "Ki", "Mi", "Gi"]
+
+    last = suffixes[-1]
+
+    for name in suffixes:
+        if amt < 1024 or name == last:
+            return f"{int(round(amt))} {name}B"
+        amt = amt / 1024
+
+    raise RuntimeError("unreachable")
+
 @pytest.fixture
 def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
     """
@@ -406,17 +418,22 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
             later_tenant_usage < du_by_timeline[tenant]
         ), "all tenants should have lost some layers"
 
+    warmed_up = later_du_by_timeline[our_tenant]
     assert (
-        later_du_by_timeline[our_tenant] > 0.5 * du_by_timeline[our_tenant]
-    ), "our warmed up tenant should be at about half capacity, part 1"
+        warmed_up > 0.5 * du_by_timeline[our_tenant]
+    ), f"our warmed up tenant should be at about half capacity but was {human_bytes(warmed_up)} expected more than {human_bytes(0.5 * du_by_timeline[our_tenant])}"
     assert (
         # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
         # So, check for up to 3 here.
-        later_du_by_timeline[our_tenant]
+        warmed_up
         < 0.5 * du_by_timeline[our_tenant] + 3 * env.layer_size
     ), "our warmed up tenant should be at about half capacity, part 2"
+
+    other_size = later_du_by_timeline[other_tenant]
+
+    log.info(f"later_du_by_timeline[other_tenant] = {other_size} ({human_bytes(other_size)}), before_relax = {other_size < 2 * env.layer_size}")
     assert (
-        later_du_by_timeline[other_tenant] < 3 * env.layer_size
+        other_size < 3 * env.layer_size
     ), "the other tenant should be evicted to 2-3 layers"
 
 
