@@ -169,6 +169,8 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "tokio",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -2735,7 +2737,6 @@ dependencies = [
  "utils",
  "walkdir",
  "workspace_hack",
- "zstd",
 ]
 
 [[package]]

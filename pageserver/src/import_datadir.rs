@@ -631,15 +631,15 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     }
     // Don't rely on file system order for listing as it may be non-deterministic
     paths.sort();
-    let mut builder = Builder::new(Vec::new());
+    let zstd = async_compression::tokio::write::ZstdEncoder::new(Vec::new());
+    let mut builder = Builder::new(zstd);
     // Use reproducible header mode
     builder.mode(HeaderMode::Deterministic);
     for path in paths {
         builder.append_path(path).await?;
     }
     builder.finish().await?;
-    let tar_data = builder.into_inner().await?;
-    let mut compressor = zstd::bulk::Compressor::new(zstd::DEFAULT_COMPRESSION_LEVEL)?;
-    let compressed = compressor.compress(&tar_data)?;
+    let zstd = builder.into_inner().await?;
+    let compressed = zstd.into_inner();
     Ok(compressed)
 }
