@@ -1030,7 +1030,7 @@ impl Tenant {
                     "Found an uninit mark file {timeline_uninit_mark_file}, removing the timeline and its uninit mark",
                 );
                 let timeline_id =
-                    TimelineId::try_from(timeline_uninit_mark_file.as_std_path().file_stem())
+                    TimelineId::try_from(timeline_uninit_mark_file.file_stem())
                         .with_context(|| {
                             format!(
                             "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
@@ -1044,7 +1044,7 @@ impl Tenant {
                 }
             } else if crate::is_delete_mark(&timeline_dir) {
                 // If metadata exists, load as usual, continue deletion
-                let timeline_id = TimelineId::try_from(timeline_dir.as_std_path().file_stem())
+                let timeline_id = TimelineId::try_from(timeline_dir.file_stem())
                     .with_context(|| {
                         format!(
                             "Could not parse timeline id out of the timeline uninit mark name {timeline_dir}",
@@ -1089,7 +1089,7 @@ impl Tenant {
                     warn!("Timeline dir entry become invalid: {timeline_dir}");
                     continue;
                 }
-                let timeline_id = TimelineId::try_from(timeline_dir.as_std_path().file_name())
+                let timeline_id = TimelineId::try_from(timeline_dir.file_name())
                     .with_context(|| {
                         format!(
                             "Could not parse timeline id out of the timeline dir name {timeline_dir}",
