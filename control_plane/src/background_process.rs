@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::{fs, io, thread};

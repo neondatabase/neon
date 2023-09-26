@@ -12,8 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
-use camino::Utf8Path;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
@@ -1015,12 +1014,12 @@ impl Tenant {
             let entry = entry.context("read timeline dir entry")?;
             let timeline_dir = entry.path();
 
-            if crate::is_temporary(&timeline_dir) {
+            if crate::is_temporary(timeline_dir) {
                 info!("Found temporary timeline directory, removing: {timeline_dir}");
-                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                if let Err(e) = std::fs::remove_dir_all(timeline_dir) {
                     error!("Failed to remove temporary directory '{timeline_dir}': {e:?}");
                 }
-            } else if is_uninit_mark(&timeline_dir) {
+            } else if is_uninit_mark(timeline_dir) {
                 if !timeline_dir.exists() {
                     warn!("Timeline dir entry become invalid: {timeline_dir}");
                     continue;
@@ -1043,7 +1042,7 @@ impl Tenant {
                 {
                     error!("Failed to clean up uninit marked timeline: {e:?}");
                 }
-            } else if crate::is_delete_mark(&timeline_dir) {
+            } else if crate::is_delete_mark(timeline_dir) {
                 // If metadata exists, load as usual, continue deletion
                 let timeline_id = TimelineId::try_from(timeline_dir.file_stem())
                     .with_context(|| {
@@ -1105,7 +1104,7 @@ impl Tenant {
                         "Found an uninit mark file, removing the timeline and its uninit mark",
                     );
                     if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
+                        remove_timeline_and_uninit_mark(timeline_dir, &timeline_uninit_mark_file)
                     {
                         error!("Failed to clean up uninit marked timeline: {e:?}");
                     }

@@ -121,7 +121,8 @@ pub async fn init_tenant_mgr(
         None
     };
 
-    let mut dir_entries = tenants_dir.read_dir_utf8()
+    let mut dir_entries = tenants_dir
+        .read_dir_utf8()
         .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
