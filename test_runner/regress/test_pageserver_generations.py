@@ -137,7 +137,7 @@ def get_deletion_queue_depth(ps_http) -> int:
     dropped = get_deletion_queue_dropped(ps_http)
     depth = submitted - executed - dropped
     log.info(f"get_deletion_queue_depth: {depth} ({submitted} - {executed} - {dropped})")
-    
+
     assert depth >= 0
     return int(depth)
 
