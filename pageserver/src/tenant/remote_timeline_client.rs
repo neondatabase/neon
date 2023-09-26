@@ -1247,6 +1247,9 @@ impl RemoteTimelineClient {
         };
 
         if let Some((lsn, slot)) = lsn_update {
+            // Updates to the remote_consistent_lsn we advertise to pageservers
+            // are all routed through the DeletionQueue, to enforce important
+            // data safety guarantees (see docs/rfcs/025-generation-numbers.md)
             self.deletion_queue_client
                 .update_remote_consistent_lsn(
                     self.tenant_id,
