@@ -305,7 +305,7 @@ impl Default for PageServerConfigBuilder {
                 env::current_dir().expect("cannot access current directory"),
             )
             .expect("non-Unicode path")
-            .join(Utf8PathBuf::from_str("pg_install").unwrap())),
+            .join("pg_install")),
             http_auth_type: Set(AuthType::Trust),
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
@@ -582,11 +582,11 @@ impl PageServerConf {
         self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
-    pub fn deletion_prefix(&self) -> PathBuf {
+    pub fn deletion_prefix(&self) -> Utf8PathBuf {
         self.workdir.join("deletion")
     }
 
-    pub fn deletion_list_path(&self, sequence: u64) -> PathBuf {
+    pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
         // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;
@@ -595,7 +595,7 @@ impl PageServerConf {
             .join(format!("{sequence:016x}-{VERSION:02x}.list"))
     }
 
-    pub fn deletion_header_path(&self) -> PathBuf {
+    pub fn deletion_header_path(&self) -> Utf8PathBuf {
         // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;

@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for RemotePath {
         D: serde::Deserializer<'de>,
     {
         let str = String::deserialize(deserializer)?;
-        Ok(Self(PathBuf::from(&str)))
+        Ok(Self(Utf8PathBuf::from(&str)))
     }
 }
 
@@ -112,7 +112,7 @@ impl RemotePath {
         self.0.extension()
     }
 
-    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, std::path::StripPrefixError> {
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
 }
