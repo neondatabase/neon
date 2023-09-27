@@ -1269,6 +1269,10 @@ impl Tenant {
                     }
 
                     // We're loading fresh timeline that didnt yet make it into remote.
+                    //
+                    // If we were to declare this timeline as being deleted (and delete it now) as a
+                    // retry never completed to a client, we must then remember it and delete any
+                    // children we come across.
                     (None, Some(remote_client))
                 }
                 Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
