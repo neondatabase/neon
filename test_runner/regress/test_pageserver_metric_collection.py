@@ -18,6 +18,9 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 
+# TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP
+
+
 @pytest.mark.parametrize(
     "remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.LOCAL_FS]
 )
