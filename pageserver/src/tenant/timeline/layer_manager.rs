@@ -263,7 +263,7 @@ impl LayerManager {
         let desc = layer.layer_desc();
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            metrics.resident_physical_size_gauge.sub(desc.file_size);
+            metrics.resident_physical_size_sub(desc.file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.

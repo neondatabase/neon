@@ -559,7 +559,7 @@ impl Timeline {
     }
 
     pub fn resident_physical_size(&self) -> u64 {
-        self.metrics.resident_physical_size_gauge.get()
+        self.metrics.resident_physical_size_get()
     }
 
     ///
@@ -1309,10 +1309,7 @@ impl Timeline {
         // will treat the file as a local layer again, count it towards resident size,
         // and it'll be like the layer removal never happened.
         // The bump in resident size is perhaps unexpected but overall a robust behavior.
-        self.metrics
-            .resident_physical_size_gauge
-            .sub(layer_file_size);
-
+        self.metrics.resident_physical_size_sub(layer_file_size);
         self.metrics.evictions.inc();
 
         if let Some(delta) = local_layer_residence_duration {
@@ -1846,9 +1843,7 @@ impl Timeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.metrics
-            .resident_physical_size_gauge
-            .set(total_physical_size);
+        self.metrics.resident_physical_size_set(total_physical_size);
 
         timer.stop_and_record();
         Ok(())
@@ -4398,7 +4393,7 @@ impl Timeline {
 
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self_clone.metrics.resident_physical_size_gauge.add(*size);
+                    self_clone.metrics.resident_physical_size_add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
