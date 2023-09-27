@@ -2,7 +2,7 @@
 // Main entry point for the safekeeper executable
 //
 use anyhow::{bail, Context, Result};
-use camino::{Utf8PathBuf, Utf8Path};
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
