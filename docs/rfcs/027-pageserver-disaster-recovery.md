@@ -94,6 +94,14 @@ Where the parameters are:
   One specifies either both `from_lsn` and `target`, or neither.
   Writing into the same timeline is forbidden.
 
+The API call returns immediately after creation of the new timeline, and
+doesn't wait for the timeline's WAL replay to finish. The API call returns
+the id of the newly created timeline. The new timeline will appear in the
+usual listings and its lsn will increase until WAL replay has finished.
+As the caller knows the targeted lsn goal, this allows them to be informed
+about progress. There is no push notification for when the process has
+finished, any followup actions need to first poll for completion.
+
 [generation numbers RFC]: https://github.com/neondatabase/neon/pull/4919
 
 ### Higher level features
@@ -126,12 +134,17 @@ limits and billing we apply to existing timelines.
 ## Proposed implementation
 
 The first problem to keep in mind is the reproducability of `initdb`.
-So an initial step would be to upload `initdb` snapshots to S3,
-maybe deduplicating them by hash, for a given storage/postgres version
-combination.
+So an initial step would be to upload `initdb` snapshots to S3.
 
 After that, we'd have the endpoint spawn a background process which
-performs the replay of the WAL to that new timeline.
+performs the replay of the WAL to that new timeline. This process should
+follow the existing workflows as closely as possible, just using the
+WAL records of a different timeline.
+
+The timeline created will be in a special state that solely looks for WAL
+entries of the timeline it is trying to copy. Once the target LSN is reached,
+it turns into a normal timeline that also accepts writes to its own
+timeline ID.
 
 ### Scalability
 
