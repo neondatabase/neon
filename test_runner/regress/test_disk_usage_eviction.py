@@ -406,7 +406,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     [warm, cold] = list(du_by_timeline.keys())
     (tenant_id, timeline_id) = warm
 
-    # make our tenant more recently used than the other one
+    # make picked tenant more recently used than the other one
     env.warm_up_tenant(tenant_id)
 
     # Build up enough pressure to require evictions from both tenants,
@@ -444,8 +444,8 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     )
     log.info(f"expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}")
 
-    assert warm_size > warm_lower, "our warmed up tenant should be at about half size (lower)"
-    assert warm_size < warm_upper, "our warmed up tenant should be at about half size (upper)"
+    assert warm_size > warm_lower, "warmed up tenant should be at about half size (lower)"
+    assert warm_size < warm_upper, "warmed up tenant should be at about half size (upper)"
 
     assert (
         cold_size < cold_upper
