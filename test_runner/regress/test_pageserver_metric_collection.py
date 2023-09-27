@@ -68,6 +68,14 @@ def test_metric_collection(
     env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
+    # we have a fast rate of calculation, these can happen at shutdown
+    env.pageserver.allowed_errors.append(
+        ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+    )
+
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
@@ -211,6 +219,14 @@ def test_metric_collection_cleans_up_tempfile(
 
     # httpserver is shut down before pageserver during passing run
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
+    # we have a fast rate of calculation, these can happen at shutdown
+    env.pageserver.allowed_errors.append(
+        ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+    )
+
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
