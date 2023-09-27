@@ -244,8 +244,12 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
 
     healthy_tenant_id, healthy_timeline_id = env.timelines[1]
 
-    broken_size_pre, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
-    healthy_size_pre, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+    broken_size_pre, _, _ = poor_mans_du(
+        env.neon_env, [(broken_tenant_id, broken_timeline_id)], verbose=True
+    )
+    healthy_size_pre, _, _ = poor_mans_du(
+        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], verbose=True
+    )
 
     # try to evict everything, then validate that broken tenant wasn't touched
     target = broken_size_pre + healthy_size_pre
@@ -253,8 +257,12 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     response = env.pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
-    broken_size_post, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
-    healthy_size_post, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+    broken_size_post, _, _ = poor_mans_du(
+        env.neon_env, [(broken_tenant_id, broken_timeline_id)], verbose=True
+    )
+    healthy_size_post, _, _ = poor_mans_du(
+        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], verbose=True
+    )
 
     assert broken_size_pre == broken_size_post, "broken tenant should not be touched"
     assert healthy_size_post < healthy_size_pre
