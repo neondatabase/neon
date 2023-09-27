@@ -7,9 +7,9 @@
  *
  * We have two ways of launching WalProposer:
  *
- *   1. As a background worker which will run physical WalSender with
- *      am_wal_proposer flag set to true. WalSender in turn would handle WAL
- *      reading part and call WalProposer when ready to scatter WAL.
+ *   1. As a background worker which will pretend to be physical WalSender.
+ * 		WalProposer will receive notifications about new available WAL and
+ * 		will immediately broadcast it to alive safekeepers.
  *
  *   2. As a standalone utility by running `postgres --sync-safekeepers`. That
  *      is needed to create LSN from which it is safe to start postgres. More
@@ -28,6 +28,10 @@
  *         playing consensus game is impossible, so speculative 'let's just poll
  *         safekeepers, learn start LSN of future epoch and run basebackup'
  *         won't work.
+ * 
+ * Both ways are implemented in walproposer_pg.c file. This file contains
+ * generic part of walproposer which can be used in both cases, but can also
+ * be used as an independent library.
  *
  *-------------------------------------------------------------------------
  */
@@ -227,13 +231,14 @@ WalProposerPoll(WalProposer *wp)
 		}
 
 		now = wp->api.get_current_timestamp();
-		if (rc == 0 || TimeToReconnect(wp, now) <= 0)			/* timeout expired: poll state */
+		/* timeout expired: poll state */
+		if (rc == 0 || TimeToReconnect(wp, now) <= 0)
 		{
 			TimestampTz now;
 
 			/*
 			 * If no WAL was generated during timeout (and we have already
-			 * collected the quorum), then send pool message
+			 * collected the quorum), then send empty keepalive message
 			 */
 			if (wp->availableLsn != InvalidXLogRecPtr)
 			{
@@ -904,7 +909,7 @@ HandleElectedProposer(WalProposer *wp)
 		return;
 	}
 
-	wp->api.start_streaming(wp, wp->propEpochStartLsn, wp->greetRequest.timeline);
+	wp->api.start_streaming(wp, wp->propEpochStartLsn);
 	/* Should not return here */
 }
 
