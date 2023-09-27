@@ -1342,6 +1342,7 @@ use std::time::{Duration, Instant};
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 
+/// Maintain a per timeline gauge in addition to the global gauge.
 struct PerTimelineRemotePhysicalSizeGauge {
     last_set: u64,
     gauge: UIntGauge,
