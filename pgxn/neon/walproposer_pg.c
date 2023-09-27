@@ -52,7 +52,7 @@ int			wal_acceptor_connection_timeout = 10000;
 static AppendResponse quorumFeedback;
 static WalproposerShmemState * walprop_shared;
 static WalProposerConfig walprop_config;
-
+static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
 
 static void nwp_shmem_startup_hook(void);
@@ -74,8 +74,6 @@ static shmem_startup_hook_type prev_shmem_startup_hook_type;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void walproposer_shmem_request(void);
 #endif
-
-static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 
 static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
@@ -235,13 +233,13 @@ backpressure_lag_impl(void)
 /*
  * WalproposerShmemSize --- report amount of shared memory space needed
  */
-Size
+static Size
 WalproposerShmemSize(void)
 {
 	return sizeof(WalproposerShmemState);
 }
 
-bool
+static bool
 WalproposerShmemInit(void)
 {
 	bool		found;
@@ -401,14 +399,14 @@ replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRe
  * Start walsender streaming replication
  */
 static void
-walprop_pg_start_streaming(WalProposer *wp, XLogRecPtr startpos, TimeLineID timeline)
+walprop_pg_start_streaming(WalProposer *wp, XLogRecPtr startpos)
 {
 	StartReplicationCmd cmd;
 
 	elog(LOG, "WAL proposer starts streaming at %X/%X",
 		 LSN_FORMAT_ARGS(startpos));
 	cmd.slotname = WAL_PROPOSER_SLOT_NAME;
-	cmd.timeline = timeline;
+	cmd.timeline = wp->greetRequest.timeline;
 	cmd.startpoint = startpos;
 	StartProposerReplication(wp, &cmd);
 }
@@ -1632,9 +1630,6 @@ walprop_pg_confirm_wal_streamed(XLogRecPtr lsn)
 		PhysicalConfirmReceivedLocation(lsn);
 }
 
-/*
- * Temporary globally exported walproposer API for postgres.
- */
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
 	.start_streaming = walprop_pg_start_streaming,
@@ -1647,7 +1642,6 @@ static const walproposer_api walprop_pg = {
 	.conn_connect_poll = walprop_connect_poll,
 	.conn_send_query = walprop_send_query,
 	.conn_get_query_result = walprop_get_query_result,
-	.conn_socket = walprop_socket,
 	.conn_flush = walprop_flush,
 	.conn_finish = walprop_finish,
 	.conn_async_read = walprop_async_read,
