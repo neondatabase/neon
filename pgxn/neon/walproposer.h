@@ -10,6 +10,12 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
+#ifdef WALPROPOSER_LIB
+#define walprop_log(...) while(0){}
+#else
+#define walprop_log elog
+#endif
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 

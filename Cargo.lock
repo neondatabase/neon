@@ -381,6 +381,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "atty"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
+dependencies = [
+ "hermit-abi 0.1.19",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1120,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cbindgen"
+version = "0.24.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b922faaf31122819ec80c4047cc684c6979a087366c069611e33649bf98e18d"
+dependencies = [
+ "clap 3.2.25",
+ "heck",
+ "indexmap",
+ "log",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 1.0.109",
+ "tempfile",
+ "toml 0.5.11",
+]
+
+[[package]]
 name = "cc"
 version = "1.0.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1209,6 +1239,21 @@ dependencies = [
 
 [[package]]
 name = "clap"
+version = "3.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ea181bf566f71cb9a5d17a59e1871af638180a18fb0035c92ae62b705207123"
+dependencies = [
+ "atty",
+ "bitflags",
+ "clap_lex 0.2.4",
+ "indexmap",
+ "strsim",
+ "termcolor",
+ "textwrap",
+]
+
+[[package]]
+name = "clap"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93aae7a4192245f70fe75dd9157fc7b4a5bf53e88d30bd4396f7d8f9284d5acc"
@@ -1227,7 +1272,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "bitflags",
- "clap_lex",
+ "clap_lex 0.5.0",
  "strsim",
 ]
 
@@ -1241,6 +1286,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.28",
+]
+
+[[package]]
+name = "clap_lex"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2850f2f5a82cbf437dd5af4d49848fbdfc27c157c3d010345776f952765261c5"
+dependencies = [
+ "os_str_bytes",
 ]
 
 [[package]]
@@ -1300,7 +1354,7 @@ dependencies = [
  "async-compression",
  "cfg-if",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "compute_api",
  "flate2",
  "futures",
@@ -1384,7 +1438,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "clap",
+ "clap 4.3.0",
  "comfy-table",
  "compute_api",
  "git-version",
@@ -1406,7 +1460,7 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio",
- "toml",
+ "toml 0.7.4",
  "tracing",
  "url",
  "utils",
@@ -1488,7 +1542,7 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap",
+ "clap 4.3.0",
  "criterion-plot",
  "is-terminal",
  "itertools",
@@ -2238,6 +2292,15 @@ checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "hermit-abi"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "hermit-abi"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d77f7ec81a6d05a3abb01ab6eb7590f6083d08449fe5a1c8b1e620283546ccb7"
@@ -2563,7 +2626,7 @@ version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eae7b9aee968036d54dce06cebaefd919e4472e753296daccd6d344e3e2df0c2"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.3.3",
  "libc",
  "windows-sys 0.48.0",
 ]
@@ -2580,7 +2643,7 @@ version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adcf93614601c8129ddf72e2d5633df827ba6551541c6d8c59520a371475be1f"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.3.3",
  "io-lifetimes",
  "rustix 0.37.19",
  "windows-sys 0.48.0",
@@ -2968,7 +3031,7 @@ version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.3.3",
  "libc",
 ]
 
@@ -3193,6 +3256,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_str_bytes"
+version = "6.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
+
+[[package]]
 name = "outref"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3205,7 +3274,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "camino",
- "clap",
+ "clap 4.3.0",
  "git-version",
  "pageserver",
  "postgres_ffi",
@@ -3228,7 +3297,7 @@ dependencies = [
  "camino",
  "camino-tempfile",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "close_fds",
  "const_format",
  "consumption_metrics",
@@ -3817,7 +3886,7 @@ dependencies = [
  "bstr",
  "bytes",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "consumption_metrics",
  "dashmap",
  "futures",
@@ -4421,7 +4490,7 @@ dependencies = [
  "bincode",
  "bytes",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "crc32c",
  "either",
  "futures-util",
@@ -4457,7 +4526,7 @@ dependencies = [
  "camino",
  "camino-tempfile",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "const_format",
  "crc32c",
  "fs2",
@@ -5022,7 +5091,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "bytes",
- "clap",
+ "clap 4.3.0",
  "const_format",
  "futures",
  "futures-core",
@@ -5217,6 +5286,12 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
+
+[[package]]
+name = "textwrap"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "222a222a5bfe1bba4a77b45ec488a741b3cb8872e5e499451fd7d0129c9c7c3d"
 
 [[package]]
 name = "thiserror"
@@ -5505,6 +5580,15 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6135d499e69981f9ff0ef2167955a5333c35e36f6937d382974566b3d5b94ec"
@@ -5651,7 +5735,7 @@ name = "trace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
+ "clap 4.3.0",
  "pageserver_api",
  "utils",
  "workspace_hack",
@@ -6038,7 +6122,7 @@ dependencies = [
  "anyhow",
  "axum",
  "cgroups-rs",
- "clap",
+ "clap 4.3.0",
  "futures",
  "inotify 0.10.2",
  "serde",
@@ -6071,7 +6155,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino-tempfile",
- "clap",
+ "clap 4.3.0",
  "env_logger",
  "log",
  "once_cell",
@@ -6090,6 +6174,36 @@ checksum = "36df944cda56c7d8d8b7496af378e6b16de9284591917d307c9b4d313c44e698"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "walproposer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "byteorder",
+ "bytes",
+ "cbindgen",
+ "crc32c",
+ "env_logger",
+ "hex",
+ "hyper",
+ "libc",
+ "log",
+ "memoffset 0.8.0",
+ "once_cell",
+ "postgres",
+ "postgres_ffi",
+ "rand 0.8.5",
+ "regex",
+ "scopeguard",
+ "serde",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -6464,7 +6578,7 @@ dependencies = [
  "bytes",
  "cc",
  "chrono",
- "clap",
+ "clap 4.3.0",
  "clap_builder",
  "crossbeam-utils",
  "either",

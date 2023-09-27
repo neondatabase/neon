@@ -26,6 +26,7 @@ members = [
     "libs/tracing-utils",
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
+    "libs/walproposer",
 ]
 
 [workspace.package]
@@ -185,6 +186,7 @@ tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
+walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
