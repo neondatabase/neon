@@ -61,9 +61,11 @@ However, this still does not meet our seamless/fast/efficient goals:
 The user expectations for availability are:
 
 - For planned maintenance, there should be zero availability
-  gap
+  gap. This expectation is fulfilled by this RFC.
 - For unplanned changes (e.g. node failures), there should be
-  minimal availability gap.
+  minimal availability gap. This RFC provides the _mechanism_
+  to fail over quickly, but does not provide the failure _detection_
+  nor failover _policy_.
 
 ## Non Goals
 
@@ -180,7 +182,7 @@ switching updating the endpoints to use B.
 
 #### Migration to a location that is not a secondary
 
-If node A is initially in Detached state, the procedure is identical. Since Node B
+If node B is initially in Detached state, the procedure is identical. Since Node B
 is coming from a Detached state rather than Secondary, the download of layers and
 catch up with WAL will take much longer.
 
@@ -441,7 +443,7 @@ Notes:
 
 ### Executing migrations
 
-Migrations will be implemented as go functions, within the
+Migrations will be implemented as Go functions, within the
 existing `Operation` framework in the control plane. These
 operations are persistent, such that they will always keep
 trying until completion: this property is important to avoid
