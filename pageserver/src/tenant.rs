@@ -840,6 +840,8 @@ impl Tenant {
             None
         };
 
+        // we can load remote timelines during init, but they are assumed to be so rare that
+        // initialization order is not passed to here.
         let init_order = None;
 
         // timeline reattaching requires that we have the metadata locally; it used to be done
