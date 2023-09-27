@@ -373,11 +373,6 @@ impl Debug for SetStoppingError {
     }
 }
 
-struct RemoteStartupData {
-    index_part: IndexPart,
-    remote_metadata: TimelineMetadata,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WaitToBecomeActiveError {
     WillNotBecomeActive {
@@ -1275,6 +1270,11 @@ impl Tenant {
         span::debug_assert_current_span_has_tenant_id();
 
         let mut resources = self.build_timeline_resources(timeline_id);
+
+        struct RemoteStartupData {
+            index_part: IndexPart,
+            remote_metadata: TimelineMetadata,
+        }
 
         let (remote_startup_data, remote_client) = match resources.remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
