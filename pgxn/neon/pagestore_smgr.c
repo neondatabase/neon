@@ -1970,6 +1970,14 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		XLogWaitForReplayOf(request_lsn);
 
 	/*
+	 * It is possible that previous modifications in this backend haven't been
+ 	 * flushed yet (e.g. in neon_zeroextend), so we do so right now to make sure
+  	 * future reads don't have to wait forever.
+	 */
+	if (!RecoveryInProgress())
+		XLogFlush(request_lsn);
+
+	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
