@@ -267,7 +267,8 @@ generation pageserver.
 
 The _AttachedMulti_ state simply disables deletions. These will be enqueued
 in `RemoteTimelineClient` until the control plane transitions the
-node into AttachedSingle, which unblocks deletions.
+node into AttachedSingle, which unblocks deletions.  Other remote storage operations
+such as uploads are not blocked.
 
 AttachedMulti is not required for data safety, only to preserve availability
 on pageservers running with stale generations.
@@ -281,6 +282,9 @@ deletions. This may be accomplished simply, by dropping enqueued deletions when 
 threshold of delayed deletions (e.g. 10k layers per tenant) is reached. As with all deletions,
 it is safe to skip them, and the leaked objects will be eventually cleaned up by scrub or
 by timeline deletion.
+
+During AttachedMulti, the Tenant is free to drop layers from local disk in response to
+disk pressure: only the deletion of remote layers is blocked.
 
 #### AttachedStale
 
@@ -352,8 +356,8 @@ uploads a serialized heat map to S3. It may skip this if there
 is no change since the last time it uploaded (e.g. if the tenant
 is totally idle).
 
-Additionally, when the tenant is configured into AttachedStale with
-flush=True (via [location configuration API](#location-configuration-api)]),
+Additionally, when the tenant is flushed to remote storage prior to a migration
+(the first step in [cutover procedure](#cutover-procedure)), 
 the heatmap is written out. This enables a future attached pageserver
 to get an up to date view when deciding which layers to download.
 
@@ -365,7 +369,7 @@ the main `Tenant` type, which represents attached tenants:
 - Download the layer heatmap
 - Select any "hot enough" layers to download, if there is sufficient
   free disk space.
-- Download layers
+- Download layers, if they were not previously evicted (see below)
 - Download the latest index_part.json
 - Check if any layers currently on disk are no longer referenced by
   IndexPart & delete them
@@ -375,6 +379,28 @@ of disk space, it may choose to retain layers that aren't referenced
 by the heatmap, as long as they are still referenced by the IndexPart. Conversely,
 if a node is very low on disk space, it might opt to raise the heat threshold required
 to both downloading a layer, until more disk space is available.
+
+#### Secondary locations & disk pressure
+
+Secondary locations are subject to eviction on disk pressure, just as
+attached locations are.  For eviction purposes, the access time of a
+layer in a secondary location will be the access time given in the heatmap,
+rather than the literal time at which the local layer file was accessed.
+
+The heatmap will indicate which layers are in local storage on the attached
+location.  The secondary will always attempt to get back to having that
+set of layers on disk, but to avoid flapping, it will remember the access
+time of the layer it was most recently asked to evict, and layers whose
+access time is below that will not be re-downloaded.
+
+The resulting behavior is that after a layer is evicted from a secondary
+location, it is only re-downloaded once the attached pageserver accesses
+the layer and uploads a heatmap reflecting that access time.  On a pageserver
+restart, the secondary location will attempt to download all layers in
+the heatmap again, if they are not on local disk.
+
+This behavior will be slightly different when secondary locations are
+used for "low energy tenants", but that is beyond the scope of this RFC.
 
 ### Location configuration API
 
