@@ -6,6 +6,7 @@ use anyhow::Context;
 use aws_sdk_s3::config::Region;
 use s3_scrubber::cloud_admin_api::CloudAdminApiClient;
 use s3_scrubber::delete_batch_producer::DeleteBatchProducer;
+use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_metadata::scan_metadata;
 use s3_scrubber::{
     checks, init_logging, init_s3_client, BucketConfig, ConsoleConfig, NodeKind, RootTarget,
@@ -35,6 +36,20 @@ enum Command {
         depth: TraversingDepth,
         #[arg(short, long, default_value_t = false)]
         skip_validation: bool,
+    },
+    FindGarbage {
+        #[arg(short, long)]
+        node_kind: NodeKind,
+        #[arg(short, long, default_value_t=TraversingDepth::Tenant)]
+        depth: TraversingDepth,
+        #[arg(short, long, default_value_t = String::from("garbage.json"))]
+        output_path: String,
+    },
+    PurgeGarbage {
+        #[arg(short, long)]
+        input_path: String,
+        #[arg(short, long, default_value_t = PurgeMode::DeletedOnly)]
+        mode: PurgeMode,
     },
     ScanMetadata {},
 }
@@ -212,5 +227,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Command::FindGarbage {
+            node_kind,
+            depth,
+            output_path,
+        } => {
+            let console_config = ConsoleConfig::from_env()?;
+            find_garbage(bucket_config, console_config, depth, node_kind, output_path).await
+        }
+        Command::PurgeGarbage { input_path, mode } => {
+            purge_garbage(input_path, mode, !cli.delete).await
+        }
     }
 }

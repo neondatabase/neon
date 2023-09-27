@@ -1,6 +1,7 @@
 pub mod checks;
 pub mod cloud_admin_api;
 pub mod delete_batch_producer;
+pub mod garbage;
 pub mod metadata_stream;
 mod s3_deletion;
 pub mod scan_metadata;
