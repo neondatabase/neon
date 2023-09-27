@@ -2108,6 +2108,14 @@ where
     Ok(result)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LoadTenantConfigError {
+    #[error("tenant config file does not exist")]
+    ConfigFileDoesNotExist,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         *self.tenant_conf.read().unwrap()
@@ -2352,19 +2360,15 @@ impl Tenant {
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_id: &TenantId,
-    ) -> anyhow::Result<TenantConfOpt> {
+    ) -> Result<TenantConfOpt, LoadTenantConfigError> {
         let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
 
         info!("loading tenantconf from {target_config_display}");
 
-        // FIXME If the config file is not found, assume that we're attaching
-        // a detached tenant and config is passed via attach command.
-        // https://github.com/neondatabase/neon/issues/1555
-        // OR: we're loading after incomplete deletion that managed to remove config.
         if !target_config_path.exists() {
             info!("tenant config not found in {target_config_display}");
-            return Ok(TenantConfOpt::default());
+            return Err(LoadTenantConfigError::ConfigFileDoesNotExist);
         }
 
         // load and parse file
@@ -2384,8 +2388,7 @@ impl Tenant {
                         format!("Failed to parse config from file '{target_config_display}' as pageserver config")
                     })?;
                 }
-                _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),
-
+                _ => return Err(LoadTenantConfigError::Other(anyhow::anyhow!("config file {target_config_display} has unrecognized pageserver option '{key}'"))),
             }
         }
 
