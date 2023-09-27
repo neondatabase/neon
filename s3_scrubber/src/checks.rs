@@ -171,7 +171,8 @@ pub struct TimelineAnalysis {
     /// yet.
     pub warnings: Vec<String>,
 
-    /// Keys not referenced in metadata: candidates for removal
+    /// Keys not referenced in metadata: candidates for removal, but NOT NECESSARILY: beware
+    /// of races between reading the metadata and reading the objects.
     pub garbage_keys: Vec<String>,
 }
 

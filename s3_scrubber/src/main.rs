@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -9,12 +8,12 @@ use s3_scrubber::cloud_admin_api::CloudAdminApiClient;
 use s3_scrubber::delete_batch_producer::DeleteBatchProducer;
 use s3_scrubber::scan_metadata::scan_metadata;
 use s3_scrubber::{
-    checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, BucketConfig,
-    ConsoleConfig, RootTarget, S3Deleter, S3Target, TraversingDepth, CLI_NAME,
+    checks, init_logging, init_s3_client, BucketConfig, ConsoleConfig, NodeKind, RootTarget,
+    S3Deleter, S3Target, TraversingDepth, CLI_NAME,
 };
 use tracing::{info, warn};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -27,28 +26,7 @@ struct Cli {
     delete: bool,
 }
 
-#[derive(ValueEnum, Clone, Copy, Eq, PartialEq)]
-enum NodeKind {
-    Safekeeper,
-    Pageserver,
-}
-
-impl NodeKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Safekeeper => "safekeeper",
-            Self::Pageserver => "pageserver",
-        }
-    }
-}
-
-impl Display for NodeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Command {
     Tidy {
         #[arg(short, long)]
@@ -70,24 +48,6 @@ async fn tidy(
     skip_validation: bool,
 ) -> anyhow::Result<()> {
     let dry_run = !cli.delete;
-    let file_name = if dry_run {
-        format!(
-            "{}_{}_{}__dry.log",
-            CLI_NAME,
-            node_kind,
-            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
-        )
-    } else {
-        format!(
-            "{}_{}_{}.log",
-            CLI_NAME,
-            node_kind,
-            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
-        )
-    };
-
-    let _guard = init_logging(&file_name);
-
     if dry_run {
         info!("Dry run, not removing items for real");
     } else {
@@ -99,10 +59,7 @@ async fn tidy(
     info!("Starting extra S3 removal in {bucket_config} for node kind '{node_kind}', traversing depth: {depth:?}");
 
     info!("Starting extra tenant S3 removal in {bucket_config} for node kind '{node_kind}'");
-    let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(
-        get_cloud_admin_api_token_or_exit(),
-        console_config.admin_api_url,
-    ));
+    let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(console_config));
 
     let bucket_region = Region::new(bucket_config.region);
     let delimiter = "/".to_string();
@@ -215,6 +172,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let bucket_config = BucketConfig::from_env()?;
+
+    let _guard = init_logging(&format!(
+        "{}_{:?}_{}_{}.log",
+        CLI_NAME,
+        cli.command,
+        bucket_config.bucket,
+        chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
+    ));
 
     match cli.command {
         Command::Tidy {

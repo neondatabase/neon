@@ -12,6 +12,8 @@ use tokio::sync::Semaphore;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use crate::ConsoleConfig;
+
 #[derive(Debug)]
 pub struct Error {
     context: String,
@@ -173,11 +175,27 @@ pub struct BranchData {
     pub written_size: Option<u64>,
 }
 
+pub trait MaybeDeleted {
+    fn is_deleted(&self) -> bool;
+}
+
+impl MaybeDeleted for ProjectData {
+    fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+}
+
+impl MaybeDeleted for BranchData {
+    fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+}
+
 impl CloudAdminApiClient {
-    pub fn new(token: String, base_url: Url) -> Self {
+    pub fn new(config: ConsoleConfig) -> Self {
         Self {
-            token,
-            base_url,
+            token: config.token,
+            base_url: config.base_url,
             request_limiter: Semaphore::new(200),
             http_client: Client::new(), // TODO timeout configs at least
         }
