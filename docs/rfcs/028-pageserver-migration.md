@@ -151,7 +151,8 @@ the pageservers' APIs:
 1. Call to Node A requesting it to flush to S3 and enter AttachedStale state
 2. Increment generation, and call to Node B requesting it to enter AttachedMulti
    state with the new generation.
-3. Call to Node B, requesting it to download the latest image layers from remote storage.
+3. Call to Node B, requesting it to download the latest hot layers from remote storage,
+   according to the latest heatmap flushed by Node A.
 4. Wait for Node B's WAL ingestion to catch up with node A's
 5. Update endpoints to use node B instead of node A
 6. Call to node B requesting it to enter state AttachedSingle.
@@ -214,7 +215,7 @@ participant E as Endpoint
 CP->>A: PUT Flush & go to AttachedStale
 note right of A: A continues to ingest WAL
 CP->>B: PUT AttachedMulti
-CP->>B: PUT Download image layers
+CP->>B: PUT Download layers from latest heatmap
 note right of B: B downloads from S3
 loop Poll until download complete
 CP->>B: GET download status
