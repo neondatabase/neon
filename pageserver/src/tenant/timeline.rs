@@ -270,7 +270,7 @@ pub struct Timeline {
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
-    pub remote_client: Arc<RemoteTimelineClient>,
+    pub(crate) remote_client: Arc<RemoteTimelineClient>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -2095,14 +2095,14 @@ impl Timeline {
             )
     }
 
-    pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
+    pub(super) fn tenant_conf_updated(&self, new_conf: &AttachedTenantConf) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                new_conf,
+                &new_conf.tenant_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -2110,6 +2110,9 @@ impl Timeline {
             let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
+
+            self.remote_client.update_config(&new_conf.location);
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
