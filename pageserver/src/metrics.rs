@@ -291,12 +291,28 @@ static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_resident_physical_size_global",
+        "Like `pageserver_resident_physical_size`, but without tenant/timeline dimensions."
+    )
+    .expect("failed to define a metric")
+});
+
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
         "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static REMOTE_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_remote_physical_size_global",
+        "Like `pageserver_remote_physical_size`, but without tenant/timeline dimensions."
     )
     .expect("failed to define a metric")
 });
@@ -1209,7 +1225,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    pub resident_physical_size_gauge: UIntGauge,
+    resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -1287,9 +1303,28 @@ impl TimelineMetrics {
     }
 
     pub fn record_new_file_metrics(&self, sz: u64) {
-        self.resident_physical_size_gauge.add(sz);
+        self.resident_physical_size_add(sz);
         self.num_persistent_files_created.inc_by(1);
         self.persistent_bytes_written.inc_by(sz);
+    }
+
+    pub fn resident_physical_size_sub(&self, sz: u64) {
+        self.resident_physical_size_gauge.sub(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
+    }
+
+    pub fn resident_physical_size_add(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
+    }
+
+    pub fn resident_physical_size_set(&self, sz: u64) {
+        self.resident_physical_size_gauge.set(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.set(sz);
+    }
+
+    pub fn resident_physical_size_get(&self) -> u64 {
+        self.resident_physical_size_gauge.get()
     }
 }
 
@@ -1298,7 +1333,10 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        {
+            RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
+            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
@@ -1352,10 +1390,43 @@ use std::time::{Duration, Instant};
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 
+/// Maintain a per timeline gauge in addition to the global gauge.
+struct PerTimelineRemotePhysicalSizeGauge {
+    last_set: u64,
+    gauge: UIntGauge,
+}
+
+impl PerTimelineRemotePhysicalSizeGauge {
+    fn new(per_timeline_gauge: UIntGauge) -> Self {
+        Self {
+            last_set: per_timeline_gauge.get(),
+            gauge: per_timeline_gauge,
+        }
+    }
+    fn set(&mut self, sz: u64) {
+        self.gauge.set(sz);
+        if sz < self.last_set {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set - sz);
+        } else {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - self.last_set);
+        };
+        self.last_set = sz;
+    }
+    fn get(&self) -> u64 {
+        self.gauge.get()
+    }
+}
+
+impl Drop for PerTimelineRemotePhysicalSizeGauge {
+    fn drop(&mut self) {
+        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set);
+    }
+}
+
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,
     timeline_id: String,
-    remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
+    remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
@@ -1373,18 +1444,24 @@ impl RemoteTimelineClientMetrics {
         }
     }
 
-    pub fn remote_physical_size_gauge(&self) -> UIntGauge {
+    pub(crate) fn remote_physical_size_set(&self, sz: u64) {
         let mut guard = self.remote_physical_size_gauge.lock().unwrap();
-        guard
-            .get_or_insert_with(|| {
+        let gauge = guard.get_or_insert_with(|| {
+            PerTimelineRemotePhysicalSizeGauge::new(
                 REMOTE_PHYSICAL_SIZE
                     .get_metric_with_label_values(&[
                         &self.tenant_id.to_string(),
                         &self.timeline_id.to_string(),
                     ])
-                    .unwrap()
-            })
-            .clone()
+                    .unwrap(),
+            )
+        });
+        gauge.set(sz);
+    }
+
+    pub(crate) fn remote_physical_size_get(&self) -> u64 {
+        let guard = self.remote_physical_size_gauge.lock().unwrap();
+        guard.as_ref().map(|gauge| gauge.get()).unwrap_or(0)
     }
 
     pub fn remote_operation_time(
