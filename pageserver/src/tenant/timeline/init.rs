@@ -201,7 +201,7 @@ pub(super) fn cleanup_future_layer(
     // lsns stored in InMemoryLayer.
     let kind = name.kind();
     tracing::info!("found future {kind} layer {name} disk_consistent_lsn is {disk_consistent_lsn}");
-    crate::tenant::timeline::rename_to_backup(path)?;
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -212,6 +212,6 @@ pub(super) fn cleanup_local_only_file(
 ) -> anyhow::Result<()> {
     let kind = name.kind();
     tracing::info!("found local-only {kind} layer {name}, metadata {local:?}");
-    crate::tenant::timeline::rename_to_backup(path)?;
+    std::fs::remove_file(path)?;
     Ok(())
 }
