@@ -16,7 +16,6 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
-
 # TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP
 
 
