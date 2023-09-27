@@ -236,7 +236,7 @@ impl ListWriter {
             let file_name = dentry.file_name();
             let dentry_str = file_name.to_string_lossy();
 
-            if file_name.to_str() == header_path.file_name() {
+            if file_name == header_path.file_name().unwrap_or("") {
                 // Don't try and parse the header's name like a list
                 continue;
             }

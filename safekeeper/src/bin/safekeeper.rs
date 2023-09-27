@@ -2,7 +2,7 @@
 // Main entry point for the safekeeper executable
 //
 use anyhow::{bail, Context, Result};
-use camino::Utf8PathBuf;
+use camino::{Utf8PathBuf, Utf8Path};
 use clap::Parser;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -15,7 +15,6 @@ use toml_edit::Document;
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -152,8 +151,8 @@ struct Args {
 }
 
 // Like PathBufValueParser, but allows empty string.
-fn opt_pathbuf_parser(s: &str) -> Result<PathBuf, String> {
-    Ok(PathBuf::from_str(s).unwrap())
+fn opt_pathbuf_parser(s: &str) -> Result<Utf8PathBuf, String> {
+    Ok(Utf8PathBuf::from_str(s).unwrap())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -204,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
     info!("version: {GIT_VERSION}");
 
     let args_workdir = &args.datadir;
-    let workdir = args_workdir.canonicalize().with_context(|| {
+    let workdir = args_workdir.canonicalize_utf8().with_context(|| {
         format!("Failed to get the absolute path for input workdir {args_workdir:?}")
     })?;
 
@@ -255,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let conf = SafeKeeperConf {
-        workdir: Utf8PathBuf::from_path_buf(workdir).unwrap(),
+        workdir,
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_pg_addr_tenant_only: args.listen_pg_tenant_only,
@@ -445,7 +444,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 }
 
 /// Determine safekeeper id.
-fn set_id(workdir: &Path, given_id: Option<NodeId>) -> Result<NodeId> {
+fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
     let id_file_path = workdir.join(ID_FILE_NAME);
 
     let my_id: NodeId;
