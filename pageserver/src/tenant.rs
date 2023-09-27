@@ -239,77 +239,6 @@ pub struct Tenant {
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 }
 
-// We should not blindly overwrite local metadata with remote one.
-// For example, consider the following case:
-//     Image layer is flushed to disk as a new delta layer, we update local metadata and start upload task but after that
-//     pageserver crashes. During startup we'll load new metadata, and then reset it
-//     to the state of remote one. But current layermap will have layers from the old
-//     metadata which is inconsistent.
-//     And with current logic it wont disgard them during load because during layermap
-//     load it sees local disk consistent lsn which is ahead of layer lsns.
-//     If we treat remote as source of truth we need to completely sync with it,
-//     i e delete local files which are missing on the remote. This will add extra work,
-//     wal for these layers needs to be reingested for example
-//
-// So the solution is to take remote metadata only when we're attaching.
-pub fn merge_local_remote_metadata<'a>(
-    local: Option<&'a TimelineMetadata>,
-    remote: Option<&'a TimelineMetadata>,
-) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
-    if let Some(remote) = remote {
-        // always pick the remote to get crash-consistent layermaps via index_part.json updates
-        return Ok((remote, false));
-    }
-
-    match (local, remote) {
-        (None, None) => anyhow::bail!("we should have either local metadata or remote"),
-        (Some(local), None) => Ok((local, true)),
-        // happens if we crash during attach, before writing out the metadata file
-        (None, Some(remote)) => Ok((remote, false)),
-        // This is the regular case where we crash/exit before finishing queued uploads.
-        // Also, it happens if we crash during attach after writing the metadata file
-        // but before removing the attaching marker file.
-        (Some(local), Some(remote)) => {
-            let consistent_lsn_cmp = local
-                .disk_consistent_lsn()
-                .cmp(&remote.disk_consistent_lsn());
-            let gc_cutoff_lsn_cmp = local
-                .latest_gc_cutoff_lsn()
-                .cmp(&remote.latest_gc_cutoff_lsn());
-            use std::cmp::Ordering::*;
-            match (consistent_lsn_cmp, gc_cutoff_lsn_cmp) {
-                // It wouldn't matter, but pick the local one so that we don't rewrite the metadata file.
-                (Equal, Equal) => Ok((local, true)),
-                // Local state is clearly ahead of the remote.
-                (Greater, Greater) => Ok((local, true)),
-                // We have local layer files that aren't on the remote, but GC horizon is on par.
-                (Greater, Equal) => Ok((local, true)),
-                // Local GC started running but we couldn't sync it to the remote.
-                (Equal, Greater) => Ok((local, true)),
-
-                // We always update the local value first, so something else must have
-                // updated the remote value, probably a different pageserver.
-                // The control plane is supposed to prevent this from happening.
-                // Bail out.
-                (Less, Less)
-                | (Less, Equal)
-                | (Equal, Less)
-                | (Less, Greater)
-                | (Greater, Less) => {
-                    anyhow::bail!(
-                        r#"remote metadata appears to be ahead of local metadata:
-local:
-  {local:#?}
-remote:
-  {remote:#?}
-"#
-                    );
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GetTimelineError {
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
@@ -1383,20 +1312,14 @@ impl Tenant {
                 index_part,
                 remote_metadata,
             }) => {
-                let (metadata, picked_local) =
-                    merge_local_remote_metadata(Some(&local_metadata), Some(&remote_metadata))
-                        .context("merge_local_remote_metadata")
-                        .map_err(LoadLocalTimelineError::Load)?;
-
+                // always choose the remote metadata to be crash consistent (see RFC 27)
                 // Save the metadata file to local disk.
-                if !picked_local {
-                    save_metadata(self.conf, &self.tenant_id, &timeline_id, metadata)
-                        .await
-                        .context("save_metadata")
-                        .map_err(LoadLocalTimelineError::Load)?;
-                }
+                save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
+                    .await
+                    .context("save_metadata")
+                    .map_err(LoadLocalTimelineError::Load)?;
 
-                (Some(index_part), metadata.to_owned())
+                (Some(index_part), remote_metadata)
             }
             None => (None, local_metadata),
         };
