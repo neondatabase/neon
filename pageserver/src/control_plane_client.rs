@@ -53,12 +53,16 @@ impl ControlPlaneClient {
             segs.pop_if_empty().push("");
         }
 
-        let client = reqwest::ClientBuilder::new()
-            .build()
-            .expect("Failed to construct http client");
+        let mut client = reqwest::ClientBuilder::new();
+
+        if let Some(jwt) = &conf.control_plane_api_token {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert("Authorization", jwt.get_contents().parse().unwrap());
+            client = client.default_headers(headers);
+        }
 
         Some(Self {
-            http_client: client,
+            http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),

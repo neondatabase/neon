@@ -11,6 +11,7 @@ use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
+use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
@@ -207,6 +208,9 @@ pub struct PageServerConf {
     pub background_task_maximum_delay: Duration,
 
     pub control_plane_api: Option<Url>,
+
+    /// JWT token for use with the control plane API.
+    pub control_plane_api_token: Option<SecretString>,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -283,6 +287,7 @@ struct PageServerConfigBuilder {
     background_task_maximum_delay: BuilderValue<Duration>,
 
     control_plane_api: BuilderValue<Option<Url>>,
+    control_plane_api_token: BuilderValue<Option<SecretString>>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -347,6 +352,7 @@ impl Default for PageServerConfigBuilder {
             .unwrap()),
 
             control_plane_api: Set(None),
+            control_plane_api_token: Set(None),
         }
     }
 }
@@ -567,6 +573,9 @@ impl PageServerConfigBuilder {
             control_plane_api: self
                 .control_plane_api
                 .ok_or(anyhow!("missing control_plane_api"))?,
+            control_plane_api_token: self
+                .control_plane_api_token
+                .ok_or(anyhow!("missing control_plane_api_token"))?,
         })
     }
 }
@@ -945,6 +954,7 @@ impl PageServerConf {
             ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
             control_plane_api: None,
+            control_plane_api_token: None,
         }
     }
 }
@@ -1168,7 +1178,8 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: humantime::parse_duration(
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
-                control_plane_api: None
+                control_plane_api: None,
+                control_plane_api_token: None
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1224,7 +1235,8 @@ background_task_maximum_delay = '334 s'
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
-                control_plane_api: None
+                control_plane_api: None,
+                control_plane_api_token: None
             },
             "Should be able to parse all basic config values correctly"
         );
