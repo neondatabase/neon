@@ -134,10 +134,7 @@ pub async fn init_tenant_mgr(
         // Must only do this if remote storage is enabled, otherwise deletion queue
         // is not running and channel push will fail.
         if resources.remote_storage.is_some() {
-            resources
-                .deletion_queue_client
-                .recover(result.clone())
-                .await?;
+            resources.deletion_queue_client.recover(result.clone())?;
         }
 
         Some(result)
