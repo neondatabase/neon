@@ -403,8 +403,8 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     du_by_timeline = env.du_by_timeline()
 
     # pick any tenant
-    [our_tenant, other_tenant] = list(du_by_timeline.keys())
-    (tenant_id, timeline_id) = our_tenant
+    [warm, cold] = list(du_by_timeline.keys())
+    (tenant_id, timeline_id) = warm
 
     # make our tenant more recently used than the other one
     env.warm_up_tenant(tenant_id)
@@ -412,9 +412,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     # Build up enough pressure to require evictions from both tenants,
     # but not enough to fall into global LRU.
     # So, set target to all occupied space, except 2*env.layer_size per tenant
-    target = (
-        du_by_timeline[other_tenant] + (du_by_timeline[our_tenant] // 2) - 2 * 2 * env.layer_size
-    )
+    target = du_by_timeline[cold] + (du_by_timeline[warm] // 2) - 2 * 2 * env.layer_size
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
@@ -429,29 +427,29 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
             later_tenant_usage < du_by_timeline[tenant]
         ), "all tenants should have lost some layers"
 
-    warmed_size = later_du_by_timeline[our_tenant]
+    warm_size = later_du_by_timeline[warm]
 
-    # bounds for warmed_up size
-    warmed_lower = 0.5 * du_by_timeline[our_tenant]
+    # bounds for warmed_size
+    warm_lower = 0.5 * du_by_timeline[warm]
 
     # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
     # So, check for up to 3 here.
-    warmed_upper = warmed_lower + 3 * env.layer_size
+    warm_upper = warm_lower + 3 * env.layer_size
 
-    other_size = later_du_by_timeline[other_tenant]
-    other_upper = 2 * env.layer_size
+    cold_size = later_du_by_timeline[cold]
+    cold_upper = 2 * env.layer_size
 
     log.info(
-        f"expecting for our_tenant: {human_bytes(warmed_lower)} < {human_bytes(warmed_size)} < {human_bytes(warmed_upper)}"
+        f"expecting for warm tenant: {human_bytes(warm_lower)} < {human_bytes(warm_size)} < {human_bytes(warm_upper)}"
     )
-    log.info(f"expecting for other_tenant: {human_bytes(other_size)} < {human_bytes(other_upper)}")
+    log.info(f"expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}")
 
-    assert warmed_size > warmed_lower, "our warmed up tenant should be at about half size (lower)"
-    assert warmed_size < warmed_upper, "our warmed up tenant should be at about half size (upper)"
+    assert warm_size > warm_lower, "our warmed up tenant should be at about half size (lower)"
+    assert warm_size < warm_upper, "our warmed up tenant should be at about half size (upper)"
 
     assert (
-        other_size < other_upper
-    ), "the other tenant should be evicted to its min_resident_size, i.e., max layer file size"
+        cold_size < cold_upper
+    ), "the cold tenant should be evicted to its min_resident_size, i.e., max layer file size"
 
 
 def poor_mans_du(
