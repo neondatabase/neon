@@ -91,14 +91,12 @@ static int   lfc_desc = 0;
 static LWLockId lfc_lock;
 static int   lfc_max_size;
 static int   lfc_size_limit;
-static int   lfc_free_space_watermark;
 static char* lfc_path;
 static  FileCacheControl* lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
-static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
 
 void FileCacheMonitorMain(Datum main_arg);
 
@@ -290,19 +288,6 @@ lfc_init(void)
 							lfc_change_limit_hook,
 							NULL);
 
-	DefineCustomIntVariable("neon.free_space_watermark",
-							"Minimal free space in local file system after reaching which local file cache will be truncated",
-							NULL,
-							&lfc_free_space_watermark,
-							1024, /* 1GB */
-							0,
-							INT_MAX,
-							PGC_SIGHUP,
-							GUC_UNIT_MB,
-							NULL,
-							NULL,
-							NULL);
-
 	DefineCustomStringVariable("neon.file_cache_path",
 							   "Path to local file cache (can be raw device)",
 							   NULL,
@@ -316,9 +301,6 @@ lfc_init(void)
 
 	if (lfc_max_size == 0)
 		return;
-
-	if (lfc_free_space_watermark != 0)
-		lfc_register_free_space_monitor();
 
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = lfc_shmem_startup;
