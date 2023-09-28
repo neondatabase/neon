@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     convert::Infallible,
     sync::{
@@ -27,12 +27,13 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// Both the proxy and the ingestion endpoint will live in the same region (or cell)
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
-#[derive(Eq, Hash, PartialEq, Serialize, Debug, Clone)]
+#[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct Ids {
     pub endpoint_id: String,
     pub branch_id: String,
 }
 
+#[derive(Debug)]
 pub struct MetricCounter {
     transmitted: AtomicU64,
     opened_connections: AtomicUsize,
@@ -86,6 +87,7 @@ impl MetricCounter {
 // endpoint and branch IDs are not user generated so we don't run the risk of hash-dos
 type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
+#[derive(Default)]
 pub struct Metrics {
     endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
 }
@@ -112,9 +114,7 @@ impl Metrics {
     }
 }
 
-pub static USAGE_METRICS: Lazy<Metrics> = Lazy::new(|| Metrics {
-    endpoints: DashMap::default(),
-});
+pub static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
@@ -131,13 +131,22 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         ticker.tick().await;
 
         let now = Utc::now();
-        collect_metrics_iteration(&http_client, &config.endpoint, &hostname, prev, now).await;
+        collect_metrics_iteration(
+            &USAGE_METRICS,
+            &http_client,
+            &config.endpoint,
+            &hostname,
+            prev,
+            now,
+        )
+        .await;
         prev = now;
     }
 }
 
 #[instrument(skip_all)]
 async fn collect_metrics_iteration(
+    metrics: &Metrics,
     client: &http::ClientWithMiddleware,
     metric_collection_endpoint: &reqwest::Url,
     hostname: &str,
@@ -151,7 +160,7 @@ async fn collect_metrics_iteration(
 
     let mut metrics_to_clear = Vec::new();
 
-    let metrics_to_send: Vec<(Ids, u64)> = USAGE_METRICS
+    let metrics_to_send: Vec<(Ids, u64)> = metrics
         .endpoints
         .iter()
         .filter_map(|counter| {
@@ -166,7 +175,6 @@ async fn collect_metrics_iteration(
 
     if metrics_to_send.is_empty() {
         trace!("no new metrics to send");
-        return;
     }
 
     // Send metrics.
@@ -213,7 +221,7 @@ async fn collect_metrics_iteration(
     }
 
     for metric in metrics_to_clear {
-        match USAGE_METRICS.endpoints.entry(metric) {
+        match metrics.endpoints.entry(metric) {
             Entry::Occupied(mut counter) => {
                 if counter.get_mut().should_clear() {
                     counter.remove_entry();
@@ -221,5 +229,97 @@ async fn collect_metrics_iteration(
             }
             Entry::Vacant(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::TcpListener,
+        sync::{Arc, Mutex},
+    };
+
+    use anyhow::Error;
+    use chrono::Utc;
+    use consumption_metrics::{Event, EventChunk};
+    use hyper::{
+        service::{make_service_fn, service_fn},
+        Body, Response,
+    };
+    use url::Url;
+
+    use super::{collect_metrics_iteration, Ids, Metrics};
+    use crate::http;
+
+    #[tokio::test]
+    async fn metrics() {
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+
+        let reports = Arc::new(Mutex::new(vec![]));
+        let reports2 = reports.clone();
+
+        let server = hyper::server::Server::from_tcp(listener)
+            .unwrap()
+            .serve(make_service_fn(move |_| {
+                let reports = reports.clone();
+                async move {
+                    Ok::<_, Error>(service_fn(move |req| {
+                        let reports = reports.clone();
+                        async move {
+                            let bytes = hyper::body::to_bytes(req.into_body()).await?;
+                            let events: EventChunk<'static, Event<Ids, String>> =
+                                serde_json::from_slice(&bytes)?;
+                            reports.lock().unwrap().push(events);
+                            Ok::<_, Error>(Response::new(Body::from(vec![])))
+                        }
+                    }))
+                }
+            }));
+        let addr = server.local_addr();
+        tokio::spawn(server);
+
+        let metrics = Metrics::default();
+        let client = http::new_client();
+        let endpoint = Url::parse(&format!("http://{addr}")).unwrap();
+        let now = Utc::now();
+
+        // no counters have been registered
+        collect_metrics_iteration(&metrics, &client, &endpoint, "foo", now, now).await;
+        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        assert!(r.is_empty());
+
+        // register a new counter
+        let counter = metrics.register(Ids {
+            endpoint_id: "e1".to_string(),
+            branch_id: "b1".to_string(),
+        });
+
+        // the counter should be observed despite 0 egress
+        collect_metrics_iteration(&metrics, &client, &endpoint, "foo", now, now).await;
+        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].events.len(), 1);
+        assert_eq!(r[0].events[0].value, 0);
+
+        // record egress
+        counter.record_egress(1);
+
+        // egress should be observered
+        collect_metrics_iteration(&metrics, &client, &endpoint, "foo", now, now).await;
+        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].events.len(), 1);
+        assert_eq!(r[0].events[0].value, 1);
+
+        // release counter
+        drop(counter);
+
+        // we do not observe the counter
+        collect_metrics_iteration(&metrics, &client, &endpoint, "foo", now, now).await;
+        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        assert!(r.is_empty());
+
+        // counter is unregistered
+        assert!(metrics.endpoints.is_empty());
     }
 }
