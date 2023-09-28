@@ -626,7 +626,8 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
         let entry = entry?;
         let metadata = entry.metadata().expect("error getting dir entry metadata");
         if metadata.is_file() {
-            paths.push(entry.path().to_owned());
+            let path = entry.path().strip_prefix(pgdata_path)?;
+            paths.push(path.to_owned());
         }
     }
     // Don't rely on file system order for listing as it may be non-deterministic
