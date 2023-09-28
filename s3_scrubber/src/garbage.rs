@@ -276,7 +276,7 @@ pub async fn get_tenant_objects(
 
     // Remove delimiter, so that object listing lists all keys in the prefix and not just
     // common prefixes.
-    tenant_root.delimiter = "".to_string();
+    tenant_root.delimiter = String::new();
 
     let key_stream = stream_listing(s3_client, &tenant_root);
     key_stream.try_collect().await
@@ -295,7 +295,7 @@ pub async fn get_timeline_objects(
 
     // Remove delimiter, so that object listing lists all keys in the prefix and not just
     // common prefixes.
-    timeline_root.delimiter = "".to_string();
+    timeline_root.delimiter = String::new();
     let key_stream = stream_listing(s3_client, &timeline_root);
 
     key_stream.try_collect().await
