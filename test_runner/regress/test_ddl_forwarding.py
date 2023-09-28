@@ -210,12 +210,13 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
         cur.execute("CREATE DATABASE failure WITH OWNER=cork")
         ddl.wait()
 
+    ddl.failures(False)
+    cur.execute("CREATE DATABASE failure WITH OWNER=cork")
+    ddl.wait()
     with pytest.raises(psycopg2.InternalError):
-        ddl.failures(False)
-        cur.execute("CREATE DATABASE failure WITH OWNER=cork")
-        ddl.wait()
         ddl.failures(True)
         cur.execute("DROP DATABASE failure")
         ddl.wait()
+    ddl.pg.connect(dbname="failure")  # Ensure we can connect after a failed drop
 
     conn.close()
