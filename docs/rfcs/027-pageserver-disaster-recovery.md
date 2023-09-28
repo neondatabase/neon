@@ -102,7 +102,7 @@ As the caller knows the targeted lsn goal, this allows them to be informed
 about progress. There is no push notification for when the process has
 finished, any followup actions need to first poll for completion.
 
-[generation numbers RFC]: https://github.com/neondatabase/neon/pull/4919
+[generation numbers RFC]: ./025-generation-numbers.md
 
 ### Higher level features
 
