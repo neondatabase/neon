@@ -194,12 +194,8 @@ impl LocationConf {
             }
         }
     }
-}
 
-impl TryFrom<&'_ models::LocationConfig> for LocationConf {
-    type Error = anyhow::Error;
-
-    fn try_from(conf: &'_ models::LocationConfig) -> Result<Self, Self::Error> {
+    pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {
         let tenant_conf = TenantConfOpt::try_from(&conf.tenant_conf)?;
 
         fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
@@ -227,6 +223,8 @@ impl TryFrom<&'_ models::LocationConfig> for LocationConf {
                 })
             }
             models::LocationConfigMode::Secondary => {
+                anyhow::ensure!(conf.generation.is_none());
+
                 let warm = conf
                     .secondary_conf
                     .as_ref()
