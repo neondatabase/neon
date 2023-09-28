@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     last_flush_lsn_upload,
-    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -145,19 +144,12 @@ DELETE_FAILPOINTS = [
 def combinations():
     result = []
 
-    remotes = [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]
+    remotes = [RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
         remotes.append(RemoteStorageKind.REAL_S3)
 
     for remote_storage_kind in remotes:
         for delete_failpoint in DELETE_FAILPOINTS:
-            if remote_storage_kind == RemoteStorageKind.NOOP and delete_failpoint in (
-                "timeline-delete-before-index-delete",
-                "timeline-delete-after-index-delete",
-            ):
-                # the above failpoints are not relevant for config without remote storage
-                continue
-
             result.append((remote_storage_kind, delete_failpoint))
     return result
 
@@ -205,23 +197,21 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     with env.endpoints.create_start("delete") as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        if remote_storage_kind is RemoteStorageKind.NOOP:
-            wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline_id)
-        else:
-            last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
-            if remote_storage_kind in available_s3_storages():
-                assert_prefix_not_empty(
-                    neon_env_builder,
-                    prefix="/".join(
-                        (
-                            "tenants",
-                            str(env.initial_tenant),
-                            "timelines",
-                            str(timeline_id),
-                        )
-                    ),
-                )
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
+
+        if remote_storage_kind in available_s3_storages():
+            assert_prefix_not_empty(
+                neon_env_builder,
+                prefix="/".join(
+                    (
+                        "tenants",
+                        str(env.initial_tenant),
+                        "timelines",
+                        str(timeline_id),
+                    )
+                ),
+            )
 
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped

@@ -5,7 +5,6 @@ from pathlib import Path
 from queue import SimpleQueue
 from typing import Any, Dict, Set
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -17,18 +16,13 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
-
 # TODO: collect all of the env setup *AFTER* removal of RemoteStorageKind.NOOP
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.LOCAL_FS]
-)
 def test_metric_collection(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address,
-    remote_storage_kind: RemoteStorageKind,
 ):
     (host, port) = httpserver_listen_address
     metric_collection_endpoint = f"http://{host}:{port}/billing/api/v1/usage_events"
@@ -58,7 +52,7 @@ def test_metric_collection(
         synthetic_size_calculation_interval="3s"
         """
 
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
@@ -109,17 +103,14 @@ def test_metric_collection(
             total += sample[2]
         return int(total)
 
-    remote_uploaded = 0
-
     # upload some data to remote storage
-    if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-        pageserver_http = env.pageserver.http_client()
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-        pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    pageserver_http = env.pageserver.http_client()
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
 
-        remote_uploaded = get_num_remote_ops("index", "upload")
-        assert remote_uploaded > 0
+    remote_uploaded = get_num_remote_ops("index", "upload")
+    assert remote_uploaded > 0
 
     # we expect uploads at 1Hz, on busy runners this could be too optimistic,
     # so give 5s we only want to get the following upload after "ready" value.
