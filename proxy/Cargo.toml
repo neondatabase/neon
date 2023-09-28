@@ -42,6 +42,7 @@ reqwest-middleware.workspace = true
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 routerify.workspace = true
+rustc-hash.workspace = true
 rustls-pemfile.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
