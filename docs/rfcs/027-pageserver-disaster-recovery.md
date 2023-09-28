@@ -130,9 +130,10 @@ higher level components like postgres or the application first read corrupt
 data, and then execute a write with data derived from that earlier read. That
 written data might then contain the corruption.
 
-For example, an application reads some counter, increments it, and then writes
-the new counter value to the database.
-On a lower leve, the compute might put FPIs (Full Page Images) into the WAL,
+Common use cases can hit this quite easily. For example, an application reads
+some counter, increments it, and then writes the new counter value to the
+database.
+On a lower level, the compute might put FPIs (Full Page Images) into the WAL,
 which have corrupt data for rows unrelated to the write operation at hand.
 
 Separating corrupt writes from non-corrupt ones is a hard problem in general,
