@@ -98,8 +98,11 @@ cd neon
 # demonstrably slower build than a release build. For a release build,
 # use "BUILD_TYPE=release make -j`nproc` -s"
 # Remove -s for the verbose build log
+#
+# CARGO_BUILD_FLAGS="--features=testing" is suggested because it allows to
+# recompile less when compiling to run the tests or exploring locally.
 
-make -j`nproc` -s
+CARGO_BUILD_FLAGS="--features=testing" make -j`nproc` -s
 ```
 
 #### Building on OSX
@@ -115,8 +118,11 @@ cd neon
 # demonstrably slower build than a release build. For a release build,
 # use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu` -s"
 # Remove -s for the verbose build log
+#
+# CARGO_BUILD_FLAGS="--features=testing" is suggested because it allows to
+# recompile less when compiling to run the tests or exploring locally.
 
-make -j`sysctl -n hw.logicalcpu` -s
+CARGO_BUILD_FLAGS="--features=testing" make -j`sysctl -n hw.logicalcpu` -s
 ```
 
 #### Dependency installation notes
