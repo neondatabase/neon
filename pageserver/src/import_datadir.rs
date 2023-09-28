@@ -2,12 +2,15 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! a neon Timeline.
 //!
+use std::io::IoSlice;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{self, Poll};
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use futures::StreamExt;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -620,6 +623,68 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
+const YIELD_DIST: u64 = 1024;
+
+struct YieldingVec {
+    yld_len: u64,
+    buf: Vec<u8>,
+}
+
+impl YieldingVec {
+    fn new() -> Self {
+        Self {
+            yld_len: 0,
+            buf: Vec::new(),
+        }
+    }
+    fn should_yield(&mut self, buf_len: usize) -> bool {
+        let buf_len: u64 = buf_len.try_into().unwrap();
+        let ret = self.yld_len / YIELD_DIST != (self.yld_len + buf_len) / YIELD_DIST;
+        self.yld_len += buf_len;
+        ret
+    }
+}
+
+impl AsyncWrite for YieldingVec {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.should_yield(buf.len()) {
+            return Poll::Pending;
+        }
+        self.get_mut().buf.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        _: &mut task::Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.should_yield(bufs.iter().map(|b| b.len()).sum()) {
+            return Poll::Pending;
+        }
+        Poll::Ready(std::io::Write::write_vectored(&mut self.buf, bufs))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     let mut paths = Vec::new();
     for entry in WalkDir::new(pgdata_path) {
@@ -632,7 +697,7 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     }
     // Don't rely on file system order for listing as it may be non-deterministic
     paths.sort();
-    let zstd = async_compression::tokio::write::ZstdEncoder::new(Vec::new());
+    let zstd = async_compression::tokio::write::ZstdEncoder::new(YieldingVec::new());
     let mut builder = Builder::new(zstd);
     // Use reproducible header mode
     builder.mode(HeaderMode::Deterministic);
@@ -642,5 +707,5 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     builder.finish().await?;
     let zstd = builder.into_inner().await?;
     let compressed = zstd.into_inner();
-    Ok(compressed)
+    Ok(compressed.buf)
 }
