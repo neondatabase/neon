@@ -10,7 +10,7 @@ use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_metadata::scan_metadata;
 use s3_scrubber::{
     checks, init_logging, init_s3_client, BucketConfig, ConsoleConfig, NodeKind, RootTarget,
-    S3Deleter, S3Target, TraversingDepth, CLI_NAME,
+    S3Deleter, S3Target, TraversingDepth,
 };
 use tracing::{info, warn};
 
@@ -188,10 +188,16 @@ async fn main() -> anyhow::Result<()> {
 
     let bucket_config = BucketConfig::from_env()?;
 
+    let command_log_name = match &cli.command {
+        Command::ScanMetadata { .. } => "scan",
+        Command::FindGarbage { .. } => "find-garbage",
+        Command::PurgeGarbage { .. } => "purge-garbage",
+        Command::Tidy { .. } => "tidy",
+    };
     let _guard = init_logging(&format!(
-        "{}_{:?}_{}_{}.log",
-        CLI_NAME,
-        cli.command,
+        "{}_{}_{}_{}.log",
+        std::env::args().next().unwrap(),
+        command_log_name,
         bucket_config.bucket,
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));

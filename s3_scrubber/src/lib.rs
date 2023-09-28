@@ -34,8 +34,6 @@ use utils::id::{TenantId, TenantTimelineId};
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
 
-pub const CLI_NAME: &str = "s3-scrubber";
-
 #[derive(Debug, Clone)]
 pub struct S3Target {
     pub bucket_name: String,
