@@ -1313,7 +1313,6 @@ impl Tenant {
                 remote_metadata,
             }) => {
                 // always choose the remote metadata to be crash consistent (see RFC 27)
-                // Save the metadata file to local disk.
                 save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
                     .await
                     .context("save_metadata")
