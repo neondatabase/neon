@@ -160,6 +160,19 @@ impl BackendType<'_, ClientCredentials<'_>> {
             Test(_) => Some("test".to_owned()),
         }
     }
+
+    /// Get username from the credentials.
+    pub fn get_user(&self) -> &str {
+        use BackendType::*;
+
+        match self {
+            Console(_, creds) => creds.user,
+            Postgres(_, creds) => creds.user,
+            Link(_) => "link",
+            Test(_) => "test",
+        }
+    }
+
     /// Authenticate the client via the requested backend, possibly using credentials.
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
