@@ -455,7 +455,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.enable_generations = False
+        self.enable_generations = True
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
