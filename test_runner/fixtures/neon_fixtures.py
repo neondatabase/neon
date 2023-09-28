@@ -1784,6 +1784,20 @@ class NeonPageserver(PgProtocol):
         client = self.http_client()
         return client.tenant_detach(tenant_id)
 
+    def tenant_create(
+        self,
+        tenant_id: TenantId,
+        conf: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
+    ) -> TenantId:
+        if self.env.attachment_service is not None:
+            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
+        else:
+            generation = None
+
+        client = self.http_client(auth_token=auth_token)
+        return client.tenant_create(tenant_id, conf, generation=generation)
+
 
 def append_pageserver_param_overrides(
     params_to_update: List[str],
