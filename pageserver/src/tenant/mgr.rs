@@ -3,6 +3,7 @@
 
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
+use std::env::VarError;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,7 +28,9 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, CreateTenantFilesMode, LoadTenantConfigError, Tenant, TenantState,
+};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -111,6 +114,7 @@ pub async fn init_tenant_mgr(
     resources: TenantSharedResources,
     init_order: InitializationOrder,
     cancel: CancellationToken,
+    skip_upgrade_tenant_conf: bool,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -184,12 +188,6 @@ pub async fn init_tenant_mgr(
                         continue;
                     }
 
-                    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-                    if tenant_ignore_mark_file.exists() {
-                        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-                        continue;
-                    }
-
                     let tenant_id = match tenant_dir_path
                         .file_name()
                         .and_then(OsStr::to_str)
@@ -205,6 +203,34 @@ pub async fn init_tenant_mgr(
                             continue;
                         }
                     };
+
+                    // Upgrade legacy on-disk state: before
+                    // - attach-time-tenant config (#4255) and
+                    // - tenant deletion markers (#4552),
+                    // it was possible that we could end up with a tenant directory but no tenant config file.
+                    // We handled that by loading the default tenant config, without persisting it.
+                    //
+                    // This step here moves these legacy tenants into the present, so we can make tenant config
+                    // file presence required in the future.
+                    if !skip_upgrade_tenant_conf {
+                                let target_config_path = conf.tenant_config_path(&tenant_id);
+                                if !target_config_path.try_exists().expect("filesystme error determining existence of tenant config file") {
+                                Tenant::persist_tenant_config(
+                                    &tenant_id,
+                                    &target_config_path,
+                                    TenantConfOpt::default(),
+                                )
+                                .await
+                                .context("upgrade tenant config on-disk state");
+                           }
+                       }
+                    }
+
+                    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+                    if tenant_ignore_mark_file.exists() {
+                        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+                        continue;
+                    }
 
                     let generation = if let Some(generations) = &tenant_generations {
                         // We have a generation map: treat it as the authority for whether

@@ -280,6 +280,23 @@ fn start_pageserver(
     // We need to release the lock file only when the process exits.
     std::mem::forget(lock_file);
 
+    let skip_upgrade_tenant_conf: bool = {
+        match std::env::var("PAGESERVER_SKIP_UPGRADE_TENANT_CONF") {
+            Ok(val) => {
+                if val == "1" {
+                    info!("Skipping upgrade of tenant configs as per env var PAGESERVER_SKIP_UPGRADE_TENANT_CONF");
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(VarError::NotPresent) => false,
+            Err(VarError::NotUnicode(_)) => {
+                panic!("env var PAGESERVER_SKIP_UPGRADE_TENANT_CONF is present but not unicode")
+            }
+        }
+    };
+
     // Bind the HTTP and libpq ports early, so that if they are in use by some other
     // process, we error out early.
     let http_addr = &conf.listen_http_addr;
@@ -404,6 +421,7 @@ fn start_pageserver(
         },
         order,
         shutdown_pageserver.clone(),
+        skip_upgrade_tenant_conf,
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
