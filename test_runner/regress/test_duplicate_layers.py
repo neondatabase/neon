@@ -41,9 +41,12 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
 def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
-    This test sets fail point at the end of first compaction phase:
-    after flushing new L1 layers but before deletion of L0 layers
-    it should cause generation of duplicate L1 layer by compaction after restart.
+    Test sets fail point at the end of first compaction phase: after
+    flushing new L1 layer but before deletion of L0 layers.
+
+    The L1 used to be overwritten, but with crash-consistency via remote
+    index_part.json, we end up deleting the not yet uploaded L1 layer on
+    startup.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
