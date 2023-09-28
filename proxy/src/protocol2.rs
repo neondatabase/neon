@@ -129,12 +129,18 @@ impl<T: AsyncRead> WithClientIp<T> {
             // exit for bad header
             let len = usize::min(self.buf.len(), HEADER.len());
             if self.buf[..len] != HEADER[..len] {
-                return Poll::Ready(Ok(None));
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid proxy protocol v2 header",
+                )));
             }
 
             // if no more bytes available then exit
             if ready!(bytes_read) == 0 {
-                return Poll::Ready(Ok(None));
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing proxy protocol v2 header",
+                )));
             };
         }
 
@@ -146,27 +152,27 @@ impl<T: AsyncRead> WithClientIp<T> {
         let command = vc & 0b1111;
         if version != 2 {
             return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+                io::ErrorKind::InvalidInput,
                 "invalid proxy protocol version. expected version 2",
             )));
         }
-        match command {
+        let local = match command {
             // the connection was established on purpose by the proxy
             // without being relayed. The connection endpoints are the sender and the
             // receiver. Such connections exist when the proxy sends health-checks to the
             // server. The receiver must accept this connection as valid and must use the
             // real connection endpoints and discard the protocol block including the
             // family which is ignored.
-            0 => {}
+            0 => true,
             // the connection was established on behalf of another node,
             // and reflects the original connection endpoints. The receiver must then use
             // the information provided in the protocol block to get original the address.
-            1 => {}
+            1 => false,
             // other values are unassigned and must not be emitted by senders. Receivers
             // must drop connections presenting unexpected values here.
             _ => {
                 return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::Other,
+                    io::ErrorKind::InvalidInput,
                     "invalid proxy protocol command. expected local (0) or proxy (1)",
                 )))
             }
@@ -186,8 +192,29 @@ impl<T: AsyncRead> WithClientIp<T> {
             // - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
             //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
             0x21 | 0x22 => 36,
-            // unspecified or unix stream. ignore the addresses
-            _ => 0,
+
+            // - \x31 : UNIX stream : the forwarded connection uses SOCK_STREAM over the
+            //   AF_UNIX protocol family. Address length is 2*108 = 216 bytes.
+            // - \x32 : UNIX datagram : the forwarded connection uses SOCK_DGRAM over the
+            //   AF_UNIX protocol family. Address length is 2*108 = 216 bytes.
+            0x31 | 0x32 => 216,
+
+            // UNSPEC : the connection is forwarded for an unknown, unspecified
+            // or unsupported protocol. The sender should use this family when sending
+            // LOCAL commands or when dealing with unsupported protocol families. When
+            // used with a LOCAL command, the receiver must accept the connection and
+            // ignore any address information. For other commands, the receiver is free
+            // to accept the connection anyway and use the real endpoints addresses or to
+            // reject the connection. The receiver should ignore address information.
+            0x00 | 0x01 | 0x02 | 0x10 | 0x20 | 0x30 if local => 0,
+
+            // unspecified or invalid. ignore the addresses
+            _ => {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid proxy protocol address family/transport protocol",
+                )))
+            }
         };
 
         // The 15th and 16th bytes is the address length in bytes in network endian order.
@@ -419,6 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic(expected = "invalid proxy protocol v2 header")]
     async fn test_invalid() {
         let data = [0x55; 256];
 
@@ -426,20 +454,15 @@ mod tests {
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
-        assert_eq!(bytes, data);
-        assert_eq!(read.state, ProxyParse::None);
     }
 
     #[tokio::test]
+    #[should_panic(expected = "missing proxy protocol v2 header")]
     async fn test_short() {
-        let data = [0x55; 10];
-
-        let mut read = pin!(WithClientIp::new(data.as_slice()));
+        let mut read = pin!(WithClientIp::new(&super::HEADER.as_slice()[..10]));
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
-        assert_eq!(bytes, data);
-        assert_eq!(read.state, ProxyParse::None);
     }
 
     #[tokio::test]
