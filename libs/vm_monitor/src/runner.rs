@@ -112,9 +112,10 @@ impl Runner {
         // we *do* still want to determine the file cache size before setting the cgroup's
         // memory.high, so it's not as simple as just swapping the order.
         //
-        // Instead, the resolution here is that on startup, we temporarily unset memory.high, to
-        // allow any existing throttling to dissipate. It's a bit of a hacky solution, but helps
-        // with reliability.
+        // Instead, the resolution here is that on vm-monitor startup (note: happens on each
+        // connection from autoscaler-agent, possibly multiple times per compute_ctl lifecycle), we
+        // temporarily unset memory.high, to allow any existing throttling to dissipate. It's a bit
+        // of a hacky solution, but helps with reliability.
         if let Some(name) = &args.cgroup {
             // Best not to set up cgroup stuff more than once, so we'll initialize cgroup state
             // now, and then set limits later.
