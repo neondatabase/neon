@@ -1,9 +1,12 @@
 #![allow(unused)]
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use hex::FromHex;
 use reqwest::{header, Client, StatusCode, Url};
+use serde::Deserialize;
 use tokio::sync::Semaphore;
 
 use utils::id::{TenantId, TimelineId};
@@ -106,7 +109,23 @@ pub struct SafekeeperData {
     pub availability_zone_id: String,
 }
 
-#[serde_with::serde_as]
+/// For ID fields, the Console API does not always return a value or null.  It will
+/// sometimes return an empty string.  Our native Id type does not consider this acceptable
+/// (nor should it), so we use a wrapper for talking to the Console API.
+fn from_nullable_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let id_str = String::deserialize(deserializer)?;
+    if id_str.is_empty() {
+        // This is a bogus value, but for the purposes of the scrubber all that
+        // matters is that it doesn't collide with any real IDs.
+        Ok(TenantId::from([0u8; 16]))
+    } else {
+        TenantId::from_hex(&id_str).map_err(|e| serde::de::Error::custom(format!("{e}")))
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProjectData {
     pub id: ProjectId,
@@ -115,7 +134,7 @@ pub struct ProjectData {
     pub platform_id: String,
     pub user_id: String,
     pub pageserver_id: u64,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
+    #[serde(deserialize_with = "from_nullable_id")]
     pub tenant: TenantId,
     pub safekeepers: Vec<SafekeeperData>,
     pub deleted: bool,
