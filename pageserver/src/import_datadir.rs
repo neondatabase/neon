@@ -623,8 +623,12 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
+// Set this limit to a small value so that we are a
+// good async citizen and yield repeatedly (but not
+// too often for the small writes)
 const YIELD_DIST: u64 = 1024;
 
+/// A buffer that yields writes at repeated intervals
 struct YieldingVec {
     yld_len: u64,
     buf: Vec<u8>,
