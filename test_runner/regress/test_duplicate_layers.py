@@ -91,7 +91,8 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
             # L0
             continue
 
-        assert l1_found is None, f"found multiple L1: {l1_found.name} and {path.name}"
+        if l1_found is not None:
+            raise RuntimeError(f"found multiple L1: {l1_found.name} and {path.name}")
         l1_found = path
 
     assert l1_found is not None, "failed to find L1 locally"
