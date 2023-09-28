@@ -1,9 +1,10 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
@@ -19,7 +20,10 @@ use utils::crashsafe;
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::ControlPlaneClient;
+use crate::control_plane_client::{
+    ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
+};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::delete::DeleteTenantFlow;
@@ -70,6 +74,11 @@ impl TenantsMap {
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
 async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let tmp_path = safe_rename_tenant_dir(path).await?;
+    fs::remove_dir_all(tmp_path).await
+}
+
+async fn safe_rename_tenant_dir(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let parent = path
         .as_ref()
         .parent()
@@ -79,11 +88,16 @@ async fn safe_remove_tenant_dir_all(path: impl AsRef<Path>) -> std::io::Result<(
             std::io::ErrorKind::InvalidInput,
             "Path must be absolute",
         ))?;
-
-    let tmp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
+    let rand_suffix = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect::<String>()
+        + TEMP_FILE_SUFFIX;
+    let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
     fs::rename(&path, &tmp_path).await?;
     fs::File::open(parent).await?.sync_all().await?;
-    fs::remove_dir_all(tmp_path).await
+    Ok(tmp_path)
 }
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
@@ -105,7 +119,23 @@ pub async fn init_tenant_mgr(
 
     // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
     let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        Some(client.re_attach().await?)
+        let result = match client.re_attach().await {
+            Ok(tenants) => tenants,
+            Err(RetryForeverError::ShuttingDown) => {
+                anyhow::bail!("Shut down while waiting for control plane re-attach response")
+            }
+        };
+
+        // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
+        // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
+        // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
+        // are processed, even though we don't block on recovery completing here.
+        resources
+            .deletion_queue_client
+            .recover(result.clone())
+            .await?;
+
+        Some(result)
     } else {
         info!("Control plane API not configured, tenant generations are disabled");
         None
@@ -274,29 +304,21 @@ pub(crate) fn schedule_local_tenant_processing(
 
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
-        if let Some(remote_storage) = resources.remote_storage {
-            match Tenant::spawn_attach(
-                conf,
-                tenant_id,
-                generation,
-                resources.broker_client,
-                tenants,
-                remote_storage,
-                ctx,
-            ) {
-                Ok(tenant) => tenant,
-                Err(e) => {
-                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                }
-            }
-        } else {
+        if resources.remote_storage.is_none() {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
             Tenant::create_broken_tenant(
                 conf,
                 tenant_id,
                 "attaching mark file present but no remote storage configured".to_string(),
             )
+        } else {
+            match Tenant::spawn_attach(conf, tenant_id, generation, resources, tenants, ctx) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                }
+            }
         }
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
@@ -427,8 +449,7 @@ pub async fn create_tenant(
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
     generation: Generation,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
+    resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -439,13 +460,9 @@ pub async fn create_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let tenant_resources = TenantSharedResources {
-            broker_client,
-            remote_storage,
-        };
         let created_tenant =
             schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                generation, tenant_resources, None, &TENANTS, ctx)?;
+                generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -492,6 +509,8 @@ pub enum GetTenantError {
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
+///
+/// This method is cancel-safe.
 pub async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
@@ -551,7 +570,24 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
-    detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await
+    let tmp_path = detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await?;
+    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+    let task_tenant_id = None;
+    task_mgr::spawn(
+        task_mgr::BACKGROUND_RUNTIME.handle(),
+        TaskKind::MgmtRequest,
+        task_tenant_id,
+        None,
+        "tenant_files_delete",
+        false,
+        async move {
+            fs::remove_dir_all(tmp_path.as_path())
+                .await
+                .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+        },
+    );
+    Ok(())
 }
 
 async fn detach_tenant0(
@@ -559,20 +595,16 @@ async fn detach_tenant0(
     tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
-) -> Result<(), TenantStateError> {
-    let local_files_cleanup_operation = |tenant_id_to_clean| async move {
+) -> Result<PathBuf, TenantStateError> {
+    let tenant_dir_rename_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
-        safe_remove_tenant_dir_all(&local_tenant_directory)
+        safe_rename_tenant_dir(&local_tenant_directory)
             .await
-            .with_context(|| {
-                format!("local tenant directory {local_tenant_directory:?} removal")
-            })?;
-        Ok(())
+            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))
     };
 
     let removal_result =
-        remove_tenant_from_memory(tenants, tenant_id, local_files_cleanup_operation(tenant_id))
-            .await;
+        remove_tenant_from_memory(tenants, tenant_id, tenant_dir_rename_operation(tenant_id)).await;
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
@@ -580,10 +612,10 @@ async fn detach_tenant0(
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
             info!("Detaching an ignored tenant");
-            local_files_cleanup_operation(tenant_id)
+            let tmp_path = tenant_dir_rename_operation(tenant_id)
                 .await
-                .with_context(|| format!("Ignored tenant {tenant_id} local files cleanup"))?;
-            return Ok(());
+                .with_context(|| format!("Ignored tenant {tenant_id} local directory rename"))?;
+            return Ok(tmp_path);
         }
     }
 
@@ -596,6 +628,7 @@ pub async fn load_tenant(
     generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -609,6 +642,7 @@ pub async fn load_tenant(
         let resources = TenantSharedResources {
             broker_client,
             remote_storage,
+            deletion_queue_client
         };
         let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, generation, resources, None,  &TENANTS, ctx)
             .with_context(|| {
@@ -676,8 +710,7 @@ pub async fn attach_tenant(
     tenant_id: TenantId,
     generation: Generation,
     tenant_conf: TenantConfOpt,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: GenericRemoteStorage,
+    resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
@@ -692,10 +725,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let resources = TenantSharedResources {
-            broker_client,
-            remote_storage: Some(remote_storage),
-        };
+
         let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, generation, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233

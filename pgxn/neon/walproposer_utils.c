@@ -25,6 +25,9 @@
 #include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
+#if PG_MAJORVERSION_NUM >= 16
+#include "utils/guc.h"
+#endif
 
 /*
  * These variables are used similarly to openLogFile/SegNo,
@@ -558,11 +561,11 @@ StartProposerReplication(StartReplicationCmd *cmd)
 static void
 WalSndLoop(void)
 {
+	/* Clear any already-pending wakeups */
+	ResetLatch(MyLatch);
+
 	for (;;)
 	{
-		/* Clear any already-pending wakeups */
-		ResetLatch(MyLatch);
-
 		CHECK_FOR_INTERRUPTS();
 
 		XLogBroadcastWalProposer();

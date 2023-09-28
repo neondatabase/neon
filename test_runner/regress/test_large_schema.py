@@ -75,7 +75,7 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
 
     # Check layer file sizes
     timeline_path = "{}/tenants/{}/timelines/{}/".format(
-        env.repo_dir, env.initial_tenant, env.initial_timeline
+        env.pageserver.workdir, env.initial_tenant, env.initial_timeline
     )
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):

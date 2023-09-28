@@ -68,10 +68,16 @@ pub struct LocalEnv {
 
     pub broker: NeonBroker,
 
-    pub pageserver: PageServerConf,
+    /// This Vec must always contain at least one pageserver
+    pub pageservers: Vec<PageServerConf>,
 
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
+
+    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // be propagated into each pageserver's configuration.
+    #[serde(default)]
+    pub control_plane_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
@@ -118,9 +124,6 @@ pub struct PageServerConf {
     // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
-
-    // Control plane location
-    pub control_plane_api: Option<Url>,
 }
 
 impl Default for PageServerConf {
@@ -131,7 +134,6 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
-            control_plane_api: None,
         }
     }
 }
@@ -180,26 +182,18 @@ impl LocalEnv {
     pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
+        #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 => Ok(path.join(format!("v{pg_version}"))),
-            15 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
     pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
     pub fn pageserver_bin(&self) -> PathBuf {
@@ -222,13 +216,21 @@ impl LocalEnv {
         self.base_data_dir.join("endpoints")
     }
 
-    // TODO: move pageserver files into ./pageserver
-    pub fn pageserver_data_dir(&self) -> PathBuf {
-        self.base_data_dir.clone()
+    pub fn pageserver_data_dir(&self, pageserver_id: NodeId) -> PathBuf {
+        self.base_data_dir
+            .join(format!("pageserver_{pageserver_id}"))
     }
 
     pub fn safekeeper_data_dir(&self, data_dir_name: &str) -> PathBuf {
         self.base_data_dir.join("safekeepers").join(data_dir_name)
+    }
+
+    pub fn get_pageserver_conf(&self, id: NodeId) -> anyhow::Result<&PageServerConf> {
+        if let Some(conf) = self.pageservers.iter().find(|node| node.id == id) {
+            Ok(conf)
+        } else {
+            bail!("could not find pageserver {id}")
+        }
     }
 
     pub fn register_branch_mapping(
@@ -307,6 +309,10 @@ impl LocalEnv {
             env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
         }
 
+        if env.pageservers.is_empty() {
+            anyhow::bail!("Configuration must contain at least one pageserver");
+        }
+
         env.base_data_dir = base_path();
 
         Ok(env)
@@ -339,7 +345,7 @@ impl LocalEnv {
         // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
         // to .neon/config. TODO: We lose any formatting and comments along the way, which is
         // a bit sad.
-        let mut conf_content = r#"# This file describes a locale deployment of the page server
+        let mut conf_content = r#"# This file describes a local deployment of the page server
 # and safekeeeper node. It is read by the 'neon_local' command-line
 # utility.
 "#
@@ -469,9 +475,9 @@ impl LocalEnv {
     }
 
     fn auth_keys_needed(&self) -> bool {
-        self.pageserver.pg_auth_type == AuthType::NeonJWT
-            || self.pageserver.http_auth_type == AuthType::NeonJWT
-            || self.safekeepers.iter().any(|sk| sk.auth_enabled)
+        self.pageservers.iter().any(|ps| {
+            ps.pg_auth_type == AuthType::NeonJWT || ps.http_auth_type == AuthType::NeonJWT
+        }) || self.safekeepers.iter().any(|sk| sk.auth_enabled)
     }
 }
 

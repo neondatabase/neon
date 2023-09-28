@@ -1138,7 +1138,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub async fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1154,7 +1154,7 @@ impl<'a> DatadirModification<'a> {
             if is_rel_block_key(key) || is_slru_block_key(key) {
                 // This bails out on first error without modifying pending_updates.
                 // That's Ok, cf this function's doc comment.
-                writer.put(key, self.lsn, &value).await?;
+                writer.put(key, self.lsn, &value, ctx).await?;
             } else {
                 retained_pending_updates.insert(key, value);
             }
@@ -1174,14 +1174,14 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub async fn commit(&mut self) -> anyhow::Result<()> {
+    pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value).await?;
+            writer.put(key, lsn, &value, ctx).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
             writer.delete(key_range, lsn).await?;

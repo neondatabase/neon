@@ -19,9 +19,7 @@ def test_basic_eviction(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -57,7 +55,7 @@ def test_basic_eviction(
     for sk in env.safekeepers:
         sk.stop()
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     initial_local_layers = sorted(
         list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
     )
@@ -154,9 +152,7 @@ def test_basic_eviction(
 
 
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -247,7 +243,7 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     assert by_kind["Image"] > 0
     assert by_kind["Delta"] > 0
     assert by_kind["InMemory"] == 0
-    resident_layers = list(env.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
+    resident_layers = list(env.pageserver.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
     log.info("resident layers count before eviction: %s", len(resident_layers))
 
     log.info("evict all layers")
@@ -255,7 +251,7 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
 
     def ensure_resident_and_remote_size_metrics():
         log.info("ensure that all the layers are gone")
-        resident_layers = list(env.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
+        resident_layers = list(env.pageserver.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
         # we have disabled all background loops, so, this should hold
         assert len(resident_layers) == 0
 

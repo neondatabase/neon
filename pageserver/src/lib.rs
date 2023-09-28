@@ -3,7 +3,8 @@ pub mod basebackup;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
-mod control_plane_client;
+pub mod control_plane_client;
+pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
@@ -27,6 +28,7 @@ pub mod failpoint_support;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
+use deletion_queue::DeletionQueue;
 use tracing::info;
 
 /// Current storage format version
@@ -48,8 +50,8 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
-#[tracing::instrument]
-pub async fn shutdown_pageserver(exit_code: i32) {
+#[tracing::instrument(skip_all, fields(%exit_code))]
+pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -76,6 +78,11 @@ pub async fn shutdown_pageserver(exit_code: i32) {
         Duration::from_secs(5),
     )
     .await;
+
+    // Best effort to persist any outstanding deletions, to avoid leaking objects
+    if let Some(mut deletion_queue) = deletion_queue {
+        deletion_queue.shutdown(Duration::from_secs(5)).await;
+    }
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.

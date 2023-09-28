@@ -33,10 +33,9 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, RemotePath, RemoteStorage, S3Config, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
-
-const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics;
 
@@ -500,7 +499,7 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
 
             let resp = self
@@ -573,7 +572,7 @@ mod tests {
 
     #[test]
     fn relative_path() {
-        let all_paths = vec!["", "some/path", "some/path/"];
+        let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
             .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
