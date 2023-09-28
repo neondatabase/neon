@@ -200,6 +200,8 @@ pub async fn task_main(
                         let mut socket = WithClientIp::new(socket);
                         if let Some(ip) = socket.wait_for_addr().await? {
                             tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                        } else if config.require_client_ip {
+                            bail!("missing required client IP");
                         }
 
                         socket
