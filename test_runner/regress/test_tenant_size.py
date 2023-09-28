@@ -532,7 +532,7 @@ def test_single_branch_get_tenant_size_grows(
     assert size_after == prev, "size after restarting pageserver should not have changed"
 
 
-def assert_approx_equal(size_a, size_b):
+def assert_size_approx_equal(size_a, size_b):
     """
     Tests that evaluate sizes are checking the pageserver space consumption
     that sits many layers below the user input.  The exact space needed
@@ -590,7 +590,7 @@ def test_get_tenant_size_with_multiple_branches(
     )
 
     size_after_first_branch = http_client.tenant_size(tenant_id)
-    assert_approx_equal(size_after_first_branch, size_at_branch)
+    assert_size_approx_equal(size_after_first_branch, size_at_branch)
 
     first_branch_endpoint = env.endpoints.create_start("first-branch", tenant_id=tenant_id)
 
@@ -616,7 +616,7 @@ def test_get_tenant_size_with_multiple_branches(
         "second-branch", main_branch_name, tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
-    assert_approx_equal(size_after_second_branch, size_after_continuing_on_main)
+    assert_size_approx_equal(size_after_second_branch, size_after_continuing_on_main)
 
     second_branch_endpoint = env.endpoints.create_start("second-branch", tenant_id=tenant_id)
 
@@ -652,7 +652,7 @@ def test_get_tenant_size_with_multiple_branches(
     # tenant_size but so far this has been reliable, even though at least gc
     # and tenant_size race for the same locks
     size_after = http_client.tenant_size(tenant_id)
-    assert_approx_equal(size_after, size_after_thinning_branch)
+    assert_size_approx_equal(size_after, size_after_thinning_branch)
 
     size_debug_file_before = open(test_output_dir / "size_debug_before.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
