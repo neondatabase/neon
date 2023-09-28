@@ -130,10 +130,15 @@ pub async fn init_tenant_mgr(
         // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
         // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
         // are processed, even though we don't block on recovery completing here.
-        resources
-            .deletion_queue_client
-            .recover(result.clone())
-            .await?;
+        //
+        // Must only do this if remote storage is enabled, otherwise deletion queue
+        // is not running and channel push will fail.
+        if resources.remote_storage.is_some() {
+            resources
+                .deletion_queue_client
+                .recover(result.clone())
+                .await?;
+        }
 
         Some(result)
     } else {
