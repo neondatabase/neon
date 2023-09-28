@@ -380,7 +380,7 @@ def test_tenant_delete_is_resumed_on_attach(
     env.pageserver.start()
 
     # now we call attach
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     # delete should be resumed
     wait_tenant_status_404(ps_http, tenant_id, iterations)

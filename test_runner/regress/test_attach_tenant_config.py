@@ -100,7 +100,6 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
 
     env = negative_env.neon_env
     tenant_id = negative_env.tenant_id
-    ps_http = env.pageserver.http_client()
 
     config_with_unknown_keys = {
         "compaction_period": "1h",
@@ -108,7 +107,7 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
     }
 
     with pytest.raises(PageserverApiException) as e:
-        ps_http.tenant_attach(tenant_id, config=config_with_unknown_keys)
+        env.pageserver.tenant_attach(tenant_id, config=config_with_unknown_keys)
     assert e.type == PageserverApiException
     assert e.value.status_code == 400
 
@@ -191,7 +190,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
     }, "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
     ps_http.tenant_detach(tenant_id)
-    ps_http.tenant_attach(tenant_id, config=fully_custom_config)
+    env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
 
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
     assert set(ps_http.tenant_config(tenant_id).effective_config.keys()) == set(
