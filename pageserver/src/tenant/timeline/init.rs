@@ -72,7 +72,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
 }
 
 /// Decision on what to do with a layer file after considering its local and remote metadata.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Decision {
     /// The layer is not present locally.
     Evicted(LayerFileMetadata),

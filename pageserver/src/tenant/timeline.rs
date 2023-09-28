@@ -1812,6 +1812,8 @@ impl Timeline {
                         Evicted(_) | UseRemote { .. } => LayerResidenceStatus::Evicted,
                     };
 
+                    tracing::debug!(layer=%name, ?decision, ?status, "applied");
+
                     let stats = LayerAccessStats::for_loading_layer(status);
 
                     let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
