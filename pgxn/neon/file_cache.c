@@ -14,7 +14,6 @@
  */
 
 #include <sys/file.h>
-#include <sys/statvfs.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -38,9 +37,6 @@
 #include "storage/fd.h"
 #include "storage/pg_shmem.h"
 #include "storage/buf_internals.h"
-#include "storage/procsignal.h"
-#include "postmaster/bgworker.h"
-#include "postmaster/interrupt.h"
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -65,9 +61,6 @@
 #define MB					((uint64)1024*1024)
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
-
-#define MAX_MONITOR_INTERVAL_USEC 1000000 /* 1 second */
-#define MAX_DISK_WRITE_RATE       1000 /* MB/sec */
 
 typedef struct FileCacheEntry
 {
