@@ -47,7 +47,7 @@ impl MetricCounter {
     /// extract the value that should be reported
     fn should_report(self: &Arc<Self>) -> Option<u64> {
         // heuristic to see if the branch is still open
-        // if a clone happens while we are observing, the heurstic will be incorrect.
+        // if a clone happens while we are observing, the heuristic will be incorrect.
         //
         // Worst case is that we won't report an event for this endpoint.
         // However, for the strong count to be 1 it must have occured that at one instant
@@ -70,7 +70,7 @@ impl MetricCounter {
         }
     }
 
-    //. determine whether the counter should be cleared from the global map.
+    /// Determine whether the counter should be cleared from the global map.
     fn should_clear(self: &mut Arc<Self>) -> bool {
         // we can't clear this entry if it's acquired elsewhere
         let Some(counter) = Arc::get_mut(self) else {
