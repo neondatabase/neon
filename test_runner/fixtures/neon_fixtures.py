@@ -1769,13 +1769,10 @@ class NeonPageserver(PgProtocol):
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
-        if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
-        else:
-            generation = None
-
         client = self.http_client()
-        return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+        return client.tenant_attach(
+            tenant_id, config, config_null, generation=self.maybe_get_generation(tenant_id)
+        )
 
     def tenant_detach(self, tenant_id: TenantId):
         if self.env.attachment_service is not None:
@@ -1790,13 +1787,23 @@ class NeonPageserver(PgProtocol):
         conf: Optional[Dict[str, Any]] = None,
         auth_token: Optional[str] = None,
     ) -> TenantId:
-        if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
-        else:
-            generation = None
-
         client = self.http_client(auth_token=auth_token)
-        return client.tenant_create(tenant_id, conf, generation=generation)
+        return client.tenant_create(
+            tenant_id, conf, generation=self.maybe_get_generation(tenant_id)
+        )
+
+    def maybe_get_generation(self, tenant_id: TenantId):
+        """
+        For tests that would like to use an HTTP client directly instead of using
+        the `tenant_attach` and `tenant_create` helpers here: issue a generation
+        number for a tenant.
+
+        Returns None if the attachment service is not enabled (legacy mode)
+        """
+        if self.env.attachment_service is not None:
+            return self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+        else:
+            return None
 
 
 def append_pageserver_param_overrides(
