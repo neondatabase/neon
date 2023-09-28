@@ -19,4 +19,4 @@ rustdocflags = ["-Arustdoc::private_intra_doc_links"]
 
 [alias]
 build_testing = ["build", "--features", "testing"]
-neon = ["run", "--bin", "neon_local"]
+neon = ["run", "--bin", "neon_local", "--features", "testing"]
