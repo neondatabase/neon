@@ -431,14 +431,14 @@ impl CgroupWatcher {
                             .context("failed to request upscale")?;
 
                         let memory_high =
-                            self.get_high_bytes().context("failed to get memory.high")?;
+                            self.get_memory_high_bytes().context("failed to get memory.high")?;
                         let new_high = memory_high + self.config.memory_high_increase_by_bytes;
                         info!(
                             current_high_bytes = memory_high,
                             new_high_bytes = new_high,
                             "updating memory.high"
                         );
-                        self.set_high_bytes(new_high)
+                        self.set_memory_high_bytes(new_high)
                             .context("failed to set memory.high")?;
                         last_memory_high_increase_at = Some(Instant::now());
                         continue;
@@ -556,14 +556,6 @@ impl CgroupWatcher {
     }
 }
 
-/// Represents a set of limits we apply to a cgroup to control memory usage.
-///
-/// Setting these values also affects the thresholds for receiving usage alerts.
-#[derive(Debug)]
-pub struct MemoryLimits {
-    pub high: u64,
-}
-
 // Methods for manipulating the actual cgroup
 impl CgroupWatcher {
     /// Get a handle on the freezer subsystem.
@@ -624,50 +616,29 @@ impl CgroupWatcher {
     }
 
     /// Set cgroup memory.high threshold.
-    pub fn set_high_bytes(&self, bytes: u64) -> anyhow::Result<()> {
+    pub fn set_memory_high_bytes(&self, bytes: u64) -> anyhow::Result<()> {
+        self.set_memory_high_internal(MaxValue::Value(u64::min(bytes, i64::MAX as u64) as i64))
+    }
+
+    /// Set the cgroup's memory.high to 'max', disabling it.
+    pub fn unset_memory_high(&self) -> anyhow::Result<()> {
+        self.set_memory_high_internal(MaxValue::Max)
+    }
+
+    fn set_memory_high_internal(&self, value: MaxValue) -> anyhow::Result<()> {
         self.memory()
             .context("failed to get memory subsystem")?
             .set_mem(cgroups_rs::memory::SetMemory {
                 low: None,
-                high: Some(MaxValue::Value(u64::min(bytes, i64::MAX as u64) as i64)),
+                high: Some(value),
                 min: None,
                 max: None,
             })
-            .context("failed to set memory.high")
-    }
-
-    /// Set cgroup memory.high and memory.max.
-    pub fn set_limits(&self, limits: &MemoryLimits) -> anyhow::Result<()> {
-        info!(limits.high, path = self.path(), "writing new memory limits",);
-        self.memory()
-            .context("failed to get memory subsystem while setting memory limits")?
-            .set_mem(cgroups_rs::memory::SetMemory {
-                min: None,
-                low: None,
-                high: Some(MaxValue::Value(
-                    u64::min(limits.high, i64::MAX as u64) as i64
-                )),
-                max: None,
-            })
-            .context("failed to set memory limits")
-    }
-
-    /// Given some amount of available memory, set the desired cgroup memory limits
-    pub fn set_memory_limits(&mut self, available_memory: u64) -> anyhow::Result<()> {
-        let new_high = self.config.calculate_memory_high_value(available_memory);
-        let limits = MemoryLimits { high: new_high };
-        info!(
-            path = self.path(),
-            memory = ?limits,
-            "setting cgroup memory",
-        );
-        self.set_limits(&limits)
-            .context("failed to set cgroup memory limits")?;
-        Ok(())
+            .map_err(anyhow::Error::from)
     }
 
     /// Get memory.high threshold.
-    pub fn get_high_bytes(&self) -> anyhow::Result<u64> {
+    pub fn get_memory_high_bytes(&self) -> anyhow::Result<u64> {
         let high = self
             .memory()
             .context("failed to get memory subsystem while getting memory statistics")?
