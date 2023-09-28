@@ -1,9 +1,7 @@
 pub mod checks;
 pub mod cloud_admin_api;
-pub mod delete_batch_producer;
 pub mod garbage;
 pub mod metadata_stream;
-mod s3_deletion;
 pub mod scan_metadata;
 
 use std::env;
@@ -22,7 +20,6 @@ use aws_sdk_s3::{Client, Config};
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use reqwest::Url;
-pub use s3_deletion::S3Deleter;
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
 use tokio::io::AsyncReadExt;
