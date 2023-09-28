@@ -644,7 +644,7 @@ fn create_remote_storage_client(
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        // No remote storage configured.
+        tracing::warn!("no remote storage configured, this is a deprecated configuration");
         return Ok(None);
     };
 
