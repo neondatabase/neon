@@ -177,19 +177,19 @@ impl OpenFiles {
 pub enum CrashsafeOverwriteError {
     #[error("final path has no parent dir")]
     FinalPathHasNoParentDir,
-    #[error("remove tempfile: {0}")]
+    #[error("remove tempfile")]
     RemovePreviousTempfile(#[source] std::io::Error),
-    #[error("create tempfile: {0}")]
+    #[error("create tempfile")]
     CreateTempfile(#[source] std::io::Error),
-    #[error("write tempfile: {0}")]
+    #[error("write tempfile")]
     WriteContents(#[source] std::io::Error),
-    #[error("sync tempfile: {0}")]
+    #[error("sync tempfile")]
     SyncTempfile(#[source] std::io::Error),
-    #[error("rename tempfile to final path: {0}")]
+    #[error("rename tempfile to final path")]
     RenameTempfileToFinalPath(#[source] std::io::Error),
-    #[error("open final path parent dir: {0}")]
+    #[error("open final path parent dir")]
     OpenFinalPathParentDir(#[source] std::io::Error),
-    #[error("sync final path parent dir: {0}")]
+    #[error("sync final path parent dir")]
     SyncFinalPathParentDir(#[source] std::io::Error),
 }
 impl CrashsafeOverwriteError {
