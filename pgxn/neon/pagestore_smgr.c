@@ -1790,6 +1790,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
+	/* ensure we have enough xlog buffers to log max-sized records */
+	XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
+
+	/*
+	 * Iterate over all the pages. They are collected into batches of
+	 * XLR_MAX_BLOCK_ID pages, and a single WAL-record is written for each
+	 * batch.
+	 */
 	while (remblocks > 0)
 	{
 		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);
