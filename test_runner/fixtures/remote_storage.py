@@ -93,8 +93,40 @@ class LocalFsStorage:
     ):
         return self.timeline_path(tenant_id, timeline_id) / layer_file_name.to_str()
 
+    def timeline_latest_generation(self, tenant_id, timeline_id):
+        timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
+        index_parts = [f for f in timeline_files if f.startswith("index_part")]
+
+        def parse_gen(filename):
+            log.info(f"parsing index_part '{filename}'")
+            parts = filename.split("-")
+            if len(parts) == 2:
+                return int(parts[1], 16)
+            else:
+                return None
+
+        generations = sorted([parse_gen(f) for f in index_parts])
+        return generations[-1]
+
     def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
-        return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME
+        latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
+        if latest_gen is None:
+            filename = TIMELINE_INDEX_PART_FILE_NAME
+        else:
+            filename = f"{TIMELINE_INDEX_PART_FILE_NAME}-{latest_gen:08x}"
+
+        return self.timeline_path(tenant_id, timeline_id) / filename
+
+    def remote_layer_path(self, tenant_id: TenantId, timeline_id: TimelineId, local_name: str):
+        latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
+
+        if latest_gen is None:
+            filename = local_name
+        else:
+            filename = f"{local_name}-{latest_gen:08x}"
+
+        # Assume this is a simple test that uploads in just one generation
+        return self.timeline_path(tenant_id, timeline_id) / filename
 
     def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
         with self.index_path(tenant_id, timeline_id).open("r") as f:

@@ -297,8 +297,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 
     # the remote side of local_layer_truncated
-    remote_layer_path = (
-        env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / path.name
+    remote_layer_path = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, path.name
     )
 
     # if the upload ever was ongoing, this check would be racy, but at least one
