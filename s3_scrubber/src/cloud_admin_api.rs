@@ -1,7 +1,9 @@
 #![allow(unused)]
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
-use reqwest::{header, Client, Url};
+use reqwest::{header, Client, StatusCode, Url};
 use tokio::sync::Semaphore;
 
 use utils::id::{TenantId, TimelineId};
@@ -34,6 +36,9 @@ impl std::fmt::Display for Error {
                     self.context, e
                 )
             }
+            ErrorKind::ResponseStatus(status) => {
+                write!(f, "Bad response status {}: {}", status, self.context)
+            }
             ErrorKind::UnexpectedState => write!(f, "Unexpected state: {}", self.context),
         }
     }
@@ -53,6 +58,7 @@ impl std::error::Error for Error {}
 pub enum ErrorKind {
     RequestSend(reqwest::Error),
     BodyRead(reqwest::Error),
+    ResponseStatus(StatusCode),
     UnexpectedState,
 }
 
@@ -206,6 +212,81 @@ impl CloudAdminApiClient {
                 ErrorKind::UnexpectedState,
             )),
         }
+    }
+
+    pub async fn list_projects(&self, region_id: String) -> Result<Vec<ProjectData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
+        let mut pagination_offset = 0;
+        const PAGINATION_LIMIT: usize = 512;
+        let mut result: Vec<ProjectData> = Vec::new();
+        loop {
+            let response = self
+                .http_client
+                .get(self.append_url("/projects"))
+                .query(&[
+                    ("show_deleted", "false".to_string()),
+                    ("limit", format!("{PAGINATION_LIMIT}")),
+                    ("offset", format!("{pagination_offset}")),
+                ])
+                .header(header::ACCEPT, "application/json")
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .map_err(|e| {
+                    Error::new(
+                        "List active projects".to_string(),
+                        ErrorKind::RequestSend(e),
+                    )
+                })?;
+
+            match response.status() {
+                StatusCode::OK => {}
+                StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                status => {
+                    return Err(Error::new(
+                        "List active projects".to_string(),
+                        ErrorKind::ResponseStatus(response.status()),
+                    ))
+                }
+            }
+
+            let response_bytes = response.bytes().await.map_err(|e| {
+                Error::new("List active projects".to_string(), ErrorKind::BodyRead(e))
+            })?;
+
+            let decode_result =
+                serde_json::from_slice::<AdminApiResponse<Vec<ProjectData>>>(&response_bytes);
+
+            let mut response = match decode_result {
+                Ok(r) => r,
+                Err(decode) => {
+                    tracing::error!(
+                        "Failed to decode response body: {}\n{}",
+                        decode,
+                        String::from_utf8(response_bytes.to_vec()).unwrap()
+                    );
+                    panic!("we out");
+                }
+            };
+
+            pagination_offset += response.data.len();
+
+            result.extend(response.data.drain(..).filter(|t| t.region_id == region_id));
+
+            if pagination_offset >= response.total.unwrap_or(0) {
+                break;
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn find_timeline_branch(
