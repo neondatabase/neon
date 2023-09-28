@@ -648,7 +648,7 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
 
     client.tenant_detach(env.initial_tenant)
-    client.tenant_attach(env.initial_tenant)
+    env.pageserver.tenant_attach(env.initial_tenant)
     wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
 
     timelines_after_detach = set(
