@@ -122,6 +122,26 @@ At the danger of being repetitive, the main goal of this feature is to be a
 backup method, so reliability is very important. This implies that other
 aspects like performance or space reduction are less important.
 
+### Corrupt WAL
+
+The process suggested by this RFC assumes that the WAL is free of corruption.
+In some instances, corruption can make it into WAL, like for example when
+higher level components like postgres or the application first read corrupt
+data, and then execute a write with data derived from that earlier read. That
+written data might then contain the corruption.
+
+For example, an application reads some counter, increments it, and then writes
+the new counter value to the database.
+On a lower leve, the compute might put FPIs (Full Page Images) into the WAL,
+which have corrupt data for rows unrelated to the write operation at hand.
+
+Separating corrupt writes from non-corrupt ones is a hard problem in general,
+and if the application was involved in making the corrupt write, a recovery
+would also involve the application. Therefore, corruption that has made it into
+the WAL is outside of the scope of this feature. However, the WAL replay can be
+issued to right before the point in time where the corruption occured. Then the
+data loss is isolated to post-corruption writes only.
+
 ## Impacted components (e.g. pageserver, safekeeper, console, etc)
 
 Most changes would happen to the pageservers.
