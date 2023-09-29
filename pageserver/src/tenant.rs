@@ -3313,7 +3313,7 @@ async fn try_create_target_tenant_dir(
         tenant_id,
         &temporary_tenant_config_path,
         &temporary_legacy_tenant_config_path,
-        &location_conf,
+        location_conf,
     )
     .await?;
 
