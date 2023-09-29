@@ -845,7 +845,7 @@ pub async fn load_tenant(
             deletion_queue_client
         };
 
-        let mut location_conf = Tenant::load_tenant_config(conf, &tenant_id).ok().unwrap_or(LocationConf::default());
+        let mut location_conf = Tenant::load_tenant_config(conf, &tenant_id).map_err( TenantMapInsertError::Other)?;
         location_conf.update_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
@@ -960,7 +960,7 @@ pub enum TenantMapInsertError {
     #[error("tenant {0} already exists in secondary state")]
     TenantExistsSecondary(TenantId),
     #[error(transparent)]
-    Closure(#[from] anyhow::Error),
+    Other(#[from] anyhow::Error),
 }
 
 /// Give the given closure access to the tenants map entry for the given `tenant_id`, iff that
@@ -996,7 +996,7 @@ where
                 v.insert(TenantSlot::Attached(tenant.clone()));
                 Ok(tenant)
             }
-            Err(e) => Err(TenantMapInsertError::Closure(e)),
+            Err(e) => Err(TenantMapInsertError::Other(e)),
         },
     }
 }
@@ -1021,7 +1021,7 @@ where
             m.insert(tenant_id, upsert_val);
             Ok(())
         }
-        Err(e) => Err(TenantMapInsertError::Closure(e)),
+        Err(e) => Err(TenantMapInsertError::Other(e)),
     }
 }
 
