@@ -697,7 +697,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .await
         {
             Ok(auth_result) => auth_result,
-            Err(e) => return stream.throw_error(e).await,
+            Err(e) => {
+                let user = creds.get_user();
+                let db = params.get("database");
+                let app = params.get("application_name");
+                let params_span = tracing::info_span!("", ?user, ?db, ?app);
+
+                return stream.throw_error(e).instrument(params_span).await;
+            }
         };
 
         let AuthSuccess {
