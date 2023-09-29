@@ -300,10 +300,10 @@ pub async fn init_tenant_mgr(
                         Generation::none()
                     };
 
-                    // Apply the generation to the LocationConf and ensure it is in
-                    // attached mode.
+                    // Presence of a generation number implies attachment: attach the tenant
+                    // if it wasn't already, and apply the generation number.
                     let mut location_conf = location_conf.unwrap_or(LocationConf::default());
-                    location_conf.update_generation(generation);
+                    location_conf.attach_in_generation(generation);
                     Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
                     match schedule_local_tenant_processing(
@@ -846,7 +846,7 @@ pub async fn load_tenant(
         };
 
         let mut location_conf = Tenant::load_tenant_config(conf, &tenant_id).map_err( TenantMapInsertError::Other)?;
-        location_conf.update_generation(generation);
+        location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
         let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, location_conf, resources, None,  &TENANTS, ctx)
