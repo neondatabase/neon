@@ -1,3 +1,11 @@
+/*
+ * Implementation of postgres based walproposer disk and IO routines, i.e. the
+ * real ones. The reason this is separate from walproposer.c is ability to
+ * replace them with mocks, allowing to do simulation testing.
+ *
+ * Also contains initialization of postgres based walproposer.
+ */
+
 #include "postgres.h"
 
 #include <signal.h>
