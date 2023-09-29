@@ -268,8 +268,8 @@ pub async fn init_tenant_mgr(
                                 .unwrap_or(false);
 
                             if is_secondary {
-                                // We do not require the control plane's permission to re-activate secondary
-                                // mode tenants on restart, because they do no remote writes and require no
+                                // We do not require the control plane's permission for secondary mode
+                                // tenants, because they do no remote writes and hence require no
                                 // generation number
                                 info!("Loaded tenant {tenant_id} in secondary mode");
                                 tenants.insert(tenant_id, TenantSlot::Secondary);
