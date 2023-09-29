@@ -28,7 +28,7 @@
  *         playing consensus game is impossible, so speculative 'let's just poll
  *         safekeepers, learn start LSN of future epoch and run basebackup'
  *         won't work.
- * 
+ *
  * Both ways are implemented in walproposer_pg.c file. This file contains
  * generic part of walproposer which can be used in both cases, but can also
  * be used as an independent library.
@@ -57,7 +57,7 @@ static void RecvAcceptorGreeting(Safekeeper *sk);
 static void SendVoteRequest(Safekeeper *sk);
 static void RecvVoteResponse(Safekeeper *sk);
 static void HandleElectedProposer(WalProposer *wp);
-static term_t GetHighestTerm(TermHistory * th);
+static term_t GetHighestTerm(TermHistory *th);
 static term_t GetEpoch(Safekeeper *sk);
 static void DetermineEpochStartLsn(WalProposer *wp);
 static void SendProposerElected(Safekeeper *sk);
@@ -71,13 +71,13 @@ static XLogRecPtr CalculateMinFlushLsn(WalProposer *wp);
 static XLogRecPtr GetAcknowledgedByQuorumWALPosition(WalProposer *wp);
 static void HandleSafekeeperResponse(WalProposer *wp);
 static bool AsyncRead(Safekeeper *sk, char **buf, int *buf_size);
-static bool AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg);
+static bool AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg);
 static bool BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState success_state);
 static bool AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_state);
 static bool AsyncFlush(Safekeeper *sk);
-static int CompareLsn(const void *a, const void *b);
+static int	CompareLsn(const void *a, const void *b);
 static char *FormatSafekeeperState(SafekeeperState state);
-static void	AssertEventsOkForState(uint32 events, Safekeeper *sk);
+static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
 static char *FormatEvents(uint32 events);
 
@@ -88,7 +88,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	char	   *sep;
 	char	   *port;
 	WalProposer *wp;
-	
+
 	wp = palloc0(sizeof(WalProposer));
 	wp->config = config;
 	wp->api = api;
@@ -116,7 +116,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 
 		{
 			Safekeeper *sk = &wp->safekeeper[wp->n_safekeepers];
-			int written = 0;
+			int			written = 0;
 
 			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
 							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
@@ -198,7 +198,7 @@ WalProposerPoll(WalProposer *wp)
 		/* Exit loop if latch is set (we got new WAL) */
 		if ((rc == 1 && events & WL_LATCH_SET))
 			break;
-		
+
 		/*
 		 * If the event contains something that one of our safekeeper states
 		 * was waiting for, we'll advance its state.
@@ -215,15 +215,16 @@ WalProposerPoll(WalProposer *wp)
 		 */
 		ReconnectSafekeepers(wp);
 
-		if (rc == 0) /* timeout expired */
+		if (rc == 0)			/* timeout expired */
 		{
 			/*
 			 * Ensure flushrecptr is set to a recent value. This fixes a case
 			 * where we've not been notified of new WAL records when we were
 			 * planning on consuming them.
 			 */
-			if (!wp->config->syncSafekeepers) {
-				XLogRecPtr flushed = wp->api.get_flush_rec_ptr();
+			if (!wp->config->syncSafekeepers)
+			{
+				XLogRecPtr	flushed = wp->api.get_flush_rec_ptr();
 
 				if (flushed > wp->availableLsn)
 					break;
@@ -574,6 +575,7 @@ HandleConnectionEvent(Safekeeper *sk)
 			elog(LOG, "connected with node %s:%s", sk->host,
 				 sk->port);
 			sk->latestMsgReceivedAt = wp->api.get_current_timestamp();
+
 			/*
 			 * We have to pick some event to update event set. We'll
 			 * eventually need the socket to be readable, so we go with that.
@@ -712,7 +714,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	 * until later.
 	 */
 	sk->greetResponse.apm.tag = 'g';
-	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) & sk->greetResponse))
+	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
 	elog(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
@@ -720,10 +722,10 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
 
-	/* 
+	/*
 	 * Note: it would be better to track the counter on per safekeeper basis,
-	 * but at worst walproposer would restart with 'term rejected', so leave as
-	 * is for now.
+	 * but at worst walproposer would restart with 'term rejected', so leave
+	 * as is for now.
 	 */
 	++wp->n_connected;
 	if (wp->n_connected <= wp->quorum)
@@ -804,7 +806,7 @@ RecvVoteResponse(Safekeeper *sk)
 	WalProposer *wp = sk->wp;
 
 	sk->voteResponse.apm.tag = 'v';
-	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) & sk->voteResponse))
+	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->voteResponse))
 		return;
 
 	elog(LOG,
@@ -915,7 +917,7 @@ HandleElectedProposer(WalProposer *wp)
 
 /* latest term in TermHistory, or 0 is there is no entries */
 static term_t
-GetHighestTerm(TermHistory * th)
+GetHighestTerm(TermHistory *th)
 {
 	return th->n_entries > 0 ? th->entries[th->n_entries - 1].term : 0;
 }
@@ -1042,7 +1044,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 	 */
 	if (!wp->config->syncSafekeepers)
 	{
-		WalproposerShmemState * walprop_shared = wp->api.get_shmem_state();
+		WalproposerShmemState *walprop_shared = wp->api.get_shmem_state();
 
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
@@ -1244,7 +1246,7 @@ BroadcastAppendRequest(WalProposer *wp)
 }
 
 static void
-PrepareAppendRequest(WalProposer *wp, AppendRequestHeader * req, XLogRecPtr beginLsn, XLogRecPtr endLsn)
+PrepareAppendRequest(WalProposer *wp, AppendRequestHeader *req, XLogRecPtr beginLsn, XLogRecPtr endLsn)
 {
 	Assert(endLsn >= beginLsn);
 	req->tag = 'a';
@@ -1355,9 +1357,9 @@ SendAppendRequests(Safekeeper *sk)
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
 		/* wal_read will raise error on failure */
 		wp->api.wal_read(sk->xlogreader,
-					 &sk->outbuf.data[sk->outbuf.len],
-					 req->beginLsn,
-					 req->endLsn - req->beginLsn);
+						 &sk->outbuf.data[sk->outbuf.len],
+						 req->beginLsn,
+						 req->endLsn - req->beginLsn);
 		sk->outbuf.len += req->endLsn - req->beginLsn;
 
 		writeResult = wp->api.conn_async_write(sk->conn, sk->outbuf.data, sk->outbuf.len);
@@ -1419,7 +1421,7 @@ RecvAppendResponses(Safekeeper *sk)
 		 * work until later.
 		 */
 		sk->appendResponse.apm.tag = 'a';
-		if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) & sk->appendResponse))
+		if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->appendResponse))
 			break;
 
 		ereport(DEBUG2,
@@ -1460,7 +1462,7 @@ RecvAppendResponses(Safekeeper *sk)
 
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
 void
-ParsePageserverFeedbackMessage(StringInfo reply_message, PageserverFeedback * rf)
+ParsePageserverFeedbackMessage(StringInfo reply_message, PageserverFeedback *rf)
 {
 	uint8		nkeys;
 	int			i;
@@ -1544,8 +1546,8 @@ static XLogRecPtr
 CalculateMinFlushLsn(WalProposer *wp)
 {
 	XLogRecPtr	lsn = wp->n_safekeepers > 0
-	? wp->safekeeper[0].appendResponse.flushLsn
-	: InvalidXLogRecPtr;
+		? wp->safekeeper[0].appendResponse.flushLsn
+		: InvalidXLogRecPtr;
 
 	for (int i = 1; i < wp->n_safekeepers; i++)
 	{
@@ -1648,15 +1650,15 @@ HandleSafekeeperResponse(WalProposer *wp)
 		if (n_synced >= wp->quorum)
 		{
 			/* A quorum of safekeepers has been synced! */
-			
+
 			/*
-			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
-			 * This helps to finish next sync-safekeepers eailier, by skipping recovery
-			 * step.
-			 * 
-			 * We don't need to wait for response because it doesn't affect correctness,
-			 * and TCP should be able to deliver the message to safekeepers in case of
-			 * network working properly.
+			 * Send empty message to broadcast latest truncateLsn to all
+			 * safekeepers. This helps to finish next sync-safekeepers
+			 * eailier, by skipping recovery step.
+			 *
+			 * We don't need to wait for response because it doesn't affect
+			 * correctness, and TCP should be able to deliver the message to
+			 * safekeepers in case of network working properly.
 			 */
 			BroadcastAppendRequest(wp);
 
@@ -1705,7 +1707,7 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
  * failed, a warning is emitted and the connection is reset.
  */
 static bool
-AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
+AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 {
 	WalProposer *wp = sk->wp;
 
@@ -2072,12 +2074,12 @@ FormatEvents(uint32 events)
 
 	/* Helper variable to check if there's extra bits */
 	uint32		all_flags = WL_LATCH_SET
-	| WL_SOCKET_READABLE
-	| WL_SOCKET_WRITEABLE
-	| WL_TIMEOUT
-	| WL_POSTMASTER_DEATH
-	| WL_EXIT_ON_PM_DEATH
-	| WL_SOCKET_CONNECTED;
+		| WL_SOCKET_READABLE
+		| WL_SOCKET_WRITEABLE
+		| WL_TIMEOUT
+		| WL_POSTMASTER_DEATH
+		| WL_EXIT_ON_PM_DEATH
+		| WL_SOCKET_CONNECTED;
 
 	/*
 	 * The formatting here isn't supposed to be *particularly* useful -- it's
