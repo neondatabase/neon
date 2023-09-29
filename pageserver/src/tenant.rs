@@ -2467,7 +2467,6 @@ impl Tenant {
             }
         }
 
-        // imitate a try-block with a closure
         info!("persisting tenantconf to {}", config_path.display());
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -2498,7 +2497,6 @@ impl Tenant {
         target_config_path: &Path,
         tenant_conf: &TenantConfOpt,
     ) -> anyhow::Result<()> {
-        // imitate a try-block with a closure
         info!("persisting tenantconf to {}", target_config_path.display());
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
