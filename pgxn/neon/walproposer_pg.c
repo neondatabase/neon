@@ -58,7 +58,7 @@ int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
 static AppendResponse quorumFeedback;
-static WalproposerShmemState * walprop_shared;
+static WalproposerShmemState *walprop_shared;
 static WalProposerConfig walprop_config;
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
@@ -87,8 +87,8 @@ static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
 static void XLogBroadcastWalProposer(WalProposer *wp);
 
-static void		XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr);
-static void		XLogWalPropClose(XLogRecPtr recptr);
+static void XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr);
+static void XLogWalPropClose(XLogRecPtr recptr);
 
 static void
 init_walprop_config(bool syncSafekeepers)
@@ -130,7 +130,7 @@ PGDLLEXPORT void
 WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
-	
+
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
 	walprop_pg_load_libpqwalreceiver();
@@ -277,14 +277,14 @@ backpressure_throttling_impl(void)
 	TimestampTz start,
 				stop;
 	bool		retry = PrevProcessInterruptsCallback
-	? PrevProcessInterruptsCallback()
-	: false;
+		? PrevProcessInterruptsCallback()
+		: false;
 
 	/*
-	 * Don't throttle read only transactions or wal sender.
-	 * Do throttle CREATE INDEX CONCURRENTLY, however. It performs some
-	 * stages outside a transaction, even though it writes a lot of WAL. 
-	 * Check PROC_IN_SAFE_IC flag to cover that case.
+	 * Don't throttle read only transactions or wal sender. Do throttle CREATE
+	 * INDEX CONCURRENTLY, however. It performs some stages outside a
+	 * transaction, even though it writes a lot of WAL. Check PROC_IN_SAFE_IC
+	 * flag to cover that case.
 	 */
 	if (am_walsender
 		|| (!(MyProc->statusFlags & PROC_IN_SAFE_IC)
@@ -386,7 +386,7 @@ walprop_pg_get_shmem_state(void)
 }
 
 void
-replication_feedback_set(PageserverFeedback * rf)
+replication_feedback_set(PageserverFeedback *rf)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
 	memcpy(&walprop_shared->feedback, rf, sizeof(PageserverFeedback));
@@ -455,11 +455,11 @@ walprop_pg_init_standalone_sync_safekeepers(void)
 	if (pipe(postmaster_alive_fds) < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
-					errmsg_internal("could not create pipe to monitor postmaster death: %m")));
+				 errmsg_internal("could not create pipe to monitor postmaster death: %m")));
 	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
 		ereport(FATAL,
 				(errcode_for_socket_access(),
-					errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
+				 errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
 
 	ChangeToDataDir();
 
@@ -471,8 +471,8 @@ walprop_pg_init_standalone_sync_safekeepers(void)
 		{
 			ereport(ERROR,
 					(errcode_for_file_access(),
-						errmsg("could not create directory \"%s\": %m",
-							   XLOGDIR)));
+					 errmsg("could not create directory \"%s\": %m",
+							XLOGDIR)));
 			exit(1);
 		}
 	}
@@ -544,8 +544,7 @@ struct WalProposerConn
 {
 	PGconn	   *pg_conn;
 	bool		is_nonblocking; /* whether the connection is non-blocking */
-	char	   *recvbuf;		/* last received data from
-								 * walprop_async_read */
+	char	   *recvbuf;		/* last received data from walprop_async_read */
 };
 
 /* Helper function */
@@ -593,18 +592,16 @@ walprop_connect_start(char *conninfo)
 	const char *keywords[3];
 	const char *values[3];
 	int			n;
-	char       *password = neon_auth_token;
+	char	   *password = neon_auth_token;
 
 	/*
-	 * Connect using the given connection string. If the
-	 * NEON_AUTH_TOKEN environment variable was set, use that as
-	 * the password.
+	 * Connect using the given connection string. If the NEON_AUTH_TOKEN
+	 * environment variable was set, use that as the password.
 	 *
-	 * The connection options are parsed in the order they're given, so
-	 * when we set the password before the connection string, the
-	 * connection string can override the password from the env variable.
-	 * Seems useful, although we don't currently use that capability
-	 * anywhere.
+	 * The connection options are parsed in the order they're given, so when
+	 * we set the password before the connection string, the connection string
+	 * can override the password from the env variable. Seems useful, although
+	 * we don't currently use that capability anywhere.
 	 */
 	n = 0;
 	if (password)
@@ -1018,19 +1015,18 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 #endif
 
 	/*
-	 * When we first start replication the standby will be behind the
-	 * primary. For some applications, for example synchronous
-	 * replication, it is important to have a clear state for this initial
-	 * catchup mode, so we can trigger actions when we change streaming
-	 * state later. We may stay in this state for a long time, which is
-	 * exactly why we want to be able to monitor whether or not we are
-	 * still here.
+	 * When we first start replication the standby will be behind the primary.
+	 * For some applications, for example synchronous replication, it is
+	 * important to have a clear state for this initial catchup mode, so we
+	 * can trigger actions when we change streaming state later. We may stay
+	 * in this state for a long time, which is exactly why we want to be able
+	 * to monitor whether or not we are still here.
 	 */
 	WalSndSetState(WALSNDSTATE_CATCHUP);
 
 	/*
-	 * Don't allow a request to stream from a future point in WAL that
-	 * hasn't been flushed to disk in this server yet.
+	 * Don't allow a request to stream from a future point in WAL that hasn't
+	 * been flushed to disk in this server yet.
 	 */
 	if (FlushPtr < cmd->startpoint)
 	{
@@ -1096,12 +1092,12 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	/*
 	 * Streaming the current timeline on a primary.
 	 *
-	 * Attempt to send all data that's already been written out and
-	 * fsync'd to disk.  We cannot go further than what's been written out
-	 * given the current implementation of WALRead().  And in any case
-	 * it's unsafe to send WAL that is not securely down to disk on the
-	 * primary: if the primary subsequently crashes and restarts, standbys
-	 * must not have applied any WAL that got lost on the primary.
+	 * Attempt to send all data that's already been written out and fsync'd to
+	 * disk.  We cannot go further than what's been written out given the
+	 * current implementation of WALRead().  And in any case it's unsafe to
+	 * send WAL that is not securely down to disk on the primary: if the
+	 * primary subsequently crashes and restarts, standbys must not have
+	 * applied any WAL that got lost on the primary.
 	 */
 #if PG_VERSION_NUM >= 150000
 	endptr = GetFlushRecPtr(NULL);
@@ -1167,12 +1163,12 @@ XLogBroadcastWalProposer(WalProposer *wp)
  * Receive WAL from most advanced safekeeper
  */
 static bool
-WalProposerRecovery(Safekeeper * sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
+WalProposerRecovery(Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
 {
 	char	   *err;
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
-	char conninfo[MAXCONNINFO];
+	char		conninfo[MAXCONNINFO];
 
 	if (!neon_auth_token)
 	{
@@ -1180,7 +1176,7 @@ WalProposerRecovery(Safekeeper * sk, TimeLineID timeline, XLogRecPtr startpos, X
 	}
 	else
 	{
-		int written = 0;
+		int			written = 0;
 
 		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->conninfo);
 		if (written > MAXCONNINFO || written < 0)
@@ -1390,11 +1386,11 @@ walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size
 	WALReadError errinfo;
 
 	if (!WALRead(state,
-				buf,
-				startptr,
-				count,
-				walprop_pg_get_timeline_id(),
-				&errinfo))
+				 buf,
+				 startptr,
+				 count,
+				 walprop_pg_get_timeline_id(),
+				 &errinfo))
 	{
 		WALReadRaiseError(&errinfo);
 	}
@@ -1432,7 +1428,7 @@ walprop_pg_init_event_set(int n_safekeepers)
 }
 
 static void
-walprop_pg_update_event_set(Safekeeper * sk, uint32 events)
+walprop_pg_update_event_set(Safekeeper *sk, uint32 events)
 {
 	/* eventPos = -1 when we don't have an event */
 	Assert(sk->eventPos != -1);
@@ -1441,7 +1437,7 @@ walprop_pg_update_event_set(Safekeeper * sk, uint32 events)
 }
 
 static void
-walprop_pg_add_safekeeper_event_set(Safekeeper * sk, uint32 events)
+walprop_pg_add_safekeeper_event_set(Safekeeper *sk, uint32 events)
 {
 	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk->conn), NULL, sk);
 }
@@ -1462,22 +1458,21 @@ walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
 #endif
 
 	/*
-	 * Wait for a wait event to happen, or timeout:
-	 *  - Safekeeper socket can become available for READ or WRITE
-	 *  - Our latch got set, because
-	 *     * PG15-: We got woken up by a process triggering the WalSender
-	 *     * PG16+: WalSndCtl->wal_flush_cv was triggered
+	 * Wait for a wait event to happen, or timeout: - Safekeeper socket can
+	 * become available for READ or WRITE - Our latch got set, because *
+	 * PG15-: We got woken up by a process triggering the WalSender * PG16+:
+	 * WalSndCtl->wal_flush_cv was triggered
 	 */
 	rc = WaitEventSetWait(waitEvents, timeout,
-							&event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
+						  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
 #if PG_MAJORVERSION_NUM >= 16
 	if (WalSndCtl != NULL)
 		late_cv_trigger = ConditionVariableCancelSleep();
 #endif
 
 	/*
-	 * If wait is terminated by latch set (walsenders' latch is set on
-	 * each wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
+	 * If wait is terminated by latch set (walsenders' latch is set on each
+	 * wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
 	 */
 	if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
 	{
@@ -1488,8 +1483,8 @@ walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
 	}
 
 	/*
-	 * If the event contains something about the socket, it means we got
-	 * an event from a safekeeper socket.
+	 * If the event contains something about the socket, it means we got an
+	 * event from a safekeeper socket.
 	 */
 	if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
 	{
@@ -1514,7 +1509,7 @@ walprop_pg_finish_sync_safekeepers(XLogRecPtr lsn)
  * Get PageserverFeedback fields from the most advanced safekeeper
  */
 static void
-GetLatestNeonFeedback(PageserverFeedback * rf, WalProposer *wp)
+GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
 {
 	int			latest_safekeeper = 0;
 	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
@@ -1549,7 +1544,7 @@ GetLatestNeonFeedback(PageserverFeedback * rf, WalProposer *wp)
  * Combine hot standby feedbacks from all safekeepers.
  */
 static void
-CombineHotStanbyFeedbacks(HotStandbyFeedback * hs, WalProposer *wp)
+CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 {
 	hs->ts = 0;
 	hs->xmin.value = ~0;		/* largest unsigned value */
@@ -1560,6 +1555,7 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback * hs, WalProposer *wp)
 		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
+
 			if (FullTransactionIdIsNormal(skhs->xmin)
 				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
 			{
