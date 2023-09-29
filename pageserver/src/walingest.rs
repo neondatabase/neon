@@ -363,7 +363,7 @@ impl<'a> WalIngest<'a> {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit().await?;
+        modification.commit(ctx).await?;
 
         Ok(())
     }
@@ -444,6 +444,7 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
         match self.timeline.pg_version {
             14 => {
@@ -479,6 +480,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v14::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -496,6 +503,12 @@ impl<'a> WalIngest<'a> {
 
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v14::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
                     }
                 } else {
@@ -535,6 +548,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v15::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -552,6 +571,12 @@ impl<'a> WalIngest<'a> {
 
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v15::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
                     }
                 } else {
@@ -591,6 +616,12 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v16::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -609,6 +640,12 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v16::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -616,7 +653,6 @@ impl<'a> WalIngest<'a> {
             }
             _ => {}
         }
-        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -660,7 +696,7 @@ impl<'a> WalIngest<'a> {
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            flags,
                         },
                         ctx,
                     )
@@ -676,7 +712,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -690,7 +726,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -717,6 +753,8 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match self.timeline.pg_version {
@@ -772,7 +810,11 @@ impl<'a> WalIngest<'a> {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        /* XLOG_NEON_HEAP_LOCK doesn't need special care */
+                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
                     }
                     info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
                 }
@@ -782,8 +824,6 @@ impl<'a> WalIngest<'a> {
                 self.timeline.pg_version
             ),
         }
-
-        // FIXME: What about XLOG_NEON_HEAP_LOCK?
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -827,7 +867,7 @@ impl<'a> WalIngest<'a> {
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            flags,
                         },
                         ctx,
                     )
@@ -843,7 +883,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -857,7 +897,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -1521,7 +1561,7 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
-        m.commit().await?;
+        m.commit(ctx).await?;
         let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
 
         Ok(walingest)
@@ -1540,22 +1580,22 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -1641,7 +1681,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 2, &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -1683,7 +1723,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 0, &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x68), false, &ctx)
@@ -1696,7 +1736,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x70), false, &ctx)
@@ -1721,7 +1761,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x80), false, &ctx)
@@ -1760,7 +1800,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1779,7 +1819,7 @@ mod tests {
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest.put_rel_drop(&mut m, TESTREL_A, &ctx).await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         // Check that rel is not visible anymore
         assert_eq!(
@@ -1797,7 +1837,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1836,7 +1876,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
@@ -1881,7 +1921,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 1, &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         // Check reported size and contents after truncation
         assert_eq!(
@@ -1930,7 +1970,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit().await?;
+        m.commit(&ctx).await?;
 
         assert_eq!(
             tline
@@ -1977,7 +2017,7 @@ mod tests {
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
-            m.commit().await?;
+            m.commit(&ctx).await?;
         }
 
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1993,7 +2033,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE, &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE
@@ -2006,7 +2046,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1, &ctx)
             .await?;
-        m.commit().await?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE - 1
@@ -2022,7 +2062,7 @@ mod tests {
             walingest
                 .put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber, &ctx)
                 .await?;
-            m.commit().await?;
+            m.commit(&ctx).await?;
             assert_eq!(
                 tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
                 size as BlockNumber

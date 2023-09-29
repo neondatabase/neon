@@ -115,6 +115,8 @@ class S3Storage:
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
+    """Is this MOCK_S3 (false) or REAL_S3 (true)"""
+    real: bool
     endpoint: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
@@ -200,9 +202,6 @@ class RemoteStorageKind(str, enum.Enum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"
-    # Pass to tests that are generic to remote storage
-    # to ensure the test pass with or without the remote storage
-    NOOP = "noop"
 
     def configure(
         self,
@@ -213,10 +212,7 @@ class RemoteStorageKind(str, enum.Enum):
         user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
-    ) -> Optional[RemoteStorage]:
-        if self == RemoteStorageKind.NOOP:
-            return None
-
+    ) -> RemoteStorage:
         if self == RemoteStorageKind.LOCAL_FS:
             return LocalFsStorage(LocalFsStorage.component_path(repo_dir, user))
 
@@ -265,6 +261,7 @@ class RemoteStorageKind(str, enum.Enum):
                 prefix_in_bucket="",
                 client=client,
                 cleanup=False,
+                real=False,
             )
 
         assert self == RemoteStorageKind.REAL_S3
@@ -300,6 +297,7 @@ class RemoteStorageKind(str, enum.Enum):
             prefix_in_bucket=prefix_in_bucket,
             client=client,
             cleanup=True,
+            real=True,
         )
 
 

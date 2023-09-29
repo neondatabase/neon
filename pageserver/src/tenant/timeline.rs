@@ -38,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
@@ -143,6 +144,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
+    pub deletion_queue_client: DeletionQueueClient,
 }
 
 pub struct Timeline {
@@ -471,7 +473,7 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn).await {
+        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
@@ -521,9 +523,23 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
-    pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
+    /// remote_consistent_lsn from the perspective of the tenant's current generation,
+    /// not validated with control plane yet.
+    /// See [`Self::get_remote_consistent_lsn_visible`].
+    pub fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
-            remote_client.last_uploaded_consistent_lsn()
+            remote_client.remote_consistent_lsn_projected()
+        } else {
+            None
+        }
+    }
+
+    /// remote_consistent_lsn which the tenant is guaranteed not to go backward from,
+    /// i.e. a value of remote_consistent_lsn_projected which has undergone
+    /// generation validation in the deletion queue.
+    pub fn get_remote_consistent_lsn_visible(&self) -> Option<Lsn> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client.remote_consistent_lsn_visible()
         } else {
             None
         }
@@ -543,7 +559,7 @@ impl Timeline {
     }
 
     pub fn resident_physical_size(&self) -> u64 {
-        self.metrics.resident_physical_size_gauge.get()
+        self.metrics.resident_physical_size_get()
     }
 
     ///
@@ -1293,10 +1309,7 @@ impl Timeline {
         // will treat the file as a local layer again, count it towards resident size,
         // and it'll be like the layer removal never happened.
         // The bump in resident size is perhaps unexpected but overall a robust behavior.
-        self.metrics
-            .resident_physical_size_gauge
-            .sub(layer_file_size);
-
+        self.metrics.resident_physical_size_sub(layer_file_size);
         self.metrics.evictions.inc();
 
         if let Some(delta) = local_layer_residence_duration {
@@ -1820,7 +1833,7 @@ impl Timeline {
             for (layer, m) in needs_upload {
                 rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
             }
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
+            rtc.schedule_layer_file_deletion(needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
@@ -1830,9 +1843,7 @@ impl Timeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.metrics
-            .resident_physical_size_gauge
-            .set(total_physical_size);
+        self.metrics.resident_physical_size_set(total_physical_size);
 
         timer.stop_and_record();
         Ok(())
@@ -2518,13 +2529,18 @@ impl Timeline {
         }
     }
 
-    async fn lookup_cached_page(&self, key: &Key, lsn: Lsn) -> Option<(Lsn, Bytes)> {
+    async fn lookup_cached_page(
+        &self,
+        key: &Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Option<(Lsn, Bytes)> {
         let cache = page_cache::get();
 
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)
+            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn, ctx)
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -2558,10 +2574,16 @@ impl Timeline {
         Ok(layer)
     }
 
-    async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
+    async fn put_value(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        val: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val).await?;
+        layer.put_value(key, lsn, val, ctx).await?;
         Ok(())
     }
 
@@ -2733,7 +2755,7 @@ impl Timeline {
                 // Normal case, write out a L0 delta layer file.
                 // `create_delta_layer` will not modify the layer map.
                 // We will remove frozen layer and add delta layer in one atomic operation later.
-                let layer = self.create_delta_layer(&frozen_layer).await?;
+                let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
                 (
                     HashMap::from([(
                         layer.filename(),
@@ -2856,19 +2878,21 @@ impl Timeline {
     async fn create_delta_layer(
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<DeltaLayer> {
         let span = tracing::info_span!("blocking");
         let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
             let frozen_layer = Arc::clone(frozen_layer);
+            let ctx = ctx.attached_child();
             move || {
                 // Write it out
                 // Keep this inside `spawn_blocking` and `Handle::current`
                 // as long as the write path is still sync and the read impl
                 // is still not fully async. Otherwise executor threads would
                 // be blocked.
-                let new_delta = Handle::current().block_on(frozen_layer.write_to_disk())?;
+                let new_delta = Handle::current().block_on(frozen_layer.write_to_disk(&ctx))?;
                 let new_delta_path = new_delta.path();
 
                 // Sync it to disk.
@@ -3574,7 +3598,7 @@ impl Timeline {
             key, lsn, ref val, ..
         } in all_values_iter
         {
-            let value = val.load().await?;
+            let value = val.load(ctx).await?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -3862,7 +3886,7 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+            remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
         }
 
         Ok(())
@@ -4197,7 +4221,7 @@ impl Timeline {
             }
 
             if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
+                remote_client.schedule_layer_file_deletion(layer_names_to_delete)?;
             }
 
             apply.flush();
@@ -4369,7 +4393,7 @@ impl Timeline {
 
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self_clone.metrics.resident_physical_size_gauge.add(*size);
+                    self_clone.metrics.resident_physical_size_add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
@@ -4699,8 +4723,14 @@ impl<'a> TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    pub async fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value).await
+    pub async fn put(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        value: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.tl.put_value(key, lsn, value, ctx).await
     }
 
     pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {

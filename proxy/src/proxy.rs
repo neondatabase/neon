@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
 };
@@ -28,10 +29,11 @@ use tracing::{error, info, info_span, warn, Instrument};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
-/// Retry duration is BASE_RETRY_WAIT_DURATION * 1.5^n
-pub const NUM_RETRIES_CONNECT: u32 = 10;
+/// Retry duration is BASE_RETRY_WAIT_DURATION * RETRY_WAIT_EXPONENT_BASE ^ n, where n starts at 0
+pub const NUM_RETRIES_CONNECT: u32 = 16;
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
-const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(100);
+const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(25);
+const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -553,8 +555,7 @@ impl ShouldRetry for compute::ConnectionError {
 }
 
 pub fn retry_after(num_retries: u32) -> time::Duration {
-    // 1.5 seems to be an ok growth factor heuristic
-    BASE_RETRY_WAIT_DURATION.mul_f64(1.5_f64.powi(num_retries as i32))
+    BASE_RETRY_WAIT_DURATION.mul_f64(RETRY_WAIT_EXPONENT_BASE.powi((num_retries as i32) - 1))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
@@ -602,6 +603,11 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    let usage = USAGE_METRICS.register(Ids {
+        endpoint_id: aux.endpoint_id.to_string(),
+        branch_id: aux.branch_id.to_string(),
+    });
+
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
@@ -609,6 +615,7 @@ pub async fn proxy_pass(
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
+            usage.record_egress(cnt as u64);
         },
     );
 
@@ -690,7 +697,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .await
         {
             Ok(auth_result) => auth_result,
-            Err(e) => return stream.throw_error(e).await,
+            Err(e) => {
+                let user = creds.get_user();
+                let db = params.get("database");
+                let app = params.get("application_name");
+                let params_span = tracing::info_span!("", ?user, ?db, ?app);
+
+                return stream.throw_error(e).instrument(params_span).await;
+            }
         };
 
         let AuthSuccess {

@@ -57,6 +57,7 @@ use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -117,7 +118,7 @@ mod span;
 
 pub mod metadata;
 mod par_fsync;
-mod remote_timeline_client;
+pub mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
@@ -157,6 +158,7 @@ pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: Option<GenericRemoteStorage>,
+    pub deletion_queue_client: DeletionQueueClient,
 }
 
 ///
@@ -196,6 +198,9 @@ pub struct Tenant {
 
     // provides access to timeline data sitting in the remote storage
     pub(crate) remote_storage: Option<GenericRemoteStorage>,
+
+    // Access to global deletion queue for when this tenant wants to schedule a deletion
+    deletion_queue_client: DeletionQueueClient,
 
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -523,14 +528,19 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         generation: Generation,
-        broker_client: storage_broker::BrokerClientChannel,
+        resources: TenantSharedResources,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let tenant_conf =
             Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
+
+        let TenantSharedResources {
+            broker_client,
+            remote_storage,
+            deletion_queue_client,
+        } = resources;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -540,7 +550,8 @@ impl Tenant {
             wal_redo_manager,
             tenant_id,
             generation,
-            Some(remote_storage.clone()),
+            remote_storage.clone(),
+            deletion_queue_client,
         ));
 
         // Do all the hard work in the background
@@ -571,7 +582,7 @@ impl Tenant {
                 let pending_deletion = {
                     match DeleteTenantFlow::should_resume_deletion(
                         conf,
-                        Some(&remote_storage),
+                        remote_storage.as_ref(),
                         &tenant_clone,
                     )
                     .await
@@ -660,6 +671,7 @@ impl Tenant {
         for timeline_id in remote_timeline_ids {
             let client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -726,6 +738,7 @@ impl Tenant {
                 remote_metadata,
                 TimelineResources {
                     remote_client: Some(remote_client),
+                    deletion_queue_client: self.deletion_queue_client.clone(),
                 },
                 ctx,
             )
@@ -750,6 +763,7 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 Some(remote_timeline_client),
+                self.deletion_queue_client.clone(),
                 None,
             )
             .await
@@ -851,6 +865,7 @@ impl Tenant {
             tenant_id,
             Generation::broken(),
             None,
+            DeletionQueueClient::broken(),
         ))
     }
 
@@ -895,6 +910,7 @@ impl Tenant {
             tenant_id,
             generation,
             remote_storage.clone(),
+            resources.deletion_queue_client.clone(),
         );
         let tenant = Arc::new(tenant);
 
@@ -1302,6 +1318,7 @@ impl Tenant {
                                 timeline_id,
                                 &local_metadata,
                                 Some(remote_client),
+                                self.deletion_queue_client.clone(),
                                 init_order,
                             )
                             .await
@@ -1351,6 +1368,7 @@ impl Tenant {
                         timeline_id,
                         &local_metadata,
                         None,
+                        self.deletion_queue_client.clone(),
                         init_order,
                     )
                     .await
@@ -1504,7 +1522,7 @@ impl Tenant {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit()
+            .commit(ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 
@@ -2242,6 +2260,9 @@ impl Tenant {
         Ok(timeline)
     }
 
+    // Allow too_many_arguments because a constructor's argument list naturally grows with the
+    // number of attributes in the struct: breaking these out into a builder wouldn't be helpful.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
@@ -2250,6 +2271,7 @@ impl Tenant {
         tenant_id: TenantId,
         generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
 
@@ -2317,6 +2339,7 @@ impl Tenant {
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
+            deletion_queue_client,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
@@ -2856,6 +2879,7 @@ impl Tenant {
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
             let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),
+                self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
                 timeline_id,
@@ -2866,7 +2890,10 @@ impl Tenant {
             None
         };
 
-        TimelineResources { remote_client }
+        TimelineResources {
+            remote_client,
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 
     /// Creates intermediate timeline structure and its files.
@@ -3322,6 +3349,7 @@ pub mod harness {
     use utils::logging;
     use utils::lsn::Lsn;
 
+    use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::{
         config::PageServerConf,
         repository::Key,
@@ -3383,6 +3411,7 @@ pub mod harness {
         pub generation: Generation,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: PathBuf,
+        pub deletion_queue: MockDeletionQueue,
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
@@ -3431,6 +3460,7 @@ pub mod harness {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+            let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
 
             Ok(Self {
                 conf,
@@ -3439,6 +3469,7 @@ pub mod harness {
                 generation: Generation::new(0xdeadbeef),
                 remote_storage,
                 remote_fs_dir,
+                deletion_queue,
             })
         }
 
@@ -3463,6 +3494,7 @@ pub mod harness {
                 self.tenant_id,
                 self.generation,
                 Some(self.remote_storage.clone()),
+                self.deletion_queue.new_client(),
             ));
             tenant
                 .load(None, ctx)
@@ -3538,14 +3570,24 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x10),
+                &Value::Image(TEST_IMG("foo at 0x10")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(TEST_IMG("foo at 0x20")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
@@ -3619,19 +3661,19 @@ mod tests {
 
         // Insert a value on the timeline
         writer
-            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"), &ctx)
             .await?;
         writer
-            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x20));
 
         writer
-            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x30));
         writer
-            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"), &ctx)
             .await?;
         writer.finish_write(Lsn(0x40));
 
@@ -3646,7 +3688,7 @@ mod tests {
             .expect("Should have a local timeline");
         let new_writer = newtline.writer().await;
         new_writer
-            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
         new_writer.finish_write(Lsn(0x40));
 
@@ -3669,7 +3711,11 @@ mod tests {
         Ok(())
     }
 
-    async fn make_some_layers(tline: &Timeline, start_lsn: Lsn) -> anyhow::Result<()> {
+    async fn make_some_layers(
+        tline: &Timeline,
+        start_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
@@ -3680,6 +3726,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3689,6 +3736,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3702,6 +3750,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3711,6 +3760,7 @@ mod tests {
                     *TEST_KEY,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -3727,7 +3777,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         // FIXME: this doesn't actually remove any layer currently, given how the flushing
@@ -3801,7 +3851,7 @@ mod tests {
             .load();
 
         let tline = repo.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION)?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         repo.gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO)?;
         let latest_gc_cutoff_lsn = tline.get_latest_gc_cutoff_lsn();
@@ -3823,7 +3873,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3832,7 +3882,7 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
         tline.set_broken("test".to_owned());
 
@@ -3873,7 +3923,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3898,7 +3948,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3907,7 +3957,7 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
 
-        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+        make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
         // run gc on parent
         tenant
@@ -3932,7 +3982,7 @@ mod tests {
             let tline = tenant
                 .create_test_timeline(TIMELINE_ID, Lsn(0x7000), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-            make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
+            make_some_layers(tline.as_ref(), Lsn(0x8000), &ctx).await?;
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
@@ -3961,7 +4011,7 @@ mod tests {
                 .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
                 .await?;
 
-            make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+            make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
             let child_tline = tenant
                 .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
@@ -3972,7 +4022,7 @@ mod tests {
                 .get_timeline(NEW_TIMELINE_ID, true)
                 .expect("Should have a local timeline");
 
-            make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+            make_some_layers(newtline.as_ref(), Lsn(0x60), &ctx).await?;
 
             // so that all uploads finish & we can call harness.load() below again
             tenant
@@ -4004,7 +4054,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+        make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
@@ -4087,7 +4137,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x10),
+                &Value::Image(TEST_IMG("foo at 0x10")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
@@ -4097,7 +4152,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x20),
+                &Value::Image(TEST_IMG("foo at 0x20")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
@@ -4107,7 +4167,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x30),
+                &Value::Image(TEST_IMG("foo at 0x30")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
@@ -4117,7 +4182,12 @@ mod tests {
 
         let writer = tline.writer().await;
         writer
-            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .put(
+                *TEST_KEY,
+                Lsn(0x40),
+                &Value::Image(TEST_IMG("foo at 0x40")),
+                &ctx,
+            )
             .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
@@ -4155,7 +4225,8 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
+        let harness = TenantHarness::create("test_bulk_insert")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4175,6 +4246,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 writer.finish_write(lsn);
@@ -4201,7 +4273,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
+        let harness = TenantHarness::create("test_random_updates")?;
+        let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4227,6 +4300,7 @@ mod tests {
                     test_key,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -4247,6 +4321,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 writer.finish_write(lsn);
@@ -4306,6 +4381,7 @@ mod tests {
                     test_key,
                     lsn,
                     &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
                 )
                 .await?;
             writer.finish_write(lsn);
@@ -4334,6 +4410,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 println!("updating {} at {}", blknum, lsn);
@@ -4402,6 +4479,7 @@ mod tests {
                         test_key,
                         lsn,
                         &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &ctx,
                     )
                     .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
@@ -4474,7 +4552,7 @@ mod tests {
             .init_empty_test_timeline()
             .context("init_empty_test_timeline")?;
         modification
-            .commit()
+            .commit(&ctx)
             .await
             .context("commit init_empty_test_timeline modification")?;
 

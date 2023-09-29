@@ -216,6 +216,24 @@ impl std::fmt::Debug for PrettyLocation<'_, '_> {
     }
 }
 
+/// When you will store a secret but want to make sure it won't
+/// be accidentally logged, wrap it in a SecretString, whose Debug
+/// implementation does not expose the contents.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn get_contents(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[SECRET]")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metrics::{core::Opts, IntCounterVec};

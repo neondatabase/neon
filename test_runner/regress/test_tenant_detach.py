@@ -519,11 +519,8 @@ def test_detach_while_attaching(
 # * restart the pageserver and verify that ignored tenant is still not loaded
 # * `load` the same tenant
 # * ensure that it's status is `Active` and it's present in pageserver's memory with all timelines
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3])
-def test_ignored_tenant_reattach(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+def test_ignored_tenant_reattach(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
