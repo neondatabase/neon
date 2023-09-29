@@ -255,7 +255,13 @@ pub async fn init_tenant_mgr(
                     };
 
                     // Try loading the location configuration
-                    let location_conf = Tenant::load_tenant_config(conf, &tenant_id).ok();
+                    let mut location_conf = match Tenant::load_tenant_config(conf, &tenant_id) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!("Error loading tenant config, skipping the tenant ({e})");
+                            continue;
+                        }
+                    };
 
                     let generation = if let Some(generations) = &tenant_generations {
                         // We have a generation map: treat it as the authority for whether
@@ -263,31 +269,33 @@ pub async fn init_tenant_mgr(
                         if let Some(gen) = generations.get(&tenant_id) {
                             *gen
                         } else {
-                            let is_secondary = location_conf
-                                .map(|c| matches!(c.mode, LocationMode::Secondary(_)))
-                                .unwrap_or(false);
-
-                            if is_secondary {
-                                // We do not require the control plane's permission for secondary mode
-                                // tenants, because they do no remote writes and hence require no
-                                // generation number
-                                info!("Loaded tenant {tenant_id} in secondary mode");
-                                tenants.insert(tenant_id, TenantSlot::Secondary);
-                            } else {
-                                // TODO: augment re-attach API to enable the control plane to
-                                // instruct us about secondary attachments.  That way, instead of throwing
-                                // away local state, we can gracefully fall back to secondary here, if the control
-                                // plane tells us so.
-                                // (https://github.com/neondatabase/neon/issues/5377)
-                                info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
-                                if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                                    error!(
-                                        "Failed to remove detached tenant directory '{}': {:?}",
-                                        tenant_dir_path.display(),
-                                        e
-                                    );
+                            match &location_conf.mode {
+                                LocationMode::Secondary(_) => {
+                                    // We do not require the control plane's permission for secondary mode
+                                    // tenants, because they do no remote writes and hence require no
+                                    // generation number
+                                    info!("Loaded tenant {tenant_id} in secondary mode");
+                                    tenants.insert(tenant_id, TenantSlot::Secondary);
                                 }
-                            }
+                                LocationMode::Attached(_) => {
+                                    // TODO: augment re-attach API to enable the control plane to
+                                    // instruct us about secondary attachments.  That way, instead of throwing
+                                    // away local state, we can gracefully fall back to secondary here, if the control
+                                    // plane tells us so.
+                                    // (https://github.com/neondatabase/neon/issues/5377)
+                                    info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
+                                    if let Err(e) =
+                                        safe_remove_tenant_dir_all(&tenant_dir_path).await
+                                    {
+                                        error!(
+                                            "Failed to remove detached tenant directory '{}': {:?}",
+                                            tenant_dir_path.display(),
+                                            e
+                                        );
+                                    }
+                                }
+                            };
+
                             continue;
                         }
                     } else {
@@ -302,7 +310,6 @@ pub async fn init_tenant_mgr(
 
                     // Presence of a generation number implies attachment: attach the tenant
                     // if it wasn't already, and apply the generation number.
-                    let mut location_conf = location_conf.unwrap_or(LocationConf::default());
                     location_conf.attach_in_generation(generation);
                     Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
