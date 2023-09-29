@@ -1060,19 +1060,24 @@ where
 
     // If the tenant was attached, shut it down gracefully.  For secondary
     // locations this part is not necessary
-    if let Some(attached_tenant) = tenant {
-        // whenever we remove a tenant from memory, we don't want to flush and wait for upload
-        let freeze_and_flush = false;
+    match tenant {
+        Some(attached_tenant) => {
+            // whenever we remove a tenant from memory, we don't want to flush and wait for upload
+            let freeze_and_flush = false;
 
-        // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
-        // that we can continue safely to cleanup.
-        match attached_tenant.shutdown(progress, freeze_and_flush).await {
-            Ok(()) => {}
-            Err(_other) => {
-                // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
-                // wait for it but return an error right away because these are distinct requests.
-                return Err(TenantStateError::IsStopping(tenant_id));
+            // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+            // that we can continue safely to cleanup.
+            match attached_tenant.shutdown(progress, freeze_and_flush).await {
+                Ok(()) => {}
+                Err(_other) => {
+                    // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
+                    // wait for it but return an error right away because these are distinct requests.
+                    return Err(TenantStateError::IsStopping(tenant_id));
+                }
             }
+        }
+        None => {
+            // Nothing to wait on when not attached, proceed.
         }
     }
 
