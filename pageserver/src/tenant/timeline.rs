@@ -90,13 +90,13 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::{LocationConf, TenantConf};
-use super::debug_assert_current_span_has_tenant_and_timeline_id;
+use super::config::TenantConf;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
     AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStatsReset, PersistentLayerDesc,
 };
+use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -149,7 +149,7 @@ pub struct TimelineResources {
 
 pub struct Timeline {
     conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<LocationConf>>,
+    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     myself: Weak<Self>,
 
@@ -1441,7 +1441,7 @@ impl Timeline {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         conf: &'static PageServerConf,
-        tenant_conf: Arc<RwLock<LocationConf>>,
+        tenant_conf: Arc<RwLock<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,

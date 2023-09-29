@@ -27,7 +27,9 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, AttachedTenantConf, CreateTenantFilesMode, Tenant, TenantState,
+};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -317,7 +319,7 @@ pub async fn init_tenant_mgr(
                         conf,
                         tenant_id,
                         &tenant_dir_path,
-                        location_conf,
+                        AttachedTenantConf::try_from(location_conf)?,
                         resources.clone(),
                         Some(init_order.clone()),
                         &TENANTS,
@@ -356,7 +358,7 @@ pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_path: &Path,
-    location_conf: LocationConf,
+    location_conf: AttachedTenantConf,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -561,7 +563,7 @@ pub async fn create_tenant(
 
         let created_tenant =
             schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                location_conf, resources, None, &TENANTS, ctx)?;
+                AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -657,7 +659,7 @@ pub(crate) async fn upsert_location(
         Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
             .await
             .map_err(SetNewTenantConfigError::Persist)?;
-        tenant.set_new_location_config(new_location_config);
+        tenant.set_new_location_config(AttachedTenantConf::try_from(new_location_config)?);
     } else {
         // Upsert a fresh TenantSlot into TenantsMap.  Do it within the map write lock,
         // and re-check that the state of anything we are replacing is as expected.
@@ -688,7 +690,7 @@ pub(crate) async fn upsert_location(
                         conf,
                         tenant_id,
                         &tenant_path,
-                        new_location_config,
+                        AttachedTenantConf::try_from(new_location_config)?,
                         resources,
                         None,
                         &TENANTS,
@@ -860,7 +862,7 @@ pub async fn load_tenant(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, location_conf, resources, None,  &TENANTS, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, AttachedTenantConf::try_from(location_conf)?, resources, None,  &TENANTS, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -945,7 +947,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, location_conf, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

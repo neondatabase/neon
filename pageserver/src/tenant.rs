@@ -45,6 +45,7 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use self::config::AttachedLocationConfig;
 use self::config::LocationConf;
 use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
@@ -163,6 +164,28 @@ pub struct TenantSharedResources {
     pub deletion_queue_client: DeletionQueueClient,
 }
 
+/// A [`Tenant`] is really an _attached_ tenant.  The configuration
+/// for an attached tenant is a subset of the [`LocationConf`], represented
+/// in this struct.
+pub(super) struct AttachedTenantConf {
+    tenant_conf: TenantConfOpt,
+    location: AttachedLocationConfig,
+}
+
+impl AttachedTenantConf {
+    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+        match &location_conf.mode {
+            LocationMode::Attached(attach_conf) => Ok(Self {
+                tenant_conf: location_conf.tenant_conf,
+                location: attach_conf.clone(),
+            }),
+            LocationMode::Secondary(_) => {
+                anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
+            }
+        }
+    }
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -180,7 +203,7 @@ pub struct Tenant {
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
     // This is necessary to allow global config updates.
-    tenant_conf: Arc<RwLock<LocationConf>>,
+    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     tenant_id: TenantId,
 
@@ -533,7 +556,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         resources: TenantSharedResources,
-        location_conf: LocationConf,
+        attached_conf: AttachedTenantConf,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -549,7 +572,7 @@ impl Tenant {
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
-            location_conf,
+            attached_conf,
             wal_redo_manager,
             tenant_id,
             remote_storage.clone(),
@@ -862,7 +885,7 @@ impl Tenant {
                 backtrace: String::new(),
             },
             conf,
-            LocationConf::default(),
+            AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
             wal_redo_manager,
             tenant_id,
             None,
@@ -883,7 +906,7 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        location_conf: LocationConf,
+        attached_conf: AttachedTenantConf,
         resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
@@ -898,7 +921,7 @@ impl Tenant {
         let tenant = Tenant::new(
             TenantState::Loading,
             conf,
-            location_conf,
+            attached_conf,
             wal_redo_manager,
             tenant_id,
             remote_storage.clone(),
@@ -1662,8 +1685,8 @@ impl Tenant {
         {
             let conf = self.tenant_conf.read().unwrap();
 
-            if !conf.may_delete_layers_hint() {
-                info!("Skipping GC in location state {:?}", conf);
+            if !conf.location.may_delete_layers_hint() {
+                info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
             }
         }
@@ -1688,8 +1711,8 @@ impl Tenant {
 
         {
             let conf = self.tenant_conf.read().unwrap();
-            if !conf.may_delete_layers_hint() || !conf.may_upload_layers_hint() {
-                info!("Skipping compaction in location state {:?}", conf);
+            if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
+                info!("Skipping compaction in location state {:?}", conf.location);
                 return Ok(());
             }
         }
@@ -2215,7 +2238,7 @@ impl Tenant {
         }
     }
 
-    pub(crate) fn set_new_location_config(&self, new_conf: LocationConf) {
+    pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         *self.tenant_conf.write().unwrap() = new_conf;
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
@@ -2286,7 +2309,7 @@ impl Tenant {
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
-        tenant_conf: LocationConf,
+        attached_conf: AttachedTenantConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
@@ -2346,19 +2369,14 @@ impl Tenant {
             }
         });
 
-        let generation = match &tenant_conf.mode {
-            LocationMode::Attached(attach_conf) => attach_conf.generation,
-            _ => panic!("Tried to construct a Tenant in non-attached state, this is a bug"),
-        };
-
         Tenant {
             tenant_id,
-            generation,
+            generation: attached_conf.location.generation,
             conf,
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
             loading_started_at: Instant::now(),
-            tenant_conf: Arc::new(RwLock::new(tenant_conf)),
+            tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
@@ -3603,10 +3621,11 @@ pub mod harness {
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
                 self.conf,
-                LocationConf::attached_single(
+                AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf),
                     self.generation,
-                ),
+                ))
+                .unwrap(),
                 walredo_mgr,
                 self.tenant_id,
                 Some(self.remote_storage.clone()),
