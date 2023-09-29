@@ -257,10 +257,22 @@ pub async fn init_tenant_mgr(
                     };
 
                     // Try loading the location configuration
-                    let mut location_conf = match Tenant::load_tenant_config(conf, &tenant_id) {
+                    let mut location_conf = match Tenant::load_tenant_config(conf, &tenant_id)
+                        .context("load tenant config")
+                    {
                         Ok(c) => c,
                         Err(e) => {
-                            warn!("Error loading tenant config, skipping the tenant ({e})");
+                            warn!("Marking tenant broken, failed to {e:#}");
+
+                            tenants.insert(
+                                tenant_id,
+                                TenantSlot::Attached(Tenant::create_broken_tenant(
+                                    conf,
+                                    tenant_id,
+                                    "error loading tenant location configuration".to_string(),
+                                )),
+                            );
+
                             continue;
                         }
                     };
