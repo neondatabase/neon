@@ -179,7 +179,7 @@ impl LocationConf {
                 match attach_conf.attach_mode {
                     AttachmentMode::Single | AttachmentMode::Multi => true,
                     AttachmentMode::Stale => {
-                        // In Stale mode, we avoid dong uploads because we expect that
+                        // In Stale mode, we avoid doing uploads because we expect that
                         // our replacement pageserver will already have started its own
                         // IndexPart that will never reference layers we upload: it is
                         // wasteful.
@@ -248,6 +248,7 @@ impl TryFrom<&'_ models::LocationConfig> for LocationConf {
 impl Default for LocationConf {
     // TODO: this should be removed once tenant loading can guarantee that we are never
     // loading from a directory without a configuration.
+    // => tech debt since https://github.com/neondatabase/neon/issues/1555
     fn default() -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
