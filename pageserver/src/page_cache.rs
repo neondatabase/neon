@@ -479,7 +479,7 @@ impl PageCache {
     // not require changes.
 
     async fn try_get_pinned_slot_permit(&self) -> anyhow::Result<PinnedSlotsPermit> {
-        let _timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
+        let timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
         match tokio::time::timeout(
             // Choose small timeout, neon_smgr does its own retries.
             // https://neondb.slack.com/archives/C04DGM6SMTM/p1694786876476869
@@ -492,7 +492,10 @@ impl PageCache {
                 res.expect("this semaphore is never closed"),
             )),
             Err(_timeout) => {
-                // TODO metric?
+                timer.stop_and_discard();
+                crate::metrics::page_cache_errors_inc(
+                    crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,
+                );
                 anyhow::bail!("timeout: there were page guards alive for all page cache slots")
             }
         }
@@ -914,8 +917,10 @@ impl PageCache {
                             // Note that just yielding to tokio during iteration without such
                             // priority boosting is likely counter-productive. We'd just give more opportunities
                             // for B to bump usage count, further starving A.
+                            crate::metrics::page_cache_errors_inc(
+                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
+                            );
                             anyhow::bail!("exceeded evict iter limit");
-                            // TODO: metric
                         }
                         continue;
                     }
@@ -925,6 +930,7 @@ impl PageCache {
                     self.remove_mapping(old_key);
                     inner.key = None;
                 }
+                crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
                 return Ok((slot_idx, inner));
             }
         }
