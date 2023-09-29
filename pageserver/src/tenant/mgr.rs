@@ -548,7 +548,7 @@ pub async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, location_conf.clone(), &tenant_id, CreateTenantFilesMode::Create).await?;
+        let tenant_directory = super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
@@ -923,7 +923,7 @@ pub async fn attach_tenant(
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
         let location_conf = LocationConf::new(tenant_conf, generation);
-        let tenant_dir = create_tenant_files(conf, location_conf.clone(), &tenant_id, CreateTenantFilesMode::Attach).await?;
+        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 

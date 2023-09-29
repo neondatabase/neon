@@ -3211,7 +3211,7 @@ pub(crate) enum CreateTenantFilesMode {
 
 pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
-    location_conf: LocationConf,
+    location_conf: &LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
@@ -3266,7 +3266,7 @@ pub(crate) async fn create_tenant_files(
 
 async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
-    location_conf: LocationConf,
+    location_conf: &LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
