@@ -95,6 +95,20 @@ pub mod errors {
                 _ => false,
             }
         }
+
+        fn cannot_retry(&self) -> bool {
+            match self {
+                // retry some transport errors
+                Self::Transport(io) => io.cannot_retry(),
+                // locked can be returned when the endpoint was in transition
+                // or when quotas are exceeded. don't retry when quotas are exceeded
+                Self::Console {
+                    status: http::StatusCode::LOCKED,
+                    ref text,
+                } => text.contains("quota"),
+                _ => false,
+            }
+        }
     }
 
     impl From<reqwest::Error> for ApiError {

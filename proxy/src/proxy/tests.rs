@@ -365,6 +365,9 @@ impl ShouldRetry for TestConnectError {
     fn could_retry(&self) -> bool {
         self.retryable
     }
+    fn cannot_retry(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait]

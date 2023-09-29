@@ -414,6 +414,9 @@ where
         Ok(res) => return Ok(res),
         Err(e) => {
             error!(error = ?e, "could not connect to compute node");
+            if e.cannot_retry() {
+                return Err(e.into());
+            }
             (invalidate_cache(node_info), e)
         }
     };
@@ -501,6 +504,8 @@ pub fn handle_try_wake(
 
 pub trait ShouldRetry {
     fn could_retry(&self) -> bool;
+    /// return true if retrying definitely won't make a difference - or is harmful
+    fn cannot_retry(&self) -> bool;
     fn should_retry(&self, num_retries: u32) -> bool {
         match self {
             _ if num_retries >= NUM_RETRIES_CONNECT => false,
@@ -517,6 +522,9 @@ impl ShouldRetry for io::Error {
             ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable | ErrorKind::TimedOut
         )
     }
+    fn cannot_retry(&self) -> bool {
+        false
+    }
 }
 
 impl ShouldRetry for tokio_postgres::error::DbError {
@@ -530,6 +538,22 @@ impl ShouldRetry for tokio_postgres::error::DbError {
                 | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
         )
     }
+    fn cannot_retry(&self) -> bool {
+        use tokio_postgres::error::SqlState;
+        match self.code() {
+            &SqlState::TOO_MANY_CONNECTIONS
+            | &SqlState::INVALID_CATALOG_NAME
+            | &SqlState::INVALID_PASSWORD => true,
+            // pgbouncer errors?
+            &SqlState::PROTOCOL_VIOLATION => matches!(
+                self.message(),
+                "no more connections allowed (max_client_conn)"
+                    | "server login has been failing, try again later (server_login_retry)"
+                    | "query_wait_timeout"
+            ),
+            _ => false,
+        }
+    }
 }
 
 impl ShouldRetry for tokio_postgres::Error {
@@ -542,6 +566,13 @@ impl ShouldRetry for tokio_postgres::Error {
             false
         }
     }
+    fn cannot_retry(&self) -> bool {
+        if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
+            tokio_postgres::error::DbError::cannot_retry(db_err)
+        } else {
+            false
+        }
+    }
 }
 
 impl ShouldRetry for compute::ConnectionError {
@@ -549,6 +580,13 @@ impl ShouldRetry for compute::ConnectionError {
         match self {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
             compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            _ => false,
+        }
+    }
+    fn cannot_retry(&self) -> bool {
+        match self {
+            compute::ConnectionError::Postgres(err) => err.cannot_retry(),
+            compute::ConnectionError::CouldNotConnect(err) => err.cannot_retry(),
             _ => false,
         }
     }
