@@ -110,7 +110,10 @@ impl std::fmt::Debug for LocationConf {
 }
 
 impl LocationConf {
-    pub(crate) fn new(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+    /// For use when loading from a legacy configuration: presence of a tenant
+    /// implies it is in AttachmentMode::Single, which used to be the only
+    /// possible state.  This function should eventually be removed.
+    pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
                 generation,

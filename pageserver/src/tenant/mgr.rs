@@ -550,7 +550,7 @@ pub async fn create_tenant(
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
 
-        let location_conf = LocationConf::new(tenant_conf, generation);
+        let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
@@ -590,7 +590,11 @@ pub async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
-    let location_conf = LocationConf::new(new_tenant_conf, tenant.generation);
+    // This is a legacy API that only operates on attached tenants: the preferred
+    // API to use is the location_config/ endpoint, which lets the caller provide
+    // the full LocationConf.
+    let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
+
     Tenant::persist_tenant_config(conf, &tenant_id, &location_conf)
         .await
         .map_err(SetNewTenantConfigError::Persist)?;
@@ -929,7 +933,7 @@ pub async fn attach_tenant(
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
-        let location_conf = LocationConf::new(tenant_conf, generation);
+        let location_conf = LocationConf::attached_single(tenant_conf, generation);
         let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233

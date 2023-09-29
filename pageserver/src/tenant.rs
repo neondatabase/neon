@@ -2403,7 +2403,11 @@ impl Tenant {
                 }
             }
 
-            Ok(LocationConf::new(tenant_conf, Generation::none()))
+            // Legacy configs are implicitly in attached state
+            Ok(LocationConf::attached_single(
+                tenant_conf,
+                Generation::none(),
+            ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
             // a detached tenant and config is passed via attach command.
@@ -3599,7 +3603,10 @@ pub mod harness {
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
                 self.conf,
-                LocationConf::new(TenantConfOpt::from(self.tenant_conf), self.generation),
+                LocationConf::attached_single(
+                    TenantConfOpt::from(self.tenant_conf),
+                    self.generation,
+                ),
                 walredo_mgr,
                 self.tenant_id,
                 Some(self.remote_storage.clone()),
