@@ -169,7 +169,7 @@ struct Slot {
 
 struct SlotInner {
     key: Option<CacheKey>,
-    // for `coalesce_permit`
+    // for `coalesce_readers_permit`
     permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
     buf: &'static mut [u8; PAGE_SZ],
 }
@@ -379,7 +379,6 @@ impl PageCache {
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
         let Ok(permit) = self.try_get_pinned_slot_permit().await else {
-            // TODO metric?
             return None;
         };
 
@@ -493,6 +492,7 @@ impl PageCache {
                 res.expect("this semaphore is never closed"),
             )),
             Err(_timeout) => {
+                // TODO metric?
                 anyhow::bail!("timeout: there were page guards alive for all page cache slots")
             }
         }
