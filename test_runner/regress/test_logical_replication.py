@@ -1,6 +1,6 @@
-import time
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
+
 
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
@@ -14,8 +14,6 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
 
     cur.execute("create table t(pk integer primary key, payload integer)")
     cur.execute("create publication pub1 for table t")
-#    cur.execute("SELECT DISTINCT t.schemaname, t.tablename, t.attnames FROM pg_catalog.pg_publication_tables t WHERE t.pubname IN ('pub1')")
-#    time.sleep(1)
 
     # now start subscriber
     vanilla_pg.start()
@@ -25,13 +23,13 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     # Wait logical replication channel to be established
-    time.sleep(1)
+    logical_replication_sync(vanilla_pg, endpoint)
 
     # insert some data
     cur.execute("insert into t values (generate_series(1,1000), 0)")
 
     # Wait logical replication to sync
-    time.sleep(1)
+    logical_replication_sync(vanilla_pg, endpoint)
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 1000
 
     # now stop subscriber...
@@ -48,7 +46,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
 
     # Wait logical replication to sync
-    time.sleep(2)
+    logical_replication_sync(vanilla_pg, endpoint)
 
     # Check that subscribers receives all data
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 2000
