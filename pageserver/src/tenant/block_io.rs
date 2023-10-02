@@ -186,26 +186,21 @@ impl FileBlockReader {
         ctx: &RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
         let cache = page_cache::get();
-        loop {
-            match cache
-                .read_immutable_buf(self.file_id, blknum, ctx)
-                .await
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to read immutable buf: {e:#}"),
-                    )
-                })? {
-                ReadBufResult::Found(guard) => break Ok(guard.into()),
-                ReadBufResult::NotFound(mut write_guard) => {
-                    // Read the page from disk into the buffer
-                    self.fill_buffer(write_guard.deref_mut(), blknum).await?;
-                    write_guard.mark_valid();
-
-                    // Swap for read lock
-                    continue;
-                }
-            };
+        match cache
+            .read_immutable_buf(self.file_id, blknum, ctx)
+            .await
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to read immutable buf: {e:#}"),
+                )
+            })? {
+            ReadBufResult::Found(guard) => Ok(guard.into()),
+            ReadBufResult::NotFound(mut write_guard) => {
+                // Read the page from disk into the buffer
+                self.fill_buffer(write_guard.deref_mut(), blknum).await?;
+                Ok(write_guard.mark_valid().into())
+            }
         }
     }
 }
