@@ -685,26 +685,14 @@ USER root
 #
 #########################################################################################
 
-FROM rust-extensions-build-pgx AS pg-jsonschema-pg-build
+FROM rust-extensions-build-pgrx AS pg-jsonschema-pg-build
 ARG PG_VERSION
 
-# caeab60d70b2fd3ae421ec66466a3abbb37b7ee6 made on 06/03/2023
-# there is no release tag yet, but we need it due to the superuser fix in the control file, switch to git tag after release >= 0.1.5
-RUN case "${PG_VERSION}" in \
-      "v14" | "v15") \
-        ;; \
-      "v16") \
-        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
-	;; \
-      *) \
-        echo "unexpected PostgreSQL version \"${PG_VERSION}\"" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421ec66466a3abbb37b7ee6.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "54129ce2e7ee7a585648dbb4cef6d73f795d94fe72f248ac01119992518469a4 pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.2.0.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "b1bd95009c8809bd6cda9a37777f8b7df425ff1a34976c1e7a4b31cf838ace66 pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xvzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgx = "0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    cargo pgx install --release && \
+    sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
 #########################################################################################
