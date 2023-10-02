@@ -264,6 +264,46 @@ pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheS
     },
 });
 
+pub(crate) static PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_page_cache_acquire_pinned_slot_seconds",
+        "Time spent acquiring a pinned slot in the page cache",
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_page_cache_find_victim_iters_total",
+        "Counter for the number of iterations in the find_victim loop",
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "page_cache_errors_total",
+        "Number of timeouts while acquiring a pinned slot in the page cache",
+        &["error_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum PageCacheErrorKind {
+    AcquirePinnedSlotTimeout,
+    EvictIterLimit,
+}
+
+pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
+    PAGE_CACHE_ERRORS
+        .get_metric_with_label_values(&[error_kind.into()])
+        .unwrap()
+        .inc();
+}
+
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
