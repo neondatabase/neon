@@ -208,6 +208,15 @@ impl CrashsafeOverwriteError {
     }
 }
 
+/// Call this when the local filesystem gives us an error with an external
+/// cause: this includes EIO, EROFS, and EACCESS: all these indicate either
+/// bad storage or bad configuration, and we can't fix that from inside
+/// a running process.
+pub(crate) fn on_fatal_io_error(e: &std::io::Error) {
+    tracing::error!("Fatal I/O error: {}", &e);
+    std::process::abort();
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
