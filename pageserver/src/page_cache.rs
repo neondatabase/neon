@@ -884,9 +884,21 @@ impl PageCache {
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
+        let mut last_slot_idx = None;
         loop {
             iters += 1;
-            let slot_idx = self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+            let slot_idx = {
+                let next_idx =
+                    self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+                match (last_slot_idx, next_idx) {
+                    (Some(x), y) if x > y => {
+                        tokio::task::yield_now().await;
+                    }
+                    (None | Some(_), _) => {}
+                }
+                last_slot_idx = Some(next_idx);
+                next_idx
+            };
 
             let slot = &self.slots[slot_idx];
 
