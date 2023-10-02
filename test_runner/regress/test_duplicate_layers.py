@@ -128,8 +128,3 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     uploaded_at = uploaded.stat()[8]
     assert overwritten_at <= uploaded_at, "expected the L1 to finally be uploaded"
-
-    # why does compaction not wait for uploads? probably so that we can compact
-    # faster than we can upload in some cases.
-    #
-    # timeline_compact should wait for uploads as well
