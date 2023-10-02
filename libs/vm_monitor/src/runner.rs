@@ -141,14 +141,6 @@ impl Runner {
             );
 
             state.cgroup = Some(cgroup);
-        } else {
-            // *NOTE*: We need to forget the sender so that its drop impl does not get ran.
-            // This allows us to poll it in `Monitor::run` regardless of whether we
-            // are managing a cgroup or not. If we don't forget it, all receives will
-            // immediately return an error because the sender is droped and it will
-            // claim all select! statements, effectively turning `Monitor::run` into
-            // `loop { fail to receive }`.
-            mem::forget(requesting_send);
         }
 
         let mut file_cache_reserved_bytes = 0;
@@ -417,7 +409,7 @@ impl Runner {
                     }
                 }
                 // we need to propagate an upscale request
-                request = self.dispatcher.request_upscale_events.recv() => {
+                request = self.dispatcher.request_upscale_events.recv(), if self.cgroup.is_some() => {
                     if request.is_none() {
                         bail!("failed to listen for upscale event from cgroup")
                     }
