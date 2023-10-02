@@ -3858,7 +3858,7 @@ impl Timeline {
             );
             let l = l as Arc<dyn PersistentLayer>;
             if guard.contains(&l) {
-                tracing::warn!(layer=%l, "duplicated L1 layer");
+                tracing::error!(layer=%l, "duplicated L1 layer");
                 duplicated_layers.insert(l.layer_desc().key());
             } else {
                 if LayerMap::is_l0(l.layer_desc()) {

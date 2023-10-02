@@ -105,17 +105,17 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     time.sleep(1)
 
     env.pageserver.start()
-    warning = f".*duplicated L1 layer layer={l1_found.name}"
-    env.pageserver.allowed_errors.append(warning)
+    message = f".*duplicated L1 layer layer={l1_found.name}"
+    env.pageserver.allowed_errors.append(message)
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     # give time for log flush
     time.sleep(1)
 
-    found_warning = env.pageserver.log_contains(warning)
-    assert found_warning, "no layer was duplicated, has this been fixed already?"
+    found_msg = env.pageserver.log_contains(message)
+    assert found_msg is not None, "no layer was duplicated, has this been fixed already?"
 
-    log.info(f"found warning: {found_warning}")
+    log.info(f"found log line: {found_msg}")
 
     overwritten_at = l1_found.stat()[8]
     assert original_created_at < overwritten_at, "expected the L1 to be overwritten"
