@@ -614,49 +614,11 @@ RUN wget https://gitlab.com/dalibo/postgresql_anonymizer/-/archive/1.1.0/postgre
 
 #########################################################################################
 #
-# Layer "rust extensions" for older extension which hasn't been updated to `pgrx` yet
-# This layer is used to build `pgx` deps
-#
-#########################################################################################
-FROM build-deps AS rust-extensions-build-pgx
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-RUN apt-get update && \
-    apt-get install -y curl libclang-dev cmake && \
-    useradd -ms /bin/bash nonroot -b /home
-
-ENV HOME=/home/nonroot
-ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
-USER nonroot
-WORKDIR /home/nonroot
-ARG PG_VERSION
-
-RUN case "${PG_VERSION}" in \
-      "v14" | "v15") \
-        ;; \
-      "v16") \
-        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
-	;; \
-      *) \
-        echo "unexpected PostgreSQL version ${PG_VERSION}" && exit 1 \
-        ;; \
-    esac && \
-    curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
-    rm rustup-init && \
-    cargo install --locked --version 0.7.3 cargo-pgx && \
-    /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
-
-USER root
-
-#########################################################################################
-#
 # Layer "rust extensions"
 # This layer is used to build `pgrx` deps
 #
 #########################################################################################
-FROM build-deps AS rust-extensions-build-pgrx
+FROM build-deps AS rust-extensions-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt-get update && \
@@ -685,26 +647,14 @@ USER root
 #
 #########################################################################################
 
-FROM rust-extensions-build-pgx AS pg-jsonschema-pg-build
+FROM rust-extensions-build AS pg-jsonschema-pg-build
 ARG PG_VERSION
 
-# caeab60d70b2fd3ae421ec66466a3abbb37b7ee6 made on 06/03/2023
-# there is no release tag yet, but we need it due to the superuser fix in the control file, switch to git tag after release >= 0.1.5
-RUN case "${PG_VERSION}" in \
-      "v14" | "v15") \
-        ;; \
-      "v16") \
-        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
-	;; \
-      *) \
-        echo "unexpected PostgreSQL version \"${PG_VERSION}\"" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421ec66466a3abbb37b7ee6.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "54129ce2e7ee7a585648dbb4cef6d73f795d94fe72f248ac01119992518469a4 pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.2.0.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "b1bd95009c8809bd6cda9a37777f8b7df425ff1a34976c1e7a4b31cf838ace66 pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xvzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgx = "0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    cargo pgx install --release && \
+    sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
 #########################################################################################
@@ -714,29 +664,14 @@ RUN case "${PG_VERSION}" in \
 #
 #########################################################################################
 
-FROM rust-extensions-build-pgx AS pg-graphql-pg-build
+FROM rust-extensions-build AS pg-graphql-pg-build
 ARG PG_VERSION
 
-# b4988843647450a153439be367168ed09971af85 made on 22/02/2023 (from remove-pgx-contrib-spiext branch)
-# Currently pgx version bump to >= 0.7.2  causes "call to unsafe function" compliation errors in
-# pgx-contrib-spiext. There is a branch that removes that dependency, so use it. It is on the
-# same 1.1 version we've used before.
-RUN case "${PG_VERSION}" in \
-      "v14" | "v15") \
-        ;; \
-      "v16") \
-        echo "TODO: Not yet supported for PostgreSQL 16. Need to update pgrx dependencies" && exit 0 \
-	;; \
-      *) \
-        echo "unexpected PostgreSQL version" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/yrashk/pg_graphql/archive/b4988843647450a153439be367168ed09971af85.tar.gz -O pg_graphql.tar.gz && \
-    echo "0c7b0e746441b2ec24187d0e03555faf935c2159e2839bddd14df6dafbc8c9bd pg_graphql.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.4.0.tar.gz -O pg_graphql.tar.gz && \
+    echo "ea85d45f8af1d2382e2af847f88102f930782c00e6c612308e6f08f27309d5f7 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xvzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgx = "~0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    sed -i 's/pgx-tests = "~0.7.1"/pgx-tests = "0.7.3"/g' Cargo.toml && \
-    cargo pgx install --release && \
+    sed -i 's/pgrx = "=0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_graphql.control
@@ -748,7 +683,7 @@ RUN case "${PG_VERSION}" in \
 #
 #########################################################################################
 
-FROM rust-extensions-build-pgrx AS pg-tiktoken-pg-build
+FROM rust-extensions-build AS pg-tiktoken-pg-build
 ARG PG_VERSION
 
 # 26806147b17b60763039c6a6878884c41a262318 made on 26/09/2023
@@ -765,7 +700,7 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6
 #
 #########################################################################################
 
-FROM rust-extensions-build-pgrx AS pg-pgx-ulid-build
+FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
 RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.3.tar.gz -O pgx_ulid.tar.gz && \
