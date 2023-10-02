@@ -24,6 +24,9 @@ pub enum ApiError {
     #[error("Precondition failed: {0}")]
     PreconditionFailed(Box<str>),
 
+    #[error("Resource temporarily unavailable: {0}")]
+    ResourceUnavailable(String),
+
     #[error("Shutting down")]
     ShuttingDown,
 
@@ -57,6 +60,10 @@ impl ApiError {
             ),
             ApiError::ShuttingDown => HttpErrorBody::response_from_msg_and_status(
                 "Shutting down".to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ApiError::ResourceUnavailable(err) => HttpErrorBody::response_from_msg_and_status(
+                err.to_string(),
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(

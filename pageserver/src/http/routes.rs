@@ -168,14 +168,14 @@ impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
             GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            e @ GetTenantError::NotActive(_) => {
+            GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
                 // in fact exist locally. If we did, the caller could draw the conclusion
                 // that it can attach the tenant to another PS and we'd be in split-brain.
                 //
                 // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
-                ApiError::InternalServerError(anyhow::Error::new(e))
+                ApiError::ResourceUnavailable(format!("Tenant not yet active"))
             }
         }
     }
