@@ -113,10 +113,10 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
 
 
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
+def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     """
-    For backwards-compatibility: if we send an empty body,
-    the request should be accepted and the config should be the default config.
+    When the 'config' body attribute is omitted, the request should be accepted
+    and the tenant should use the default configuration
     """
     env = positive_env
     ps_http = env.pageserver.http_client()
@@ -127,9 +127,14 @@ def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
+    body = {}
+    gen = env.pageserver.maybe_get_generation(tenant_id)
+    if gen is not None:
+        body["generation"] = gen
+
     ps_http.post(
         f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        data=b"",
+        json=body,
         headers=None if content_type else {"Content-Type": "application/json"},
     ).raise_for_status()
 
