@@ -13,6 +13,10 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
+    # use a failpoint to return all L0s as L1s
+    message = ".*duplicated L1 layer layer=.*"
+    env.pageserver.allowed_errors.append(message)
+
     # Use aggressive compaction and checkpoint settings
     tenant_id, _ = env.neon_cli.create_tenant(
         conf={
