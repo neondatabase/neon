@@ -484,26 +484,13 @@ impl PageCache {
     // not require changes.
 
     async fn try_get_pinned_slot_permit(&self) -> anyhow::Result<PinnedSlotsPermit> {
-        let timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
-        match tokio::time::timeout(
-            // Choose small timeout, neon_smgr does its own retries.
-            // https://neondb.slack.com/archives/C04DGM6SMTM/p1694786876476869
-            Duration::from_secs(10),
-            Arc::clone(&self.pinned_slots).acquire_owned(),
-        )
-        .await
-        {
-            Ok(res) => Ok(PinnedSlotsPermit(
-                res.expect("this semaphore is never closed"),
-            )),
-            Err(_timeout) => {
-                timer.stop_and_discard();
-                crate::metrics::page_cache_errors_inc(
-                    crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,
-                );
-                anyhow::bail!("timeout: there were page guards alive for all page cache slots")
-            }
-        }
+        let _timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
+        Ok(PinnedSlotsPermit(
+            Arc::clone(&self.pinned_slots)
+                .acquire_owned()
+                .await
+                .unwrap(),
+        ))
     }
 
     /// Look up a page in the cache.
