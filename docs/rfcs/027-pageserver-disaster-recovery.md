@@ -186,6 +186,13 @@ possible approaches to this, including creating snapshots of the
 page files and uploading them to S3, but if we do this for every single
 branch, we lose the cheap branching property.
 
+### Implementation by component
+
+The proposed changes for the various components of the neon architecture
+are written up in this notion page:
+
+https://www.notion.so/neondatabase/Pageserver-disaster-recovery-one-pager-4ecfb5df16ce4f6bbfc3817ed1a6cbb2
+
 ### Unresolved questions
 
 none known (outside of the mentioned ones).
