@@ -243,11 +243,7 @@ impl ListWriter {
             let file_name = dentry.file_name();
             let dentry_str = file_name.to_string_lossy();
 
-            if Some(file_name.as_os_str()) == header_path.file_name() {
-                // Don't try and parse the header's name like a list
-                continue;
-            }
-
+            // Temporary files might be left behind from `crashsafe_overwrite`
             if dentry_str.ends_with(TEMP_SUFFIX) {
                 info!("Cleaning up temporary file {dentry_str}");
                 let absolute_path = deletion_directory.join(dentry.file_name());
@@ -260,6 +256,11 @@ impl ListWriter {
                     );
                 }
 
+                continue;
+            }
+
+            if Some(file_name.as_os_str()) == header_path.file_name() {
+                // Don't try and parse the header's name like a list
                 continue;
             }
 

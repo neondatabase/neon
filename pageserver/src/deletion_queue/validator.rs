@@ -116,6 +116,11 @@ where
     /// Valid LSN updates propagate back to Timelines immediately, valid DeletionLists
     /// go into the queue of ready-to-execute lists.
     async fn validate(&mut self) -> Result<(), DeletionQueueError> {
+        // Figure out for each tenant which generation number to validate.
+        //
+        // It is sufficient to validate the max generation number of each tenant because only the
+        // highest generation number can possibly be valid. Hence this map will collect the
+        // highest generation pending validation for each tenant.
         let mut tenant_generations = HashMap::new();
         for list in &self.pending_lists {
             for (tenant_id, tenant_list) in &list.tenants {
@@ -244,6 +249,11 @@ where
                         self.list_write_failed = Some(list.sequence);
                     }
                 }
+            }
+
+            // Assert monotonicity of the list sequence numbers we are processing
+            if let Some(validated) = validated_sequence {
+                assert!(list.sequence >= validated)
             }
 
             validated_sequence = Some(list.sequence);
