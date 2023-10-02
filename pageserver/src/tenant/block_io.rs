@@ -6,7 +6,7 @@ use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
 use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use bytes::Bytes;
 use std::ops::{Deref, DerefMut};
 
@@ -96,7 +96,7 @@ impl<'a> BlockReaderRef<'a> {
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
-            VirtualFile(r) => r.read_blk(blknum).await,
+            VirtualFile(r) => r.read_blk(blknum).await.map_err(virtual_file::Error::into),
         }
     }
 }
@@ -174,6 +174,7 @@ impl FileBlockReader {
         self.file
             .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
             .await
+            .map_err(virtual_file::Error::into)
     }
     /// Read a block.
     ///

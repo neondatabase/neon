@@ -234,7 +234,10 @@ impl BlobWriter<false> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
+    use crate::{
+        context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef,
+        virtual_file::Error,
+    };
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
