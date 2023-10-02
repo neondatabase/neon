@@ -217,6 +217,133 @@ pub(crate) fn on_fatal_io_error(e: &std::io::Error) {
     std::process::abort();
 }
 
+/// Identify error types that should alwways terminate the process.  Other
+/// error types may be elegible for retry.
+pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
+    match e.kind() {
+        ErrorKind::InvalidInput => {
+            // Invalid input is always a code problem, not a disk/filesystem problem
+            return false;
+        }
+        ErrorKind::UnexpectedEof => {
+            // UnexpectedEof in e.g. read_exact_at tends to indicate a code bug in
+            // picking the offset to read at, not a disk/filesystem problem
+            return false;
+        }
+        ErrorKind::WriteZero => {
+            return false;
+        }
+        ErrorKind::Interrupted => {
+            return false;
+        }
+        _ => { // Not a special kind, fall through to checking OS error
+        }
+    }
+
+    match e.raw_os_error() {
+        Some(ENOSPC) => {
+            // We do not terminate on ENOSPC, because the process needs to stay up
+            // for layer eviction to do its thing and free up that space
+            false
+        }
+        Some(EBADF) => {
+            // Bad file descriptor indicates a logic bug rather than a storage problem
+            false
+        }
+        Some(_) => {
+            // On all other local storage errors, we terminate the process.
+            true
+        }
+        None => {
+            // Does not originate from the operating system, so
+            // it's not a hardware/filesystem problem: do not terminate.
+            false
+        }
+    }
+}
+
+/// Wrap std::io::Error with a behavior where we will terminate the process
+/// on most I/O errors from local storage.  The rational for terminating is:
+/// - EIO means we can't trust the drive any more
+/// - EROFS means the local filesystem or drive is damaged, we shouldn't use it any more
+/// - EACCESS means something is fatally misconfigured about the pageserver, such
+///   as running the process as the wrong user, or the filesystem having the wrong
+///   ownership or permission bits.  We terminate so that it's obvious to
+///   the operator why the pageserver isn't working, and they can restart it when
+///   they've fixed the problem.
+#[derive(thiserror::Error, Debug)]
+pub struct Error {
+    inner: std::io::Error,
+    context: Option<String>,
+}
+
+impl Error {
+    /// Wrap a io::Error with some context & terminate
+    /// the process if the io::Error matches our policy for termination
+    fn new_with_context(e: std::io::Error, context: &str) -> Self {
+        Self::build(e, Some(context.to_string()))
+    }
+
+    fn context(e: Self, context: &str) -> Self {
+        Self {
+            inner: e.inner,
+            context: Some(context.to_string()),
+        }
+    }
+
+    fn new(e: std::io::Error) -> Self {
+        Self::build(e, None)
+    }
+
+    fn invalid(reason: &str) -> Self {
+        Self::new(std::io::Error::new(ErrorKind::InvalidInput, reason))
+    }
+
+    fn build(e: std::io::Error, context: Option<String>) -> Self {
+        // Construct instance early so that we have it for
+        // using Display in termination message.
+        let instance = Self { inner: e, context };
+
+        // Maybe terminate: this violates the usual expectation that callers
+        // should make their own decisions about how to handle an Error, but
+        // it's worthwhile to avoid every single user of the local filesystem
+        // having to apply the same "terminate on errors" behavior.
+        if is_fatal_io_error(&instance.inner) {
+            on_fatal_io_error(&instance.inner);
+            unreachable!();
+        }
+
+        instance
+    }
+
+    fn kind(&self) -> ErrorKind {
+        self.inner.kind()
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::build(e, None)
+    }
+}
+
+impl From<Error> for std::io::Error {
+    fn from(e: Error) -> std::io::Error {
+        e.inner
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.context {
+            Some(context) => {
+                write!(f, "{}: {}", context, self.inner)
+            }
+            None => self.inner.fmt(f),
+        }
+    }
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Path) -> Result<VirtualFile, std::io::Error> {
