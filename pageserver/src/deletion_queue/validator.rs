@@ -28,6 +28,7 @@ use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::control_plane_client::RetryForeverError;
 use crate::metrics;
+use crate::virtual_file::on_fatal_io_error;
 
 use super::deleter::DeleterMessage;
 use super::DeletionHeader;
@@ -303,6 +304,9 @@ where
                 // issue (probably permissions) has been fixed by then.
                 tracing::error!("Failed to delete {}: {e:#}", list_path.display());
                 metrics::DELETION_QUEUE.unexpected_errors.inc();
+
+                on_fatal_io_error(&e);
+
                 break;
             }
         }

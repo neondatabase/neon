@@ -34,6 +34,8 @@ use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::virtual_file;
+use crate::virtual_file::on_fatal_io_error;
 
 // The number of keys in a DeletionList before we will proactively persist it
 // (without reaching a flush deadline).  This aims to deliver objects of the order
@@ -199,7 +201,8 @@ impl ListWriter {
                     );
                     Ok(None)
                 } else {
-                    Err(anyhow::anyhow!(e))
+                    on_fatal_io_error(&e);
+                    unreachable!();
                 }
             }
         }
@@ -228,8 +231,10 @@ impl ListWriter {
                     deletion_directory.display(),
                 );
 
-                // Give up: if we can't read the deletion list directory, we probably can't
-                // write lists into it later, so the queue won't work.
+                // This is fatal: any failure to read this local directory indicates a
+                // storage problem or configuration problem of the node.
+                virtual_file::on_fatal_io_error(&e);
+
                 return Err(e.into());
             }
         };
@@ -248,12 +253,12 @@ impl ListWriter {
                 info!("Cleaning up temporary file {dentry_str}");
                 let absolute_path = deletion_directory.join(dentry.file_name());
                 if let Err(e) = tokio::fs::remove_file(&absolute_path).await {
-                    // Non-fatal error: we will just leave the file behind but not
-                    // try and load it.
                     warn!(
                         "Failed to clean up temporary file {}: {e:#}",
                         absolute_path.display()
                     );
+
+                    virtual_file::on_fatal_io_error(&e);
                 }
 
                 continue;
@@ -271,7 +276,7 @@ impl ListWriter {
                     .expect("Non optional group should be present")
                     .as_str()
             } else {
-                warn!("Unexpected key in deletion queue: {basename}");
+                warn!("Unexpected filename in deletion queue: {basename}");
                 metrics::DELETION_QUEUE.unexpected_errors.inc();
                 continue;
             };
@@ -299,7 +304,13 @@ impl ListWriter {
         for s in seqs {
             let list_path = self.conf.deletion_list_path(s);
 
-            let list_bytes = tokio::fs::read(&list_path).await?;
+            let list_bytes = match tokio::fs::read(&list_path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    virtual_file::on_fatal_io_error(&e);
+                    unreachable!();
+                }
+            };
 
             let mut deletion_list = match serde_json::from_slice::<DeletionList>(&list_bytes) {
                 Ok(l) => l,
