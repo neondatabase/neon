@@ -23,7 +23,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import (
-    TIMELINE_INDEX_PART_FILE_NAME,
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
@@ -758,10 +757,11 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
-        assert (
-            new_branch_on_remote_storage / TIMELINE_INDEX_PART_FILE_NAME
+        assert env.pageserver_remote_storage.index_path(
+            env.initial_tenant, new_branch_timeline_id
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
+        barrier.abort()
         create_thread.join()
 
 
