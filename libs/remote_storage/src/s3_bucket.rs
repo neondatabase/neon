@@ -227,10 +227,10 @@ impl S3Bucket {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
+                    download_stream: Box::pin(TimedDownload::new(
                         started_at,
                         RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
-                    ))),
+                    )),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
