@@ -4,9 +4,9 @@
 //! This is the "Monitor" part of the monitor binary and is the main entrypoint for
 //! all functionality.
 
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fmt::Debug, mem};
 
 use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
