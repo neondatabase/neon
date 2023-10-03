@@ -288,10 +288,14 @@ def test_deletion_queue_recovery(
 
     ps_http = env.pageserver.http_client()
 
-    # Prevent deletion lists from being executed, to build up some backlog of deletions
     ps_http.configure_failpoints(
         [
+            # Prevent deletion lists from being executed, to build up some backlog of deletions
             ("deletion-queue-before-execute", "return"),
+            # Prevent deletion lists from being validated, we will test that they are
+            # dropped properly during recovery.  'pause' is okay here because we kill
+            # the pageserver with immediate=true
+            ("control-plane-client-validate", "pause"),
         ]
     )
 
@@ -332,9 +336,10 @@ def test_deletion_queue_recovery(
         # successfully
         assert get_deletion_queue_executed(ps_http) == before_restart_depth
     else:
+        env.pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
+
         # If we lost the attachment, we should have dropped our pre-restart deletions.
         assert get_deletion_queue_dropped(ps_http) == before_restart_depth
-        env.pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
 
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
