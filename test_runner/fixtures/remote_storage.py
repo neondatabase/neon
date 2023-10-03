@@ -106,6 +106,8 @@ class LocalFsStorage:
                 return None
 
         generations = sorted([parse_gen(f) for f in index_parts])
+        if len(generations) == 0:
+            raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
         return generations[-1]
 
     def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
