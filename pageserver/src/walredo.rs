@@ -298,25 +298,25 @@ impl PostgresRedoManager {
             WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
             debug!(
-				"postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-				len,
-				nbytes,
-				duration.as_micros(),
-				lsn
-			);
+                "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+                len,
+                nbytes,
+                duration.as_micros(),
+                lsn
+            );
 
             // If something went wrong, don't try to reuse the process. Kill it, and
             // next request will launch a new one.
             if result.is_err() {
                 error!(
-                "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
-                records.len(),
-				records.first().map(|p| p.0).unwrap_or(Lsn(0)),
-				records.last().map(|p| p.0).unwrap_or(Lsn(0)),
-                nbytes,
-				base_img_lsn,
-                lsn
-            );
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
+                    records.len(),
+                    records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+                    records.last().map(|p| p.0).unwrap_or(Lsn(0)),
+                    nbytes,
+                    base_img_lsn,
+                    lsn
+                );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
                 // The owning objects (ChildStdout and ChildStderr) are stored in
