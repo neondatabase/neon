@@ -1279,7 +1279,7 @@ async fn getpage_at_lsn_handler(
     .await
 }
 
-async fn timeline_get_partitioning(
+async fn timeline_collect_keyspace(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -1363,7 +1363,7 @@ async fn timeline_get_partitioning(
 
         json_response(StatusCode::OK, Partitioning { keys, at_lsn })
     }
-    .instrument(info_span!("timeline_get_partitioning", %tenant_id, %timeline_id))
+    .instrument(info_span!("timeline_collect_keyspace", %tenant_id, %timeline_id))
     .await
 }
 
@@ -1719,7 +1719,7 @@ pub fn make_router(
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/partitioning",
-            |r| testing_api_handler("read out the partitioning", r, timeline_get_partitioning),
+            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
         )
         .any(handler_404))
 }
