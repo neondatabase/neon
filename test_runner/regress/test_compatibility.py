@@ -117,7 +117,7 @@ def test_create_snapshot(
 
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+        ".*init_tenant_mgr: marking .* as locally complete, while it doesn't exist in remote index.*"
     )
 
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])

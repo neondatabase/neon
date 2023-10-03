@@ -76,7 +76,7 @@ def test_remote_storage_backup_and_restore(
 
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+        ".*marking .* as locally complete, while it doesn't exist in remote index.*"
     )
     env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
 
