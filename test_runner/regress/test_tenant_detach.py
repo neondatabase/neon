@@ -454,6 +454,10 @@ def test_detach_while_attaching(
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
+    # Our re-attach may race with the deletion queue processing LSN updates
+    # from the original attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
+
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
     # from shared_buffers without hitting the page server, which defeats the point
