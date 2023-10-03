@@ -264,13 +264,8 @@ impl CgroupWatcher {
                 }
             })
             // Only report the event if the memory.high count increased
-            .filter_map(|high| {
-                if MEMORY_EVENT_COUNT.fetch_max(high, Ordering::AcqRel) < high {
-                    Some(high)
-                } else {
-                    None
-                }
-            })
+            // NB: fetch_max sets the atomic to the max, but *returns* the previous value.
+            .filter(|&high| MEMORY_EVENT_COUNT.fetch_max(high, Ordering::AcqRel) < high)
             .map(Sequenced::new);
 
         let initial_count = get_event_count(
