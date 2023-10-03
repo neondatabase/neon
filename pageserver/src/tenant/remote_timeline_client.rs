@@ -901,9 +901,22 @@ impl RemoteTimelineClient {
         .await
         .context("list prefixes")?;
 
-        let remaining: Vec<RemotePath> = remaining
+        // We will delete the current index_part object last, since it acts as a deletion
+        // marker via its deleted_at attribute
+        let latest_index = remaining
+            .iter()
+            .filter(|p| {
+                p.object_name()
+                    .map(|n| n.starts_with(IndexPart::FILE_NAME))
+                    .unwrap_or(false)
+            })
+            .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
+            .max_by_key(|i| i.1)
+            .map(|i| i.0.clone());
+
+        let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| p.object_name() != Some(IndexPart::FILE_NAME))
+            .filter(|p| Some(p) != latest_index.as_ref())
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
                     info!(%name, "deleting a file not referenced from index_part.json");
@@ -913,9 +926,11 @@ impl RemoteTimelineClient {
             })
             .collect();
 
-        let not_referenced_count = remaining.len();
-        if !remaining.is_empty() {
-            self.deletion_queue_client.push_immediate(remaining).await?;
+        let not_referenced_count = remaining_layers.len();
+        if !remaining_layers.is_empty() {
+            self.deletion_queue_client
+                .push_immediate(remaining_layers)
+                .await?;
         }
 
         fail::fail_point!("timeline-delete-before-index-delete", |_| {
@@ -924,12 +939,12 @@ impl RemoteTimelineClient {
             ))?
         });
 
-        let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
-
         debug!("enqueuing index part deletion");
-        self.deletion_queue_client
-            .push_immediate([index_file_path].to_vec())
-            .await?;
+        if let Some(latest_index) = latest_index {
+            self.deletion_queue_client
+                .push_immediate([latest_index].to_vec())
+                .await?;
+        }
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
