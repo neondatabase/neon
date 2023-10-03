@@ -588,6 +588,18 @@ impl DeletionQueueClient {
             .await
     }
 
+    /// Issue a flush without waiting for it to complete.  This is useful on advisory flushes where
+    /// the caller wants to avoid the risk of waiting for lots of enqueued work, such as on tenant
+    /// detach where flushing is nice but not necessary.
+    ///
+    /// This function provides no guarantees of work being done.
+    pub fn flush_advisory(&self) {
+        let (flush_op, _) = FlushOp::new();
+
+        // Transmit the flush message, ignoring any result (such as a closed channel during shutdown).
+        drop(self.tx.send(ListWriterQueueMessage::FlushExecute(flush_op)));
+    }
+
     // Wait until all previous deletions are executed
     pub(crate) async fn flush_execute(&self) -> Result<(), DeletionQueueError> {
         debug!("flush_execute: flushing to deletion lists...");

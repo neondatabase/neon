@@ -558,9 +558,14 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", %tenant_id))
-        .await?;
+    mgr::detach_tenant(
+        conf,
+        tenant_id,
+        detach_ignored.unwrap_or(false),
+        &state.deletion_queue_client,
+    )
+    .instrument(info_span!("tenant_detach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::OK, ())
 }
