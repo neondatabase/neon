@@ -3,7 +3,6 @@ import json
 import os
 import re
 import subprocess
-import tarfile
 import threading
 import time
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Ty
 from urllib.parse import urlencode
 
 import allure
+import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
@@ -235,15 +235,18 @@ def allure_attach_from_dir(dir: Path):
             name = str(attachment.relative_to(dir))
 
             # compress files larger than 1Mb, they're hardly readable in a browser
-            if attachment.stat().st_size > 1024 * 1024:
-                source = f"{attachment}.tar.gz"
-                with tarfile.open(source, "w:gz") as tar:
-                    tar.add(attachment, arcname=attachment.name)
-                name = f"{name}.tar.gz"
+            if attachment.stat().st_size > 1024**2:
+                name = f"{name}.zst"
+                source = f"{attachment}.zst"
+                with open(source, "wb") as f:
+                    f.write(zstandard.compress(attachment.read_bytes()))
 
-            if source.endswith(".tar.gz"):
+            if source.endswith(".gz"):
                 attachment_type = "application/gzip"
-                extension = "tar.gz"
+                extension = "gz"
+            elif source.endswith(".zst"):
+                attachment_type = "application/zstd"
+                extension = "zst"
             elif source.endswith(".svg"):
                 attachment_type = "image/svg+xml"
                 extension = "svg"
