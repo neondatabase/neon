@@ -442,16 +442,6 @@ impl Timeline {
         self.latest_gc_cutoff_lsn.read()
     }
 
-    pub(crate) fn partitioning(&self) -> Option<(KeyPartitioning, Lsn)> {
-        let g = self.partitioning.lock().unwrap();
-
-        if g.0.parts.is_empty() || !g.1.is_valid() {
-            None
-        } else {
-            Some((g.0.clone(), g.1))
-        }
-    }
-
     /// Look up given page version.
     ///
     /// If a remote layer file is needed, it is downloaded as part of this

@@ -1287,25 +1287,6 @@ async fn timeline_get_partitioning(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    #[derive(Default)]
-    enum Collect {
-        #[default]
-        Always,
-    }
-
-    impl std::str::FromStr for Collect {
-        type Err = anyhow::Error;
-
-        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-            Ok(match s {
-                "always" | "yes" | "true" => Collect::Always,
-                // "if-none" => Collect::IfNone,
-                // "never" | "no" | "false" => Collect::Never,
-                s => return Err(anyhow::anyhow!("invalid value: {s:?}")),
-            })
-        }
-    }
-
     struct Partitioning {
         keys: crate::keyspace::KeySpace,
 
@@ -1338,24 +1319,6 @@ async fn timeline_get_partitioning(
         }
     }
 
-    /*
-    struct KeySpaces<'a>(&'a [crate::keyspace::KeySpace]);
-
-    impl<'a> serde::Serialize for KeySpaces<'a> {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeSeq;
-            let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-            for ks in self.0 {
-                seq.serialize_element(&KeySpace(ks))?;
-            }
-            seq.end()
-        }
-    }
-    */
-
     struct KeySpace<'a>(&'a crate::keyspace::KeySpace);
 
     impl<'a> serde::Serialize for KeySpace<'a> {
@@ -1387,51 +1350,18 @@ async fn timeline_get_partitioning(
         }
     }
 
-    let collect: Option<Collect> = parse_query_param(&request, "collect")?;
-    let collect = collect.unwrap_or_default();
-
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+        let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
+        let keys = timeline
+            .collect_keyspace(at_lsn, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
 
-        let partitioning = match collect {
-            Collect::Always => {
-                let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-                (
-                    timeline
-                        .collect_keyspace(at_lsn, &ctx)
-                        .await
-                        .map_err(|e| ApiError::InternalServerError(e))?,
-                    at_lsn,
-                )
-            } /*_ => {
-                  let p = timeline.partitioning();
-
-                  match (collect, p) {
-                      (Collect::IfNone, None) => {
-                          let lsn = timeline.get_last_record_lsn();
-                          Some((
-                              timeline
-                                  .collect_keyspace(lsn, &ctx)
-                                  .await
-                                  .map_err(|e| ApiError::InternalServerError(e))?,
-                              lsn,
-                          ))
-                      }
-                      (_, p) => p.map(|p| (p.0.parts.into_iter().flatten().collect::<Vec<_>>(), p.1)),
-                  }
-              }*/
-        };
-
-        json_response(
-            StatusCode::OK,
-            Partitioning {
-                keys: partitioning.0,
-                at_lsn: partitioning.1,
-            },
-        )
+        json_response(StatusCode::OK, Partitioning { keys, at_lsn })
     }
     .instrument(info_span!("timeline_get_partitioning", %tenant_id, %timeline_id))
     .await
