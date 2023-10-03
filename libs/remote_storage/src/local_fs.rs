@@ -219,7 +219,7 @@ impl RemoteStorage for LocalFs {
 
     async fn upload(
         &self,
-        data: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        data: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -252,8 +252,11 @@ impl RemoteStorage for LocalFs {
         );
 
         let from_size_bytes = data_size_bytes as u64;
+        let data = tokio_util::io::StreamReader::new(data);
+        let data = std::pin::pin!(data);
         let mut buffer_to_read = data.take(from_size_bytes);
 
+        // alternatively we could just write the bytes to a file, but local_fs is a testing utility
         let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
             .with_context(|| {
@@ -529,25 +532,26 @@ mod fs_tests {
         let storage = create_storage()?;
 
         let id = RemotePath::new(Utf8Path::new("dummy"))?;
-        let content = std::io::Cursor::new(b"12345");
+        let content = bytes::Bytes::from_static(b"12345");
+        let content = move || futures::stream::once(futures::future::ready(Ok(content.clone())));
 
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(Box::new(content.clone()), 0, &id, None)
+            .upload(content(), 0, &id, None)
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(Box::new(content.clone()), 4, &id, None)
+            .upload(content(), 4, &id, None)
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(Box::new(content.clone()), 6, &id, None)
+            .upload(content(), 6, &id, None)
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage.upload(Box::new(content), 5, &id, None).await?;
+        storage.upload(content(), 5, &id, None).await?;
 
         Ok(())
     }
@@ -815,16 +819,17 @@ mod fs_tests {
                 )
             })?;
 
-        storage
-            .upload(Box::new(file), size, &relative_path, metadata)
-            .await?;
+        // readerstream is also a buffer
+        let file = tokio_util::io::ReaderStream::new(file);
+
+        storage.upload(file, size, &relative_path, metadata).await?;
         Ok(relative_path)
     }
 
     async fn create_file_for_upload(
         path: &Utf8Path,
         contents: &str,
-    ) -> anyhow::Result<(io::BufReader<fs::File>, usize)> {
+    ) -> anyhow::Result<(fs::File, usize)> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         let mut file_for_writing = std::fs::OpenOptions::new()
             .write(true)
@@ -834,7 +839,7 @@ mod fs_tests {
         drop(file_for_writing);
         let file_size = path.metadata()?.len() as usize;
         Ok((
-            io::BufReader::new(fs::OpenOptions::new().read(true).open(&path).await?),
+            fs::OpenOptions::new().read(true).open(&path).await?,
             file_size,
         ))
     }

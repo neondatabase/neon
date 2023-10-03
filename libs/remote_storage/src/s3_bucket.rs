@@ -403,7 +403,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -413,7 +413,7 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(ReaderStream::new(from));
+        let body = Body::wrap_stream(from);
         let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self

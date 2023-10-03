@@ -108,7 +108,7 @@ impl RemoteStorage for UnreliableWrapper {
 
     async fn upload(
         &self,
-        data: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        data: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
