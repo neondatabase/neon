@@ -133,6 +133,8 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             node_id: self.node_id,
         };
 
+        fail::fail_point!("control-plane-client-re-attach");
+
         let response: ReAttachResponse = self.retry_http_forever(&re_attach_path, request).await?;
         tracing::info!(
             "Received re-attach response with {} tenants",
@@ -167,6 +169,8 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                 })
                 .collect(),
         };
+
+        fail::fail_point!("control-plane-client-validate");
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 
