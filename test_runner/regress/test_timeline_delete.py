@@ -854,7 +854,7 @@ def test_timeline_delete_resumed_on_attach(
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
-            f".*InternalServerError\\(Tenant {tenant_id} is not active.*",
+            ".*Resource temporarily unavailable.*Tenant not yet active",
             '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
         )
     )
