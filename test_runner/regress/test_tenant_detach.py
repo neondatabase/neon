@@ -556,7 +556,7 @@ def test_ignored_tenant_reattach(neon_env_builder: NeonEnvBuilder):
     ), "Ignored tenant should not be reloaded after pageserver restart"
 
     # now, load it from the local files and expect it works
-    pageserver_http.tenant_load(tenant_id=ignored_tenant_id)
+    env.pageserver.tenant_load(tenant_id=ignored_tenant_id)
     wait_until_tenant_state(pageserver_http, ignored_tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
@@ -611,7 +611,7 @@ def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder
     assert layers_removed, f"Found no layers for tenant {timeline_dir}"
 
     # now, load it from the local files and expect it to work due to remote storage restoration
-    pageserver_http.tenant_load(tenant_id=tenant_id)
+    env.pageserver.tenant_load(tenant_id=tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
@@ -645,7 +645,7 @@ def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException,
         match=f"tenant {tenant_id} already exists, state: Active",
     ):
-        pageserver_http.tenant_load(tenant_id)
+        env.pageserver.tenant_load(tenant_id)
 
     with pytest.raises(
         expected_exception=PageserverApiException,
@@ -714,7 +714,7 @@ def test_ignore_while_attaching(
 
     # Calling load will bring the tenant back online
     pageserver_http.configure_failpoints([("attach-before-activate", "off")])
-    pageserver_http.tenant_load(tenant_id)
+    env.pageserver.tenant_load(tenant_id)
 
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
@@ -818,7 +818,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         found_broken
     ), f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
 
-    client.tenant_load(env.initial_tenant)
+    env.pageserver.tenant_load(env.initial_tenant)
 
     found_active = False
     active, broken_set = ([], [])

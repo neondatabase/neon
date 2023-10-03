@@ -282,8 +282,11 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res
 
-    def tenant_load(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
+    def tenant_load(self, tenant_id: TenantId, generation=None):
+        body = None
+        if generation is not None:
+            body = {"generation": generation}
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load", json=body)
         self.verbose_error(res)
 
     def tenant_ignore(self, tenant_id: TenantId):

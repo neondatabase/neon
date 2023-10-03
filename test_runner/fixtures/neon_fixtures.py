@@ -1792,6 +1792,10 @@ class NeonPageserver(PgProtocol):
             tenant_id, conf, generation=self.maybe_get_generation(tenant_id)
         )
 
+    def tenant_load(self, tenant_id: TenantId):
+        client = self.http_client()
+        return client.tenant_load(tenant_id, generation=self.maybe_get_generation(tenant_id))
+
     def maybe_get_generation(self, tenant_id: TenantId):
         """
         For tests that would like to use an HTTP client directly instead of using
