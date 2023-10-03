@@ -443,12 +443,12 @@ impl Timeline {
     }
 
     pub(crate) fn partitioning(&self) -> Option<(KeyPartitioning, Lsn)> {
-        let (partitioning, at_lsn) = self.partitioning.lock().unwrap();
+        let g = self.partitioning.lock().unwrap();
 
-        if partitioning.parts.is_empty() || !at_lsn.is_valid() {
+        if g.0.parts.is_empty() || !g.1.is_valid() {
             None
         } else {
-            Some((partitioning.clone(), at_lsn))
+            Some((g.0.clone(), g.1))
         }
     }
 
