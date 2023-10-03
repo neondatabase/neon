@@ -1718,7 +1718,7 @@ pub fn make_router(
             testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler)
         })
         .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/partitioning",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/keyspace",
             |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
         )
         .any(handler_404))
