@@ -695,7 +695,7 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
         let entry = entry?;
         let metadata = entry.metadata().expect("error getting dir entry metadata");
         if metadata.is_file() {
-            let path = entry.path().strip_prefix(pgdata_path)?;
+            let path = entry.path();
             paths.push(path.to_owned());
         }
     }
@@ -706,7 +706,8 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     // Use reproducible header mode
     builder.mode(HeaderMode::Deterministic);
     for path in paths {
-        builder.append_path(path).await?;
+        let rel_path = path.strip_prefix(pgdata_path)?;
+        builder.append_path_with_name(&path, rel_path).await?;
     }
     builder.finish().await?;
     let zstd = builder.into_inner().await?;
