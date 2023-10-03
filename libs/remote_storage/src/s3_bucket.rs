@@ -47,10 +47,47 @@ pub struct S3Bucket {
     bucket_name: String,
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
+    concurrency_limiter: ConcurrencyLimiter,
+}
+
+struct ConcurrencyLimiter {
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Arc<Semaphore>,
+    write: Arc<Semaphore>,
+    read: Arc<Semaphore>,
+}
+
+impl ConcurrencyLimiter {
+    fn for_kind(&self, kind: RequestKind) -> &Arc<Semaphore> {
+        match kind {
+            RequestKind::Get => &self.read,
+            RequestKind::Put => &self.write,
+            RequestKind::List => &self.read,
+            RequestKind::Delete => &self.write,
+        }
+    }
+
+    async fn acquire(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
+        self.for_kind(kind).acquire().await
+    }
+
+    async fn acquire_owned(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        Arc::clone(self.for_kind(kind)).acquire_owned().await
+    }
+
+    fn new(limit: usize) -> ConcurrencyLimiter {
+        Self {
+            read: Arc::new(Semaphore::new(limit)),
+            write: Arc::new(Semaphore::new(limit)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -117,7 +154,7 @@ impl S3Bucket {
             bucket_name: aws_config.bucket_name.clone(),
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
+            concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
         })
     }
 
@@ -156,7 +193,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .acquire()
+            .acquire(kind)
             .await
             .expect("semaphore is never closed");
 
@@ -172,8 +209,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .clone()
-            .acquire_owned()
+            .acquire_owned(kind)
             .await
             .expect("semaphore is never closed");
 
