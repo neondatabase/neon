@@ -80,7 +80,7 @@ pub async fn download_layer_file<'a>(
                 .await
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
-            let mut download = storage
+            let download = storage
                 .download(&remote_path)
                 .await
                 .with_context(|| {
@@ -90,9 +90,12 @@ pub async fn download_layer_file<'a>(
                 })
                 .map_err(DownloadError::Other)?;
 
+            let mut reader =
+                tokio::io::BufReader::with_capacity(32 * 1024, download.download_stream);
+
             let bytes_amount = tokio::time::timeout(
                 MAX_DOWNLOAD_DURATION,
-                tokio::io::copy(&mut download.download_stream, &mut destination_file),
+                tokio::io::copy_buf(&mut reader, &mut destination_file),
             )
             .await
             .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
