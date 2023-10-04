@@ -169,3 +169,6 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000
+
+    with open(neon_env_builder.test_output_dir / "foobar.walredo", "w") as file:
+        file.write("lets see if this ends in the report")
