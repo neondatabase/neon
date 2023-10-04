@@ -458,7 +458,7 @@ impl PageServerHandler {
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
                 // error message is enough
-                span.in_scope(|| error!("error reading relation or page version: {:?}", e));
+                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
