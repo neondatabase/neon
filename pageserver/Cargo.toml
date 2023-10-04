@@ -81,6 +81,7 @@ enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 tempfile.workspace = true
+async-channel = "1.9.0"
 
 [dev-dependencies]
 criterion.workspace = true
