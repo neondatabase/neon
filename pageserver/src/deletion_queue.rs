@@ -3,7 +3,6 @@ mod list_writer;
 mod validator;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +12,7 @@ use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
@@ -336,7 +336,6 @@ impl DeletionList {
         timeline_entry.extend(objects.drain(..).map(|p| {
             p.strip_prefix(&timeline_remote_path)
                 .expect("Timeline paths always start with the timeline prefix")
-                .to_string_lossy()
                 .to_string()
         }));
         true
@@ -350,7 +349,7 @@ impl DeletionList {
                 result.extend(
                     timeline_layers
                         .into_iter()
-                        .map(|l| timeline_remote_path.join(&PathBuf::from(l))),
+                        .map(|l| timeline_remote_path.join(&Utf8PathBuf::from(l))),
                 );
             }
         }
@@ -727,12 +726,9 @@ impl DeletionQueue {
 
 #[cfg(test)]
 mod test {
+    use camino::Utf8Path;
     use hex_literal::hex;
-    use std::{
-        io::ErrorKind,
-        path::{Path, PathBuf},
-        time::Duration,
-    };
+    use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
@@ -764,7 +760,7 @@ mod test {
 
     struct TestSetup {
         harness: TenantHarness,
-        remote_fs_dir: PathBuf,
+        remote_fs_dir: Utf8PathBuf,
         storage: GenericRemoteStorage,
         mock_control_plane: MockControlPlane,
         deletion_queue: DeletionQueue,
@@ -873,7 +869,7 @@ mod test {
         // Set up a GenericRemoteStorage targetting a directory
         let remote_fs_dir = harness.conf.workdir.join("remote_fs");
         std::fs::create_dir_all(remote_fs_dir)?;
-        let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
+        let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
             max_concurrent_syncs: std::num::NonZeroUsize::new(
                 remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
@@ -909,7 +905,7 @@ mod test {
     }
 
     // TODO: put this in a common location so that we can share with remote_timeline_client's tests
-    fn assert_remote_files(expected: &[&str], remote_path: &Path) {
+    fn assert_remote_files(expected: &[&str], remote_path: &Utf8Path) {
         let mut expected: Vec<String> = expected.iter().map(|x| String::from(*x)).collect();
         expected.sort();
 
@@ -926,10 +922,7 @@ mod test {
                         unreachable!();
                     }
                 } else {
-                    panic!(
-                        "Unexpected error listing {}: {e}",
-                        remote_path.to_string_lossy()
-                    );
+                    panic!("Unexpected error listing {remote_path}: {e}");
                 }
             }
         };
@@ -944,7 +937,7 @@ mod test {
         assert_eq!(expected, found);
     }
 
-    fn assert_local_files(expected: &[&str], directory: &Path) {
+    fn assert_local_files(expected: &[&str], directory: &Utf8Path) {
         let dir = match std::fs::read_dir(directory) {
             Ok(d) => d,
             Err(_) => {

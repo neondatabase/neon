@@ -17,6 +17,8 @@ async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+camino.workspace = true
+camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 close_fds.workspace = true
@@ -80,7 +82,6 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-tempfile.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use tokio::task::JoinHandle;
@@ -7,7 +8,6 @@ use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -230,8 +230,8 @@ pub async fn wal_backup_launcher_task_main(
 
 struct WalBackupTask {
     timeline: Arc<Timeline>,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
@@ -240,8 +240,8 @@ struct WalBackupTask {
 /// Offload single timeline.
 async fn backup_task_main(
     ttid: TenantTimelineId,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -351,8 +351,8 @@ pub async fn backup_lsn_range(
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
     parallel_jobs: usize,
 ) -> Result<()> {
     if parallel_jobs < 1 {
@@ -408,8 +408,8 @@ pub async fn backup_lsn_range(
 
 async fn backup_single_segment(
     seg: &Segment,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
 ) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
@@ -429,7 +429,7 @@ async fn backup_single_segment(
         BACKUP_ERRORS.inc();
     }
     res?;
-    debug!("Backup of {} done", segment_file_path.display());
+    debug!("Backup of {} done", segment_file_path);
 
     Ok(*seg)
 }
@@ -454,7 +454,7 @@ impl Segment {
         XLogFileName(PG_TLI, self.seg_no, self.size())
     }
 
-    pub fn file_path(self, timeline_dir: &Path) -> Result<PathBuf> {
+    pub fn file_path(self, timeline_dir: &Utf8Path) -> Result<Utf8PathBuf> {
         Ok(timeline_dir.join(self.object_name()))
     }
 
@@ -479,19 +479,22 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
-async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize) -> Result<()> {
+async fn backup_object(
+    source_file: &Utf8Path,
+    target_file: &RemotePath,
+    size: usize,
+) -> Result<()> {
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
-        format!(
-            "Failed to open file {} for wal backup",
-            source_file.display()
-        )
-    })?);
+    let file = tokio::io::BufReader::new(
+        File::open(&source_file)
+            .await
+            .with_context(|| format!("Failed to open file {} for wal backup", source_file))?,
+    );
 
     storage
         .upload_storage_object(Box::new(file), size, target_file)

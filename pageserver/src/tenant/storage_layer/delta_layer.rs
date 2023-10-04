@@ -41,6 +41,7 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,6 @@ use std::fs::{self, File};
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::*;
@@ -267,7 +267,7 @@ impl PersistentLayer for DeltaLayer {
         Some(self)
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<Utf8PathBuf> {
         self.local_path()
     }
 
@@ -374,7 +374,7 @@ impl DeltaLayer {
             .await
     }
 
-    pub(crate) fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<Utf8PathBuf> {
         Some(self.path())
     }
 
@@ -409,7 +409,7 @@ impl DeltaLayer {
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
         fname: &DeltaFileName,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.clone(),
             PathOrConf::Conf(conf) => conf
@@ -424,7 +424,7 @@ impl DeltaLayer {
         timeline_id: &TimelineId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(8)
@@ -455,7 +455,7 @@ impl DeltaLayer {
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
-            .with_context(|| format!("Failed to load delta layer {}", self.path().display()))
+            .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
     async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
@@ -471,7 +471,7 @@ impl DeltaLayer {
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
 
-            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let actual_filename = path.file_name().unwrap().to_owned();
             let expected_filename = self.filename().file_name();
 
             if actual_filename != expected_filename {
@@ -510,7 +510,7 @@ impl DeltaLayer {
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'pagectl' binary.
-    pub fn new_for_path(path: &Path, file: File) -> Result<Self> {
+    pub fn new_for_path(path: &Utf8Path, file: File) -> Result<Self> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);
         file.read_exact_at(&mut summary_buf, 0)?;
@@ -538,7 +538,7 @@ impl DeltaLayer {
         self.desc.delta_file_name()
     }
     /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
+    pub fn path(&self) -> Utf8PathBuf {
         Self::path_for(
             &self.path_or_conf,
             &self.desc.tenant_id,
@@ -573,7 +573,7 @@ impl DeltaLayer {
 ///
 struct DeltaLayerWriterInner {
     conf: &'static PageServerConf,
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
 
@@ -711,7 +711,7 @@ impl DeltaLayerWriterInner {
         ensure!(
             metadata.len() <= S3_UPLOAD_LIMIT,
             "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
-            file.path.display(),
+            file.path,
             metadata.len()
         );
 
@@ -748,7 +748,7 @@ impl DeltaLayerWriterInner {
         );
         std::fs::rename(self.path, &final_path)?;
 
-        trace!("created delta layer {}", final_path.display());
+        trace!("created delta layer {final_path}");
 
         Ok(layer)
     }
@@ -847,13 +847,13 @@ impl Drop for DeltaLayerWriter {
 
 impl DeltaLayerInner {
     pub(super) async fn load(
-        path: &std::path::Path,
+        path: &Utf8Path,
         summary: Option<Summary>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+            .with_context(|| format!("Failed to open file '{path}'"))?;
         let file = FileBlockReader::new(file);
 
         let summary_blk = file.read_blk(0, ctx).await?;
@@ -933,15 +933,12 @@ impl DeltaLayerInner {
                 .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
                 .with_context(|| {
-                    format!(
-                        "Failed to read blob from virtual file {}",
-                        file.file.path.display()
-                    )
+                    format!("Failed to read blob from virtual file {}", file.file.path)
                 })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
-                    file.file.path.display()
+                    file.file.path
                 )
             })?;
             match val {

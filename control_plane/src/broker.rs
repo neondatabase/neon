@@ -7,7 +7,7 @@
 //! ```
 use anyhow::Context;
 
-use std::path::PathBuf;
+use camino::Utf8PathBuf;
 
 use crate::{background_process, local_env};
 
@@ -30,7 +30,7 @@ pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
         || {
             let url = broker.client_url();
             let status_url = url.join("status").with_context(|| {
-                format!("Failed to append /status path to broker endpoint {url}",)
+                format!("Failed to append /status path to broker endpoint {url}")
             })?;
             let request = client
                 .get(status_url)
@@ -50,6 +50,7 @@ pub fn stop_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     background_process::stop_process(true, "storage_broker", &storage_broker_pid_file_path(env))
 }
 
-fn storage_broker_pid_file_path(env: &local_env::LocalEnv) -> PathBuf {
-    env.base_data_dir.join("storage_broker.pid")
+fn storage_broker_pid_file_path(env: &local_env::LocalEnv) -> Utf8PathBuf {
+    Utf8PathBuf::from_path_buf(env.base_data_dir.join("storage_broker.pid"))
+        .expect("non-Unicode path")
 }

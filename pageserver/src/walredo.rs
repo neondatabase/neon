@@ -1278,13 +1278,13 @@ mod tests {
 
     struct RedoHarness {
         // underscored because unused, except for removal at drop
-        _repo_dir: tempfile::TempDir,
+        _repo_dir: camino_tempfile::Utf8TempDir,
         manager: PostgresRedoManager,
     }
 
     impl RedoHarness {
         fn new() -> anyhow::Result<Self> {
-            let repo_dir = tempfile::tempdir()?;
+            let repo_dir = camino_tempfile::tempdir()?;
             let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
             let conf = Box::leak(Box::new(conf));
             let tenant_id = TenantId::generate();

@@ -25,9 +25,8 @@ pub mod walredo;
 
 pub mod failpoint_support;
 
-use std::path::Path;
-
 use crate::task_mgr::TaskKind;
+use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
 use tracing::info;
 
@@ -132,25 +131,25 @@ pub const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
 /// Full path: `tenants/<tenant_id>/___ignored_tenant`.
 pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
 
-pub fn is_temporary(path: &Path) -> bool {
+pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        Some(name) => name.ends_with(TEMP_FILE_SUFFIX),
         None => false,
     }
 }
 
-fn ends_with_suffix(path: &Path, suffix: &str) -> bool {
+fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(suffix),
+        Some(name) => name.ends_with(suffix),
         None => false,
     }
 }
 
-pub fn is_uninit_mark(path: &Path) -> bool {
+pub fn is_uninit_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
 }
 
-pub fn is_delete_mark(path: &Path) -> bool {
+pub fn is_delete_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
 }
 

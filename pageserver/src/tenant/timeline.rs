@@ -9,6 +9,7 @@ mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -29,7 +30,6 @@ use utils::id::TenantTimelineId;
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
-use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -1736,7 +1736,7 @@ impl Timeline {
                         Discovered::Temporary(name) => (name, "temporary timeline file"),
                         Discovered::TemporaryDownload(name) => (name, "temporary download"),
                     };
-                    path.push(name);
+                    path.push(Utf8Path::new(&name));
                     init::cleanup(&path, kind)?;
                     path.pop();
                 }
@@ -2217,10 +2217,10 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
         let timeline_id = self.layer_desc().timeline_id;
         match self.local_path() {
             Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", timeline_id)),
+                debug_assert!(local_path.to_string().contains(&format!("{}", timeline_id)),
                     "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
-                format!("{}", local_path.display())
+                format!("{local_path}")
             }
             None => {
                 format!("remote {}/{self}", timeline_id)
@@ -3743,7 +3743,7 @@ impl Timeline {
                     );
                 }
             }
-            let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
+            let mut layer_paths: Vec<Utf8PathBuf> = new_layers.iter().map(|l| l.path()).collect();
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
@@ -3853,10 +3853,7 @@ impl Timeline {
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata().with_context(|| {
-                format!(
-                    "read file metadata for new created layer {}",
-                    new_delta_path.display()
-                )
+                format!("read file metadata for new created layer {new_delta_path}")
             })?;
 
             if let Some(remote_client) = &self.remote_client {
@@ -4790,11 +4787,10 @@ fn is_send() {
 
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
-fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
+fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
     let filename = path
         .file_name()
-        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
-        .to_string_lossy();
+        .ok_or_else(|| anyhow!("Path {path} don't have a file name"))?;
     let mut new_path = path.to_owned();
 
     for i in 0u32.. {

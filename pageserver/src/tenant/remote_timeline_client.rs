@@ -209,6 +209,7 @@ pub mod index;
 mod upload;
 
 use anyhow::Context;
+use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
@@ -219,7 +220,6 @@ use utils::backoff::{
 };
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -924,7 +924,7 @@ impl RemoteTimelineClient {
             ))?
         });
 
-        let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
+        let index_file_path = timeline_storage_path.join(Utf8Path::new(IndexPart::FILE_NAME));
 
         debug!("enqueuing index part deletion");
         self.deletion_queue_client
@@ -1409,7 +1409,7 @@ pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {
 }
 
 pub fn remote_timeline_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
-    remote_timelines_path(tenant_id).join(&PathBuf::from(timeline_id.to_string()))
+    remote_timelines_path(tenant_id).join(Utf8Path::new(&timeline_id.to_string()))
 }
 
 pub fn remote_layer_path(
@@ -1452,14 +1452,7 @@ pub(crate) fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         }
     };
 
-    let file_name_str = match file_name.to_str() {
-        Some(s) => s,
-        None => {
-            tracing::warn!("Malformed index key {:?}", path);
-            return None;
-        }
-    };
-    match file_name_str.split_once('-') {
+    match file_name.split_once('-') {
         Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
         None => None,
     }
@@ -1471,20 +1464,16 @@ pub(crate) fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
 /// Errors if the path provided does not start from pageserver's workdir.
 pub fn remote_path(
     conf: &PageServerConf,
-    local_path: &Path,
+    local_path: &Utf8Path,
     generation: Generation,
 ) -> anyhow::Result<RemotePath> {
     let stripped = local_path
         .strip_prefix(&conf.workdir)
         .context("Failed to strip workdir prefix")?;
 
-    let suffixed = format!(
-        "{0}{1}",
-        stripped.to_string_lossy(),
-        generation.get_suffix()
-    );
+    let suffixed = format!("{0}{1}", stripped, generation.get_suffix());
 
-    RemotePath::new(&PathBuf::from(suffixed)).with_context(|| {
+    RemotePath::new(Utf8Path::new(&suffixed)).with_context(|| {
         format!(
             "to resolve remote part of path {:?} for base {:?}",
             local_path, conf.workdir
@@ -1504,7 +1493,7 @@ mod tests {
         DEFAULT_PG_VERSION,
     };
 
-    use std::{collections::HashSet, path::Path};
+    use std::collections::HashSet;
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1538,7 +1527,7 @@ mod tests {
         assert_eq!(avec, bvec);
     }
 
-    fn assert_remote_files(expected: &[&str], remote_path: &Path, generation: Generation) {
+    fn assert_remote_files(expected: &[&str], remote_path: &Utf8Path, generation: Generation) {
         let mut expected: Vec<String> = expected
             .iter()
             .map(|x| format!("{}{}", x, generation.get_suffix()))
@@ -1657,12 +1646,12 @@ mod tests {
 
         let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
-        println!("workdir: {}", harness.conf.workdir.display());
+        println!("workdir: {}", harness.conf.workdir);
 
         let remote_timeline_dir = harness
             .remote_fs_dir
             .join(timeline_path.strip_prefix(&harness.conf.workdir).unwrap());
-        println!("remote_timeline_dir: {}", remote_timeline_dir.display());
+        println!("remote_timeline_dir: {remote_timeline_dir}");
 
         let generation = harness.generation;
 
@@ -1909,7 +1898,7 @@ mod tests {
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
         );
-        eprintln!("Writing {}", index_path.display());
+        eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
         example_index_part
     }
