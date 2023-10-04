@@ -20,7 +20,7 @@ use tokio_postgres::AsyncMessage;
 use crate::{
     auth, console,
     metrics::{Ids, MetricCounter, USAGE_METRICS},
-    proxy::NUM_DB_CONNECTIONS_GAUGE,
+    proxy::{NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
 };
 use crate::{compute, config};
 
@@ -420,9 +420,9 @@ async fn connect_to_compute_once(
 
     tokio::spawn(
         async move {
-            NUM_DB_CONNECTIONS_GAUGE.with_label_values(&["http"]).inc();
+            NUM_DB_CONNECTIONS_OPENED_COUNTER.with_label_values(&["http"]).inc();
             scopeguard::defer! {
-                NUM_DB_CONNECTIONS_GAUGE.with_label_values(&["http"]).dec();
+                NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
             }
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {

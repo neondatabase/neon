@@ -19,7 +19,6 @@ use metrics::{
 };
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use prometheus::{register_int_gauge_vec, IntGaugeVec};
 use std::{error::Error, io, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -39,28 +38,37 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "proxy_db_connections_total",
-        "Number of active connections to a database.",
+pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_db_connections_opened_total",
+        "Number of opened connections to a database.",
         &["protocol"],
     )
     .unwrap()
 });
 
-pub static NUM_CLIENT_REQUEST_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "proxy_client_requests_total",
-        "Number of active requests from a client.",
+pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_db_connections_closed_total",
+        "Number of closed connections to a database.",
         &["protocol"],
     )
     .unwrap()
 });
 
-pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "proxy_client_connections_total",
-        "Number of active connections from a client.",
+pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_client_connections_opened_total",
+        "Number of opened connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_client_connections_closed_total",
+        "Number of closed connections from a client.",
         &["protocol"],
     )
     .unwrap()
@@ -232,16 +240,14 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     );
 
     let proto = mode.protocol_label();
-    NUM_CLIENT_CONNECTION_GAUGE
+    NUM_CLIENT_CONNECTION_OPENED_COUNTER
         .with_label_values(&[proto])
         .inc();
-    NUM_CLIENT_REQUEST_GAUGE.with_label_values(&[proto]).inc();
     NUM_CONNECTIONS_ACCEPTED_COUNTER
         .with_label_values(&[proto])
         .inc();
     scopeguard::defer! {
-        NUM_CLIENT_CONNECTION_GAUGE.with_label_values(&[proto]).dec();
-        NUM_CLIENT_REQUEST_GAUGE.with_label_values(&[proto]).dec();
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER.with_label_values(&[proto]).inc();
         NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
     }
 
@@ -636,14 +642,7 @@ pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
-    mode: ClientMode,
 ) -> anyhow::Result<()> {
-    let proto = mode.protocol_label();
-    NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).inc();
-    scopeguard::defer! {
-        NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).dec();
-    }
-
     let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id.to_string(),
         branch_id: aux.branch_id.to_string(),
@@ -760,6 +759,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .or_else(|e| stream.throw_error(e))
             .await?;
 
+        let proto = mode.protocol_label();
+        NUM_DB_CONNECTIONS_OPENED_COUNTER
+            .with_label_values(&[proto])
+            .inc();
+        scopeguard::defer! {
+            NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
+        }
+
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
@@ -767,6 +774,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &aux, mode).await
+        proxy_pass(stream, node.stream, &aux).await
     }
 }

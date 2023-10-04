@@ -3,7 +3,10 @@ use crate::{
     config::ProxyConfig,
     error::io_error,
     protocol2::{ProxyProtocolAccept, WithClientIp},
-    proxy::{handle_client, ClientMode, NUM_CLIENT_CONNECTION_GAUGE},
+    proxy::{
+        handle_client, ClientMode, NUM_CLIENT_CONNECTION_CLOSED_COUNTER,
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER,
+    },
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
@@ -312,7 +315,7 @@ struct MetricService<S> {
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
-        NUM_CLIENT_CONNECTION_GAUGE
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER
             .with_label_values(&["http"])
             .inc();
         MetricService { inner }
@@ -321,9 +324,9 @@ impl<S> MetricService<S> {
 
 impl<S> Drop for MetricService<S> {
     fn drop(&mut self) {
-        NUM_CLIENT_CONNECTION_GAUGE
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
             .with_label_values(&["http"])
-            .dec();
+            .inc();
     }
 }
 
