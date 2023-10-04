@@ -45,7 +45,8 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
+const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -262,6 +263,8 @@ async fn handle_inner(
         None => MAX_REQUEST_SIZE + 1,
     };
 
+    // we don't have a streaming request support yet so this is to prevent OOM
+    // from a malicious user sending an extremely large request body
     if request_content_length > MAX_REQUEST_SIZE {
         return Err(anyhow::anyhow!(
             "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
@@ -384,6 +387,13 @@ async fn query_to_json<T: GenericClient>(
         let row = row?;
         *current_size += row.body_len();
         rows.push(row);
+        // we don't have a streaming response support yet so this is to prevent OOM
+        // from a malicious query (eg a cross join)
+        if *current_size > MAX_RESPONSE_SIZE {
+            return Err(anyhow::anyhow!(
+                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
+            ));
+        }
     }
 
     // grab the command tag and number of rows affected
