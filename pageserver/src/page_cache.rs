@@ -250,7 +250,7 @@ pub struct PageCache {
 
     /// Index of the next candidate to evict, for the Clock replacement algorithm.
     /// This is interpreted modulo the page cache size.
-    next_evict_slot: std::sync::Mutex<usize>,
+    next_evict_slot: tokio::sync::Mutex<usize>,
 
     size_metrics: &'static PageCacheSizeMetrics,
 }
@@ -882,7 +882,7 @@ impl PageCache {
         &self,
         _permit_witness: &PinnedSlotsPermit,
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
-        let mut next_evict_slot = self.next_evict_slot.lock().unwrap();
+        let mut next_evict_slot = self.next_evict_slot.lock().await;
         loop {
             let slot_idx = *next_evict_slot % self.slots.len();
             *next_evict_slot = next_evict_slot.wrapping_add(1);
@@ -943,7 +943,7 @@ impl PageCache {
             materialized_page_map: Default::default(),
             immutable_page_map: Default::default(),
             slots,
-            next_evict_slot: std::sync::Mutex::new(0),
+            next_evict_slot: tokio::sync::Mutex::new(0),
             size_metrics,
             pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
         }
