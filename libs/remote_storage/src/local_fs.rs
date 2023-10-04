@@ -174,7 +174,7 @@ impl RemoteStorage for LocalFs {
             while let Some(Ok(entry)) = entries.next() {
                 let file_name = entry.file_name();
                 let full_file_name = cur_folder.clone().join(file_name);
-                if full_file_name.starts_with(&prefix) {
+                if full_file_name.to_string().starts_with(&prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
                     files.push(file_remote_path.clone());
                     if full_file_name.is_dir() {
