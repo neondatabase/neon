@@ -335,6 +335,8 @@ impl PostgresRedoManager {
                 if let Some(proc) = self.stdin.lock().unwrap().take() {
                     proc.child.kill_and_wait();
                 }
+            } else if n_attempts != 0 {
+                info!(n_attempts, "retried walredo succeeded");
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
