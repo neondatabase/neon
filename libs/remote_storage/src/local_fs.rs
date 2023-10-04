@@ -165,18 +165,18 @@ impl RemoteStorage for LocalFs {
         // Note that Utf8PathBuf starts_with only considers full path segments, but
         // object prefixes are arbitrary strings, so we need the strings for doing
         // starts_with later.
-        let prefix = full_path.to_string();
+        let prefix = full_path.as_str();
 
         let mut files = vec![];
-        let mut directory_queue = vec![initial_dir.clone()];
+        let mut directory_queue = vec![initial_dir];
         while let Some(cur_folder) = directory_queue.pop() {
             let mut entries = cur_folder.read_dir_utf8()?;
             while let Some(Ok(entry)) = entries.next() {
                 let file_name = entry.file_name();
-                let full_file_name = cur_folder.clone().join(file_name);
-                if full_file_name.to_string().starts_with(&prefix) {
+                let full_file_name = cur_folder.join(file_name);
+                if full_file_name.as_str().starts_with(prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
-                    files.push(file_remote_path.clone());
+                    files.push(file_remote_path);
                     if full_file_name.is_dir() {
                         directory_queue.push(full_file_name);
                     }
