@@ -801,6 +801,9 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         wa_http_cli_debug = wa.http_client(auth_token=env.auth_keys.generate_safekeeper_token())
         wa_http_cli_debug.check_status()
 
+    # create a dummy table to wait for timeline initialization in safekeeper
+    endpoint.safe_psql("create table wait_for_sk()")
+
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
     epoch = tli_status.acceptor_epoch
