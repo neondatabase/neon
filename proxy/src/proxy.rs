@@ -19,6 +19,7 @@ use metrics::{
 };
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
+use prometheus::{register_int_gauge_vec, IntGaugeVec};
 use std::{error::Error, io, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -38,19 +39,46 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "proxy_accepted_connections_total",
-        "Number of TCP client connections accepted.",
+pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "proxy_connections_total",
+        "Number of active connections to a database.",
         &["protocol"],
     )
     .unwrap()
 });
 
-static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static NUM_CLIENT_REQUEST_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "proxy_client_connections_total",
+        "Number of active requests from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "proxy_client_connections_total",
+        "Number of active connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_total",
+        "Number of client connections accepted.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_closed_connections_total",
-        "Number of TCP client connections closed.",
+        "Number of client connections closed.",
         &["protocol"],
     )
     .unwrap()
@@ -203,12 +231,18 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         "handling interactive connection from client"
     );
 
-    // The `closed` counter will increase when this future is destroyed.
+    let proto = mode.protocol_label();
+    NUM_CLIENT_CONNECTION_GAUGE
+        .with_label_values(&[proto])
+        .inc();
+    NUM_CLIENT_REQUEST_GAUGE.with_label_values(&[proto]).inc();
     NUM_CONNECTIONS_ACCEPTED_COUNTER
-        .with_label_values(&[mode.protocol_label()])
+        .with_label_values(&[proto])
         .inc();
     scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[mode.protocol_label()]).inc();
+        NUM_CLIENT_CONNECTION_GAUGE.with_label_values(&[proto]).dec();
+        NUM_CLIENT_REQUEST_GAUGE.with_label_values(&[proto]).dec();
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
     }
 
     let tls = config.tls_config.as_ref();
@@ -243,7 +277,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode.allow_cleartext()))
+        .with_session(|session| client.connect_to_db(session, mode))
         .await
 }
 
@@ -602,7 +636,14 @@ pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
+    mode: ClientMode,
 ) -> anyhow::Result<()> {
+    let proto = mode.protocol_label();
+    NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).inc();
+    scopeguard::defer! {
+        NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).dec();
+    }
+
     let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id.to_string(),
         branch_id: aux.branch_id.to_string(),
@@ -677,7 +718,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
-        allow_cleartext: bool,
+        mode: ClientMode,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -693,7 +734,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         };
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, allow_cleartext)
+            .authenticate(&extra, &mut stream, mode.allow_cleartext())
             .await
         {
             Ok(auth_result) => auth_result,
@@ -726,6 +767,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &aux).await
+        proxy_pass(stream, node.stream, &aux, mode).await
     }
 }

@@ -20,6 +20,7 @@ use tokio_postgres::AsyncMessage;
 use crate::{
     auth, console,
     metrics::{Ids, MetricCounter, USAGE_METRICS},
+    proxy::NUM_DB_CONNECTIONS_GAUGE,
 };
 use crate::{compute, config};
 
@@ -418,36 +419,42 @@ async fn connect_to_compute_once(
     };
 
     tokio::spawn(
-        poll_fn(move |cx| {
-            if matches!(rx.has_changed(), Ok(true)) {
-                session = *rx.borrow_and_update();
-                info!(%session, "changed session");
+        async move {
+            NUM_DB_CONNECTIONS_GAUGE.with_label_values(&["http"]).inc();
+            scopeguard::defer! {
+                NUM_DB_CONNECTIONS_GAUGE.with_label_values(&["http"]).dec();
             }
+            poll_fn(move |cx| {
+                if matches!(rx.has_changed(), Ok(true)) {
+                    session = *rx.borrow_and_update();
+                    info!(%session, "changed session");
+                }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
+                loop {
+                    let message = ready!(connection.poll_message(cx));
 
-                match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session, "notice: {}", notice);
-                    }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session, "unknown message");
-                    }
-                    Some(Err(e)) => {
-                        error!(%session, "connection error: {}", e);
-                        return Poll::Ready(())
-                    }
-                    None => {
-                        info!("connection closed");
-                        return Poll::Ready(())
+                    match message {
+                        Some(Ok(AsyncMessage::Notice(notice))) => {
+                            info!(%session, "notice: {}", notice);
+                        }
+                        Some(Ok(AsyncMessage::Notification(notif))) => {
+                            warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                        }
+                        Some(Ok(_)) => {
+                            warn!(%session, "unknown message");
+                        }
+                        Some(Err(e)) => {
+                            error!(%session, "connection error: {}", e);
+                            return Poll::Ready(())
+                        }
+                        None => {
+                            info!("connection closed");
+                            return Poll::Ready(())
+                        }
                     }
                 }
-            }
-        })
+            }).await
+        }
         .instrument(span)
     );
 
