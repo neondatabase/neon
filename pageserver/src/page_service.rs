@@ -1265,7 +1265,10 @@ async fn get_active_tenant_with_timeout(
         Ok(tenant) => tenant,
         Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
         Err(GetTenantError::NotActive(_)) => {
-            unreachable!("we're calling get_tenant with active=false")
+            unreachable!("we're calling get_tenant with active_only=false")
+        }
+        Err(GetTenantError::Broken(_)) => {
+            unreachable!("we're calling get_tenant with active_only=false")
         }
     };
     let wait_time = Duration::from_secs(30);

@@ -180,10 +180,15 @@ pub async fn init_tenant_mgr(
         // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
         // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
         // are processed, even though we don't block on recovery completing here.
-        resources
-            .deletion_queue_client
-            .recover(result.clone())
-            .await?;
+        //
+        // Must only do this if remote storage is enabled, otherwise deletion queue
+        // is not running and channel push will fail.
+        if resources.remote_storage.is_some() {
+            resources
+                .deletion_queue_client
+                .recover(result.clone())
+                .await?;
+        }
 
         Some(result)
     } else {
@@ -730,6 +735,11 @@ pub enum GetTenantError {
     NotFound(TenantId),
     #[error("Tenant {0} is not active")]
     NotActive(TenantId),
+    /// Broken is logically a subset of NotActive, but a distinct error is useful as
+    /// NotActive is usually a retryable state for API purposes, whereas Broken
+    /// is a stuck error state
+    #[error("Tenant is broken: {0}")]
+    Broken(String),
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
@@ -744,10 +754,20 @@ pub async fn get_tenant(
     let tenant = m
         .get(&tenant_id)
         .ok_or(GetTenantError::NotFound(tenant_id))?;
-    if active_only && !tenant.is_active() {
-        Err(GetTenantError::NotActive(tenant_id))
-    } else {
-        Ok(Arc::clone(tenant))
+
+    match tenant.current_state() {
+        TenantState::Broken {
+            reason,
+            backtrace: _,
+        } if active_only => Err(GetTenantError::Broken(reason)),
+        TenantState::Active => Ok(Arc::clone(tenant)),
+        _ => {
+            if active_only {
+                Err(GetTenantError::NotActive(tenant_id))
+            } else {
+                Ok(Arc::clone(tenant))
+            }
+        }
     }
 }
 

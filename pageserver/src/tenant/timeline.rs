@@ -499,13 +499,36 @@ impl Timeline {
         };
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
+        let path = self
+            .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
 
-        RECONSTRUCT_TIME
-            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
-            .await
+        let timer = RECONSTRUCT_TIME.start_timer();
+        let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
+        timer.stop_and_record();
+
+        if cfg!(feature = "testing") && res.is_err() {
+            // it can only be walredo issue
+            use std::fmt::Write;
+
+            let mut msg = String::new();
+
+            path.into_iter().for_each(|(res, cont_lsn, layer)| {
+                writeln!(
+                    msg,
+                    "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
+                    layer(),
+                )
+                .expect("string grows")
+            });
+
+            // this is to rule out or provide evidence that we could in some cases read a duplicate
+            // walrecord
+            tracing::info!("walredo failed, path:\n{msg}");
+        }
+
+        res
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -562,7 +585,7 @@ impl Timeline {
     }
 
     pub fn resident_physical_size(&self) -> u64 {
-        self.metrics.resident_physical_size_gauge.get()
+        self.metrics.resident_physical_size_get()
     }
 
     ///
@@ -1312,10 +1335,7 @@ impl Timeline {
         // will treat the file as a local layer again, count it towards resident size,
         // and it'll be like the layer removal never happened.
         // The bump in resident size is perhaps unexpected but overall a robust behavior.
-        self.metrics
-            .resident_physical_size_gauge
-            .sub(layer_file_size);
-
+        self.metrics.resident_physical_size_sub(layer_file_size);
         self.metrics.evictions.inc();
 
         if let Some(delta) = local_layer_residence_duration {
@@ -1852,9 +1872,7 @@ impl Timeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.metrics
-            .resident_physical_size_gauge
-            .set(total_physical_size);
+        self.metrics.resident_physical_size_set(total_physical_size);
 
         timer.stop_and_record();
         Ok(())
@@ -2235,7 +2253,7 @@ impl Timeline {
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<Vec<TraversalPathItem>, PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -2266,12 +2284,12 @@ impl Timeline {
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
-                ValueReconstructResult::Complete => return Ok(()),
+                ValueReconstructResult::Complete => return Ok(traversal_path),
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
                         MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
-                        return Ok(());
+                        return Ok(traversal_path);
                     }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
@@ -4404,7 +4422,7 @@ impl Timeline {
 
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self_clone.metrics.resident_physical_size_gauge.add(*size);
+                    self_clone.metrics.resident_physical_size_add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.

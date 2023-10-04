@@ -105,6 +105,8 @@ class NeonCompare(PgCompare):
         self._pg_bin = pg_bin
         self.pageserver_http_client = self.env.pageserver.http_client()
 
+        # note that neon_simple_env now uses LOCAL_FS remote storage
+
         # Create tenant
         tenant_conf: Dict[str, str] = {}
         if False:  # TODO add pytest setting for this

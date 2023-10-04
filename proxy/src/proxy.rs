@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
 };
@@ -602,6 +603,11 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    let usage = USAGE_METRICS.register(Ids {
+        endpoint_id: aux.endpoint_id.to_string(),
+        branch_id: aux.branch_id.to_string(),
+    });
+
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
@@ -609,6 +615,7 @@ pub async fn proxy_pass(
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
+            usage.record_egress(cnt as u64);
         },
     );
 
@@ -690,7 +697,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .await
         {
             Ok(auth_result) => auth_result,
-            Err(e) => return stream.throw_error(e).await,
+            Err(e) => {
+                let user = creds.get_user();
+                let db = params.get("database");
+                let app = params.get("application_name");
+                let params_span = tracing::info_span!("", ?user, ?db, ?app);
+
+                return stream.throw_error(e).instrument(params_span).await;
+            }
         };
 
         let AuthSuccess {

@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     last_flush_lsn_upload,
-    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -35,6 +34,7 @@ from fixtures.remote_storage import (
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
+from urllib3.util.retry import Retry
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -145,19 +145,12 @@ DELETE_FAILPOINTS = [
 def combinations():
     result = []
 
-    remotes = [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]
+    remotes = [RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
         remotes.append(RemoteStorageKind.REAL_S3)
 
     for remote_storage_kind in remotes:
         for delete_failpoint in DELETE_FAILPOINTS:
-            if remote_storage_kind == RemoteStorageKind.NOOP and delete_failpoint in (
-                "timeline-delete-before-index-delete",
-                "timeline-delete-after-index-delete",
-            ):
-                # the above failpoints are not relevant for config without remote storage
-                continue
-
             result.append((remote_storage_kind, delete_failpoint))
     return result
 
@@ -205,23 +198,21 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     with env.endpoints.create_start("delete") as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        if remote_storage_kind is RemoteStorageKind.NOOP:
-            wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline_id)
-        else:
-            last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
-            if remote_storage_kind in available_s3_storages():
-                assert_prefix_not_empty(
-                    neon_env_builder,
-                    prefix="/".join(
-                        (
-                            "tenants",
-                            str(env.initial_tenant),
-                            "timelines",
-                            str(timeline_id),
-                        )
-                    ),
-                )
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
+
+        if remote_storage_kind in available_s3_storages():
+            assert_prefix_not_empty(
+                neon_env_builder,
+                prefix="/".join(
+                    (
+                        "tenants",
+                        str(env.initial_tenant),
+                        "timelines",
+                        str(timeline_id),
+                    )
+                ),
+            )
 
     env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
     # It appears when we stopped flush loop during deletion and then pageserver is stopped
@@ -624,7 +615,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     child_timeline_id = env.neon_cli.create_branch("child", "main")
 
-    ps_http = env.pageserver.http_client()
+    ps_http = env.pageserver.http_client(retries=Retry(0, read=False))
 
     failpoint_name = "persist_deleted_index_part"
     ps_http.configure_failpoints((failpoint_name, "pause"))
@@ -864,7 +855,7 @@ def test_timeline_delete_resumed_on_attach(
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
-            f".*InternalServerError\\(Tenant {tenant_id} is not active.*",
+            ".*Resource temporarily unavailable.*Tenant not yet active",
             '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
         )
     )
