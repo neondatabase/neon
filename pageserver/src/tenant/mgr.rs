@@ -151,39 +151,66 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
+fn emergency_generations(
+    tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
+) -> HashMap<TenantId, Generation> {
+    tenant_confs
+        .iter()
+        .filter_map(|(tid, lc)| {
+            let lc = match lc {
+                Ok(lc) => lc,
+                Err(_) => return None,
+            };
+            let gen = match &lc.mode {
+                LocationMode::Attached(alc) => Some(alc.generation),
+                LocationMode::Secondary(_) => None,
+            };
+
+            gen.map(|g| (*tid, g))
+        })
+        .collect()
+}
+
 async fn init_load_generations(
     conf: &'static PageServerConf,
+    tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
     resources: &TenantSharedResources,
     cancel: &CancellationToken,
 ) -> anyhow::Result<Option<HashMap<TenantId, Generation>>> {
-    // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-    if let Some(client) = ControlPlaneClient::new(conf, cancel) {
-        let result = match client.re_attach().await {
+    let generations = if conf.control_plane_emergency_mode {
+        error!(
+            "Emergency mode!  Tenants will be attached unsafely using their last known generation"
+        );
+        emergency_generations(tenant_confs)
+    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+        info!("Calling control plane API to re-attach tenants");
+        // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
+        match client.re_attach().await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
             }
-        };
-
-        // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
-        // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
-        // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
-        // are processed, even though we don't block on recovery completing here.
-        //
-        // Must only do this if remote storage is enabled, otherwise deletion queue
-        // is not running and channel push will fail.
-        if resources.remote_storage.is_some() {
-            resources
-                .deletion_queue_client
-                .recover(result.clone())
-                .await?;
         }
-
-        Ok(Some(result))
     } else {
         info!("Control plane API not configured, tenant generations are disabled");
-        Ok(None)
+        return Ok(None);
+    };
+
+    // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
+    // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
+    // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
+    // are processed, even though we don't block on recovery completing here.
+    //
+    // Must only do this if remote storage is enabled, otherwise deletion queue
+    // is not running and channel push will fail.
+    if resources.remote_storage.is_some() {
+        resources
+            .deletion_queue_client
+            .recover(generations.clone())
+            .await?;
     }
+
+    Ok(Some(generations))
 }
 
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
@@ -284,7 +311,8 @@ pub async fn init_tenant_mgr(
     let tenant_configs = init_load_tenant_configs(conf).await?;
 
     // Determine which tenants are to be attached
-    let tenant_generations = init_load_generations(conf, &resources, &cancel).await?;
+    let tenant_generations =
+        init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
 
     // Construct `Tenant` objects and start them running
     for (tenant_id, location_conf) in tenant_configs {
