@@ -2,7 +2,7 @@ import time
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from requests.exceptions import ConnectionError
@@ -61,6 +61,13 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
+
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # make sure we receive no new wal after this, so that we'll write over the same L1 file.
+    endpoint.stop()
+    for sk in env.safekeepers:
+        sk.stop()
 
     # hit the exit failpoint
     with pytest.raises(ConnectionError, match="Remote end closed connection without response"):
