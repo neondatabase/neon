@@ -892,13 +892,7 @@ impl PageCache {
                     self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
                 match (last_slot_idx, next_idx) {
                     (Some(x), y) if x > y => {
-                        #[inline(never)]
-                        fn dont_compete_with_other_find_victim_for_a_while() {
-                            for _ in 0..1_000_000 {
-                                std::hint::spin_loop();
-                            }
-                        }
-                        dont_compete_with_other_find_victim_for_a_while();
+                        tokio::task::yield_now().await;
                     }
                     (None | Some(_), _) => {}
                 }
