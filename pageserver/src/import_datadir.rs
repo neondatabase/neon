@@ -625,7 +625,7 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
 
 /// A buffer that yields writes at repeated intervals
 struct YieldingVec {
-    yld_len: u64,
+    yld_len: usize,
     buf: Vec<u8>,
 }
 
@@ -636,15 +636,17 @@ impl YieldingVec {
             buf: Vec::new(),
         }
     }
-    fn should_yield(&mut self, buf_len: usize) -> bool {
+    fn should_yield(&mut self, add_buf_len: usize) -> bool {
         // Set this limit to a small value so that we are a
         // good async citizen and yield repeatedly (but not
         // too often for many small writes to cause many yields)
-        const YIELD_DIST: u64 = 1024;
+        const YIELD_DIST: usize = 1024;
 
-        let buf_len: u64 = buf_len.try_into().unwrap();
-        let ret = self.yld_len / YIELD_DIST != (self.yld_len + buf_len) / YIELD_DIST;
-        self.yld_len += buf_len;
+        let tgt_buf_len = self.buf.len() + add_buf_len;
+        let ret = self.yld_len / YIELD_DIST < tgt_buf_len / YIELD_DIST;
+        if self.yld_len < tgt_buf_len {
+            self.yld_len += add_buf_len;
+        }
         ret
     }
 }
@@ -652,10 +654,11 @@ impl YieldingVec {
 impl AsyncWrite for YieldingVec {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        _cx: &mut task::Context<'_>,
+        cx: &mut task::Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         if self.should_yield(buf.len()) {
+            cx.waker().wake_by_ref();
             return Poll::Pending;
         }
         self.get_mut().buf.extend_from_slice(buf);
@@ -664,10 +667,11 @@ impl AsyncWrite for YieldingVec {
 
     fn poll_write_vectored(
         mut self: Pin<&mut Self>,
-        _: &mut task::Context<'_>,
+        cx: &mut task::Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         if self.should_yield(bufs.iter().map(|b| b.len()).sum()) {
+            cx.waker().wake_by_ref();
             return Poll::Pending;
         }
         Poll::Ready(std::io::Write::write_vectored(&mut self.buf, bufs))
