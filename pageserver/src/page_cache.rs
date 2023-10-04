@@ -250,7 +250,7 @@ pub struct PageCache {
 
     /// Index of the next candidate to evict, for the Clock replacement algorithm.
     /// This is interpreted modulo the page cache size.
-    next_evict_slot: AtomicUsize,
+    next_evict_slot: std::sync::Mutex<usize>,
 
     size_metrics: &'static PageCacheSizeMetrics,
 }
@@ -882,11 +882,11 @@ impl PageCache {
         &self,
         _permit_witness: &PinnedSlotsPermit,
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
-        let iter_limit = self.slots.len() * 10;
-        let mut iters = 0;
+        let mut next_evict_slot = self.next_evict_slot.lock().unwrap();
         loop {
-            iters += 1;
-            let slot_idx = self.next_evict_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+            let slot_idx = *next_evict_slot % self.slots.len();
+            *next_evict_slot = next_evict_slot.wrapping_add(1);
+
 
             let slot = &self.slots[slot_idx];
 
@@ -894,42 +894,6 @@ impl PageCache {
                 let mut inner = match slot.inner.try_write() {
                     Ok(inner) => inner,
                     Err(_err) => {
-                        if iters > iter_limit {
-                            // NB: Even with the permits, there's no hard guarantee that we will find a slot with
-                            // any particular number of iterations: other threads might race ahead and acquire and
-                            // release pins just as we're scanning the array.
-                            //
-                            // Imagine that nslots is 2, and as starting point, usage_count==1 on all
-                            // slots. There are two threads running concurrently, A and B. A has just
-                            // acquired the permit from the semaphore.
-                            //
-                            //   A: Look at slot 1. Its usage_count == 1, so decrement it to zero, and continue the search
-                            //   B: Acquire permit.
-                            //   B: Look at slot 2, decrement its usage_count to zero and continue the search
-                            //   B: Look at slot 1. Its usage_count is zero, so pin it and bump up its usage_count to 1.
-                            //   B: Release pin and permit again
-                            //   B: Acquire permit.
-                            //   B: Look at slot 2. Its usage_count is zero, so pin it and bump up its usage_count to 1.
-                            //   B: Release pin and permit again
-                            //
-                            // Now we're back in the starting situation that both slots have
-                            // usage_count 1, but A has now been through one iteration of the
-                            // find_victim() loop. This can repeat indefinitely and on each
-                            // iteration, A's iteration count increases by one.
-                            //
-                            // So, even though the semaphore for the permits is fair, the victim search
-                            // itself happens in parallel and is not fair.
-                            // Hence even with a permit, a task can theoretically be starved.
-                            // To avoid this, we'd need tokio to give priority to tasks that are holding
-                            // permits for longer.
-                            // Note that just yielding to tokio during iteration without such
-                            // priority boosting is likely counter-productive. We'd just give more opportunities
-                            // for B to bump usage count, further starving A.
-                            crate::metrics::page_cache_errors_inc(
-                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
-                            );
-                            anyhow::bail!("exceeded evict iter limit");
-                        }
                         continue;
                     }
                 };
@@ -938,7 +902,6 @@ impl PageCache {
                     self.remove_mapping(old_key);
                     inner.key = None;
                 }
-                crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
                 return Ok((slot_idx, inner));
             }
         }
@@ -980,7 +943,7 @@ impl PageCache {
             materialized_page_map: Default::default(),
             immutable_page_map: Default::default(),
             slots,
-            next_evict_slot: AtomicUsize::new(0),
+            next_evict_slot: std::sync::Mutex::new(0),
             size_metrics,
             pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
         }
