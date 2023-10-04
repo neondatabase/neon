@@ -56,7 +56,7 @@ use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-    RECONSTRUCT_TIME, UNEXPECTED_ONDEMAND_DOWNLOADS,
+    UNEXPECTED_ONDEMAND_DOWNLOADS,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -501,9 +501,12 @@ impl Timeline {
             .await?;
         timer.stop_and_record();
 
-        let timer = RECONSTRUCT_TIME.start_timer();
+        let start = Instant::now();
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
-        timer.stop_and_record();
+        let elapsed = start.elapsed();
+        crate::metrics::RECONSTRUCT_TIME
+            .for_result(&res)
+            .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
             // it can only be walredo issue
