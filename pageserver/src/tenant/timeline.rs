@@ -501,9 +501,9 @@ impl Timeline {
             .await?;
         timer.stop_and_record();
 
-        let res = RECONSTRUCT_TIME
-            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
-            .await;
+        let timer = RECONSTRUCT_TIME.start_timer();
+        let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
+        timer.stop_and_record();
 
         if cfg!(feature = "testing") && res.is_err() {
             // it can only be walredo issue
