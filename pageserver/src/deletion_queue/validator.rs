@@ -15,10 +15,10 @@
 //! Deletions are passed onward to the Deleter.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camino::Utf8PathBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::info;
@@ -282,16 +282,16 @@ where
         Ok(())
     }
 
-    async fn cleanup_lists(&mut self, list_paths: Vec<PathBuf>) {
+    async fn cleanup_lists(&mut self, list_paths: Vec<Utf8PathBuf>) {
         for list_path in list_paths {
-            debug!("Removing deletion list {}", list_path.display());
+            debug!("Removing deletion list {list_path}");
 
             if let Err(e) = tokio::fs::remove_file(&list_path).await {
                 // Unexpected: we should have permissions and nothing else should
                 // be touching these files.  We will leave the file behind.  Subsequent
                 // pageservers will try and load it again: hopefully whatever storage
                 // issue (probably permissions) has been fixed by then.
-                tracing::error!("Failed to delete {}: {e:#}", list_path.display());
+                tracing::error!("Failed to delete {list_path}: {e:#}");
                 metrics::DELETION_QUEUE.unexpected_errors.inc();
                 break;
             }

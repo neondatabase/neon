@@ -1,14 +1,14 @@
 use std::{
     borrow::Cow,
-    ffi::OsStr,
     fs::{self, File},
     io,
-    path::{Path, PathBuf},
 };
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Similar to [`std::fs::create_dir`], except we fsync the
 /// created directory and its parent.
-pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn create_dir(path: impl AsRef<Utf8Path>) -> io::Result<()> {
     let path = path.as_ref();
 
     fs::create_dir(path)?;
@@ -18,7 +18,7 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Similar to [`std::fs::create_dir_all`], except we fsync all
 /// newly created directories and the pre-existing parent.
-pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn create_dir_all(path: impl AsRef<Utf8Path>) -> io::Result<()> {
     let mut path = path.as_ref();
 
     let mut dirs_to_create = Vec::new();
@@ -30,7 +30,7 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!("non-directory found in path: {}", path.display()),
+                    format!("non-directory found in path: {path}"),
                 ));
             }
             Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -44,7 +44,7 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("can't find parent of path '{}'", path.display()).as_str(),
+                    format!("can't find parent of path '{path}'"),
                 ));
             }
         }
@@ -70,21 +70,18 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Adds a suffix to the file(directory) name, either appending the suffix to the end of its extension,
 /// or if there's no extension, creates one and puts a suffix there.
-pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
-    let new_extension = match original_path
-        .as_ref()
-        .extension()
-        .map(OsStr::to_string_lossy)
-    {
+pub fn path_with_suffix_extension(
+    original_path: impl AsRef<Utf8Path>,
+    suffix: &str,
+) -> Utf8PathBuf {
+    let new_extension = match original_path.as_ref().extension() {
         Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
         None => Cow::Borrowed(suffix),
     };
-    original_path
-        .as_ref()
-        .with_extension(new_extension.as_ref())
+    original_path.as_ref().with_extension(new_extension)
 }
 
-pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
+pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {
     let parent = file_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::Other,
@@ -97,7 +94,7 @@ pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn fsync(path: &Path) -> io::Result<()> {
+pub fn fsync(path: &Utf8Path) -> io::Result<()> {
     File::open(path)
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to open the file {path:?}: {e}")))
         .and_then(|file| {
@@ -111,19 +108,18 @@ pub fn fsync(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}")))
 }
 
-pub async fn fsync_async(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
-    tokio::fs::File::open(path).await?.sync_all().await
+pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Error> {
+    tokio::fs::File::open(path.as_ref()).await?.sync_all().await
 }
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn test_create_dir_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
         let existing_dir_path = dir.path();
         let err = create_dir(existing_dir_path).unwrap_err();
@@ -139,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_create_dir_all_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
         let existing_dir_path = dir.path();
         create_dir_all(existing_dir_path).unwrap();
@@ -166,29 +162,29 @@ mod tests {
 
     #[test]
     fn test_path_with_suffix_extension() {
-        let p = PathBuf::from("/foo/bar");
+        let p = Utf8PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp").to_string(),
             "/foo/bar.temp"
         );
-        let p = PathBuf::from("/foo/bar");
+        let p = Utf8PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string(),
             "/foo/bar.temp.temp"
         );
-        let p = PathBuf::from("/foo/bar.baz");
+        let p = Utf8PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string(),
             "/foo/bar.baz.temp.temp"
         );
-        let p = PathBuf::from("/foo/bar.baz");
+        let p = Utf8PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string(),
             "/foo/bar.baz..temp"
         );
-        let p = PathBuf::from("/foo/bar/dir/");
+        let p = Utf8PathBuf::from("/foo/bar/dir/");
         assert_eq!(
-            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string(),
             "/foo/bar/dir..temp"
         );
     }

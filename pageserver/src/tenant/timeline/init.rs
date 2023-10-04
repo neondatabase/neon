@@ -12,7 +12,8 @@ use crate::{
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
-use std::{collections::HashMap, ffi::OsString, path::Path, str::FromStr};
+use camino::Utf8Path;
+use std::{collections::HashMap, str::FromStr};
 use utils::lsn::Lsn;
 
 /// Identified files in the timeline directory.
@@ -20,46 +21,43 @@ pub(super) enum Discovered {
     /// The only one we care about
     Layer(LayerFileName, u64),
     /// Old ephmeral files from previous launches, should be removed
-    Ephemeral(OsString),
+    Ephemeral(String),
     /// Old temporary timeline files, unsure what these really are, should be removed
-    Temporary(OsString),
+    Temporary(String),
     /// Temporary on-demand download files, should be removed
-    TemporaryDownload(OsString),
+    TemporaryDownload(String),
     /// "metadata" file we persist locally and include in `index_part.json`
     Metadata,
     /// Backup file from previously future layers
     IgnoredBackup,
     /// Unrecognized, warn about these
-    Unknown(OsString),
+    Unknown(String),
 }
 
 /// Scans the timeline directory for interesting files.
-pub(super) fn scan_timeline_dir(path: &Path) -> anyhow::Result<Vec<Discovered>> {
+pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
-    for direntry in std::fs::read_dir(path)? {
+    for direntry in path.read_dir_utf8()? {
         let direntry = direntry?;
-        let direntry_path = direntry.path();
-        let file_name = direntry.file_name();
+        let file_name = direntry.file_name().to_string();
 
-        let fname = file_name.to_string_lossy();
-
-        let discovered = match LayerFileName::from_str(&fname) {
+        let discovered = match LayerFileName::from_str(&file_name) {
             Ok(file_name) => {
                 let file_size = direntry.metadata()?.len();
                 Discovered::Layer(file_name, file_size)
             }
             Err(_) => {
-                if fname == METADATA_FILE_NAME {
+                if file_name == METADATA_FILE_NAME {
                     Discovered::Metadata
-                } else if fname.ends_with(".old") {
+                } else if file_name.ends_with(".old") {
                     // ignore these
                     Discovered::IgnoredBackup
-                } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
+                } else if remote_timeline_client::is_temp_download_file(direntry.path()) {
                     Discovered::TemporaryDownload(file_name)
-                } else if is_ephemeral_file(&fname) {
+                } else if is_ephemeral_file(&file_name) {
                     Discovered::Ephemeral(file_name)
-                } else if is_temporary(&direntry_path) {
+                } else if is_temporary(direntry.path()) {
                     Discovered::Temporary(file_name)
                 } else {
                     Discovered::Unknown(file_name)
@@ -162,15 +160,14 @@ pub(super) fn reconcile(
         .collect::<Vec<_>>()
 }
 
-pub(super) fn cleanup(path: &Path, kind: &str) -> anyhow::Result<()> {
+pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
     let file_name = path.file_name().expect("must be file path");
     tracing::debug!(kind, ?file_name, "cleaning up");
-    std::fs::remove_file(path)
-        .with_context(|| format!("failed to remove {kind} at {}", path.display()))
+    std::fs::remove_file(path).with_context(|| format!("failed to remove {kind} at {path}"))
 }
 
 pub(super) fn cleanup_local_file_for_remote(
-    path: &Path,
+    path: &Utf8Path,
     local: &LayerFileMetadata,
     remote: &LayerFileMetadata,
 ) -> anyhow::Result<()> {
@@ -182,8 +179,7 @@ pub(super) fn cleanup_local_file_for_remote(
     if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
         assert!(
             path.exists(),
-            "we would leave the local_layer without a file if this does not hold: {}",
-            path.display()
+            "we would leave the local_layer without a file if this does not hold: {path}",
         );
         Err(err)
     } else {
@@ -192,7 +188,7 @@ pub(super) fn cleanup_local_file_for_remote(
 }
 
 pub(super) fn cleanup_future_layer(
-    path: &Path,
+    path: &Utf8Path,
     name: &LayerFileName,
     disk_consistent_lsn: Lsn,
 ) -> anyhow::Result<()> {

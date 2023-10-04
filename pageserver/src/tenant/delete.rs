@@ -1,9 +1,7 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::TenantState;
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
@@ -62,7 +60,7 @@ fn remote_tenant_delete_mark_path(
         .context("Failed to strip workdir prefix")
         .and_then(RemotePath::new)
         .context("tenant path")?;
-    Ok(tenant_remote_path.join(Path::new("deleted")))
+    Ok(tenant_remote_path.join(Utf8Path::new("deleted")))
 }
 
 async fn create_remote_delete_mark(
@@ -148,7 +146,7 @@ async fn schedule_ordered_timeline_deletions(
     Ok(already_running_deletions)
 }
 
-async fn ensure_timelines_dir_empty(timelines_path: &Path) -> Result<(), DeleteTenantError> {
+async fn ensure_timelines_dir_empty(timelines_path: &Utf8Path) -> Result<(), DeleteTenantError> {
     // Assert timelines dir is empty.
     if !fs_ext::is_directory_empty(timelines_path).await? {
         // Display first 10 items in directory
@@ -188,17 +186,14 @@ async fn cleanup_remaining_fs_traces(
     conf: &PageServerConf,
     tenant_id: &TenantId,
 ) -> Result<(), DeleteTenantError> {
-    let rm = |p: PathBuf, is_dir: bool| async move {
+    let rm = |p: Utf8PathBuf, is_dir: bool| async move {
         if is_dir {
             tokio::fs::remove_dir(&p).await
         } else {
             tokio::fs::remove_file(&p).await
         }
         .or_else(fs_ext::ignore_not_found)
-        .with_context(|| {
-            let to_display = p.display();
-            format!("failed to delete {to_display}")
-        })
+        .with_context(|| format!("failed to delete {p}"))
     };
 
     rm(conf.tenant_config_path(tenant_id), false).await?;

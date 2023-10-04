@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::{fmt, str::FromStr};
 
 use anyhow::Context;
@@ -215,12 +214,11 @@ pub struct TimelineId(Id);
 
 id_newtype!(TimelineId);
 
-impl TryFrom<Option<&OsStr>> for TimelineId {
+impl TryFrom<Option<&str>> for TimelineId {
     type Error = anyhow::Error;
 
-    fn try_from(value: Option<&OsStr>) -> Result<Self, Self::Error> {
+    fn try_from(value: Option<&str>) -> Result<Self, Self::Error> {
         value
-            .and_then(OsStr::to_str)
             .unwrap_or_default()
             .parse::<TimelineId>()
             .with_context(|| format!("Could not parse timeline id from {:?}", value))

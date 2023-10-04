@@ -307,15 +307,17 @@ impl PostgresRedoManager {
 
             // If something went wrong, don't try to reuse the process. Kill it, and
             // next request will launch a new one.
-            if result.is_err() {
+            if let Err(e) = result.as_ref() {
                 error!(
-                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
+                    n_attempts,
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
                     records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                     nbytes,
                     base_img_lsn,
-                    lsn
+                    lsn,
+                    utils::error::report_compact_sources(e),
                 );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
@@ -333,6 +335,8 @@ impl PostgresRedoManager {
                 if let Some(proc) = self.stdin.lock().unwrap().take() {
                     proc.child.kill_and_wait();
                 }
+            } else if n_attempts != 0 {
+                info!(n_attempts, "retried walredo succeeded");
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
@@ -1274,13 +1278,13 @@ mod tests {
 
     struct RedoHarness {
         // underscored because unused, except for removal at drop
-        _repo_dir: tempfile::TempDir,
+        _repo_dir: camino_tempfile::Utf8TempDir,
         manager: PostgresRedoManager,
     }
 
     impl RedoHarness {
         fn new() -> anyhow::Result<Self> {
-            let repo_dir = tempfile::tempdir()?;
+            let repo_dir = camino_tempfile::tempdir()?;
             let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
             let conf = Box::leak(Box::new(conf));
             let tenant_id = TenantId::generate();

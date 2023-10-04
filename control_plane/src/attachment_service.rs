@@ -1,5 +1,6 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
+use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::{path::PathBuf, process::Child};
@@ -47,8 +48,9 @@ impl AttachmentService {
         }
     }
 
-    fn pid_file(&self) -> PathBuf {
-        self.env.base_data_dir.join("attachment_service.pid")
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.env.base_data_dir.join("attachment_service.pid"))
+            .expect("non-Unicode path")
     }
 
     pub fn start(&self) -> anyhow::Result<Child> {
