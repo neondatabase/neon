@@ -56,7 +56,7 @@ impl LocalFs {
         &self,
         file_path: &Utf8Path,
     ) -> anyhow::Result<Option<StorageMetadata>> {
-        let metadata_path = storage_metadata_path(file_path)?;
+        let metadata_path = storage_metadata_path(file_path);
         if metadata_path.exists() && metadata_path.is_file() {
             let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
                 format!("Failed to read metadata from the local storage at '{metadata_path}'")
@@ -258,7 +258,7 @@ impl RemoteStorage for LocalFs {
             })?;
 
         if let Some(storage_metadata) = metadata {
-            let storage_metadata_path = storage_metadata_path(&target_file_path)?;
+            let storage_metadata_path = storage_metadata_path(&target_file_path);
             fs::write(
                 &storage_metadata_path,
                 serde_json::to_string(&storage_metadata.0)
@@ -373,8 +373,8 @@ impl RemoteStorage for LocalFs {
     }
 }
 
-fn storage_metadata_path(original_path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
-    Ok(path_with_suffix_extension(original_path, "metadata"))
+fn storage_metadata_path(original_path: &Utf8Path) -> Utf8PathBuf {
+    path_with_suffix_extension(original_path, "metadata")
 }
 
 fn get_all_files<'a, P>(
