@@ -3697,7 +3697,7 @@ impl Timeline {
 
             writer.as_mut().unwrap().put_value(key, lsn, value).await?;
 
-            if new_layers.len() > 0 {
+            if !new_layers.is_empty() {
                 fail_point!("after-timeline-compacted-first-L1");
             }
 
