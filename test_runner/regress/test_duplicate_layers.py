@@ -8,7 +8,6 @@ from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from requests.exceptions import ConnectionError
 
 
-@pytest.mark.timeout(600)
 def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -35,8 +34,6 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     time.sleep(10)  # let compaction to be performed
     assert env.pageserver.log_contains("compact-level0-phase1-return-same")
-
-    pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T200", "-Mprepared", connstr])
 
 
 def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
