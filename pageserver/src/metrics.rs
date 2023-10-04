@@ -94,30 +94,27 @@ pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
 });
 
 // Metrics collected on operations on the storage repository.
-static RECONSTRUCT_TIME_IMPL: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["result"],
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric")
-});
 
 pub(crate) struct ReconstructTimeMetrics {
     ok: Histogram,
     err: Histogram,
 }
 
-pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> =
-    Lazy::new(|| ReconstructTimeMetrics {
-        ok: RECONSTRUCT_TIME_IMPL
-            .get_metric_with_label_values(&["ok"])
-            .unwrap(),
-        err: RECONSTRUCT_TIME_IMPL
-            .get_metric_with_label_values(&["err"])
-            .unwrap(),
+pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
+    static IMPL: Lazy<HistogramVec> = Lazy::new(|| {
+        register_histogram_vec!(
+            "pageserver_getpage_reconstruct_seconds",
+            "Time spent in reconstruct_value (reconstruct a page from deltas)",
+            &["result"],
+            CRITICAL_OP_BUCKETS.into(),
+        )
+        .expect("failed to define a metric")
     });
+    ReconstructTimeMetrics {
+        ok: IMPL.get_metric_with_label_values(&["ok"]).unwrap(),
+        err: IMPL.get_metric_with_label_values(&["err"]).unwrap(),
+    }
+});
 
 impl ReconstructTimeMetrics {
     pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
