@@ -40,7 +40,7 @@ const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
 pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_db_connections_opened_total",
+        "proxy_opened_db_connections_total",
         "Number of opened connections to a database.",
         &["protocol"],
     )
@@ -49,7 +49,7 @@ pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(||
 
 pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_db_connections_closed_total",
+        "proxy_closed_db_connections_total",
         "Number of closed connections to a database.",
         &["protocol"],
     )
@@ -58,7 +58,7 @@ pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(||
 
 pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_client_connections_opened_total",
+        "proxy_opened_client_connections_total",
         "Number of opened connections from a client.",
         &["protocol"],
     )
@@ -67,7 +67,7 @@ pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new
 
 pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_client_connections_closed_total",
+        "proxy_closed_client_connections_total",
         "Number of closed connections from a client.",
         &["protocol"],
     )
