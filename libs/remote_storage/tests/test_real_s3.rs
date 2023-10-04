@@ -132,7 +132,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         .iter()
         .map(|x| x.get_path())
         .filter(|x| x.starts_with("folder1"))
-        .map(|x| RemotePath::new(&x).expect("must be valid path"))
+        .map(|x| RemotePath::new(x).expect("must be valid path"))
         .collect();
     assert_eq!(
         nested_remote_files, trim_remote_blobs,
@@ -167,15 +167,11 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
         MaybeEnabledS3::Disabled => return Ok(()),
     };
 
-    let path1 = RemotePath::new(&Utf8Path::new(
-        format!("{}/path1", ctx.base_prefix).as_str(),
-    ))
-    .with_context(|| "RemotePath conversion")?;
+    let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
 
-    let path2 = RemotePath::new(&Utf8Path::new(
-        format!("{}/path2", ctx.base_prefix).as_str(),
-    ))
-    .with_context(|| "RemotePath conversion")?;
+    let path2 = RemotePath::new(Utf8Path::new(format!("{}/path2", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
 
     let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
