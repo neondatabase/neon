@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::task::{self, Poll};
 
 use anyhow::{bail, ensure, Context, Result};
+use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -705,7 +706,11 @@ pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
     }
     // Don't rely on file system order for listing as it may be non-deterministic
     paths.sort();
-    let zstd = async_compression::tokio::write::ZstdEncoder::new(YieldingVec::new());
+    let zstd = ZstdEncoder::with_quality_and_params(
+        YieldingVec::new(),
+        Level::Default,
+        &[CParameter::enable_long_distance_matching(true)],
+    );
     let mut builder = Builder::new(zstd);
     // Use reproducible header mode
     builder.mode(HeaderMode::Deterministic);
