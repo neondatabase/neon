@@ -370,8 +370,9 @@ pub(super) async fn handle_walreceiver_connection(
             })?;
 
         if let Some(last_lsn) = status_update {
-            let timeline_remote_consistent_lsn =
-                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = timeline
+                .get_remote_consistent_lsn_visible()
+                .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let last_received_lsn = last_lsn;

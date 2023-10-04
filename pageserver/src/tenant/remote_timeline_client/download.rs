@@ -50,7 +50,12 @@ pub async fn download_layer_file<'a>(
         .timeline_path(&tenant_id, &timeline_id)
         .join(layer_file_name.file_name());
 
-    let remote_path = remote_layer_path(&tenant_id, &timeline_id, layer_file_name, layer_metadata);
+    let remote_path = remote_layer_path(
+        &tenant_id,
+        &timeline_id,
+        layer_file_name,
+        layer_metadata.generation,
+    );
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:

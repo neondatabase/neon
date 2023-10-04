@@ -7,7 +7,6 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
-use hashbrown::HashMap;
 use hyper::{
     server::{
         accept,
@@ -18,7 +17,6 @@ use hyper::{
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
-use serde_json::{json, Value};
 
 use std::{
     convert::Infallible,
@@ -204,44 +202,7 @@ async fn ws_handler(
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = sql_over_http::handle(request, sni_hostname, conn_pool, session_id)
-            .instrument(info_span!("sql-over-http"))
-            .await;
-        let status_code = match result {
-            Ok(_) => StatusCode::OK,
-            Err(_) => StatusCode::BAD_REQUEST,
-        };
-        let (json, headers) = match result {
-            Ok(r) => r,
-            Err(e) => {
-                let message = format!("{:?}", e);
-                let code = match e.downcast_ref::<tokio_postgres::Error>() {
-                    Some(e) => match e.code() {
-                        Some(e) => serde_json::to_value(e.code()).unwrap(),
-                        None => Value::Null,
-                    },
-                    None => Value::Null,
-                };
-                error!(
-                    ?code,
-                    "sql-over-http per-client task finished with an error: {e:#}"
-                );
-                (
-                    json!({ "message": message, "code": code }),
-                    HashMap::default(),
-                )
-            }
-        };
-        json_response(status_code, json).map(|mut r| {
-            r.headers_mut().insert(
-                "Access-Control-Allow-Origin",
-                hyper::http::HeaderValue::from_static("*"),
-            );
-            for (k, v) in headers {
-                r.headers_mut().insert(k, v);
-            }
-            r
-        })
+        sql_over_http::handle(request, sni_hostname, conn_pool, session_id).await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
@@ -253,7 +214,7 @@ async fn ws_handler(
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
             .body(Body::empty())
-            .map_err(|e| ApiError::BadRequest(e.into()))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }

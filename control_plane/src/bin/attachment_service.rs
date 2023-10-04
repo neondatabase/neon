@@ -223,6 +223,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     if attach_req.pageserver_id.is_some() {
         tenant_state.generation += 1;
     }
+    tenant_state.pageserver = attach_req.pageserver_id;
     let generation = tenant_state.generation;
 
     locked.save().await.map_err(ApiError::InternalServerError)?;

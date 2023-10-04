@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{bail, Context};
 
+use serde::{Deserialize, Serialize};
 use tokio::io;
 use toml_edit::Item;
 use tracing::info;
@@ -42,6 +43,9 @@ pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
+/// As defined in S3 docs
+pub const MAX_KEYS_PER_DELETE: usize = 1000;
+
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
 /// Path on the remote storage, relative to some inner prefix.
@@ -49,6 +53,25 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 /// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemotePath(PathBuf);
+
+impl Serialize for RemotePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for RemotePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        Ok(Self(PathBuf::from(&str)))
+    }
+}
 
 impl std::fmt::Display for RemotePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -87,6 +110,10 @@ impl RemotePath {
 
     pub fn extension(&self) -> Option<&str> {
         self.0.extension()?.to_str()
+    }
+
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, std::path::StripPrefixError> {
+        self.0.strip_prefix(&p.0)
     }
 }
 

@@ -12,7 +12,6 @@ from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
     PAGESERVER_PER_TENANT_METRICS,
-    PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
@@ -232,17 +231,10 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         assert value
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind",
-    # exercise both the code paths where remote_storage=None and remote_storage=Some(...)
-    [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3],
-)
-def test_pageserver_metrics_removed_after_detach(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilder):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
 
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     neon_env_builder.num_safekeepers = 3
 
@@ -282,9 +274,6 @@ def test_pageserver_metrics_removed_after_detach(
     for tenant in [tenant_1, tenant_2]:
         pre_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
         expected = set(PAGESERVER_PER_TENANT_METRICS)
-        if remote_storage_kind == RemoteStorageKind.NOOP:
-            # if there's no remote storage configured, we don't expose the remote timeline client metrics
-            expected -= set(PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS)
         assert pre_detach_samples == expected
 
         env.pageserver.http_client().tenant_detach(tenant)
@@ -294,9 +283,7 @@ def test_pageserver_metrics_removed_after_detach(
 
 
 # Check that empty tenants work with or without the remote storage
-@pytest.mark.parametrize(
-    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
-)
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_pageserver_with_empty_tenants(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):

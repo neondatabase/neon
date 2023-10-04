@@ -378,21 +378,30 @@ impl AsyncTestContext for MaybeEnabledS3WithSimpleTestBlobs {
 fn create_s3_client(
     max_keys_per_list_response: Option<i32>,
 ) -> anyhow::Result<Arc<GenericRemoteStorage>> {
+    use rand::Rng;
+
     let remote_storage_s3_bucket = env::var("REMOTE_STORAGE_S3_BUCKET")
         .context("`REMOTE_STORAGE_S3_BUCKET` env var is not set, but real S3 tests are enabled")?;
     let remote_storage_s3_region = env::var("REMOTE_STORAGE_S3_REGION")
         .context("`REMOTE_STORAGE_S3_REGION` env var is not set, but real S3 tests are enabled")?;
-    let random_prefix_part = std::time::SystemTime::now()
+
+    // due to how time works, we've had test runners use the same nanos as bucket prefixes.
+    // millis is just a debugging aid for easier finding the prefix later.
+    let millis = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("random s3 test prefix part calculation")?
-        .as_nanos();
+        .as_millis();
+
+    // because nanos can be the same for two threads so can millis, add randomness
+    let random = rand::thread_rng().gen::<u32>();
+
     let remote_storage_config = RemoteStorageConfig {
         max_concurrent_syncs: NonZeroUsize::new(100).unwrap(),
         max_sync_errors: NonZeroU32::new(5).unwrap(),
         storage: RemoteStorageKind::AwsS3(S3Config {
             bucket_name: remote_storage_s3_bucket,
             bucket_region: remote_storage_s3_region,
-            prefix_in_bucket: Some(format!("pagination_should_work_test_{random_prefix_part}/")),
+            prefix_in_bucket: Some(format!("test_{millis}_{random:08x}/")),
             endpoint: None,
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
