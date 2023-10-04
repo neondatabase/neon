@@ -175,7 +175,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
-        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+        &["direction"],
     )
     .unwrap()
 });
@@ -764,7 +764,7 @@ pub async fn proxy_pass(
         branch_id: aux.branch_id.to_string(),
     });
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
     let mut client = MeasuredStream::new(
         client,
         |_| {},
@@ -775,7 +775,7 @@ pub async fn proxy_pass(
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},

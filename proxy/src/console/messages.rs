@@ -94,31 +94,6 @@ pub struct MetricsAuxInfo {
     pub branch_id: Box<str>,
 }
 
-impl MetricsAuxInfo {
-    /// Definitions of labels for traffic metric.
-    pub const TRAFFIC_LABELS: &'static [&'static str] = &[
-        // Received (rx) / sent (tx).
-        "direction",
-        // ID of a project.
-        "project_id",
-        // ID of an endpoint within a project.
-        "endpoint_id",
-        // ID of a branch within a project (snapshot).
-        "branch_id",
-    ];
-
-    /// Values of labels for traffic metric.
-    // TODO: add more type safety (validate arity & positions).
-    pub fn traffic_labels(&self, direction: &'static str) -> [&str; 4] {
-        [
-            direction,
-            &self.project_id,
-            &self.endpoint_id,
-            &self.branch_id,
-        ]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
