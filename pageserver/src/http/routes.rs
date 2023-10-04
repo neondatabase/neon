@@ -132,7 +132,7 @@ impl From<PageReconstructError> for ApiError {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
             PageReconstructError::AncestorStopping(_) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
+                ApiError::ResourceUnavailable(format!("{pre}"))
             }
             PageReconstructError::WalRedo(pre) => {
                 ApiError::InternalServerError(anyhow::Error::new(pre))
@@ -145,7 +145,7 @@ impl From<TenantMapInsertError> for ApiError {
     fn from(tmie: TenantMapInsertError) -> ApiError {
         match tmie {
             TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
-                ApiError::InternalServerError(anyhow::Error::new(tmie))
+                ApiError::ResourceUnavailable(format!("{tmie}"))
             }
             TenantMapInsertError::TenantAlreadyExists(id, state) => {
                 ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
@@ -159,6 +159,12 @@ impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
             TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
+            TenantStateError::NotActive(_) => {
+                ApiError::ResourceUnavailable("Tenant not yet active".into())
+            }
+            TenantStateError::IsStopping(_) => {
+                ApiError::ResourceUnavailable("Tenant is stopping".into())
+            }
             _ => ApiError::InternalServerError(anyhow::Error::new(tse)),
         }
     }
@@ -168,14 +174,17 @@ impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
             GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            e @ GetTenantError::NotActive(_) => {
+            GetTenantError::Broken(reason) => {
+                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
+            GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
                 // in fact exist locally. If we did, the caller could draw the conclusion
                 // that it can attach the tenant to another PS and we'd be in split-brain.
                 //
                 // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
-                ApiError::InternalServerError(anyhow::Error::new(e))
+                ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
         }
     }
@@ -622,8 +631,9 @@ async fn tenant_list_handler(
     let response_data = mgr::list_tenants()
         .instrument(info_span!("tenant_list"))
         .await
-        .map_err(anyhow::Error::new)
-        .map_err(ApiError::InternalServerError)?
+        .map_err(|_| {
+            ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".to_string())
+        })?
         .iter()
         .map(|(id, state)| TenantInfo {
             id: *id,

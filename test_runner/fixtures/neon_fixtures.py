@@ -37,6 +37,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
+from urllib3.util.retry import Retry
 
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
@@ -1651,11 +1652,14 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
+    def http_client(
+        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+    ) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
+            retries=retries,
         )
 
     @property
