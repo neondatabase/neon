@@ -41,7 +41,7 @@ const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
 pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
-        "proxy_connections_total",
+        "proxy_db_connections_total",
         "Number of active connections to a database.",
         &["protocol"],
     )
@@ -50,7 +50,7 @@ pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
 
 pub static NUM_CLIENT_REQUEST_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
-        "proxy_client_connections_total",
+        "proxy_client_requests_total",
         "Number of active requests from a client.",
         &["protocol"],
     )
