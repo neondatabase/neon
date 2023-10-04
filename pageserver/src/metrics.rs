@@ -101,18 +101,16 @@ pub(crate) struct ReconstructTimeMetrics {
 }
 
 pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
-    static IMPL: Lazy<HistogramVec> = Lazy::new(|| {
-        register_histogram_vec!(
-            "pageserver_getpage_reconstruct_seconds",
-            "Time spent in reconstruct_value (reconstruct a page from deltas)",
-            &["result"],
-            CRITICAL_OP_BUCKETS.into(),
-        )
-        .expect("failed to define a metric")
-    });
+    let inner = register_histogram_vec!(
+        "pageserver_getpage_reconstruct_seconds",
+        "Time spent in reconstruct_value (reconstruct a page from deltas)",
+        &["result"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric");
     ReconstructTimeMetrics {
-        ok: IMPL.get_metric_with_label_values(&["ok"]).unwrap(),
-        err: IMPL.get_metric_with_label_values(&["err"]).unwrap(),
+        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
+        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
     }
 });
 
