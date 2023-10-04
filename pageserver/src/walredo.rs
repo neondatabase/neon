@@ -312,13 +312,14 @@ impl PostgresRedoManager {
 
                 error!(
                     will_retry,
-                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {e:#}",
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
                     records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                     nbytes,
                     base_img_lsn,
-                    lsn
+                    lsn,
+                    utils::error::report_compact_sources(e),
                 );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
