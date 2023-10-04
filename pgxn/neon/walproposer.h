@@ -2,6 +2,7 @@
 #define __NEON_WALPROPOSER_H__
 
 #include "access/xlogdefs.h"
+#include "access/xlogreader.h"
 #include "postgres.h"
 #include "port.h"
 #include "access/xlog_internal.h"
@@ -327,6 +328,24 @@ typedef struct AppendResponse
 /*  Other fields are fixed part */
 #define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, rf)
 
+#define NEON_WALREADER_ERR_MSG_LEN	   128
+
+/*
+ * Like WALRead, but returns error instead of throwing ERROR when segment is
+ * missing + doesn't attempt to read WAL before specified horizon -- basebackup
+ * LSN. Missing WAL should be fetched by peer recovery, or, alternatively, on 
+ * demand WAL fetching from safekeepers should be implemented in NeonWALReader.
+ */
+typedef struct {
+	/* LSN before */
+	XLogRecPtr available_lsn;
+	WALSegmentContext segcxt;
+	WALOpenSegment seg;
+	int wre_errno;
+	/* Explains failure to read, static for simplicity. */
+	char err_msg[NEON_WALREADER_ERR_MSG_LEN];
+} NeonWALReader;
+
 /*
  * Descriptor of safekeeper
  */
@@ -358,7 +377,7 @@ typedef struct Safekeeper
 	/*
 	 * WAL reader, allocated for each safekeeper.
 	 */
-	XLogReaderState *xlogreader;
+	NeonWALReader *xlogreader;
 
 	/*
 	 * Streaming will start here; must be record boundary.
@@ -507,5 +526,10 @@ extern PGAsyncWriteResult walprop_async_write(WalProposerConn *conn, void const 
 extern bool walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size);
 
 extern uint64 BackpressureThrottlingTime(void);
+
+extern NeonWALReader *NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn);
+extern void NeonWALReaderFree(NeonWALReader *state);
+extern bool NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
+
 
 #endif							/* __NEON_WALPROPOSER_H__ */

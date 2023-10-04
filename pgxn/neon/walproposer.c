@@ -566,9 +566,7 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 		}
 
 		initStringInfo(&safekeeper[n_safekeepers].outbuf);
-		safekeeper[n_safekeepers].xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
-		if (safekeeper[n_safekeepers].xlogreader == NULL)
-			elog(FATAL, "Failed to allocate xlog reader");
+		safekeeper[n_safekeepers].xlogreader = NULL;
 		safekeeper[n_safekeepers].flushWrite = false;
 		safekeeper[n_safekeepers].startStreamingAt = InvalidXLogRecPtr;
 		safekeeper[n_safekeepers].streamingAt = InvalidXLogRecPtr;
@@ -716,6 +714,12 @@ ShutdownConnection(Safekeeper *sk)
 	sk->voteResponse.termHistory.entries = NULL;
 
 	HackyRemoveWalProposerEvent(sk);
+
+	if (sk->xlogreader)
+	{
+		NeonWALReaderFree(sk->xlogreader);
+		sk->xlogreader = NULL;
+	}
 }
 
 /*
@@ -1238,8 +1242,8 @@ HandleElectedProposer(void)
 			 LSN_FORMAT_ARGS(truncateLsn),
 			 LSN_FORMAT_ARGS(propEpochStartLsn));
 		/* Perform recovery */
-		if (!WalProposerRecovery(donor, greetRequest.timeline, truncateLsn, propEpochStartLsn))
-			elog(FATAL, "Failed to recover state");
+		// if (!WalProposerRecovery(donor, greetRequest.timeline, truncateLsn, propEpochStartLsn))
+		// 	elog(FATAL, "Failed to recover state");
 	}
 	else if (syncSafekeepers)
 	{
@@ -1555,6 +1559,12 @@ SendProposerElected(Safekeeper *sk)
 	term_t		lastCommonTerm;
 	int			i;
 
+	/* It's a good moment to create WAL reader */
+	Assert(!sk->xlogreader);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, propEpochStartLsn);
+	if (!sk->xlogreader)
+		elog(FATAL, "failed to allocate xlog reader");
+
 	/*
 	 * Determine start LSN by comparing safekeeper's log term switch history
 	 * and proposer's, searching for the divergence point.
@@ -1834,19 +1844,24 @@ SendAppendRequests(Safekeeper *sk)
 
 		/* write the WAL itself */
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
-		if (!WALRead(sk->xlogreader,
+
+		if (!NeonWALRead(sk->xlogreader,
 					 &sk->outbuf.data[sk->outbuf.len],
 					 req->beginLsn,
 					 req->endLsn - req->beginLsn,
 #if PG_VERSION_NUM >= 150000
 		/* FIXME don't use hardcoded timeline_id here */
-					 1,
+					 1
 #else
-					 ThisTimeLineID,
+					 ThisTimeLineID
 #endif
-					 &errinfo))
+					 ))
 		{
-			WALReadRaiseError(&errinfo);
+			elog(WARNING, "WAL reading for node %s:%s failed: %s",
+					 sk->host, sk->port,
+					 sk->xlogreader->err_msg);
+			ShutdownConnection(sk);
+			return false;
 		}
 		sk->outbuf.len += req->endLsn - req->beginLsn;
 
