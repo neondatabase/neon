@@ -222,7 +222,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
+    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 
@@ -250,6 +250,9 @@ def allure_attach_from_dir(dir: Path):
             elif source.endswith(".html"):
                 attachment_type = "text/html"
                 extension = "html"
+            elif source.endswith(".walredo"):
+                attachment_type = "application/octet-stream"
+                extension = "walredo"
             else:
                 attachment_type = "text/plain"
                 extension = attachment.suffix.removeprefix(".")
