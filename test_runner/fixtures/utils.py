@@ -231,16 +231,20 @@ def allure_attach_from_dir(dir: Path):
 
     for attachment in Path(dir).glob("**/*"):
         if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
-            source = str(attachment)
             name = str(attachment.relative_to(dir))
 
-            # compress files larger than 1Mb, they're hardly readable in a browser
+            # compress files that are larger than 1Mb, they're hardly readable in a browser
             if attachment.stat().st_size > 1024**2:
-                name = f"{name}.zst"
-                source = f"{attachment}.zst"
-                with open(source, "wb") as f:
-                    f.write(zstandard.compress(attachment.read_bytes()))
+                compressed = attachment.with_suffix(".zst")
 
+                cctx = zstandard.ZstdCompressor()
+                with attachment.open("rb") as fin, compressed.open("wb") as fout:
+                    cctx.copy_stream(fin, fout)
+
+                name = f"{name}.zst"
+                attachment = compressed
+
+            source = str(attachment)
             if source.endswith(".gz"):
                 attachment_type = "application/gzip"
                 extension = "gz"
