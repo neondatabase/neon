@@ -314,7 +314,6 @@ static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum PageCacheErrorKind {
     AcquirePinnedSlotTimeout,
-    EvictIterLimit,
 }
 
 pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {

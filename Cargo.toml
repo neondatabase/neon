@@ -35,6 +35,7 @@ license = "Apache-2.0"
 ## All dependency versions, used in the project
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
+async-channel = "1.9.0"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
 flate2 = "1.0.26"
 async-stream = "0.3"
