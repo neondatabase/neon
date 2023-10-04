@@ -308,10 +308,8 @@ impl PostgresRedoManager {
             // If something went wrong, don't try to reuse the process. Kill it, and
             // next request will launch a new one.
             if let Err(e) = result.as_ref() {
-                let will_retry = (n_attempts + 1) > MAX_RETRY_ATTEMPTS;
-
                 error!(
-                    will_retry,
+                    n_attempts,
                     "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
