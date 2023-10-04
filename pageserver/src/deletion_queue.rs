@@ -40,7 +40,6 @@ use validator::ValidatorQueueMessage;
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 
-// TODO: adminstrative "panic button" config property to disable all deletions
 // TODO: configurable for how long to wait before executing deletions
 
 /// We aggregate object deletions from many tenants in one place, for several reasons:
