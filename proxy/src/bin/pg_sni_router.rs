@@ -168,7 +168,7 @@ async fn task_main(
                     .instrument(tracing::info_span!("handle_client", ?session_id))
                 );
             }
-            Some(Err(e)) = connections.join_next() => {
+            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
                 if !e.is_panic() && !e.is_cancelled() {
                     warn!("unexpected error from joined connection task: {e:?}");
                 }
