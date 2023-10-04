@@ -988,6 +988,33 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.start()
 
 
+# Test that we can create timeline with one safekeeper down and initialize it
+# later when some data already had been written.
+def test_late_init(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    sk1 = env.safekeepers[0]
+    sk1.stop()
+
+    # create and insert smth while safekeeper is down...
+    env.neon_cli.create_branch("test_late_init")
+    endpoint = env.endpoints.create_start("test_late_init")
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.safe_psql("insert into t select generate_series(1, 1000), 'payload'")
+    log.info("insert with safekeeper down done")
+    endpoint.stop()  # stop compute
+
+    # stop another safekeeper, and start one which missed timeline creation
+    sk2 = env.safekeepers[1]
+    sk2.stop()
+    sk1.start()
+
+    # insert some more
+    endpoint = env.endpoints.create_start("test_late_init")
+    endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
+
+
 # is timeline flush_lsn equal on provided safekeepers?
 def is_flush_lsn_aligned(sk1_http_cli, sk2_http_cli, tenant_id, timeline_id):
     status1 = sk1_http_cli.timeline_status(tenant_id, timeline_id)
