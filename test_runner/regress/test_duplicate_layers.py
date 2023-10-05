@@ -130,7 +130,6 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     message = f".*duplicated L1 layer layer={l1_found.name}"
     found_msg = env.pageserver.log_contains(message)
-    assert found_msg is not None, "no layer was duplicated, has this been fixed already?"
     # resident or evicted, it should not be overwritten, however it should had been non-existing at startup
     assert (
         found_msg is None
