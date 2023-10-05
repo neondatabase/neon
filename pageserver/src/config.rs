@@ -487,6 +487,10 @@ impl PageServerConfigBuilder {
         self.control_plane_api = BuilderValue::Set(api)
     }
 
+    pub fn control_plane_api_token(&mut self, token: Option<SecretString>) {
+        self.control_plane_api_token = BuilderValue::Set(token)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -785,6 +789,14 @@ impl PageServerConf {
                         builder.control_plane_api(None)
                     } else {
                         builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
+                    }
+                },
+                "control_plane_api_token" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api_token(None)
+                    } else {
+                        builder.control_plane_api_token(Some(parsed.into()))
                     }
                 },
                 _ => bail!("unrecognized pageserver option '{key}'"),
