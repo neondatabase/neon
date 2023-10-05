@@ -1,7 +1,7 @@
 import random
 import threading
 import time
-from typing import List
+from typing import List, Dict, Union, Any
 
 import pytest
 from fixtures.log_helper import log
@@ -206,6 +206,76 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
     env.pageserver.stop(immediate=True)
 
     raise RuntimeError("was able to branch before ancestor has been uploaded")
+
+
+def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: NeonEnvBuilder):
+    """
+    If the activate only after upload is used, then retries could become competing.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.append(
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*Error processing HTTP request: InternalServerError\\(Timeline .*/.* already exists in pageserver's memory"
+    )
+    ps_http = env.pageserver.http_client()
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    ps_http.tenant_create(env.initial_tenant)
+
+    with pytest.raises(ReadTimeout):
+        ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline, timeout=2)
+
+    branch_id = TimelineId.generate()
+
+    from queue import SimpleQueue
+    import threading
+
+    queue: SimpleQueue[Union[Dict[Any, Any], Exception]] = SimpleQueue()
+    barrier = threading.Barrier(3)
+
+    def try_branch():
+        barrier.wait()
+        try:
+            ret = ps_http.timeline_create(
+                env.pg_version,
+                env.initial_tenant,
+                branch_id,
+                ancestor_timeline_id=env.initial_timeline,
+                timeout=5
+            )
+            queue.put(ret)
+        except Exception as e:
+            queue.put(e)
+
+    threads = [threading.Thread(target=try_branch) for _ in range(2)]
+    for t in threads:
+        t.start()
+
+    barrier.wait()
+
+    # give time to start the awaits
+    time.sleep(1)
+    # now both requests race to branch, only one can win because they take gc_cs
+    ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
+
+    first = queue.get()
+    second = queue.get()
+
+    (succeeded, failed) = (first, second) if isinstance(second, Exception) else (second, first)
+    assert isinstance(failed, Exception)
+    assert isinstance(succeeded, Dict)
+
+    log.info(failed)
+    log.info(succeeded)
+
+    assert str(failed).startswith(f"Timeline {env.initial_tenant}/{branch_id} already exists")
+    assert succeeded["state"] == "Active"
 
 
 def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEnvBuilder):
