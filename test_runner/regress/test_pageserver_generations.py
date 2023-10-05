@@ -285,7 +285,7 @@ def test_deletion_queue_recovery(
     :param keep_attachment: If true, we re-attach after restart.  Else, we act as if some other
     node took the attachment while we were restarting.
     :param validate_before: If true, we wait for deletions to be validated before restart.  This
-    makes the elegible to be executed after restart, if the same node keeps the attachment.
+    makes them elegible to be executed after restart, if the same node keeps the attachment.
     """
     neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
