@@ -17,6 +17,8 @@ from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import ReadTimeout
 
+from fixtures.pageserver.http import PageserverApiException
+
 
 # Test branch creation
 #
@@ -203,9 +205,13 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
             timeout=2
         )
 
-    env.pageserver.stop(immediate=True)
+    with pytest.raises(PageserverApiException, match = f"NotFound: Timeline {env.initial_tenant}/{branch_id} was not found"):
+        ps_http.timeline_detail(env.initial_tenant, branch_id)
+        # important to note that a task might still be in progress to complete
+        # the work, but will never get to that because we have the pause
+        # failpoint
 
-    raise RuntimeError("was able to branch before ancestor has been uploaded")
+    env.pageserver.stop(immediate=True)
 
 
 def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: NeonEnvBuilder):
