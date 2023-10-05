@@ -113,6 +113,7 @@ impl MetadataSummary {
         self.count += 1;
         if let BlobDataParseResult::Parsed {
             index_part,
+            index_part_generation: _,
             s3_layers: _,
         } = &data.blob_data
         {
