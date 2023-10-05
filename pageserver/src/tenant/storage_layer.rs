@@ -14,6 +14,7 @@ use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use camino::Utf8PathBuf;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
@@ -22,7 +23,6 @@ use pageserver_api::models::{
     HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -378,7 +378,7 @@ pub trait PersistentLayer: Layer + AsLayerDesc {
 
     // Path to the layer file in the local filesystem.
     // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
+    fn local_path(&self) -> Option<Utf8PathBuf>;
 
     /// Permanently remove this layer from disk.
     fn delete_resident_layer_file(&self) -> Result<()>;
@@ -456,7 +456,7 @@ pub mod tests {
 /// config. In that case, we use the Path variant to hold the full path to the file on
 /// disk.
 enum PathOrConf {
-    Path(PathBuf),
+    Path(Utf8PathBuf),
     Conf(&'static PageServerConf),
 }
 

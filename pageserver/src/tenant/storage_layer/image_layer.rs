@@ -37,6 +37,7 @@ use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
@@ -45,7 +46,6 @@ use std::fs::{self, File};
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
-use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -195,7 +195,7 @@ impl AsLayerDesc for ImageLayer {
 }
 
 impl PersistentLayer for ImageLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<Utf8PathBuf> {
         self.local_path()
     }
 
@@ -269,10 +269,10 @@ impl ImageLayer {
             .get_value_reconstruct_data(key, reconstruct_state, ctx)
             .await
             // FIXME: makes no sense to dump paths
-            .with_context(|| format!("read {}", self.path().display()))
+            .with_context(|| format!("read {}", self.path()))
     }
 
-    pub(crate) fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<Utf8PathBuf> {
         Some(self.path())
     }
 
@@ -304,7 +304,7 @@ impl ImageLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         fname: &ImageFileName,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
@@ -318,7 +318,7 @@ impl ImageLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         fname: &ImageFileName,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(8)
@@ -342,7 +342,7 @@ impl ImageLayer {
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
-            .with_context(|| format!("Failed to load image layer {}", self.path().display()))
+            .with_context(|| format!("Failed to load image layer {}", self.path()))
     }
 
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
@@ -359,7 +359,7 @@ impl ImageLayer {
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
-            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let actual_filename = path.file_name().unwrap().to_owned();
             let expected_filename = self.filename().file_name();
 
             if actual_filename != expected_filename {
@@ -399,7 +399,7 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'pagectl' binary.
-    pub fn new_for_path(path: &Path, file: File) -> Result<ImageLayer> {
+    pub fn new_for_path(path: &Utf8Path, file: File) -> Result<ImageLayer> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);
         file.read_exact_at(&mut summary_buf, 0)?;
@@ -427,7 +427,7 @@ impl ImageLayer {
     }
 
     /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
+    pub fn path(&self) -> Utf8PathBuf {
         Self::path_for(
             &self.path_or_conf,
             self.desc.timeline_id,
@@ -439,14 +439,14 @@ impl ImageLayer {
 
 impl ImageLayerInner {
     pub(super) async fn load(
-        path: &std::path::Path,
+        path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
             .await
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+            .with_context(|| format!("Failed to open file '{}'", path))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -526,7 +526,7 @@ impl ImageLayerInner {
 ///
 struct ImageLayerWriterInner {
     conf: &'static PageServerConf,
-    path: PathBuf,
+    path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
     key_range: Range<Key>,
@@ -558,7 +558,7 @@ impl ImageLayerWriterInner {
                 lsn,
             },
         );
-        info!("new image layer {}", path.display());
+        info!("new image layer {path}");
         let mut file = VirtualFile::open_with_options(
             &path,
             std::fs::OpenOptions::new().write(true).create_new(true),
@@ -685,7 +685,7 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        trace!("created image layer {}", layer.path().display());
+        trace!("created image layer {}", layer.path());
 
         Ok(layer)
     }

@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
 use serde::Deserialize;
@@ -201,7 +202,7 @@ pub async fn build(args: Args) -> Result<Response> {
 
 /// Builds DiskContent from a directory path. It can fail if the directory
 /// is deleted between the time we get the path and the time we try to open it.
-fn build_disk_content(path: &std::path::Path) -> Result<DiskContent> {
+fn build_disk_content(path: &Utf8Path) -> Result<DiskContent> {
     let mut files = Vec::new();
     for entry in fs::read_dir(path)? {
         if entry.is_err() {
@@ -256,7 +257,7 @@ fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
 fn build_config(config: SafeKeeperConf) -> Config {
     Config {
         id: config.my_id,
-        workdir: config.workdir,
+        workdir: config.workdir.into(),
         listen_pg_addr: config.listen_pg_addr,
         listen_http_addr: config.listen_http_addr,
         no_sync: config.no_sync,

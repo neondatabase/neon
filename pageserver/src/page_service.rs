@@ -412,31 +412,53 @@ impl PageServerHandler {
             // TODO: We could create a new per-request context here, with unique ID.
             // Currently we use the same per-timeline context for all requests
 
-            let response = match neon_fe_msg {
+            let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelExists);
-                    self.handle_get_rel_exists_request(&timeline, &req, &ctx)
-                        .await
+                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_rel_exists_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelSize);
-                    self.handle_get_nblocks_request(&timeline, &req, &ctx).await
+                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_nblocks_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetPageAtLsn);
-                    self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
-                        .await
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetDbSize);
-                    self.handle_db_size_request(&timeline, &req, &ctx).await
+                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
+                    (
+                        self.handle_db_size_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
             };
 
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
                 // error message is enough
-                error!("error reading relation or page version: {:?}", e);
+                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
@@ -627,7 +649,6 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
@@ -648,7 +669,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
@@ -667,7 +687,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
@@ -689,7 +708,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
@@ -1265,7 +1283,10 @@ async fn get_active_tenant_with_timeout(
         Ok(tenant) => tenant,
         Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
         Err(GetTenantError::NotActive(_)) => {
-            unreachable!("we're calling get_tenant with active=false")
+            unreachable!("we're calling get_tenant with active_only=false")
+        }
+        Err(GetTenantError::Broken(_)) => {
+            unreachable!("we're calling get_tenant with active_only=false")
         }
     };
     let wait_time = Duration::from_secs(30);

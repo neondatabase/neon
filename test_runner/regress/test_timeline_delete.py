@@ -34,6 +34,7 @@ from fixtures.remote_storage import (
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
+from urllib3.util.retry import Retry
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
@@ -614,7 +615,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     child_timeline_id = env.neon_cli.create_branch("child", "main")
 
-    ps_http = env.pageserver.http_client()
+    ps_http = env.pageserver.http_client(retries=Retry(0, read=False))
 
     failpoint_name = "persist_deleted_index_part"
     ps_http.configure_failpoints((failpoint_name, "pause"))
@@ -854,7 +855,7 @@ def test_timeline_delete_resumed_on_attach(
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this
-            f".*InternalServerError\\(Tenant {tenant_id} is not active.*",
+            ".*Resource temporarily unavailable.*Tenant not yet active",
             '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
         )
     )

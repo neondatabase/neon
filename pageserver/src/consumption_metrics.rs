@@ -3,11 +3,11 @@
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{mgr, LogicalSizeCalculationCause};
+use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
 use reqwest::Url;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tracing::*;
@@ -41,7 +41,7 @@ pub async fn collect_metrics(
     _cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
-    local_disk_storage: PathBuf,
+    local_disk_storage: Utf8PathBuf,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
@@ -68,7 +68,7 @@ pub async fn collect_metrics(
         },
     );
 
-    let path: Arc<PathBuf> = Arc::new(local_disk_storage);
+    let path: Arc<Utf8PathBuf> = Arc::new(local_disk_storage);
 
     let cancel = task_mgr::shutdown_token();
 
@@ -153,7 +153,7 @@ pub async fn collect_metrics(
 ///
 /// Cancellation safe.
 async fn restore_and_reschedule(
-    path: &Arc<PathBuf>,
+    path: &Arc<Utf8PathBuf>,
     metric_collection_interval: Duration,
 ) -> Cache {
     let (cached, earlier_metric_at) = match disk_cache::read_metrics_from_disk(path.clone()).await {

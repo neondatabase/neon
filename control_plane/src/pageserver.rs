@@ -14,6 +14,7 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
+use camino::Utf8PathBuf;
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
@@ -144,7 +145,7 @@ impl PageServerNode {
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
         self.pageserver_init(config_overrides)
-            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id,))
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
     pub fn repo_path(&self) -> PathBuf {
@@ -154,8 +155,9 @@ impl PageServerNode {
     /// The pid file is created by the pageserver process, with its pid stored inside.
     /// Other pageservers cannot lock the same file and overwrite it for as long as the current
     /// pageserver runs. (Unless someone removes the file manually; never do that!)
-    fn pid_file(&self) -> PathBuf {
-        self.repo_path().join("pageserver.pid")
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
+            .expect("non-Unicode path")
     }
 
     pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {

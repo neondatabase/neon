@@ -182,8 +182,7 @@ impl ListWriter {
                     Ok(h) => Ok(Some(h.validated_sequence)),
                     Err(e) => {
                         warn!(
-                            "Failed to deserialize deletion header, ignoring {}: {e:#}",
-                            header_path.display()
+                            "Failed to deserialize deletion header, ignoring {header_path}: {e:#}",
                         );
                         // This should never happen unless we make a mistake with our serialization.
                         // Ignoring a deletion header is not consequential for correctnes because all deletions
@@ -195,10 +194,7 @@ impl ListWriter {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    debug!(
-                        "Deletion header {} not found, first start?",
-                        header_path.display()
-                    );
+                    debug!("Deletion header {header_path} not found, first start?");
                     Ok(None)
                 } else {
                     on_fatal_io_error(&e);
@@ -226,10 +222,7 @@ impl ListWriter {
         let mut dir = match tokio::fs::read_dir(&deletion_directory).await {
             Ok(d) => d,
             Err(e) => {
-                warn!(
-                    "Failed to open deletion list directory {}: {e:#}",
-                    deletion_directory.display(),
-                );
+                warn!("Failed to open deletion list directory {deletion_directory}: {e:#}");
 
                 // This is fatal: any failure to read this local directory indicates a
                 // storage problem or configuration problem of the node.
@@ -248,24 +241,23 @@ impl ListWriter {
             let file_name = dentry.file_name();
             let dentry_str = file_name.to_string_lossy();
 
-            // Temporary files might be left behind from `crashsafe_overwrite`
+            if file_name == header_path.file_name().unwrap_or("") {
+                // Don't try and parse the header's name like a list
+                continue;
+            }
+
             if dentry_str.ends_with(TEMP_SUFFIX) {
                 info!("Cleaning up temporary file {dentry_str}");
-                let absolute_path = deletion_directory.join(dentry.file_name());
+                let absolute_path =
+                    deletion_directory.join(dentry.file_name().to_str().expect("non-Unicode path"));
                 if let Err(e) = tokio::fs::remove_file(&absolute_path).await {
-                    warn!(
-                        "Failed to clean up temporary file {}: {e:#}",
-                        absolute_path.display()
-                    );
+                    // Non-fatal error: we will just leave the file behind but not
+                    // try and load it.
+                    warn!("Failed to clean up temporary file {absolute_path}: {e:#}");
 
                     virtual_file::on_fatal_io_error(&e);
                 }
 
-                continue;
-            }
-
-            if Some(file_name.as_os_str()) == header_path.file_name() {
-                // Don't try and parse the header's name like a list
                 continue;
             }
 
@@ -372,7 +364,7 @@ impl ListWriter {
         if let Err(e) = create_dir_all(&self.conf.deletion_prefix()) {
             tracing::error!(
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
-                self.conf.deletion_prefix().display()
+                self.conf.deletion_prefix(),
             );
             metrics::DELETION_QUEUE.unexpected_errors.inc();
             return;

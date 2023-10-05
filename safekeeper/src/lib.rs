@@ -1,8 +1,8 @@
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
 use tokio::runtime::Runtime;
 
-use std::path::PathBuf;
 use std::time::Duration;
 use storage_broker::Uri;
 
@@ -51,7 +51,7 @@ pub struct SafeKeeperConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // data directories to avoid clashing with each other.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
     pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_pg_addr_tenant_only: Option<String>,
@@ -73,11 +73,11 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.workdir.join(tenant_id.to_string())
     }
 
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
+    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
     }
@@ -87,7 +87,7 @@ impl SafeKeeperConf {
     #[cfg(test)]
     fn dummy() -> Self {
         SafeKeeperConf {
-            workdir: PathBuf::from("./"),
+            workdir: Utf8PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_pg_addr_tenant_only: None,

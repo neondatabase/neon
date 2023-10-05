@@ -1,10 +1,12 @@
 use anyhow::Context;
-use std::path::PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use std::sync::Arc;
 
 use super::RawMetric;
 
-pub(super) async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result<Vec<RawMetric>> {
+pub(super) async fn read_metrics_from_disk(
+    path: Arc<Utf8PathBuf>,
+) -> anyhow::Result<Vec<RawMetric>> {
     // do not add context to each error, callsite will log with full path
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
@@ -25,10 +27,10 @@ pub(super) async fn read_metrics_from_disk(path: Arc<PathBuf>) -> anyhow::Result
     .and_then(|x| x)
 }
 
-fn scan_and_delete_with_same_prefix(path: &std::path::Path) -> std::io::Result<()> {
+fn scan_and_delete_with_same_prefix(path: &Utf8Path) -> std::io::Result<()> {
     let it = std::fs::read_dir(path.parent().expect("caller checked"))?;
 
-    let prefix = path.file_name().expect("caller checked").to_string_lossy();
+    let prefix = path.file_name().expect("caller checked").to_string();
 
     for entry in it {
         let entry = entry?;
@@ -62,7 +64,7 @@ fn scan_and_delete_with_same_prefix(path: &std::path::Path) -> std::io::Result<(
 
 pub(super) async fn flush_metrics_to_disk(
     current_metrics: &Arc<Vec<RawMetric>>,
-    path: &Arc<PathBuf>,
+    path: &Arc<Utf8PathBuf>,
 ) -> anyhow::Result<()> {
     use std::io::Write;
 
@@ -81,7 +83,7 @@ pub(super) async fn flush_metrics_to_disk(
 
             let parent = path.parent().expect("existence checked");
             let file_name = path.file_name().expect("existence checked");
-            let mut tempfile = tempfile::Builder::new()
+            let mut tempfile = camino_tempfile::Builder::new()
                 .prefix(file_name)
                 .suffix(".tmp")
                 .tempfile_in(parent)?;

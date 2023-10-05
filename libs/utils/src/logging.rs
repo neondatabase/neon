@@ -228,6 +228,12 @@ impl SecretString {
     }
 }
 
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 impl std::fmt::Debug for SecretString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[SECRET]")

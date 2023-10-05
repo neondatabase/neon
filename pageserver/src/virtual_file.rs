@@ -12,11 +12,11 @@
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 use crate::tenant::TENANTS_SEGMENT_NAME;
+use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
 
@@ -51,7 +51,7 @@ pub struct VirtualFile {
     /// if a new file is created, we only pass the create flag when it's initially
     /// opened, in the VirtualFile::create() function, and strip the flag before
     /// storing it here.
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     open_options: OpenOptions,
 
     // These are strings becase we only use them for metrics, and those expect strings.
@@ -311,7 +311,7 @@ impl std::fmt::Display for Error {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub async fn open(path: &Path) -> Result<VirtualFile, Error> {
+    pub async fn open(path: &Utf8Path) -> Result<VirtualFile, Error> {
         Self::open_with_options(path, OpenOptions::new().read(true))
             .await
             .map_err(Error::from)
@@ -319,7 +319,7 @@ impl VirtualFile {
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub async fn create(path: &Path) -> Result<VirtualFile, Error> {
+    pub async fn create(path: &Utf8Path) -> Result<VirtualFile, Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
@@ -334,10 +334,10 @@ impl VirtualFile {
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
     pub async fn open_with_options(
-        path: &Path,
+        path: &Utf8Path,
         open_options: &OpenOptions,
     ) -> Result<VirtualFile, Error> {
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
         let tenant_id;
         let timeline_id;
@@ -385,8 +385,8 @@ impl VirtualFile {
     /// atomic, a crash during the write operation will never leave behind a
     /// partially written file.
     pub async fn crashsafe_overwrite(
-        final_path: &Path,
-        tmp_path: &Path,
+        final_path: &Utf8Path,
+        tmp_path: &Utf8Path,
         content: &[u8],
     ) -> Result<(), Error> {
         let final_path_parent = final_path.parent().ok_or(std::io::Error::new(
@@ -842,7 +842,7 @@ mod tests {
 
     async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> Result<(), Error>
     where
-        OF: Fn(PathBuf, OpenOptions) -> FT,
+        OF: Fn(Utf8PathBuf, OpenOptions) -> FT,
         FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);

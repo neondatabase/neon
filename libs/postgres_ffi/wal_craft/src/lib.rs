@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure};
+use camino_tempfile::{tempdir, Utf8TempDir};
 use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
@@ -8,7 +9,6 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-use tempfile::{tempdir, TempDir};
 
 macro_rules! xlog_utils_test {
     ($version:ident) => {
@@ -33,7 +33,7 @@ pub struct Conf {
 
 pub struct PostgresServer {
     process: std::process::Child,
-    _unix_socket_dir: TempDir,
+    _unix_socket_dir: Utf8TempDir,
     client_config: postgres::Config,
 }
 

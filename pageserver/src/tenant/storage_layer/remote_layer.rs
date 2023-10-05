@@ -8,9 +8,9 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
+use camino::Utf8PathBuf;
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use utils::{
@@ -92,7 +92,7 @@ impl AsLayerDesc for RemoteLayer {
 }
 
 impl PersistentLayer for RemoteLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<Utf8PathBuf> {
         None
     }
 

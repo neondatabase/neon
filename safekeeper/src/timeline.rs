@@ -2,6 +2,7 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{anyhow, bail, Result};
+use camino::Utf8PathBuf;
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -9,7 +10,6 @@ use tokio::fs;
 
 use serde_with::DisplayFromStr;
 use std::cmp::max;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::{
@@ -331,7 +331,7 @@ pub struct Timeline {
     cancellation_rx: watch::Receiver<bool>,
 
     /// Directory where timeline state is stored.
-    pub timeline_dir: PathBuf,
+    pub timeline_dir: Utf8PathBuf,
 }
 
 impl Timeline {
@@ -805,7 +805,7 @@ impl Timeline {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-async fn delete_dir(path: &PathBuf) -> Result<bool> {
+async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
     match fs::remove_dir_all(path).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
