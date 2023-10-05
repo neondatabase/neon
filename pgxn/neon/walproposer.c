@@ -1100,7 +1100,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		/* We're still collecting terms from the majority. */
 		propTerm = Max(sk->greetResponse.term, propTerm);
 
-		/* Quorum is acquried, prepare the vote request. */
+		/* Quorum is acquired, prepare the vote request. */
 		if (n_connected == quorum)
 		{
 			propTerm++;
@@ -2303,7 +2303,7 @@ HandleSafekeeperResponse(void)
 
 			/*
 			 * Send empty message to broadcast latest truncateLsn to all safekeepers.
-			 * This helps to finish next sync-safekeepers eailier, by skipping recovery
+			 * This helps to finish next sync-safekeepers earlier, by skipping recovery
 			 * step.
 			 *
 			 * We don't need to wait for response because it doesn't affect correctness,

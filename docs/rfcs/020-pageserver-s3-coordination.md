@@ -128,7 +128,7 @@ During discussion it seems that we converged on the approach consisting of:
   whether we need to apply change to the index state or not.
 - Responsibility for running background jobs is assigned externally. Pageserver
   keeps locally persistent flag for each tenant that indicates whether this
-  pageserver is considered as primary one or not. TODO what happends if we
+  pageserver is considered as primary one or not. TODO what happens if we
   crash and cannot start for some extended period of time? Control plane can
   assign ownership to some other pageserver. Pageserver needs some way to check
   if its still the blessed one. Maybe by explicit request to control plane on

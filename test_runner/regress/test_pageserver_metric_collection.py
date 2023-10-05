@@ -434,7 +434,6 @@ class WrittenDataDeltaVerifier:
         self.sum = 0
         self.timerange = None
         pass
-
     def ingest(self, event, parent):
         assert event["type"] == "incremental"
         self.value = event["value"]
