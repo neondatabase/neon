@@ -185,43 +185,33 @@ pub(crate) fn on_fatal_io_error(e: &std::io::Error) -> ! {
 /// Identify error types that should alwways terminate the process.  Other
 /// error types may be elegible for retry.
 pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
-    match e.kind() {
-        ErrorKind::InvalidInput => {
-            // Invalid input is always a code problem, not a disk/filesystem problem
-            return false;
-        }
-        ErrorKind::UnexpectedEof => {
-            // UnexpectedEof in e.g. read_exact_at tends to indicate a code bug in
-            // picking the offset to read at, not a disk/filesystem problem
-            return false;
-        }
-        ErrorKind::WriteZero => {
-            return false;
-        }
-        ErrorKind::Interrupted => {
-            return false;
-        }
-        _ => { // Not a special kind, fall through to checking OS error
-        }
-    }
-
+    use nix::errno::Errno::*;
     match e.raw_os_error().map(nix::errno::from_i32) {
-        Some(nix::errno::Errno::ENOSPC) => {
-            // We do not terminate on ENOSPC, because the process needs to stay up
-            // for layer eviction to do its thing and free up that space
-            false
-        }
-        Some(nix::errno::Errno::EBADF) => {
-            // Bad file descriptor indicates a logic bug rather than a storage problem
-            false
-        }
-        Some(_) => {
-            // On all other local storage errors, we terminate the process.
+        Some(EIO) => {
+            // Terminate on EIO because we no longer trust the device to store
+            // data safely, or to uphold persistence guarantees on fsync.
             true
         }
-        None => {
-            // Does not originate from the operating system, so
-            // it's not a hardware/filesystem problem: do not terminate.
+        Some(EROFS) => {
+            // Terminate on EROFS because a filesystem is usually remounted
+            // readonly when it has experienced some critical issue, so the same
+            // logic as EIO applies.
+            true
+        }
+        Some(EACCES) => {
+            // Terminate on EACCESS because we should always have permissions
+            // for our own data dir: if we don't, then we can't do our job and
+            // need administrative intervention to fix permissions.  Terminating
+            // is the best way to make sure we stop cleanly rather than going
+            // into infinite retry loops, and will make it clear to the outside
+            // world that we need help.
+            true
+        }
+        _ => {
+            // Treat all other local file I/O errors are retryable.  This includes:
+            // - ENOSPC: we stay up and wait for eviction to free some space
+            // - EINVAL, EBADF, EBADFD: this is a code bug, not a filesystem/hardware issue
+            // - WriteZero, Interrupted: these are used internally VirtualFile
             false
         }
     }
