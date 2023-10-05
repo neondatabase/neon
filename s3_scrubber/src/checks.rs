@@ -1,13 +1,17 @@
 use std::collections::HashSet;
 
 use anyhow::Context;
-use aws_sdk_s3::Client;
+use aws_sdk_s3::{types::ObjectIdentifier, Client};
 use tracing::{error, info, warn};
 
 use crate::cloud_admin_api::BranchData;
-use crate::{download_object_with_retries, list_objects_with_retries, RootTarget};
+use crate::metadata_stream::stream_listing;
+use crate::{download_object_with_retries, RootTarget};
+use futures_util::{pin_mut, StreamExt};
+use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
+use remote_storage::RemotePath;
 use utils::id::TenantTimelineId;
 
 pub(crate) struct TimelineAnalysis {
@@ -189,58 +193,59 @@ pub(crate) async fn list_timeline_blobs(
     s3_root: &RootTarget,
 ) -> anyhow::Result<S3TimelineBlobData> {
     let mut s3_layers = HashSet::new();
-    let mut index_part_object = None;
-
-    let timeline_dir_target = s3_root.timeline_root(&id);
-    let mut continuation_token = None;
 
     let mut errors = Vec::new();
     let mut keys_to_remove = Vec::new();
 
-    loop {
-        let fetch_response =
-            list_objects_with_retries(s3_client, &timeline_dir_target, continuation_token.clone())
-                .await?;
+    let mut timeline_dir_target = s3_root.timeline_root(&id);
+    timeline_dir_target.delimiter = String::new();
 
-        let subdirectories = fetch_response.common_prefixes().unwrap_or_default();
-        if !subdirectories.is_empty() {
-            errors.push(format!(
-                "S3 list response should not contain any subdirectories, but got {subdirectories:?}"
-            ));
-        }
+    let mut index_parts: Vec<ObjectIdentifier> = Vec::new();
 
-        for (object, key) in fetch_response
-            .contents()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|object| Some((object, object.key()?)))
-        {
-            let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
-            match blob_name {
-                Some("index_part.json") => index_part_object = Some(object.clone()),
-                Some(maybe_layer_name) => match maybe_layer_name.parse::<LayerFileName>() {
-                    Ok(new_layer) => {
-                        s3_layers.insert(new_layer);
-                    }
-                    Err(e) => {
-                        errors.push(
-                            format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
-                        );
-                        keys_to_remove.push(key.to_string());
-                    }
-                },
-                None => {
-                    errors.push(format!("S3 list response got an object with odd key {key}"));
+    let stream = stream_listing(s3_client, &timeline_dir_target);
+    pin_mut!(stream);
+    while let Some(obj) = stream.next().await {
+        let obj = obj?;
+        let key = match obj.key() {
+            Some(k) => k,
+            None => continue,
+        };
+
+        let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
+        match blob_name {
+            Some(name) if name.starts_with("index_part.json") => index_parts.push(obj),
+            Some(maybe_layer_name) => match maybe_layer_name.parse::<LayerFileName>() {
+                Ok(new_layer) => {
+                    s3_layers.insert(new_layer);
+                }
+                Err(e) => {
+                    errors.push(
+                        format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
+                    );
                     keys_to_remove.push(key.to_string());
                 }
+            },
+            None => {
+                errors.push(format!("S3 list response got an object with odd key {key}"));
+                keys_to_remove.push(key.to_string());
             }
         }
-
-        match fetch_response.next_continuation_token {
-            Some(new_token) => continuation_token = Some(new_token),
-            None => break,
-        }
     }
+
+    let index_part_object = if index_parts.len() == 1 {
+        // Legacy case: just one index_part
+        index_parts.pop()
+    } else {
+        // Choose the index_part with the highest generation
+        index_parts
+            .into_iter()
+            .filter_map(|k| {
+                parse_remote_index_path(RemotePath::from_string(k.key().unwrap()).unwrap())
+                    .map(|g| (k, g))
+            })
+            .max_by_key(|i| i.1)
+            .map(|(k, _g)| k)
+    };
 
     if index_part_object.is_none() {
         errors.push("S3 list response got no index_part.json file".to_string());
