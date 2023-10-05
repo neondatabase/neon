@@ -148,6 +148,9 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     env.pageserver.allowed_errors.append(
         ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
     )
+    env.pageserver.allowed_errors.append(
+        ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading"
+    )
     ps_http = env.pageserver.http_client()
 
     # pause all uploads
@@ -161,14 +164,11 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
     env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
-    env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
+    with pytest.raises(RuntimeError, match="is not active, state: Loading"):
+        env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
 
-    # FIXME: uploads bother shutdown
+    # FIXME: stuck uploads bother shutdown
     env.pageserver.stop(immediate=True)
-
-    raise RuntimeError(
-        "above should had thrown, but of course did not because this is unimplemented"
-    )
 
 
 def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder):
