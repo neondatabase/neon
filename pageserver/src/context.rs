@@ -86,15 +86,18 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
+    page_cache_permit: Option<Arc<crate::page_cache::PinnedSlotsPermit>>,
 }
 
 /// The kind of access to the page cache.
@@ -150,6 +153,7 @@ impl RequestContextBuilder {
                 download_behavior: DownloadBehavior::Download,
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
+                page_cache_permit: None,
             },
         }
     }
@@ -163,6 +167,7 @@ impl RequestContextBuilder {
                 download_behavior: original.download_behavior,
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
+                page_cache_permit: original.page_cache_permit.clone(),
             },
         }
     }
@@ -183,6 +188,11 @@ impl RequestContextBuilder {
 
     pub(crate) fn page_content_kind(mut self, k: PageContentKind) -> Self {
         self.inner.page_content_kind = k;
+        self
+    }
+
+    pub(crate) fn page_cache_permit(mut self, p: Arc<crate::page_cache::PinnedSlotsPermit>) -> Self {
+        self.inner.page_cache_permit = Some(p);
         self
     }
 
@@ -285,5 +295,9 @@ impl RequestContext {
 
     pub(crate) fn page_content_kind(&self) -> PageContentKind {
         self.page_content_kind
+    }
+
+    pub(crate) fn permit(&self) -> Option<&crate::page_cache::PinnedSlotsPermit> {
+        self.page_cache_permit.as_ref().map(|p| &**p)
     }
 }

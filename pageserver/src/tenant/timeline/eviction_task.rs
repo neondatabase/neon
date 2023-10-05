@@ -16,7 +16,7 @@
 use std::{
     collections::HashMap,
     ops::ControlFlow,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
-    context::{DownloadBehavior, RequestContext},
+    context::{DownloadBehavior, RequestContext, RequestContextBuilder},
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -397,9 +397,14 @@ impl Timeline {
             }
         }
 
+        let permit = crate::page_cache::get().get_permit().await;
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_cache_permit(permit)
+            .build();
+
         // imitiate repartiting on first compactation
         if let Err(e) = self
-            .collect_keyspace(lsn, ctx)
+            .collect_keyspace(lsn, &ctx)
             .instrument(info_span!("collect_keyspace"))
             .await
         {
