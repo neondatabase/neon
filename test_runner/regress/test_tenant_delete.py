@@ -293,6 +293,10 @@ def test_tenant_delete_is_resumed_on_attach(
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env.pageserver.allowed_errors.append(
+        # lucky race with stopping from flushing a layer we fail to schedule any uploads
+        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    )
 
     tenant_id = env.initial_tenant
 
