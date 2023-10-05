@@ -354,10 +354,6 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
     wait_until_tenant_active(ps_http, env.initial_tenant)
 
-    # missing test case:
-    # first timeline is successfully created and uploaded
-    # second timeline only exists on disk but not uploaded
-
     with pytest.raises(PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"):
         ps_http.timeline_detail(env.initial_tenant, branch_id)
 
