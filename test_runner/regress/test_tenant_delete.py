@@ -45,12 +45,9 @@ def test_tenant_delete_smoke(
         [
             # The deletion queue will complain when it encounters simulated S3 errors
             ".*deletion executor: DeleteObjects request failed.*",
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
         ]
-    )
-
-    # lucky race with stopping from flushing a layer we fail to schedule any uploads
-    env.pageserver.allowed_errors.append(
-        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
     )
 
     ps_http = env.pageserver.http_client()
@@ -194,11 +191,9 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     )
 
     if simulate_failures:
-        env.pageserver.allowed_errors.extend(
-            [
-                # The deletion queue will complain when it encounters simulated S3 errors
-                ".*deletion executor: DeleteObjects request failed.*",
-            ]
+        env.pageserver.allowed_errors.append(
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
         )
 
     ps_http = env.pageserver.http_client()
