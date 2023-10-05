@@ -197,6 +197,7 @@ async fn cleanup_remaining_fs_traces(
     };
 
     rm(conf.tenant_config_path(tenant_id), false).await?;
+    rm(conf.tenant_location_config_path(tenant_id), false).await?;
 
     fail::fail_point!("tenant-delete-before-remove-timelines-dir", |_| {
         Err(anyhow::anyhow!(

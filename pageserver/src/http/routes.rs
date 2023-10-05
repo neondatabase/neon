@@ -10,7 +10,8 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest, TenantLoadRequest,
+    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
+    TenantLoadRequest, TenantLocationConfigRequest,
 };
 use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -29,7 +30,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantMapInsertError, TenantStateError,
 };
@@ -150,7 +151,10 @@ impl From<TenantMapInsertError> for ApiError {
             TenantMapInsertError::TenantAlreadyExists(id, state) => {
                 ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
             }
-            TenantMapInsertError::Closure(e) => ApiError::InternalServerError(e),
+            TenantMapInsertError::TenantExistsSecondary(id) => {
+                ApiError::Conflict(format!("tenant {id} already exists as secondary"))
+            }
+            TenantMapInsertError::Other(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -1011,6 +1015,48 @@ async fn update_tenant_config_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_tenant_location_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
+    let tenant_id = request_data.tenant_id;
+    check_permission(&request, Some(tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
+    let conf = state.conf;
+
+    // The `Detached` state is special, it doesn't upsert a tenant, it removes
+    // its local disk content and drops it from memory.
+    if let LocationConfigMode::Detached = request_data.config.mode {
+        mgr::detach_tenant(conf, tenant_id, true)
+            .instrument(info_span!("tenant_detach", %tenant_id))
+            .await?;
+        return json_response(StatusCode::OK, ());
+    }
+
+    let location_conf =
+        LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
+
+    mgr::upsert_location(
+        state.conf,
+        tenant_id,
+        location_conf,
+        state.broker_client.clone(),
+        state.remote_storage.clone(),
+        state.deletion_queue_client.clone(),
+        &ctx,
+    )
+    .await
+    // TODO: badrequest assumes the caller was asking for something unreasonable, but in
+    // principle we might have hit something like concurrent API calls to the same tenant,
+    // which is not a 400 but a 409.
+    .map_err(ApiError::BadRequest)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 async fn handle_tenant_break(
     r: Request<Body>,
@@ -1463,6 +1509,9 @@ pub fn make_router(
         })
         .get("/v1/tenant/:tenant_id/config", |r| {
             api_handler(r, get_tenant_config_handler)
+        })
+        .put("/v1/tenant/:tenant_id/location_config", |r| {
+            api_handler(r, put_tenant_location_config_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline", |r| {
             api_handler(r, timeline_list_handler)

@@ -37,8 +37,8 @@ use crate::tenant::{
     TIMELINES_SEGMENT_NAME,
 };
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
-    TIMELINE_UNINIT_MARK_SUFFIX,
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
+    TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 pub mod defaults {
@@ -631,8 +631,16 @@ impl PageServerConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
+    ///
+    /// Legacy: superseded by tenant_location_config_path.  Eventually
+    /// remove this function.
     pub fn tenant_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
+    }
+
+    pub fn tenant_location_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
+        self.tenant_path(tenant_id)
+            .join(TENANT_LOCATION_CONFIG_NAME)
     }
 
     pub fn timelines_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
