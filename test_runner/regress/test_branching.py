@@ -15,9 +15,9 @@ from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
-from requests import ReadTimeout
+from requests import ReadTimeout, HTTPError
 
-from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.http import PageserverApiException, TimelineCreate409
 
 
 # Test branch creation
@@ -213,7 +213,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
     env.pageserver.stop(immediate=True)
 
 
-def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: NeonEnvBuilder):
+def test_competing_branchings_from_loading_race_to_ok_or_409(neon_env_builder: NeonEnvBuilder):
     """
     If the activate only after upload is used, then retries could become competing.
     """
@@ -246,6 +246,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: N
 
     def try_branch():
         barrier.wait()
+        barrier.wait()
         try:
             ret = ps_http.timeline_create(
                 env.pg_version,
@@ -263,12 +264,10 @@ def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: N
         t.start()
 
     barrier.wait()
-
-    # give time to start the awaits
-    time.sleep(1)
-    # now both requests race to branch, only one can win because they take gc_cs
     ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
+    barrier.wait()
 
+    # now both requests race to branch, only one can win because they take gc_cs, Tenant::timelines or marker files
     first = queue.get()
     second = queue.get()
 
@@ -279,7 +278,8 @@ def test_competing_branchings_from_loading_race_to_ok_or_500(neon_env_builder: N
     log.info(failed)
     log.info(succeeded)
 
-    assert str(failed).startswith(f"Timeline {env.initial_tenant}/{branch_id} already exists")
+    # FIXME: there's probably multiple valid status codes
+    assert isinstance(failed, TimelineCreate409)
     assert succeeded["state"] == "Active"
 
 
