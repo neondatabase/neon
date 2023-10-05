@@ -180,7 +180,7 @@ const EBADF: i32 = 9;
 /// cause: this includes EIO, EROFS, and EACCESS: all these indicate either
 /// bad storage or bad configuration, and we can't fix that from inside
 /// a running process.
-pub(crate) fn on_fatal_io_error(e: &std::io::Error) {
+pub(crate) fn on_fatal_io_error(e: &std::io::Error) -> ! {
     tracing::error!("Fatal I/O error: {}", &e);
     std::process::abort();
 }
