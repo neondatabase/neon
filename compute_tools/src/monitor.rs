@@ -3,7 +3,8 @@ use std::{thread, time::Duration};
 
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
+use utils::id::TenantTimelineId;
 
 use crate::compute::ComputeNode;
 
@@ -12,7 +13,8 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
 // XXX: the only expected panic is at `RwLock` unwrap().
-fn watch_compute_activity(compute: &ComputeNode) {
+#[instrument(name = "", fields(ttid = %ttid), skip_all)]
+fn watch_compute_activity(compute: &ComputeNode, ttid: TenantTimelineId) {
     // Suppose that `connstr` doesn't change
     let connstr = compute.connstr.as_str();
     // Define `client` outside of the loop to reuse existing connection if it's active.
@@ -103,11 +105,11 @@ fn watch_compute_activity(compute: &ComputeNode) {
 }
 
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
+pub fn launch_monitor(state: &Arc<ComputeNode>, ttid: TenantTimelineId) -> thread::JoinHandle<()> {
     let state = Arc::clone(state);
 
     thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&state))
+        .spawn(move || watch_compute_activity(&state, ttid))
         .expect("cannot launch compute monitor thread")
 }

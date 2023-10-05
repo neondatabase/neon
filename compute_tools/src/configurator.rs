@@ -4,11 +4,13 @@ use std::thread;
 use tracing::{error, info, instrument};
 
 use compute_api::responses::ComputeStatus;
+use utils::id::TenantTimelineId;
 
 use crate::compute::ComputeNode;
 
-#[instrument(skip_all)]
-fn configurator_main_loop(compute: &Arc<ComputeNode>) {
+// Log ttid everywhere
+#[instrument(name = "", fields(ttid = %ttid), skip_all)]
+fn configurator_main_loop(compute: &Arc<ComputeNode>, ttid: TenantTimelineId) {
     info!("waiting for reconfiguration requests");
     loop {
         let state = compute.state.lock().unwrap();
@@ -41,13 +43,16 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     }
 }
 
-pub fn launch_configurator(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
+pub fn launch_configurator(
+    compute: &Arc<ComputeNode>,
+    ttid: TenantTimelineId,
+) -> thread::JoinHandle<()> {
     let compute = Arc::clone(compute);
 
     thread::Builder::new()
         .name("compute-configurator".into())
         .spawn(move || {
-            configurator_main_loop(&compute);
+            configurator_main_loop(&compute, ttid);
             info!("configurator thread is exited");
         })
         .expect("cannot launch configurator thread")
