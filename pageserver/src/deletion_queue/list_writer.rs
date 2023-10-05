@@ -198,7 +198,6 @@ impl ListWriter {
                     Ok(None)
                 } else {
                     on_fatal_io_error(&e);
-                    unreachable!();
                 }
             }
         }
@@ -227,8 +226,6 @@ impl ListWriter {
                 // This is fatal: any failure to read this local directory indicates a
                 // storage problem or configuration problem of the node.
                 virtual_file::on_fatal_io_error(&e);
-
-                return Err(e.into());
             }
         };
 
@@ -300,7 +297,6 @@ impl ListWriter {
                 Ok(b) => b,
                 Err(e) => {
                     virtual_file::on_fatal_io_error(&e);
-                    unreachable!();
                 }
             };
 

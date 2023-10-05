@@ -306,8 +306,6 @@ where
                 metrics::DELETION_QUEUE.unexpected_errors.inc();
 
                 on_fatal_io_error(&e);
-
-                break;
             }
         }
     }

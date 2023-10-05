@@ -275,7 +275,6 @@ impl Error {
         // having to apply the same "terminate on errors" behavior.
         if is_fatal_io_error(&instance.inner) {
             on_fatal_io_error(&instance.inner);
-            unreachable!();
         }
 
         instance
