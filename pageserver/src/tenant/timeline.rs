@@ -3645,7 +3645,7 @@ impl Timeline {
                     next_key_size = next_size;
                     if key != next_key {
                         if dup_end_lsn.is_valid() {
-                            // We are writting segment with duplicates:
+                            // We are writing segment with duplicates:
                             // place all remaining values of this key in separate segment
                             dup_start_lsn = dup_end_lsn; // new segments starts where old stops
                             dup_end_lsn = lsn_range.end; // there are no more values of this key till end of LSN range

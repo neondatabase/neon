@@ -363,7 +363,7 @@ def test_tenant_relocation(
         current_lsn=current_lsn_second,
     )
 
-    log.info("inititalizing new pageserver")
+    log.info("initializing new pageserver")
     # bootstrap second pageserver
     new_pageserver_dir = env.repo_dir / "new_pageserver"
     new_pageserver_dir.mkdir()

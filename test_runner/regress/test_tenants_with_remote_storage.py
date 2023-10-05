@@ -139,7 +139,7 @@ def test_tenants_attached_after_download(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # Thats because of UnreliableWrapper's injected failures
+    # That's because of UnreliableWrapper's injected failures
     env.pageserver.allowed_errors.append(
         f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
     )
