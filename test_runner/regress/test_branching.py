@@ -195,14 +195,12 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
     branch_id = TimelineId.generate()
 
-    with pytest.raises(ReadTimeout):
-        # FIXME: this should be rejected somehow
+    with pytest.raises(PageserverApiException, match = "ancestor timeline is not active"):
         ps_http.timeline_create(
             env.pg_version,
             env.initial_tenant,
             branch_id,
             ancestor_timeline_id=env.initial_timeline,
-            timeout=2
         )
 
     with pytest.raises(PageserverApiException, match = f"NotFound: Timeline {env.initial_tenant}/{branch_id} was not found"):
