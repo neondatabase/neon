@@ -320,7 +320,7 @@ impl DeltaLayer {
         let keys = DeltaLayerInner::load_keys(&inner, ctx).await?;
 
         // A subroutine to dump a single blob
-        async fn dump_blob(val: ValueRef<'_, '_>, ctx: &RequestContext) -> Result<String> {
+        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> Result<String> {
             let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -549,7 +549,7 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub(crate) async fn load_keys<'c>(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'c, '_>>> {
+    pub(crate) async fn load_keys<'c>(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -971,7 +971,7 @@ impl DeltaLayerInner {
     pub(super) async fn load_keys<'a, 'b, T: AsRef<DeltaLayerInner> + Clone>(
         this: &'a T,
         ctx: &'b RequestContext,
-    ) -> Result<Vec<DeltaEntry<'b, 'a>>> {
+    ) -> Result<Vec<DeltaEntry<'a>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
@@ -1023,22 +1023,22 @@ impl DeltaLayerInner {
 }
 
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<'c, 'a> {
+pub struct DeltaEntry<'a> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<'c, 'a>,
+    pub val: ValueRef<'a>,
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef<'c, 'a> {
+pub struct ValueRef<'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<'c, 'a>,
+    reader: BlockCursor<'a>,
 }
 
-impl<'c, 'a> ValueRef<'c, 'a> {
+impl<'c, 'a> ValueRef<'a> {
     /// Loads the value from disk
     pub async fn load(&self, ctx: &'c RequestContext) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
@@ -1051,11 +1051,11 @@ impl<'c, 'a> ValueRef<'c, 'a> {
 pub(crate) struct Adapter<T>(T);
 
 impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
-    pub(crate) async fn read_blk(
+    pub(crate) async fn read_blk<'c>(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+        ctx: &'c RequestContext,
+    ) -> Result<BlockLease<'c, '_>, std::io::Error> {
         self.0.as_ref().file.read_blk(blknum, ctx).await
     }
 }

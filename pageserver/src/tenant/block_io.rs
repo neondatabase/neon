@@ -21,14 +21,14 @@ pub trait BlockReader {
     ///
     /// A cursor caches the last accessed page, allowing for faster
     /// access if the same block is accessed repeatedly.
-    fn block_cursor(&self) -> BlockCursor<'_, '_>;
+    fn block_cursor(&self) -> BlockCursor<'_>;
 }
 
 impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    fn block_cursor(&self) -> BlockCursor<'_, '_> {
+    fn block_cursor(&self) -> BlockCursor<'_> {
         (*self).block_cursor()
     }
 }
@@ -71,7 +71,7 @@ impl<'c, 'a> Deref for BlockLease<'c, 'a> {
 /// similar to using traits for this purpose.
 ///
 /// Unlike traits, we also support the read function to be async though.
-pub(crate) enum BlockReaderRef<'c, 'a> {
+pub(crate) enum BlockReaderRef<'a> {
     FileBlockReader(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
@@ -81,13 +81,13 @@ pub(crate) enum BlockReaderRef<'c, 'a> {
     VirtualFile(&'a VirtualFile),
 }
 
-impl<'c, 'a> BlockReaderRef<'c, 'a> {
+impl<'a> BlockReaderRef<'a> {
     #[inline(always)]
-    async fn read_blk(
+    async fn read_blk<'c>(
         &self,
         blknum: u32,
         ctx: &'c RequestContext,
-    ) -> Result<BlockLease<'c, 'a>, std::io::Error> {
+    ) -> Result<BlockLease<'c, '_>, std::io::Error> {
         use BlockReaderRef::*;
         match self {
             FileBlockReader(r) => r.read_blk(blknum, ctx).await,
@@ -120,12 +120,12 @@ impl<'c, 'a> BlockReaderRef<'c, 'a> {
 /// // do stuff with 'buf'
 /// ```
 ///
-pub struct BlockCursor<'c, 'a> {
-    reader: BlockReaderRef<'c, 'a>,
+pub struct BlockCursor<'a> {
+    reader: BlockReaderRef<'a>,
 }
 
-impl<'c, 'a> BlockCursor<'c, 'a> {
-    pub(crate) fn new(reader: BlockReaderRef<'c, 'a>) -> Self {
+impl<'a> BlockCursor<'a> {
+    pub(crate) fn new(reader: BlockReaderRef<'a>) -> Self {
         BlockCursor { reader }
     }
     // Needed by cli
@@ -141,11 +141,11 @@ impl<'c, 'a> BlockCursor<'c, 'a> {
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     #[inline(always)]
-    pub async fn read_blk(
+    pub async fn read_blk<'c>(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+        ctx: &'c RequestContext,
+    ) -> Result<BlockLease<'c, '_>, std::io::Error> {
         self.reader.read_blk(blknum, ctx).await
     }
 }
@@ -206,7 +206,7 @@ impl FileBlockReader {
 }
 
 impl BlockReader for FileBlockReader {
-    fn block_cursor(&self) -> BlockCursor<'_, '_> {
+    fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }
 }

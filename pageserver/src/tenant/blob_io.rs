@@ -20,10 +20,10 @@ use std::io::{Error, ErrorKind};
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
-    pub async fn read_blob(
+    pub async fn read_blob<'c>(
         &self,
         offset: u64,
-        ctx: &RequestContext,
+        ctx: &'c RequestContext,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
@@ -31,11 +31,11 @@ impl<'a> BlockCursor<'a> {
     }
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
-    pub async fn read_blob_into_buf(
+    pub async fn read_blob_into_buf<'c>(
         &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
-        ctx: &RequestContext,
+        ctx: &'c RequestContext,
     ) -> Result<(), std::io::Error> {
         let mut blknum = (offset / PAGE_SZ as u64) as u32;
         let mut off = (offset % PAGE_SZ as u64) as usize;

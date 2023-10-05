@@ -64,11 +64,11 @@ impl EphemeralFile {
         self.len
     }
 
-    pub(crate) async fn read_blk(
+    pub(crate) async fn read_blk<'c>(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
-    ) -> Result<BlockLease, io::Error> {
+        ctx: &'c RequestContext,
+    ) -> Result<BlockLease<'c, '_>, io::Error> {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();

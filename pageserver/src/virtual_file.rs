@@ -544,7 +544,7 @@ impl VirtualFile {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
-    ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
+    ) -> Result<crate::tenant::block_io::BlockLease<'_, '_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
         let mut buf = [0; PAGE_SZ];
         self.read_exact_at(&mut buf, blknum as u64 * (PAGE_SZ as u64))
