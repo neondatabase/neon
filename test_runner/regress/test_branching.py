@@ -1,7 +1,8 @@
 import random
 import threading
 import time
-from typing import List, Dict, Union, Any
+from queue import SimpleQueue
+from typing import Any, Dict, List, Union
 
 import pytest
 from fixtures.log_helper import log
@@ -11,13 +12,12 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
 )
+from fixtures.pageserver.http import PageserverApiException, TimelineCreate409
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
-from requests import ReadTimeout, HTTPError
-
-from fixtures.pageserver.http import PageserverApiException, TimelineCreate409
+from requests import ReadTimeout
 
 
 # Test branch creation
@@ -195,7 +195,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
     branch_id = TimelineId.generate()
 
-    with pytest.raises(PageserverApiException, match = "ancestor timeline is not active"):
+    with pytest.raises(PageserverApiException, match="ancestor timeline is not active"):
         ps_http.timeline_create(
             env.pg_version,
             env.initial_tenant,
@@ -203,7 +203,10 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
             ancestor_timeline_id=env.initial_timeline,
         )
 
-    with pytest.raises(PageserverApiException, match = f"NotFound: Timeline {env.initial_tenant}/{branch_id} was not found"):
+    with pytest.raises(
+        PageserverApiException,
+        match=f"NotFound: Timeline {env.initial_tenant}/{branch_id} was not found",
+    ):
         ps_http.timeline_detail(env.initial_tenant, branch_id)
         # important to note that a task might still be in progress to complete
         # the work, but will never get to that because we have the pause
@@ -238,9 +241,6 @@ def test_competing_branchings_from_loading_race_to_ok_or_409(neon_env_builder: N
 
     branch_id = TimelineId.generate()
 
-    from queue import SimpleQueue
-    import threading
-
     queue: SimpleQueue[Union[Dict[Any, Any], Exception]] = SimpleQueue()
     barrier = threading.Barrier(3)
 
@@ -253,7 +253,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_409(neon_env_builder: N
                 env.initial_tenant,
                 branch_id,
                 ancestor_timeline_id=env.initial_timeline,
-                timeout=5
+                timeout=5,
             )
             queue.put(ret)
         except Exception as e:
@@ -340,10 +340,14 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
     branch_id = TimelineId.generate()
 
-    with pytest.raises(PageserverApiException, match = "ancestor timeline is not active"):
-        ps_http.timeline_create(env.pg_version, env.initial_tenant, branch_id, ancestor_timeline_id=env.initial_timeline)
+    with pytest.raises(PageserverApiException, match="ancestor timeline is not active"):
+        ps_http.timeline_create(
+            env.pg_version, env.initial_tenant, branch_id, ancestor_timeline_id=env.initial_timeline
+        )
 
-    with pytest.raises(PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"):
+    with pytest.raises(
+        PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"
+    ):
         ps_http.timeline_detail(env.initial_tenant, branch_id)
 
     # FIXME: paused uploads bother shutdown
@@ -354,7 +358,9 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
     wait_until_tenant_active(ps_http, env.initial_tenant)
 
-    with pytest.raises(PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"):
+    with pytest.raises(
+        PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"
+    ):
         ps_http.timeline_detail(env.initial_tenant, branch_id)
 
     detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
