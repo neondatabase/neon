@@ -338,13 +338,16 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
     with pytest.raises(ReadTimeout):
         ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline, timeout=2)
 
-    second_id = TimelineId.generate()
+    branch_id = TimelineId.generate()
 
     with pytest.raises(ReadTimeout):
-        ps_http.timeline_create(env.pg_version, env.initial_tenant, second_id, ancestor_timeline_id=env.initial_timeline, timeout=2)
+        ps_http.timeline_create(env.pg_version, env.initial_tenant, branch_id, ancestor_timeline_id=env.initial_timeline, timeout=2)
 
-    # make sure it's readable now, the create just hangs
-    detail = ps_http.timeline_detail(env.initial_tenant, second_id)
+    ## this did not work:
+    # ps_http.configure_failpoints(("before-upload-index-pausable", "off->pause"))
+    # time.sleep(1)
+
+    ps_http.timeline_detail(env.initial_tenant, branch_id)
 
     env.pageserver.stop(immediate=True)
 
@@ -353,7 +356,12 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
     wait_until_tenant_active(ps_http, env.initial_tenant)
 
-    # currently it lives on and will get eventually uploaded, but this will change to both returning 404
-    for id in [second_id, env.initial_timeline]:
-        detail = ps_http.timeline_detail(env.initial_tenant, id)
-        assert detail is not None
+    # missing test case:
+    # first timeline is successfully created and uploaded
+    # second timeline only exists on disk but not uploaded
+
+    with pytest.raises(PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"):
+        ps_http.timeline_detail(env.initial_tenant, branch_id)
+
+    detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+    assert detail["state"] == "Active"
