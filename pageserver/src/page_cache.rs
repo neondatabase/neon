@@ -971,14 +971,15 @@ impl PageCache {
             })
             .collect();
 
-        let (find_victim_sender, find_victim_waiters) = async_channel::bounded(num_pages);
+        let num_permits = num_pages/2;
+        let (find_victim_sender, find_victim_waiters) = async_channel::bounded(num_permits);
         Self {
             materialized_page_map: Default::default(),
             immutable_page_map: Default::default(),
             slots,
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
-            pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
+            pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_permits)),
             find_victim_sender,
             find_victim_waiters,
         }
