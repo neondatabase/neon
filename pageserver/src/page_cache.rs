@@ -552,12 +552,12 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with immutable file pages.
 
-    pub async fn read_immutable_buf(
+    pub async fn read_immutable_buf<'c>(
         &'static self,
         file_id: FileId,
         blkno: u32,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ReadBufResult> {
+        ctx: &'c RequestContext,
+    ) -> anyhow::Result<ReadBufResult<'c, 'static>> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
         self.lock_for_read(&mut cache_key, ctx).await

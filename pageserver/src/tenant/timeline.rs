@@ -158,7 +158,7 @@ pub struct Timeline {
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
     /// Never changes for the lifetime of this [`Timeline`] object.
-    ///  
+    ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
@@ -505,7 +505,7 @@ impl Timeline {
         timer.stop_and_record();
 
         let start = Instant::now();
-        let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
+        let res = self.reconstruct_value(key, lsn, reconstruct_state, ctx).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
             .for_result(&res)
@@ -4279,6 +4279,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         mut data: ValueReconstructState,
+        ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
         data.records.reverse();
@@ -4342,6 +4343,7 @@ impl Timeline {
                             key,
                             last_rec_lsn,
                             &img,
+                            ctx,
                         )
                         .await
                         .context("Materialized page memoization failed")
