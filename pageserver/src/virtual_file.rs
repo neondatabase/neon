@@ -173,9 +173,6 @@ impl OpenFiles {
     }
 }
 
-const ENOSPC: i32 = 28;
-const EBADF: i32 = 9;
-
 /// Call this when the local filesystem gives us an error with an external
 /// cause: this includes EIO, EROFS, and EACCESS: all these indicate either
 /// bad storage or bad configuration, and we can't fix that from inside
@@ -208,13 +205,13 @@ pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
         }
     }
 
-    match e.raw_os_error() {
-        Some(ENOSPC) => {
+    match e.raw_os_error().map(nix::errno::from_i32) {
+        Some(nix::errno::Errno::ENOSPC) => {
             // We do not terminate on ENOSPC, because the process needs to stay up
             // for layer eviction to do its thing and free up that space
             false
         }
-        Some(EBADF) => {
+        Some(nix::errno::Errno::EBADF) => {
             // Bad file descriptor indicates a logic bug rather than a storage problem
             false
         }
