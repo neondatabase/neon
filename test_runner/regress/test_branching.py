@@ -169,7 +169,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     with pytest.raises(RuntimeError, match="is not active, state: Loading"):
         env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
 
-    # FIXME: stuck uploads bother shutdown
+    # FIXME: paused uploads bother shutdown
     env.pageserver.stop(immediate=True)
 
 
@@ -211,6 +211,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
         # the work, but will never get to that because we have the pause
         # failpoint
 
+    # FIXME: paused uploads bother shutdown
     env.pageserver.stop(immediate=True)
 
 
@@ -306,6 +307,7 @@ def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEn
     with pytest.raises(ReadTimeout):
         ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline, timeout=2)
 
+    # FIXME: paused uploads bother shutdown
     env.pageserver.stop(immediate=True)
 
     # now without a failpoint
@@ -349,6 +351,7 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
     ps_http.timeline_detail(env.initial_tenant, branch_id)
 
+    # FIXME: paused uploads bother shutdown
     env.pageserver.stop(immediate=True)
 
     # now without a failpoint
