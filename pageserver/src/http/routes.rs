@@ -396,6 +396,9 @@ async fn timeline_create_handler(
                     format!("{err:#}")
                 ))
             }
+            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
+                json_response(StatusCode::INTERNAL_SERVER_ERROR, HttpErrorBody::from_msg(e.to_string()))
+            }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
