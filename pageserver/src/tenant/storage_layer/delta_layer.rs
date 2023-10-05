@@ -320,7 +320,7 @@ impl DeltaLayer {
         let keys = DeltaLayerInner::load_keys(&inner, ctx).await?;
 
         // A subroutine to dump a single blob
-        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> Result<String> {
+        async fn dump_blob(val: ValueRef<'_, '_>, ctx: &RequestContext) -> Result<String> {
             let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -549,7 +549,7 @@ impl DeltaLayer {
     /// Loads all keys stored in the layer. Returns key, lsn, value size and value reference.
     ///
     /// The value can be obtained via the [`ValueRef::load`] function.
-    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'_>>> {
+    pub(crate) async fn load_keys<'c>(&self, ctx: &RequestContext) -> Result<Vec<DeltaEntry<'c, '_>>> {
         let inner = self
             .load(LayerAccessKind::KeyIter, ctx)
             .await
@@ -971,7 +971,7 @@ impl DeltaLayerInner {
     pub(super) async fn load_keys<'a, 'b, T: AsRef<DeltaLayerInner> + Clone>(
         this: &'a T,
         ctx: &'b RequestContext,
-    ) -> Result<Vec<DeltaEntry<'a>>> {
+    ) -> Result<Vec<DeltaEntry<'b, 'a>>> {
         let dl = this.as_ref();
         let file = &dl.file;
 
@@ -1023,24 +1023,24 @@ impl DeltaLayerInner {
 }
 
 /// A set of data associated with a delta layer key and its value
-pub struct DeltaEntry<'a> {
+pub struct DeltaEntry<'c, 'a> {
     pub key: Key,
     pub lsn: Lsn,
     /// Size of the stored value
     pub size: u64,
     /// Reference to the on-disk value
-    pub val: ValueRef<'a>,
+    pub val: ValueRef<'c, 'a>,
 }
 
 /// Reference to an on-disk value
-pub struct ValueRef<'a> {
+pub struct ValueRef<'c, 'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<'a>,
+    reader: BlockCursor<'c, 'a>,
 }
 
-impl<'a> ValueRef<'a> {
+impl<'c, 'a> ValueRef<'c, 'a> {
     /// Loads the value from disk
-    pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
+    pub async fn load(&self, ctx: &'c RequestContext) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
         let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
         let val = Value::des(&buf)?;

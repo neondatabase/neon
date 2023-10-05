@@ -21,40 +21,40 @@ pub trait BlockReader {
     ///
     /// A cursor caches the last accessed page, allowing for faster
     /// access if the same block is accessed repeatedly.
-    fn block_cursor(&self) -> BlockCursor<'_>;
+    fn block_cursor(&self) -> BlockCursor<'_, '_>;
 }
 
 impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    fn block_cursor(&self) -> BlockCursor<'_> {
+    fn block_cursor(&self) -> BlockCursor<'_, '_> {
         (*self).block_cursor()
     }
 }
 
 /// Reference to an in-memory copy of an immutable on-disk block.
-pub enum BlockLease<'a> {
-    PageReadGuard(PageReadGuard<'static>),
+pub enum BlockLease<'c, 'a> {
+    PageReadGuard(PageReadGuard<'c, 'static>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
 }
 
-impl From<PageReadGuard<'static>> for BlockLease<'static> {
-    fn from(value: PageReadGuard<'static>) -> BlockLease<'static> {
+impl<'c, 'a> From<PageReadGuard<'c, 'a>> for BlockLease<'c, 'a> {
+    fn from(value: PageReadGuard<'c, 'a>) -> BlockLease<'c, 'a> {
         BlockLease::PageReadGuard(value)
     }
 }
 
 #[cfg(test)]
-impl<'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+impl<'c, 'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'c, 'a> {
     fn from(value: std::sync::Arc<[u8; PAGE_SZ]>) -> Self {
         BlockLease::Arc(value)
     }
 }
 
-impl<'a> Deref for BlockLease<'a> {
+impl<'c, 'a> Deref for BlockLease<'c, 'a> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
@@ -71,7 +71,7 @@ impl<'a> Deref for BlockLease<'a> {
 /// similar to using traits for this purpose.
 ///
 /// Unlike traits, we also support the read function to be async though.
-pub(crate) enum BlockReaderRef<'a> {
+pub(crate) enum BlockReaderRef<'c, 'a> {
     FileBlockReader(&'a FileBlockReader),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
@@ -81,13 +81,13 @@ pub(crate) enum BlockReaderRef<'a> {
     VirtualFile(&'a VirtualFile),
 }
 
-impl<'a> BlockReaderRef<'a> {
+impl<'c, 'a> BlockReaderRef<'c, 'a> {
     #[inline(always)]
     async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+        ctx: &'c RequestContext,
+    ) -> Result<BlockLease<'c, 'a>, std::io::Error> {
         use BlockReaderRef::*;
         match self {
             FileBlockReader(r) => r.read_blk(blknum, ctx).await,
@@ -120,12 +120,12 @@ impl<'a> BlockReaderRef<'a> {
 /// // do stuff with 'buf'
 /// ```
 ///
-pub struct BlockCursor<'a> {
-    reader: BlockReaderRef<'a>,
+pub struct BlockCursor<'c, 'a> {
+    reader: BlockReaderRef<'c, 'a>,
 }
 
-impl<'a> BlockCursor<'a> {
-    pub(crate) fn new(reader: BlockReaderRef<'a>) -> Self {
+impl<'c, 'a> BlockCursor<'c, 'a> {
+    pub(crate) fn new(reader: BlockReaderRef<'c, 'a>) -> Self {
         BlockCursor { reader }
     }
     // Needed by cli
@@ -180,11 +180,11 @@ impl FileBlockReader {
     /// Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
-    pub async fn read_blk(
+    pub async fn read_blk<'c>(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+        ctx: &'c RequestContext,
+    ) -> Result<BlockLease<'c, 'static>, std::io::Error> {
         let cache = page_cache::get();
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
@@ -206,7 +206,7 @@ impl FileBlockReader {
 }
 
 impl BlockReader for FileBlockReader {
-    fn block_cursor(&self) -> BlockCursor<'_> {
+    fn block_cursor(&self) -> BlockCursor<'_, '_> {
         BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }
 }
