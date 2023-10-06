@@ -37,6 +37,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
+from urllib3.util.retry import Retry
 
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
@@ -1084,15 +1085,32 @@ class AbstractNeonCli(abc.ABC):
             stderr=subprocess.PIPE,
             timeout=timeout,
         )
+
+        indent = "  "
         if not res.returncode:
-            log.info(f"Run {res.args} success: {res.stdout}")
+            stripped = res.stdout.strip()
+            lines = stripped.splitlines()
+            if len(lines) < 2:
+                log.debug(f"Run {res.args} success: {stripped}")
+            else:
+                log.debug("Run %s success:\n%s" % (res.args, textwrap.indent(stripped, indent)))
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run {res.args} failed:
-              stdout: {res.stdout}
-              stderr: {res.stderr}
+            indent = indent * 2
+            msg = textwrap.dedent(
+                """\
+            Run %s failed:
+              stdout:
+            %s
+              stderr:
+            %s
             """
+            )
+            msg = msg % (
+                res.args,
+                textwrap.indent(res.stdout.strip(), indent),
+                textwrap.indent(res.stderr.strip(), indent),
+            )
             log.info(msg)
             raise RuntimeError(msg) from subprocess.CalledProcessError(
                 res.returncode, res.args, res.stdout, res.stderr
@@ -1651,11 +1669,14 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
+    def http_client(
+        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+    ) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
+            retries=retries,
         )
 
     @property

@@ -13,6 +13,7 @@ use pageserver_api::models;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
+use utils::generation::Generation;
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -44,7 +45,211 @@ pub mod defaults {
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
 
-/// Per-tenant configuration options
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum AttachmentMode {
+    /// Our generation is current as far as we know, and as far as we know we are the only attached
+    /// pageserver.  This is the "normal" attachment mode.
+    Single,
+    /// Our generation number is current as far as we know, but we are advised that another
+    /// pageserver is still attached, and therefore to avoid executing deletions.   This is
+    /// the attachment mode of a pagesever that is the destination of a migration.
+    Multi,
+    /// Our generation number is superseded, or about to be superseded.  We are advised
+    /// to avoid remote storage writes if possible, and to avoid sending billing data.  This
+    /// is the attachment mode of a pageserver that is the origin of a migration.
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AttachedLocationConfig {
+    pub(crate) generation: Generation,
+    pub(crate) attach_mode: AttachmentMode,
+    // TODO: add a flag to override AttachmentMode's policies under
+    // disk pressure (i.e. unblock uploads under disk pressure in Stale
+    // state, unblock deletions after timeout in Multi state)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SecondaryLocationConfig {
+    /// If true, keep the local cache warm by polling remote storage
+    pub(crate) warm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum LocationMode {
+    Attached(AttachedLocationConfig),
+    Secondary(SecondaryLocationConfig),
+}
+
+/// Per-tenant, per-pageserver configuration.  All pageservers use the same TenantConf,
+/// but have distinct LocationConf.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocationConf {
+    /// The location-specific part of the configuration, describes the operating
+    /// mode of this pageserver for this tenant.
+    pub(crate) mode: LocationMode,
+    /// The pan-cluster tenant configuration, the same on all locations
+    pub(crate) tenant_conf: TenantConfOpt,
+}
+
+impl std::fmt::Debug for LocationConf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.mode {
+            LocationMode::Attached(conf) => {
+                write!(
+                    f,
+                    "Attached {:?}, gen={:?}",
+                    conf.attach_mode, conf.generation
+                )
+            }
+            LocationMode::Secondary(conf) => {
+                write!(f, "Secondary, warm={}", conf.warm)
+            }
+        }
+    }
+}
+
+impl AttachedLocationConfig {
+    /// Consult attachment mode to determine whether we are currently permitted
+    /// to delete layers.  This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_delete_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.attach_mode {
+            AttachmentMode::Single => true,
+            AttachmentMode::Multi | AttachmentMode::Stale => {
+                // In Multi mode we avoid doing deletions because some other
+                // attached pageserver might get 404 while trying to read
+                // a layer we delete which is still referenced in their metadata.
+                //
+                // In Stale mode, we avoid doing deletions because we expect
+                // that they would ultimately fail validation in the deletion
+                // queue due to our stale generation.
+                false
+            }
+        }
+    }
+
+    /// Whether we are currently hinted that it is worthwhile to upload layers.
+    /// This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_upload_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.attach_mode {
+            AttachmentMode::Single | AttachmentMode::Multi => true,
+            AttachmentMode::Stale => {
+                // In Stale mode, we avoid doing uploads because we expect that
+                // our replacement pageserver will already have started its own
+                // IndexPart that will never reference layers we upload: it is
+                // wasteful.
+                false
+            }
+        }
+    }
+}
+
+impl LocationConf {
+    /// For use when loading from a legacy configuration: presence of a tenant
+    /// implies it is in AttachmentMode::Single, which used to be the only
+    /// possible state.  This function should eventually be removed.
+    pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation,
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf,
+        }
+    }
+
+    /// For use when attaching/re-attaching: update the generation stored in this
+    /// structure.  If we were in a secondary state, promote to attached (posession
+    /// of a fresh generation implies this).
+    pub(crate) fn attach_in_generation(&mut self, generation: Generation) {
+        match &mut self.mode {
+            LocationMode::Attached(attach_conf) => {
+                attach_conf.generation = generation;
+            }
+            LocationMode::Secondary(_) => {
+                // We are promoted to attached by the control plane's re-attach response
+                self.mode = LocationMode::Attached(AttachedLocationConfig {
+                    generation,
+                    attach_mode: AttachmentMode::Single,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {
+        let tenant_conf = TenantConfOpt::try_from(&conf.tenant_conf)?;
+
+        fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
+            conf.generation
+                .ok_or_else(|| anyhow::anyhow!("Generation must be set when attaching"))
+        }
+
+        let mode = match &conf.mode {
+            models::LocationConfigMode::AttachedMulti => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Multi,
+                })
+            }
+            models::LocationConfigMode::AttachedSingle => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Single,
+                })
+            }
+            models::LocationConfigMode::AttachedStale => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Stale,
+                })
+            }
+            models::LocationConfigMode::Secondary => {
+                anyhow::ensure!(conf.generation.is_none());
+
+                let warm = conf
+                    .secondary_conf
+                    .as_ref()
+                    .map(|c| c.warm)
+                    .unwrap_or(false);
+                LocationMode::Secondary(SecondaryLocationConfig { warm })
+            }
+            models::LocationConfigMode::Detached => {
+                // Should not have been called: API code should translate this mode
+                // into a detach rather than trying to decode it as a LocationConf
+                return Err(anyhow::anyhow!("Cannot decode a Detached configuration"));
+            }
+        };
+
+        Ok(Self { mode, tenant_conf })
+    }
+}
+
+impl Default for LocationConf {
+    // TODO: this should be removed once tenant loading can guarantee that we are never
+    // loading from a directory without a configuration.
+    // => tech debt since https://github.com/neondatabase/neon/issues/1555
+    fn default() -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation: Generation::none(),
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf: TenantConfOpt::default(),
+        }
+    }
+}
+
+/// A tenant's calcuated configuration, which is the result of merging a
+/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
+///
+/// For storing and transmitting individual tenant's configuration, see
+/// TenantConfOpt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this

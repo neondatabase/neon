@@ -253,7 +253,7 @@ impl std::fmt::Display for UploadOp {
                 write!(f, "UploadMetadata(lsn: {})", lsn)
             }
             UploadOp::Delete(delete) => {
-                write!(f, "Delete({} layers)", delete.layers.len(),)
+                write!(f, "Delete({} layers)", delete.layers.len())
             }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }

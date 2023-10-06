@@ -30,7 +30,7 @@
 
 #include "neon.h"
 #include "walproposer.h"
-#include "walproposer_utils.h"
+#include "neon_utils.h"
 
 #define PageStoreTrace DEBUG5
 

@@ -13,6 +13,7 @@ aws-types.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
+camino.workspace = true
 hyper = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,6 @@ pin-project-lite.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+camino-tempfile.workspace = true
 test-context.workspace = true
 rand.workspace = true

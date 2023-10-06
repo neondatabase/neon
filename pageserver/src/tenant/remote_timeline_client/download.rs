@@ -5,10 +5,10 @@
 
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use camino::Utf8Path;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -74,12 +74,7 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path)
                 .await
-                .with_context(|| {
-                    format!(
-                        "create a destination file for layer '{}'",
-                        temp_file_path.display()
-                    )
-                })
+                .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
             let mut download = storage
                 .download(&remote_path)
@@ -121,7 +116,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .flush()
         .await
-        .with_context(|| format!("flush source file at {}", temp_file_path.display()))
+        .with_context(|| format!("flush source file at {temp_file_path}"))
         .map_err(DownloadError::Other)?;
 
     let expected = layer_metadata.file_size();
@@ -135,12 +130,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .sync_all()
         .await
-        .with_context(|| {
-            format!(
-                "failed to fsync source file at {}",
-                temp_file_path.display()
-            )
-        })
+        .with_context(|| format!("failed to fsync source file at {temp_file_path}"))
         .map_err(DownloadError::Other)?;
     drop(destination_file);
 
@@ -152,27 +142,23 @@ pub async fn download_layer_file<'a>(
 
     fs::rename(&temp_file_path, &local_path)
         .await
-        .with_context(|| format!("rename download layer file to {}", local_path.display(),))
+        .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
 
     crashsafe::fsync_async(&local_path)
         .await
-        .with_context(|| format!("fsync layer file {}", local_path.display(),))
+        .with_context(|| format!("fsync layer file {local_path}"))
         .map_err(DownloadError::Other)?;
 
-    tracing::debug!("download complete: {}", local_path.display());
+    tracing::debug!("download complete: {local_path}");
 
     Ok(bytes_amount)
 }
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
-pub fn is_temp_download_file(path: &Path) -> bool {
-    let extension = path.extension().map(|pname| {
-        pname
-            .to_str()
-            .expect("paths passed to this function must be valid Rust strings")
-    });
+pub fn is_temp_download_file(path: &Utf8Path) -> bool {
+    let extension = path.extension();
     match extension {
         Some(TEMP_DOWNLOAD_EXTENSION) => true,
         Some(_) => false,

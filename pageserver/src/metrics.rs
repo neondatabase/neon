@@ -94,14 +94,34 @@ pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
 });
 
 // Metrics collected on operations on the storage repository.
-pub(crate) static RECONSTRUCT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+
+pub(crate) struct ReconstructTimeMetrics {
+    ok: Histogram,
+    err: Histogram,
+}
+
+pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value (reconstruct a page from deltas)",
+        &["result"],
         CRITICAL_OP_BUCKETS.into(),
     )
-    .expect("failed to define a metric")
+    .expect("failed to define a metric");
+    ReconstructTimeMetrics {
+        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
+        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
+    }
 });
+
+impl ReconstructTimeMetrics {
+    pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
+        match result {
+            Ok(_) => &self.ok,
+            Err(_) => &self.err,
+        }
+    }
+}
 
 pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -947,6 +967,7 @@ pub(crate) struct DeletionQueueMetrics {
     pub(crate) keys_submitted: IntCounter,
     pub(crate) keys_dropped: IntCounter,
     pub(crate) keys_executed: IntCounter,
+    pub(crate) keys_validated: IntCounter,
     pub(crate) dropped_lsn_updates: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
     pub(crate) remote_errors: IntCounterVec,
@@ -968,7 +989,13 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 
     keys_executed: register_int_counter!(
         "pageserver_deletion_queue_executed_total",
-        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed."
+        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed to completion"
+    )
+    .expect("failed to define a metric"),
+
+    keys_validated: register_int_counter!(
+        "pageserver_deletion_queue_validated_total",
+        "Number of keys validated for deletion.  Sum with pageserver_deletion_queue_dropped_total for the total number of keys that have passed through the validation stage."
     )
     .expect("failed to define a metric"),
 
@@ -1856,7 +1883,6 @@ pub fn preinitialize_metrics() {
     // histograms
     [
         &READ_NUM_FS_LAYERS,
-        &RECONSTRUCT_TIME,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_WAIT_TIME,
@@ -1867,4 +1893,7 @@ pub fn preinitialize_metrics() {
     .for_each(|h| {
         Lazy::force(h);
     });
+
+    // Custom
+    Lazy::force(&RECONSTRUCT_TIME);
 }
