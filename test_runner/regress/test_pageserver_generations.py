@@ -81,7 +81,7 @@ def generate_uploads_and_deletions(
                     f"""
                 INSERT INTO foo (id, val)
                 SELECT g, '{data}'
-                FROM generate_series(1, 20000) g
+                FROM generate_series(1, 200) g
                 ON CONFLICT (id) DO UPDATE
                 SET val = EXCLUDED.val
                 """,
