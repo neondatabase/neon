@@ -72,13 +72,14 @@
 //!
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     convert::TryInto,
+    future::poll_fn,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc, Weak,
+        Arc, Mutex, Weak,
     },
-    task::Poll,
+    task::{Poll, Waker},
     time::Duration,
 };
 
@@ -252,10 +253,16 @@ pub struct PageCache {
     /// This is interpreted modulo the page cache size.
     next_evict_slot: AtomicUsize,
 
-    find_victim_sender:
-        async_channel::Sender<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
-    find_victim_waiters:
-        async_channel::Receiver<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
+    find_victim_waiters: Mutex<(
+        VecDeque<usize>,
+        VecDeque<usize>,
+        Vec<
+            Option<(
+                Option<Waker>,
+                Option<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
+            )>,
+        >,
+    )>,
 
     size_metrics: &'static PageCacheSizeMetrics,
 }
@@ -870,7 +877,17 @@ impl PageCache {
         _permit_witness: &PinnedSlotsPermit,
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         // Get in line.
-        let receiver = self.find_victim_waiters.recv();
+        let my_idx = {
+            let mut guard = self.find_victim_waiters.lock().unwrap();
+            let (waiters, free, slots) = &mut *guard;
+            let my_idx = free
+                .pop_front()
+                .expect("can't happen, len(slots) = len(waiters");
+            waiters.push_back(my_idx);
+            let prev = slots[my_idx].replace((None, None));
+            debug_assert!(prev.is_none());
+            my_idx
+        };
 
         let mut iters = 0;
         loop {
@@ -895,16 +912,42 @@ impl PageCache {
                     inner.key = None;
                 }
                 crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
-                self.find_victim_sender
-                    .try_send((slot_idx, inner))
-                    .expect("we always get in line first");
-                match futures::poll!(receiver) {
-                    Poll::Ready(Ok(res)) => return Ok(res),
-                    Poll::Ready(Err(_closed)) => unreachable!("we never close"),
-                    Poll::Pending => {
-                        unreachable!("we just sent to the channel and got in line earlier")
+
+                // put in the victim we found
+                {
+                    let mut slots_guard = self.find_victim_waiters.lock().unwrap();
+                    let (waiters, _, slots) = &mut *slots_guard;
+                    let winner_idx = waiters.pop_front().expect("we put ourselves in");
+                    let winner_slot = slots[winner_idx].as_mut().unwrap();
+                    let prev = winner_slot.1.replace((slot_idx, inner));
+                    debug_assert!(
+                        prev.is_none(),
+                        "ensure we didn't mess up this simple ring buffer structure"
+                    );
+                    if let Some(waker) = winner_slot.0.take() {
+                        waker.wake()
                     }
                 }
+
+                // take the victim that was found by someone else
+                return Ok(poll_fn(move |cx| {
+                    let mut guard = self.find_victim_waiters.lock().unwrap();
+                    let (_, free, waiters) = &mut *guard;
+
+                    let my_slot = waiters[my_idx].as_mut().unwrap();
+                    if let Some(res) = my_slot.1.take() {
+                        // .take() resets the waiters slot to None
+                        free.push_back(my_idx);
+                        debug_assert!(my_slot.0.is_none());
+                        debug_assert!(my_slot.1.is_none());
+                        waiters[my_idx] = None;
+                        return Poll::Ready(res);
+                    }
+                    let prev = my_slot.0.replace(cx.waker().clone());
+                    debug_assert!(prev.is_none());
+                    Poll::Pending
+                })
+                .await);
             }
         }
     }
@@ -941,7 +984,6 @@ impl PageCache {
             })
             .collect();
 
-        let (find_victim_sender, find_victim_waiters) = async_channel::bounded(num_pages);
         Self {
             materialized_page_map: Default::default(),
             immutable_page_map: Default::default(),
@@ -949,8 +991,11 @@ impl PageCache {
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
             pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
-            find_victim_sender,
-            find_victim_waiters,
+            find_victim_waiters: Mutex::new((VecDeque::new(), (0..num_pages).collect(), {
+                let mut v = Vec::with_capacity(num_pages);
+                v.resize_with(num_pages, || None);
+                v
+            })),
         }
     }
 }
