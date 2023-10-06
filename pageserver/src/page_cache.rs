@@ -287,18 +287,23 @@ impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
 /// currently found in the page cache. In that case, the caller of lock_for_read()
 /// is expected to fill in the page contents and call mark_valid().
 pub struct PageWriteGuard<'i> {
-    inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
+    state: PageWriteGuardState<'i>,
+}
 
-    _permit: PinnedSlotsPermit,
-
-    // Are the page contents currently valid?
-    // Used to mark pages as invalid that are assigned but not yet filled with data.
-    valid: bool,
+enum PageWriteGuardState<'i> {
+    Invalid {
+        inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
+        _permit: PinnedSlotsPermit,
+    },
+    Downgraded,
 }
 
 impl std::ops::DerefMut for PageWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.buf
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
@@ -306,25 +311,37 @@ impl std::ops::Deref for PageWriteGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.inner.buf
+        match &self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
 impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
     fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
-        self.inner.buf
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
-impl PageWriteGuard<'_> {
+impl<'a> PageWriteGuard<'a> {
     /// Mark that the buffer contents are now valid.
-    pub fn mark_valid(&mut self) {
-        assert!(self.inner.key.is_some());
-        assert!(
-            !self.valid,
-            "mark_valid called on a buffer that was already valid"
-        );
-        self.valid = true;
+    #[must_use]
+    pub fn mark_valid(mut self) -> PageReadGuard<'a> {
+        let prev = std::mem::replace(&mut self.state, PageWriteGuardState::Downgraded);
+        match prev {
+            PageWriteGuardState::Invalid { inner, _permit } => {
+                assert!(inner.key.is_some());
+                PageReadGuard {
+                    _permit: Arc::new(_permit),
+                    slot_guard: inner.downgrade(),
+                }
+            }
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
@@ -335,11 +352,14 @@ impl Drop for PageWriteGuard<'_> {
     /// initializing it, remove the mapping from the page cache.
     ///
     fn drop(&mut self) {
-        assert!(self.inner.key.is_some());
-        if !self.valid {
-            let self_key = self.inner.key.as_ref().unwrap();
-            PAGE_CACHE.get().unwrap().remove_mapping(self_key);
-            self.inner.key = None;
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => {
+                assert!(inner.key.is_some());
+                let self_key = inner.key.as_ref().unwrap();
+                PAGE_CACHE.get().unwrap().remove_mapping(self_key);
+                inner.key = None;
+            }
+            PageWriteGuardState::Downgraded => {}
         }
     }
 }
@@ -498,12 +518,13 @@ impl PageCache {
                 "we hold a write lock, so, no one else should have a permit"
             );
             let mut write_guard = PageWriteGuard {
-                _permit: permit.take().unwrap(),
-                inner,
-                valid: false,
+                state: PageWriteGuardState::Invalid {
+                    _permit: permit.take().unwrap(),
+                    inner,
+                },
             };
             write_guard.copy_from_slice(img);
-            write_guard.mark_valid();
+            let _ = write_guard.mark_valid();
             return Ok(());
         }
     }
@@ -684,9 +705,10 @@ impl PageCache {
             );
 
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
-                _permit: permit.take().unwrap(),
-                inner,
-                valid: false,
+                state: PageWriteGuardState::Invalid {
+                    _permit: permit.take().unwrap(),
+                    inner,
+                },
             }));
         }
     }
