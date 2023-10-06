@@ -322,7 +322,7 @@ impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
     fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
         match &mut self.state {
             PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
-            PageWriteGuardState::Downgraded => todo!(),
+            PageWriteGuardState::Downgraded => unreachable!(),
         }
     }
 }
