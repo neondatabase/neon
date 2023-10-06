@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
 )
-from fixtures.pageserver.http import PageserverApiException, TimelineCreate409
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
@@ -216,7 +216,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
     env.pageserver.stop(immediate=True)
 
 
-def test_competing_branchings_from_loading_race_to_ok_or_409(neon_env_builder: NeonEnvBuilder):
+def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: NeonEnvBuilder):
     """
     If the activate only after upload is used, then retries could become competing.
     """
@@ -278,8 +278,10 @@ def test_competing_branchings_from_loading_race_to_ok_or_409(neon_env_builder: N
     log.info(failed)
     log.info(succeeded)
 
-    # FIXME: there's probably multiple valid status codes
-    assert isinstance(failed, TimelineCreate409)
+    # FIXME: there's probably multiple valid status codes:
+    # - Timeline 62505b9a9f6b1d29117b1b74eaf07b12/56cd19d3b2dbcc65e9d53ec6ca304f24 already exists
+    # - whatever 409 response says, but that is a subclass of PageserverApiException
+    assert isinstance(failed, PageserverApiException)
     assert succeeded["state"] == "Active"
 
 
