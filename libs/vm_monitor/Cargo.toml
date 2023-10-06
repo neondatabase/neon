@@ -29,3 +29,4 @@ workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cgroups-rs = "0.3.3"
+pin-project-lite.workspace = true

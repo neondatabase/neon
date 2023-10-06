@@ -2,18 +2,18 @@
 
 use std::num::NonZeroU64;
 
-use crate::MiB;
+use crate::{bytes_to_mebibytes, MiB};
 use anyhow::{anyhow, Context};
 use tokio_postgres::{types::ToSql, Client, NoTls, Row};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Manages Postgres' file cache by keeping a connection open.
 #[derive(Debug)]
 pub struct FileCacheState {
     client: Client,
     conn_str: String,
-    pub(crate) config: FileCacheConfig,
+    config: FileCacheConfig,
 
     /// A token for cancelling spawned threads during shutdown.
     token: CancellationToken,
@@ -24,7 +24,7 @@ pub struct FileCacheConfig {
     /// Whether the file cache is *actually* stored in memory (e.g. by writing to
     /// a tmpfs or shmem file). If true, the size of the file cache will be counted against the
     /// memory available for the cgroup.
-    pub(crate) in_memory: bool,
+    in_memory: bool,
 
     /// The size of the file cache, in terms of the size of the resource it consumes
     /// (currently: only memory)
@@ -133,7 +133,10 @@ impl FileCacheConfig {
     }
 
     /// Calculate the desired size of the cache, given the total memory
-    pub fn calculate_cache_size(&self, total: u64) -> u64 {
+    ///
+    /// This isn't exposed publicly because the actual size of the cache may be limited by its
+    /// maximum size, so calculating the real usage requires querying the cache directly.
+    fn calculate_cache_size(&self, total: u64) -> u64 {
         // *Note*: all units are in bytes, until the very last line.
         let available = total.saturating_sub(self.min_remaining_after_cache.get());
         if available == 0 {
@@ -203,12 +206,17 @@ impl FileCacheState {
         Ok(client)
     }
 
+    /// Returns whether the config indicates the file cache is in memory
+    pub fn in_memory(&self) -> bool {
+        self.config.in_memory
+    }
+
     /// Execute a query with a retry if necessary.
     ///
     /// If the initial query fails, we restart the database connection and attempt
     /// if again.
     #[tracing::instrument(skip_all, fields(%statement))]
-    pub async fn query_with_retry(
+    async fn query_with_retry(
         &mut self,
         statement: &str,
         params: &[&(dyn ToSql + Sync)],
@@ -238,7 +246,7 @@ impl FileCacheState {
         }
     }
 
-    /// Get the current size of the file cache.
+    /// Get the current size of the file cache, in bytes
     #[tracing::instrument(skip_all)]
     pub async fn get_file_cache_size(&mut self) -> anyhow::Result<u64> {
         self.query_with_retry(
@@ -258,10 +266,12 @@ impl FileCacheState {
         .context("failed to extract file cache size from query result")
     }
 
-    /// Attempt to set the file cache size, returning the size it was actually
-    /// set to.
-    #[tracing::instrument(skip_all, fields(%num_bytes))]
-    pub async fn set_file_cache_size(&mut self, num_bytes: u64) -> anyhow::Result<u64> {
+    /// Calculates the desired size of the cache, relative to the total size given and capped by
+    /// the cache's maximum size (requires querying).
+    #[tracing::instrument(skip(self))]
+    pub async fn calculate_cache_size(&mut self, total_bytes: u64) -> anyhow::Result<u64> {
+        let desired_bytes = self.config.calculate_cache_size(total_bytes);
+
         let max_bytes = self
             // The file cache GUC variable is in MiB, but the conversion with pg_size_bytes
             // means that the end result we get is in bytes.
@@ -277,20 +287,21 @@ impl FileCacheState {
             .map(|bytes| bytes as u64)
             .context("failed to extract max file cache size from query result")?;
 
-        let max_mb = max_bytes / MiB;
-        let num_mb = u64::min(num_bytes, max_bytes) / MiB;
+        if desired_bytes > max_bytes {
+            warn!(
+                desired_mb = bytes_to_mebibytes(desired_bytes),
+                max_mb = bytes_to_mebibytes(max_bytes),
+                "desired file cache size capped by maximum size"
+            );
+        }
 
-        let capped = if num_bytes > max_bytes {
-            " (capped by maximum size)"
-        } else {
-            ""
-        };
+        Ok(desired_bytes.min(max_bytes))
+    }
 
-        info!(
-            size = num_mb,
-            max = max_mb,
-            "updating file cache size {capped}",
-        );
+    /// Set the file cache size to a value returned by `calculate_size`
+    #[tracing::instrument(skip_all, fields(num_bytes))]
+    pub async fn set_file_cache_size(&mut self, num_bytes: u64) -> anyhow::Result<u64> {
+        let num_mb = num_bytes / MiB;
 
         // note: even though the normal ways to get the cache size produce values with trailing "MB"
         // (hence why we call pg_size_bytes in `get_file_cache_size`'s query), the format

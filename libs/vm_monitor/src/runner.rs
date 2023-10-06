@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::cgroup::{CgroupWatcher, Sequenced};
+use crate::cgroup::{self, CgroupWatcher};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
@@ -89,10 +89,9 @@ impl Runner {
 
         // *NOTE*: the dispatcher and cgroup manager talk through these channels
         // so make sure they each get the correct half, nothing is droppped, etc.
-        let (notified_send, notified_recv) = mpsc::channel(1);
         let (requesting_send, requesting_recv) = mpsc::channel(1);
 
-        let dispatcher = Dispatcher::new(ws, notified_send, requesting_recv)
+        let dispatcher = Dispatcher::new(ws, requesting_recv)
             .await
             .context("error creating new dispatcher")?;
 
@@ -121,15 +120,8 @@ impl Runner {
             // now, and then set limits later.
             info!("initializing cgroup");
 
-            let (cgroup, cgroup_event_stream) = CgroupWatcher::new(name.clone(), requesting_send)
-                .context("failed to create cgroup manager")?;
-
-            info!("temporarily unsetting memory.high");
-
-            // Temporarily un-set cgroup memory.high; see above.
-            cgroup
-                .unset_memory_high()
-                .context("failed to unset memory.high")?;
+            let (cgroup, controller, cgroup_event_stream) =
+                CgroupWatcher::new(name.clone()).context("failed to create cgroup manager")?;
 
             let cgroup = Arc::new(cgroup);
 
@@ -137,8 +129,19 @@ impl Runner {
             spawn_with_cancel(
                 token.clone(),
                 |_| error!("cgroup watcher terminated"),
-                async move { cgroup_clone.watch(notified_recv, cgroup_event_stream).await },
+                async move {
+                    cgroup_clone
+                        .watch(controller, requesting_send, cgroup_event_stream)
+                        .await
+                },
             );
+
+            info!("temporarily unsetting memory.high");
+
+            cgroup
+                .unset_memory_high()
+                .await
+                .context("failed to unset memory.high")?;
 
             state.cgroup = Some(cgroup);
         }
@@ -165,7 +168,10 @@ impl Runner {
                 .await
                 .context("error getting file cache size")?;
 
-            let new_size = file_cache.config.calculate_cache_size(mem);
+            let new_size = file_cache
+                .calculate_cache_size(mem)
+                .await
+                .context("failed to calculate new file cache size")?;
             info!(
                 initial = bytes_to_mebibytes(size),
                 new = bytes_to_mebibytes(new_size),
@@ -174,16 +180,13 @@ impl Runner {
 
             // note: even if size == new_size, we want to explicitly set it, just
             // to make sure that we have the permissions to do so
-            let actual_size = file_cache
+            file_cache
                 .set_file_cache_size(new_size)
                 .await
                 .context("failed to set file cache size, possibly due to inadequate permissions")?;
-            if actual_size != new_size {
-                info!("file cache size actually got set to {actual_size}")
-            }
             // Mark the resources given to the file cache as reserved, but only if it's in memory.
             if !args.file_cache_on_disk {
-                file_cache_reserved_bytes = actual_size;
+                file_cache_reserved_bytes = new_size;
             }
 
             state.filecache = Some(file_cache);
@@ -191,13 +194,10 @@ impl Runner {
 
         if let Some(cgroup) = &state.cgroup {
             let available = mem - file_cache_reserved_bytes;
-            let value = cgroup.config.calculate_memory_high_value(available);
-
-            info!(value, "setting memory.high");
-
             cgroup
-                .set_memory_high_bytes(value)
-                .context("failed to set cgroup memory.high")?;
+                .set_initial_memory_high(cgroup::MemorySize { bytes: available })
+                .await
+                .context("failed to set initial cgroup memory.high")?;
         }
 
         Ok(state)
@@ -217,73 +217,45 @@ impl Runner {
 
         let requested_mem = target.mem;
         let usable_system_memory = requested_mem.saturating_sub(self.config.sys_buffer_bytes);
-        let expected_file_cache_mem_usage = self
-            .filecache
-            .as_ref()
-            .map(|file_cache| file_cache.config.calculate_cache_size(usable_system_memory))
-            .unwrap_or(0);
-        let mut new_cgroup_mem_high = 0;
+        let (new_file_cache_size, file_cache_mem_reserved_bytes) = match &mut self.filecache {
+            None => (0, 0),
+            Some(fc) => {
+                let size = fc.calculate_cache_size(usable_system_memory).await?;
+                match fc.in_memory() {
+                    true => (size, size),
+                    false => (size, 0),
+                }
+            }
+        };
+
+        let mut status = vec![];
+
         if let Some(cgroup) = &self.cgroup {
-            new_cgroup_mem_high = cgroup
-                .config
-                .calculate_memory_high_value(usable_system_memory - expected_file_cache_mem_usage);
+            let available = usable_system_memory.saturating_sub(file_cache_mem_reserved_bytes);
 
-            let current = cgroup
-                .current_memory_usage()
-                .context("failed to fetch cgroup memory")?;
-
-            if new_cgroup_mem_high < current + cgroup.config.memory_high_buffer_bytes {
-                let status = format!(
-                    "{}: {} MiB (new high) < {} (current usage) + {} (buffer)",
-                    "calculated memory.high too low",
-                    bytes_to_mebibytes(new_cgroup_mem_high),
-                    bytes_to_mebibytes(current),
-                    bytes_to_mebibytes(cgroup.config.memory_high_buffer_bytes)
-                );
-
-                info!(status, "discontinuing downscale");
-
-                return Ok((false, status));
+            match cgroup
+                .downscale(cgroup::MemorySize { bytes: available })
+                .await?
+            {
+                Ok(accepted_message) => status.push(accepted_message),
+                Err(denied_message) => {
+                    info!(status = denied_message, "discontinuing downscale");
+                    return Ok((false, denied_message));
+                }
             }
         }
 
-        // The downscaling has been approved. Downscale the file cache, then the cgroup.
-        let mut status = vec![];
-        let mut file_cache_mem_usage = 0;
+        // The downscaling has been approved and actioned by the cgroup (if there is one), which is
+        // the only component that can reject it, so all that's left is to update the file cache.
         if let Some(file_cache) = &mut self.filecache {
             let actual_usage = file_cache
-                .set_file_cache_size(expected_file_cache_mem_usage)
+                .set_file_cache_size(new_file_cache_size)
                 .await
                 .context("failed to set file cache size")?;
-            if file_cache.config.in_memory {
-                file_cache_mem_usage = actual_usage;
-            }
             let message = format!(
                 "set file cache size to {} MiB (in memory = {})",
                 bytes_to_mebibytes(actual_usage),
-                file_cache.config.in_memory,
-            );
-            info!("downscale: {message}");
-            status.push(message);
-        }
-
-        if let Some(cgroup) = &self.cgroup {
-            let available_memory = usable_system_memory - file_cache_mem_usage;
-
-            if file_cache_mem_usage != expected_file_cache_mem_usage {
-                new_cgroup_mem_high = cgroup.config.calculate_memory_high_value(available_memory);
-            }
-
-            // new_cgroup_mem_high is initialized to 0 but it is guaranteed to not be here
-            // since it is properly initialized in the previous cgroup if let block
-            cgroup
-                .set_memory_high_bytes(new_cgroup_mem_high)
-                .context("failed to set cgroup memory.high")?;
-
-            let message = format!(
-                "set cgroup memory.high to {} MiB, of new max {} MiB",
-                bytes_to_mebibytes(new_cgroup_mem_high),
-                bytes_to_mebibytes(available_memory)
+                file_cache.in_memory(),
             );
             info!("downscale: {message}");
             status.push(message);
@@ -308,42 +280,34 @@ impl Runner {
         // Get the file cache's expected contribution to the memory usage
         let mut file_cache_mem_usage = 0;
         if let Some(file_cache) = &mut self.filecache {
-            let expected_usage = file_cache.config.calculate_cache_size(usable_system_memory);
+            let new_size = file_cache
+                .calculate_cache_size(usable_system_memory)
+                .await
+                .context("failed to calculate new file cache size")?;
+
             info!(
-                target = bytes_to_mebibytes(expected_usage),
+                size = bytes_to_mebibytes(new_size),
                 total = bytes_to_mebibytes(new_mem),
                 "updating file cache size",
             );
 
-            let actual_usage = file_cache
-                .set_file_cache_size(expected_usage)
+            let actual_size = file_cache
+                .set_file_cache_size(new_size)
                 .await
                 .context("failed to set file cache size")?;
-            if file_cache.config.in_memory {
-                file_cache_mem_usage = actual_usage;
-            }
-
-            if actual_usage != expected_usage {
-                warn!(
-                    "file cache was set to a different size that we wanted: target = {} Mib, actual= {} Mib",
-                    bytes_to_mebibytes(expected_usage),
-                    bytes_to_mebibytes(actual_usage)
-                )
+            if file_cache.in_memory() {
+                file_cache_mem_usage = actual_size;
             }
         }
 
         if let Some(cgroup) = &self.cgroup {
-            let available_memory = usable_system_memory - file_cache_mem_usage;
-            let new_cgroup_mem_high = cgroup.config.calculate_memory_high_value(available_memory);
-            info!(
-                target = bytes_to_mebibytes(new_cgroup_mem_high),
-                total = bytes_to_mebibytes(new_mem),
-                name = cgroup.path(),
-                "updating cgroup memory.high",
-            );
+            let available_memory = usable_system_memory.saturating_sub(file_cache_mem_usage);
+
             cgroup
-                .set_memory_high_bytes(new_cgroup_mem_high)
-                .context("failed to set cgroup memory.high")?;
+                .upscale(cgroup::MemorySize {
+                    bytes: available_memory,
+                })
+                .await?;
         }
 
         Ok(())
@@ -361,10 +325,6 @@ impl Runner {
                 self.handle_upscale(granted)
                     .await
                     .context("failed to handle upscale")?;
-                self.dispatcher
-                    .notify_upscale(Sequenced::new(granted))
-                    .await
-                    .context("failed to notify notify cgroup of upscale")?;
                 Ok(Some(OutboundMsg::new(
                     OutboundMsgKind::UpscaleConfirmation {},
                     id,

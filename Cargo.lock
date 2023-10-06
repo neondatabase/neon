@@ -5190,6 +5190,7 @@ dependencies = [
  "clap",
  "futures",
  "inotify 0.10.2",
+ "pin-project-lite",
  "serde",
  "serde_json",
  "sysinfo",
