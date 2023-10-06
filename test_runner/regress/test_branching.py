@@ -271,12 +271,12 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
     first = queue.get()
     second = queue.get()
 
+    log.info(first)
+    log.info(second)
+
     (succeeded, failed) = (first, second) if isinstance(second, Exception) else (second, first)
     assert isinstance(failed, Exception)
     assert isinstance(succeeded, Dict)
-
-    log.info(failed)
-    log.info(succeeded)
 
     # FIXME: there's probably multiple valid status codes:
     # - Timeline 62505b9a9f6b1d29117b1b74eaf07b12/56cd19d3b2dbcc65e9d53ec6ca304f24 already exists
