@@ -220,6 +220,8 @@ where
                     warn!("Dropping stale deletions for tenant {tenant_id} in generation {:?}, objects may be leaked", tenant.generation);
                     metrics::DELETION_QUEUE.keys_dropped.inc_by(tenant.len() as u64);
                     mutated = true;
+                } else {
+                    metrics::DELETION_QUEUE.keys_validated.inc_by(tenant.len() as u64);
                 }
                 this_list_valid
             });

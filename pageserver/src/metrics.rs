@@ -967,6 +967,7 @@ pub(crate) struct DeletionQueueMetrics {
     pub(crate) keys_submitted: IntCounter,
     pub(crate) keys_dropped: IntCounter,
     pub(crate) keys_executed: IntCounter,
+    pub(crate) keys_validated: IntCounter,
     pub(crate) dropped_lsn_updates: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
     pub(crate) remote_errors: IntCounterVec,
@@ -988,7 +989,13 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 
     keys_executed: register_int_counter!(
         "pageserver_deletion_queue_executed_total",
-        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed."
+        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed to completion"
+    )
+    .expect("failed to define a metric"),
+
+    keys_validated: register_int_counter!(
+        "pageserver_deletion_queue_validated_total",
+        "Number of keys validated for deletion.  Sum with pageserver_deletion_queue_dropped_total for the total number of keys that have passed through the validation stage."
     )
     .expect("failed to define a metric"),
 
