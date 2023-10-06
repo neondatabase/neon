@@ -85,6 +85,8 @@ typedef struct FileCacheControl
 	uint32 size; /* size of cache file in chunks */
 	uint32 used; /* number of used chunks */
 	uint32 limit; /* shared copy of lfc_size_limit */
+	uint64 hits;
+	uint64 misses;
 	dlist_head lru; /* double linked list for LRU replacement algorithm */
 } FileCacheControl;
 
@@ -208,6 +210,8 @@ lfc_shmem_startup(void)
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
+		lfc_ctl->hits = 0;
+		lfc_ctl->misses = 0;
 		dlist_init(&lfc_ctl->lru);
 
 		/* Recreate file cache on restart */
@@ -590,6 +594,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
+		lfc_ctl->misses += 1; /* race condition here, but precise value is not needed */
 		LWLockRelease(lfc_lock);
 		return false;
 	}
@@ -614,6 +619,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	if (lfc_ctl->generation == generation)
 	{
 		Assert(LFC_ENABLED());
+		lfc_ctl->hits += 1;
 		Assert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
@@ -741,6 +747,23 @@ typedef struct
 	TupleDesc	tupdesc;
 	LocalCachePagesRec *record;
 } LocalCachePagesContext;
+
+
+PG_FUNCTION_INFO_V1(local_cache_hits);
+Datum
+local_cache_hits(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(lfc_ctl ? lfc_ctl->hits : -1);
+}
+
+
+PG_FUNCTION_INFO_V1(local_cache_misses);
+Datum
+local_cache_misses(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(lfc_ctl ? lfc_ctl->misses : -1);
+}
+
 
 /*
  * Function returning data from the local file cache
