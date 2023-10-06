@@ -151,61 +151,86 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
-/// Initialize repositories with locally available timelines.
-/// Timelines that are only partially available locally (remote storage has more data than this pageserver)
-/// are scheduled for download and added to the tenant once download is completed.
-#[instrument(skip_all)]
-pub async fn init_tenant_mgr(
+fn emergency_generations(
+    tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
+) -> HashMap<TenantId, Generation> {
+    tenant_confs
+        .iter()
+        .filter_map(|(tid, lc)| {
+            let lc = match lc {
+                Ok(lc) => lc,
+                Err(_) => return None,
+            };
+            let gen = match &lc.mode {
+                LocationMode::Attached(alc) => Some(alc.generation),
+                LocationMode::Secondary(_) => None,
+            };
+
+            gen.map(|g| (*tid, g))
+        })
+        .collect()
+}
+
+async fn init_load_generations(
     conf: &'static PageServerConf,
-    resources: TenantSharedResources,
-    init_order: InitializationOrder,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    // Scan local filesystem for attached tenants
-    let tenants_dir = conf.tenants_path();
-
-    let mut tenants = HashMap::new();
-
-    // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-    let tenant_generations = if let Some(client) = ControlPlaneClient::new(conf, &cancel) {
-        let result = match client.re_attach().await {
+    tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
+    resources: &TenantSharedResources,
+    cancel: &CancellationToken,
+) -> anyhow::Result<Option<HashMap<TenantId, Generation>>> {
+    let generations = if conf.control_plane_emergency_mode {
+        error!(
+            "Emergency mode!  Tenants will be attached unsafely using their last known generation"
+        );
+        emergency_generations(tenant_confs)
+    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+        info!("Calling control plane API to re-attach tenants");
+        // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
+        match client.re_attach().await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
             }
-        };
-
-        // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
-        // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
-        // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
-        // are processed, even though we don't block on recovery completing here.
-        //
-        // Must only do this if remote storage is enabled, otherwise deletion queue
-        // is not running and channel push will fail.
-        if resources.remote_storage.is_some() {
-            resources
-                .deletion_queue_client
-                .recover(result.clone())
-                .await?;
         }
-
-        Some(result)
     } else {
         info!("Control plane API not configured, tenant generations are disabled");
-        None
+        return Ok(None);
     };
+
+    // The deletion queue needs to know about the startup attachment state to decide which (if any) stored
+    // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
+    // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
+    // are processed, even though we don't block on recovery completing here.
+    //
+    // Must only do this if remote storage is enabled, otherwise deletion queue
+    // is not running and channel push will fail.
+    if resources.remote_storage.is_some() {
+        resources
+            .deletion_queue_client
+            .recover(generations.clone())
+            .await?;
+    }
+
+    Ok(Some(generations))
+}
+
+/// Initial stage of load: walk the local tenants directory, clean up any temp files,
+/// and load configurations for the tenants we found.
+async fn init_load_tenant_configs(
+    conf: &'static PageServerConf,
+) -> anyhow::Result<HashMap<TenantId, anyhow::Result<LocationConf>>> {
+    let tenants_dir = conf.tenants_path();
 
     let mut dir_entries = tenants_dir
         .read_dir_utf8()
         .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
 
-    let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
+    let mut configs = HashMap::new();
 
     loop {
         match dir_entries.next() {
             None => break,
-            Some(Ok(dir_entry)) => {
-                let tenant_dir_path = dir_entry.path().to_path_buf();
+            Some(Ok(dentry)) => {
+                let tenant_dir_path = dentry.path().to_path_buf();
                 if crate::is_temporary(&tenant_dir_path) {
                     info!("Found temporary tenant directory, removing: {tenant_dir_path}");
                     // No need to use safe_remove_tenant_dir_all because this is already
@@ -216,141 +241,158 @@ pub async fn init_tenant_mgr(
                             tenant_dir_path, e
                         );
                     }
-                } else {
-                    // This case happens if we:
-                    // * crash during attach before creating the attach marker file
-                    // * crash during tenant delete before removing tenant directory
-                    let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
-                        format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
-                    })?;
-                    if is_empty {
-                        info!("removing empty tenant directory {tenant_dir_path:?}");
-                        if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
-                            error!(
-                                "Failed to remove empty tenant directory '{}': {e:#}",
-                                tenant_dir_path
-                            )
-                        }
-                        continue;
-                    }
-
-                    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-                    if tenant_ignore_mark_file.exists() {
-                        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-                        continue;
-                    }
-
-                    let tenant_id = match tenant_dir_path
-                        .file_name()
-                        .unwrap_or_default()
-                        .parse::<TenantId>()
-                    {
-                        Ok(id) => id,
-                        Err(_) => {
-                            warn!(
-                                "Invalid tenant path (garbage in our repo directory?): {}",
-                                tenant_dir_path
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Try loading the location configuration
-                    let mut location_conf = match Tenant::load_tenant_config(conf, &tenant_id)
-                        .context("load tenant config")
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!("Marking tenant broken, failed to {e:#}");
-
-                            tenants.insert(
-                                tenant_id,
-                                TenantSlot::Attached(Tenant::create_broken_tenant(
-                                    conf,
-                                    tenant_id,
-                                    "error loading tenant location configuration".to_string(),
-                                )),
-                            );
-
-                            continue;
-                        }
-                    };
-
-                    let generation = if let Some(generations) = &tenant_generations {
-                        // We have a generation map: treat it as the authority for whether
-                        // this tenant is really attached.
-                        if let Some(gen) = generations.get(&tenant_id) {
-                            *gen
-                        } else {
-                            match &location_conf.mode {
-                                LocationMode::Secondary(_) => {
-                                    // We do not require the control plane's permission for secondary mode
-                                    // tenants, because they do no remote writes and hence require no
-                                    // generation number
-                                    info!("Loaded tenant {tenant_id} in secondary mode");
-                                    tenants.insert(tenant_id, TenantSlot::Secondary);
-                                }
-                                LocationMode::Attached(_) => {
-                                    // TODO: augment re-attach API to enable the control plane to
-                                    // instruct us about secondary attachments.  That way, instead of throwing
-                                    // away local state, we can gracefully fall back to secondary here, if the control
-                                    // plane tells us so.
-                                    // (https://github.com/neondatabase/neon/issues/5377)
-                                    info!("Detaching tenant {tenant_id}, control plane omitted it in re-attach response");
-                                    if let Err(e) =
-                                        safe_remove_tenant_dir_all(&tenant_dir_path).await
-                                    {
-                                        error!(
-                                            "Failed to remove detached tenant directory '{}': {:?}",
-                                            tenant_dir_path, e
-                                        );
-                                    }
-                                }
-                            };
-
-                            continue;
-                        }
-                    } else {
-                        // Legacy mode: no generation information, any tenant present
-                        // on local disk may activate
-                        info!(
-                            "Starting tenant {} in legacy mode, no generation",
-                            tenant_dir_path
-                        );
-                        Generation::none()
-                    };
-
-                    // Presence of a generation number implies attachment: attach the tenant
-                    // if it wasn't already, and apply the generation number.
-                    location_conf.attach_in_generation(generation);
-                    Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
-
-                    match schedule_local_tenant_processing(
-                        conf,
-                        tenant_id,
-                        &tenant_dir_path,
-                        AttachedTenantConf::try_from(location_conf)?,
-                        resources.clone(),
-                        Some(init_order.clone()),
-                        &TENANTS,
-                        &ctx,
-                    ) {
-                        Ok(tenant) => {
-                            tenants.insert(tenant.tenant_id(), TenantSlot::Attached(tenant));
-                        }
-                        Err(e) => {
-                            error!("Failed to collect tenant files from dir {tenants_dir:?} for entry {dir_entry:?}, reason: {e:#}");
-                        }
-                    }
+                    continue;
                 }
+
+                // This case happens if we:
+                // * crash during attach before creating the attach marker file
+                // * crash during tenant delete before removing tenant directory
+                let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
+                    format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
+                })?;
+                if is_empty {
+                    info!("removing empty tenant directory {tenant_dir_path:?}");
+                    if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
+                        error!(
+                            "Failed to remove empty tenant directory '{}': {e:#}",
+                            tenant_dir_path
+                        )
+                    }
+                    continue;
+                }
+
+                let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+                if tenant_ignore_mark_file.exists() {
+                    info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+                    continue;
+                }
+
+                let tenant_id = match tenant_dir_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .parse::<TenantId>()
+                {
+                    Ok(id) => id,
+                    Err(_) => {
+                        warn!(
+                            "Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",
+                        );
+                        continue;
+                    }
+                };
+
+                configs.insert(tenant_id, Tenant::load_tenant_config(conf, &tenant_id));
             }
             Some(Err(e)) => {
-                // On error, print it, but continue with the other tenants. If we error out
-                // here, the pageserver startup fails altogether, causing outage for *all*
-                // tenants. That seems worse.
-                error!(
-                    "Failed to list tenants dir entry in directory {tenants_dir:?}, reason: {e:?}"
+                // An error listing the top level directory indicates serious problem
+                // with local filesystem: we will fail to load, and fail to start.
+                anyhow::bail!(e);
+            }
+        }
+    }
+    Ok(configs)
+}
+
+/// Initialize repositories with locally available timelines.
+/// Timelines that are only partially available locally (remote storage has more data than this pageserver)
+/// are scheduled for download and added to the tenant once download is completed.
+#[instrument(skip_all)]
+pub async fn init_tenant_mgr(
+    conf: &'static PageServerConf,
+    resources: TenantSharedResources,
+    init_order: InitializationOrder,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut tenants = HashMap::new();
+
+    let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
+
+    // Scan local filesystem for attached tenants
+    let tenant_configs = init_load_tenant_configs(conf).await?;
+
+    // Determine which tenants are to be attached
+    let tenant_generations =
+        init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
+
+    // Construct `Tenant` objects and start them running
+    for (tenant_id, location_conf) in tenant_configs {
+        let tenant_dir_path = conf.tenant_path(&tenant_id);
+
+        let mut location_conf = match location_conf {
+            Ok(l) => l,
+            Err(e) => {
+                warn!(%tenant_id, "Marking tenant broken, failed to {e:#}");
+
+                tenants.insert(
+                    tenant_id,
+                    TenantSlot::Attached(Tenant::create_broken_tenant(
+                        conf,
+                        tenant_id,
+                        format!("{}", e),
+                    )),
                 );
+                continue;
+            }
+        };
+
+        let generation = if let Some(generations) = &tenant_generations {
+            // We have a generation map: treat it as the authority for whether
+            // this tenant is really attached.
+            if let Some(gen) = generations.get(&tenant_id) {
+                *gen
+            } else {
+                match &location_conf.mode {
+                    LocationMode::Secondary(_) => {
+                        // We do not require the control plane's permission for secondary mode
+                        // tenants, because they do no remote writes and hence require no
+                        // generation number
+                        info!(%tenant_id, "Loaded tenant in secondary mode");
+                        tenants.insert(tenant_id, TenantSlot::Secondary);
+                    }
+                    LocationMode::Attached(_) => {
+                        // TODO: augment re-attach API to enable the control plane to
+                        // instruct us about secondary attachments.  That way, instead of throwing
+                        // away local state, we can gracefully fall back to secondary here, if the control
+                        // plane tells us so.
+                        // (https://github.com/neondatabase/neon/issues/5377)
+                        info!(%tenant_id, "Detaching tenant, control plane omitted it in re-attach response");
+                        if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
+                            error!(%tenant_id,
+                                "Failed to remove detached tenant directory '{tenant_dir_path}': {e:?}",
+                            );
+                        }
+                    }
+                };
+
+                continue;
+            }
+        } else {
+            // Legacy mode: no generation information, any tenant present
+            // on local disk may activate
+            info!(%tenant_id, "Starting tenant in legacy mode, no generation",);
+            Generation::none()
+        };
+
+        // Presence of a generation number implies attachment: attach the tenant
+        // if it wasn't already, and apply the generation number.
+        location_conf.attach_in_generation(generation);
+        Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
+
+        match schedule_local_tenant_processing(
+            conf,
+            tenant_id,
+            &tenant_dir_path,
+            AttachedTenantConf::try_from(location_conf)?,
+            resources.clone(),
+            Some(init_order.clone()),
+            &TENANTS,
+            &ctx,
+        ) {
+            Ok(tenant) => {
+                tenants.insert(tenant.tenant_id(), TenantSlot::Attached(tenant));
+            }
+            Err(e) => {
+                error!(%tenant_id, "Failed to start tenant: {e:#}");
             }
         }
     }

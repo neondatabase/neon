@@ -211,6 +211,10 @@ pub struct PageServerConf {
 
     /// JWT token for use with the control plane API.
     pub control_plane_api_token: Option<SecretString>,
+
+    /// If true, pageserver will make best-effort to operate without a control plane: only
+    /// for use in major incidents.
+    pub control_plane_emergency_mode: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -288,6 +292,7 @@ struct PageServerConfigBuilder {
 
     control_plane_api: BuilderValue<Option<Url>>,
     control_plane_api_token: BuilderValue<Option<SecretString>>,
+    control_plane_emergency_mode: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -355,6 +360,7 @@ impl Default for PageServerConfigBuilder {
 
             control_plane_api: Set(None),
             control_plane_api_token: Set(None),
+            control_plane_emergency_mode: Set(false),
         }
     }
 }
@@ -491,6 +497,10 @@ impl PageServerConfigBuilder {
         self.control_plane_api_token = BuilderValue::Set(token)
     }
 
+    pub fn control_plane_emergency_mode(&mut self, enabled: bool) {
+        self.control_plane_emergency_mode = BuilderValue::Set(enabled)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -582,6 +592,9 @@ impl PageServerConfigBuilder {
             control_plane_api_token: self
                 .control_plane_api_token
                 .ok_or(anyhow!("missing control_plane_api_token"))?,
+            control_plane_emergency_mode: self
+                .control_plane_emergency_mode
+                .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
         })
     }
 }
@@ -807,6 +820,10 @@ impl PageServerConf {
                         builder.control_plane_api_token(Some(parsed.into()))
                     }
                 },
+                "control_plane_emergency_mode" => {
+                    builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
+
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -976,6 +993,7 @@ impl PageServerConf {
             background_task_maximum_delay: Duration::ZERO,
             control_plane_api: None,
             control_plane_api_token: None,
+            control_plane_emergency_mode: false,
         }
     }
 }
@@ -1199,7 +1217,8 @@ background_task_maximum_delay = '334 s'
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
                 control_plane_api: None,
-                control_plane_api_token: None
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1255,7 +1274,8 @@ background_task_maximum_delay = '334 s'
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
                 control_plane_api: None,
-                control_plane_api_token: None
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false
             },
             "Should be able to parse all basic config values correctly"
         );
