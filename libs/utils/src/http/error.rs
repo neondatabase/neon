@@ -1,5 +1,6 @@
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use thiserror::Error;
 use tracing::{error, info};
@@ -25,7 +26,7 @@ pub enum ApiError {
     PreconditionFailed(Box<str>),
 
     #[error("Resource temporarily unavailable: {0}")]
-    ResourceUnavailable(String),
+    ResourceUnavailable(Cow<'static, str>),
 
     #[error("Shutting down")]
     ShuttingDown,
