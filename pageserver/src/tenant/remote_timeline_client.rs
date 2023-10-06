@@ -912,11 +912,16 @@ impl RemoteTimelineClient {
             })
             .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
             .max_by_key(|i| i.1)
-            .map(|i| i.0.clone());
+            .map(|i| i.0.clone())
+            .unwrap_or(
+                // No generation-suffixed indices, assume we are dealing with
+                // a legacy index.
+                remote_index_path(&self.tenant_id, &self.timeline_id, Generation::none()),
+            );
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| Some(p) != latest_index.as_ref())
+            .filter(|p| p!= &latest_index)
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
                     info!(%name, "deleting a file not referenced from index_part.json");
@@ -940,11 +945,9 @@ impl RemoteTimelineClient {
         });
 
         debug!("enqueuing index part deletion");
-        if let Some(latest_index) = latest_index {
-            self.deletion_queue_client
-                .push_immediate([latest_index].to_vec())
-                .await?;
-        }
+        self.deletion_queue_client
+            .push_immediate([latest_index].to_vec())
+            .await?;
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
