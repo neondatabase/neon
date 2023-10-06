@@ -213,7 +213,7 @@ where
 
 /// Files ending with this suffix will be ignored and erased
 /// during recovery as startup.
-const TEMP_SUFFIX: &str = ".tmp";
+const TEMP_SUFFIX: &str = "tmp";
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
