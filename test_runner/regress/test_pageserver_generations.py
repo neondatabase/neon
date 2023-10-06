@@ -341,9 +341,13 @@ def test_deletion_queue_recovery(
 
         wait_until(20, 1, assert_validation_complete)
 
-        # A short wait to let the DeletionHeader get written out, as this happens after
-        # the validated count gets incremented.
-        time.sleep(1)
+        # The validatated keys statistic advances before the header is written, so we
+        # also wait to see the header hit the disk: this seems paranoid but the race
+        # can really happen on a heavily overloaded test machine.
+        def assert_header_written():
+            assert (env.pageserver.workdir / "deletion" / "header-01").exists()
+
+        wait_until(20, 1, assert_header_written)
 
     log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
     env.pageserver.stop(immediate=True)
