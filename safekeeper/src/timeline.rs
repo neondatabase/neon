@@ -723,9 +723,9 @@ impl Timeline {
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }
-            let remover = shared_state.sk.wal_store.remove_up_to(horizon_segno - 1);
+
             // release the lock before removing
-            remover
+            shared_state.sk.wal_store.remove_up_to(horizon_segno - 1)
         };
 
         // delete old WAL files

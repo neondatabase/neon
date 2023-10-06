@@ -400,8 +400,7 @@ impl ImageLayer {
     ///
     /// This variant is only used for debugging purposes, by the 'pagectl' binary.
     pub fn new_for_path(path: &Utf8Path, file: File) -> Result<ImageLayer> {
-        let mut summary_buf = Vec::new();
-        summary_buf.resize(PAGE_SZ, 0);
+        let mut summary_buf = vec![0; PAGE_SZ];
         file.read_exact_at(&mut summary_buf, 0)?;
         let summary = Summary::des_prefix(&summary_buf)?;
         let metadata = file

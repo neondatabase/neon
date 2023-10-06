@@ -825,7 +825,7 @@ impl PostgresRedoManager {
         while nwrite < writebuf.len() {
             let n = loop {
                 match nix::poll::poll(&mut pollfds[0..2], wal_redo_timeout.as_millis() as i32) {
-                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    Err(nix::errno::Errno::EINTR) => continue,
                     res => break res,
                 }
             }?;
@@ -917,7 +917,7 @@ impl PostgresRedoManager {
                 // and forward any logging information that the child writes to its stderr to the page server's log.
                 let n = loop {
                     match nix::poll::poll(&mut pollfds[1..3], wal_redo_timeout.as_millis() as i32) {
-                        Err(e) if e == nix::errno::Errno::EINTR => continue,
+                        Err(nix::errno::Errno::EINTR) => continue,
                         res => break res,
                     }
                 }?;
