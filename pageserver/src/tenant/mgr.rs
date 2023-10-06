@@ -316,15 +316,12 @@ pub async fn init_tenant_mgr(
 
     // Construct `Tenant` objects and start them running
     for (tenant_id, location_conf) in tenant_configs {
-        let span = tracing::info_span!("tenant init", %tenant_id);
-        let _guard = span.enter();
-
         let tenant_dir_path = conf.tenant_path(&tenant_id);
 
         let mut location_conf = match location_conf {
             Ok(l) => l,
             Err(e) => {
-                warn!("Marking tenant broken, failed to {e:#}");
+                warn!(%tenant_id, "Marking tenant broken, failed to {e:#}");
 
                 tenants.insert(
                     tenant_id,
@@ -349,7 +346,7 @@ pub async fn init_tenant_mgr(
                         // We do not require the control plane's permission for secondary mode
                         // tenants, because they do no remote writes and hence require no
                         // generation number
-                        info!("Loaded tenant in secondary mode");
+                        info!(%tenant_id, "Loaded tenant in secondary mode");
                         tenants.insert(tenant_id, TenantSlot::Secondary);
                     }
                     LocationMode::Attached(_) => {
@@ -358,9 +355,9 @@ pub async fn init_tenant_mgr(
                         // away local state, we can gracefully fall back to secondary here, if the control
                         // plane tells us so.
                         // (https://github.com/neondatabase/neon/issues/5377)
-                        info!("Detaching tenant, control plane omitted it in re-attach response");
+                        info!(%tenant_id, "Detaching tenant, control plane omitted it in re-attach response");
                         if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                            error!(
+                            error!(%tenant_id,
                                 "Failed to remove detached tenant directory '{tenant_dir_path}': {e:?}",
                             );
                         }
@@ -372,7 +369,7 @@ pub async fn init_tenant_mgr(
         } else {
             // Legacy mode: no generation information, any tenant present
             // on local disk may activate
-            info!("Starting tenant in legacy mode, no generation",);
+            info!(%tenant_id, "Starting tenant in legacy mode, no generation",);
             Generation::none()
         };
 
@@ -395,7 +392,7 @@ pub async fn init_tenant_mgr(
                 tenants.insert(tenant.tenant_id(), TenantSlot::Attached(tenant));
             }
             Err(e) => {
-                error!("Failed to start tenant: {e:#}");
+                error!(%tenant_id, "Failed to start tenant: {e:#}");
             }
         }
     }
