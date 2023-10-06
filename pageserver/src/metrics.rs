@@ -691,10 +691,9 @@ impl StorageIoTime {
         .expect("failed to define a metric");
         let metrics = std::array::from_fn(|i| {
             let op = StorageIoOperation::from_repr(i).unwrap();
-            let metric = storage_io_histogram_vec
+            storage_io_histogram_vec
                 .get_metric_with_label_values(&[op.as_str()])
-                .unwrap();
-            metric
+                .unwrap()
         });
         Self { metrics }
     }

@@ -186,7 +186,7 @@ where
     V: Serialize,
     I: AsRef<[u8]>,
 {
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v.clone()));
+    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v));
 
     transformed
         .collect::<HashMap<String, &V>>()
@@ -325,10 +325,7 @@ impl DeletionList {
             return false;
         }
 
-        let timeline_entry = tenant_entry
-            .timelines
-            .entry(*timeline)
-            .or_insert_with(Vec::new);
+        let timeline_entry = tenant_entry.timelines.entry(*timeline).or_default();
 
         let timeline_remote_path = remote_timeline_path(tenant, timeline);
 

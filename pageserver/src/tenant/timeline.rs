@@ -158,7 +158,7 @@ pub struct Timeline {
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
     /// Never changes for the lifetime of this [`Timeline`] object.
-    ///  
+    ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
@@ -2363,7 +2363,7 @@ impl Timeline {
                 // during branch creation.
                 match ancestor.wait_to_become_active(ctx).await {
                     Ok(()) => {}
-                    Err(state) if state == TimelineState::Stopping => {
+                    Err(TimelineState::Stopping) => {
                         return Err(PageReconstructError::AncestorStopping(ancestor.timeline_id));
                     }
                     Err(state) => {
