@@ -3,7 +3,10 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.pageserver.utils import (
+    wait_for_upload_queue_empty,
+    wait_until_tenant_active,
+)
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from requests.exceptions import ConnectionError
 
@@ -113,6 +116,8 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     time.sleep(1)
 
     env.pageserver.start()
+    wait_until_tenant_active(pageserver_http, tenant_id)
+
     message = f".*duplicated L1 layer layer={l1_found.name}"
     env.pageserver.allowed_errors.append(message)
 

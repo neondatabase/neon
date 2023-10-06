@@ -133,7 +133,7 @@ impl From<PageReconstructError> for ApiError {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
             PageReconstructError::AncestorStopping(_) => {
-                ApiError::ResourceUnavailable(format!("{pre}"))
+                ApiError::ResourceUnavailable(format!("{pre}").into())
             }
             PageReconstructError::WalRedo(pre) => {
                 ApiError::InternalServerError(anyhow::Error::new(pre))
@@ -146,7 +146,7 @@ impl From<TenantMapInsertError> for ApiError {
     fn from(tmie: TenantMapInsertError) -> ApiError {
         match tmie {
             TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
-                ApiError::ResourceUnavailable(format!("{tmie}"))
+                ApiError::ResourceUnavailable(format!("{tmie}").into())
             }
             TenantMapInsertError::TenantAlreadyExists(id, state) => {
                 ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
@@ -636,7 +636,7 @@ async fn tenant_list_handler(
         .instrument(info_span!("tenant_list"))
         .await
         .map_err(|_| {
-            ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".to_string())
+            ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
         .map(|(id, state)| TenantInfo {
