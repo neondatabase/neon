@@ -502,4 +502,25 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     wal
 }
 
-// If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ts_conversion() {
+        let now = SystemTime::now();
+        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+
+        assert_eq!(
+            now.elapsed().unwrap().as_micros(),
+            round_trip.elapsed().unwrap().as_micros()
+        );
+
+        let now_pg = get_current_timestamp();
+        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+
+        assert_eq!(now_pg, round_trip_pg);
+    }
+
+    // If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+}

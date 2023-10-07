@@ -2,6 +2,7 @@
 //! Management HTTP API
 //!
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -514,7 +515,7 @@ async fn get_time_range_of_lsn_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
     let lsn_str = must_get_query_param(&request, "lsn")?;
-    let lsn = Lsn::from_hex(&lsn_str)
+    let lsn = Lsn::from_str(&lsn_str)
         .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
         .map_err(ApiError::BadRequest)?;
 
