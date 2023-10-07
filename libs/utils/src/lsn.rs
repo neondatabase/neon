@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 
 use camino::Utf8Path;
-use serde::{Deserialize, Serialize};
+use serde::{de::Visitor, Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::str::FromStr;
@@ -13,9 +13,59 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Lsn(pub u64);
+
+impl Serialize for Lsn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Lsn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LsnVisitor;
+
+        impl<'de> Visitor<'de> for LsnVisitor {
+            type Value = Lsn;
+
+            // TODO: improve the "expecting" description
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("u64 value in either bincode form(u64) or serde_json form({upper_u32_hex}/{lower_u32_hex})")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Lsn(v))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Lsn::from_str(v).map_err(|e| E::custom(e))
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(LsnVisitor)
+        } else {
+            deserializer.deserialize_u64(LsnVisitor)
+        }
+    }
+}
 
 /// We tried to parse an LSN from a string, but failed
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -264,7 +314,12 @@ impl MonotonicCounter<Lsn> for RecordLsn {
 
 #[cfg(test)]
 mod tests {
+    use crate::bin_ser::BeSer;
+
     use super::*;
+
+    use serde::ser::Serialize;
+    use serde_assert::{Deserializer, Serializer, Token, Tokens};
 
     #[test]
     fn test_lsn_strings() {
@@ -340,5 +395,96 @@ mod tests {
 
         assert_eq!(lsn.fetch_max(Lsn(6000)), Lsn(5678));
         assert_eq!(lsn.fetch_max(Lsn(5000)), Lsn(6000));
+    }
+
+    #[test]
+    fn test_lsn_serde() {
+        let original_lsn = Lsn(0x0123456789abcdef);
+        let expected_readable_tokens = Tokens(vec![Token::U64(0x0123456789abcdef)]);
+        let expected_non_readable_tokens =
+            Tokens(vec![Token::Str(String::from("1234567/89ABCDEF"))]);
+
+        // Testing human_readable ser/de
+        let serializer = Serializer::builder().is_human_readable(false).build();
+        let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
+        assert_eq!(readable_ser_tokens, expected_readable_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(false)
+            .tokens(readable_ser_tokens)
+            .build();
+        let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
+        assert_eq!(des_lsn, original_lsn);
+
+        // Testing NON human_readable ser/de
+        let serializer = Serializer::builder().is_human_readable(true).build();
+        let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
+        assert_eq!(non_readable_ser_tokens, expected_non_readable_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(true)
+            .tokens(non_readable_ser_tokens)
+            .build();
+        let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
+        assert_eq!(des_lsn, original_lsn);
+
+        // Testing mismatching ser/de
+        let serializer = Serializer::builder().is_human_readable(false).build();
+        let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(true)
+            .tokens(non_readable_ser_tokens)
+            .build();
+        Lsn::deserialize(&mut deserializer).unwrap_err();
+
+        let serializer = Serializer::builder().is_human_readable(true).build();
+        let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(false)
+            .tokens(readable_ser_tokens)
+            .build();
+        Lsn::deserialize(&mut deserializer).unwrap_err();
+    }
+
+    #[test]
+    fn test_lsn_ensure_roundtrip() {
+        let original_lsn = Lsn(0xaaaabbbb);
+
+        let serializer = Serializer::builder().is_human_readable(false).build();
+        let ser_tokens = original_lsn.serialize(&serializer).unwrap();
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(false)
+            .tokens(ser_tokens)
+            .build();
+
+        let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
+        assert_eq!(des_lsn, original_lsn);
+    }
+
+    #[test]
+    fn test_lsn_bincode_serde() {
+        let lsn = Lsn(0x0123456789abcdef);
+        let expected_bytes = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+
+        let ser_bytes = lsn.ser().unwrap();
+        assert_eq!(ser_bytes, expected_bytes);
+
+        let des_lsn = Lsn::des(&ser_bytes).unwrap();
+        assert_eq!(des_lsn, lsn);
+    }
+
+    #[test]
+    fn test_lsn_bincode_ensure_roundtrip() {
+        let original_lsn = Lsn(0x01_02_03_04_05_06_07_08);
+        let expected_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        let ser_bytes = original_lsn.ser().unwrap();
+        assert_eq!(ser_bytes, expected_bytes);
+
+        let des_lsn = Lsn::des(&ser_bytes).unwrap();
+        assert_eq!(des_lsn, original_lsn);
     }
 }
