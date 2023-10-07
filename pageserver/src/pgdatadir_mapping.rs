@@ -397,6 +397,40 @@ impl Timeline {
         .await
     }
 
+    /// Obtain the possible timestamp range for the given lsn
+    ///
+    /// If the lsn has no timestamps, returns None
+    pub async fn get_timestamp_range_for_lsn(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<(TimestampTz, TimestampTz)>, PageReconstructError> {
+        let mut min: Option<TimestampTz> = None;
+        let mut max: Option<TimestampTz> = None;
+
+        let () = self
+            .map_all_timestamps(probe_lsn, ctx, |timestamp| {
+                if let Some(min) = &mut min {
+                    *min = (*min).min(timestamp);
+                } else {
+                    min = Some(timestamp);
+                }
+                if let Some(max) = &mut max {
+                    *max = (*max).max(timestamp);
+                } else {
+                    max = Some(timestamp);
+                }
+                ControlFlow::Continue(())
+            })
+            .await?;
+
+        if let (Some(min), Some(max)) = (min, max) {
+            Ok(Some((min, max)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Runs the given function on all the timestamps for a given lsn
     ///
     /// The return value is either given by the closure, or set to the `Default`

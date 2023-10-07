@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
+use humantime::format_rfc3339;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -499,6 +500,35 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Future(_lsn) => "future".into(),
         LsnForTimestamp::Past(_lsn) => "past".into(),
         LsnForTimestamp::NoData(_lsn) => "nodata".into(),
+    };
+    json_response(StatusCode::OK, result)
+}
+
+async fn get_time_range_of_lsn_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let lsn_str = must_get_query_param(&request, "lsn")?;
+    let lsn = Lsn::from_hex(&lsn_str)
+        .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
+        .map_err(ApiError::BadRequest)?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let result = timeline.get_timestamp_range_for_lsn(lsn, &ctx).await?;
+
+    let result = match result {
+        Some((min, max)) => {
+            let min = format_rfc3339(postgres_ffi::from_pg_timestamp(min));
+            let max = format_rfc3339(postgres_ffi::from_pg_timestamp(max));
+            serde_json::json!({ "min": format!("{min}"), "max": format!("{max}") })
+        }
+        None => serde_json::json!({ "empty": true }),
     };
     json_response(StatusCode::OK, result)
 }
@@ -1537,6 +1567,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
             |r| api_handler(r, get_lsn_by_timestamp_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_time_range_of_lsn",
+            |r| api_handler(r, get_time_range_of_lsn_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             api_handler(r, timeline_gc_handler)
