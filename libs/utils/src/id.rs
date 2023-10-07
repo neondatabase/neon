@@ -308,3 +308,120 @@ impl fmt::Display for NodeId {
         write!(f, "{}", self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+
+    use crate::bin_ser::BeSer;
+
+    use super::*;
+
+    #[test]
+    fn test_id_serde_non_human_readable() {
+        let original_id = Id([
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ]);
+        let expected_tokens = Tokens(vec![
+            Token::Tuple { len: 16 },
+            Token::U8(173),
+            Token::U8(80),
+            Token::U8(132),
+            Token::U8(115),
+            Token::U8(129),
+            Token::U8(226),
+            Token::U8(72),
+            Token::U8(254),
+            Token::U8(170),
+            Token::U8(201),
+            Token::U8(135),
+            Token::U8(108),
+            Token::U8(199),
+            Token::U8(26),
+            Token::U8(228),
+            Token::U8(24),
+            Token::TupleEnd,
+        ]);
+
+        let serializer = Serializer::builder().is_human_readable(false).build();
+        let serialized_tokens = original_id.serialize(&serializer).unwrap();
+        assert_eq!(serialized_tokens, expected_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(false)
+            .tokens(serialized_tokens)
+            .build();
+        let deserialized_id = Id::deserialize(&mut deserializer).unwrap();
+        assert_eq!(deserialized_id, original_id);
+    }
+
+    #[test]
+    fn test_id_serde_human_readable() {
+        let original_id = Id([
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ]);
+        let expected_tokens = Tokens(vec![Token::Str(String::from(
+            "ad50847381e248feaac9876cc71ae418",
+        ))]);
+
+        let serializer = Serializer::builder().is_human_readable(true).build();
+        let serialized_tokens = original_id.serialize(&serializer).unwrap();
+        assert_eq!(serialized_tokens, expected_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(true)
+            .tokens(Tokens(vec![Token::Str(String::from(
+                "ad50847381e248feaac9876cc71ae418",
+            ))]))
+            .build();
+        assert_eq!(Id::deserialize(&mut deserializer).unwrap(), original_id);
+    }
+
+    #[test]
+    fn test_id_bincode_serde() {
+        let id_arr = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        let original_id = Id(id_arr);
+        let expected_bytes = id_arr.to_vec();
+
+        let ser_bytes = original_id.ser().unwrap();
+        assert!(ser_bytes == expected_bytes);
+
+        let des_id = Id::des(&ser_bytes).unwrap();
+        assert!(des_id == original_id);
+    }
+
+    #[test]
+    fn test_tenant_id_bincode_serde() {
+        let id_arr = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        let original_tenant_id = TenantId(Id(id_arr));
+        let expected_bytes = id_arr.to_vec();
+
+        let ser_bytes = original_tenant_id.ser().unwrap();
+        assert_eq!(ser_bytes, expected_bytes);
+
+        let des_tenant_id = TenantId::des(&ser_bytes).unwrap();
+        assert_eq!(des_tenant_id, original_tenant_id);
+    }
+
+    #[test]
+    fn test_timeline_id_bincode_serde() {
+        let id_arr = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        let original_timeline_id = TimelineId(Id(id_arr));
+        let expected_bytes = id_arr.to_vec();
+
+        let ser_bytes = original_timeline_id.ser().unwrap();
+        assert_eq!(ser_bytes, expected_bytes);
+
+        let des_timeline_id = TimelineId::des(&expected_bytes).unwrap();
+        assert_eq!(des_timeline_id, original_timeline_id);
+    }
+}
