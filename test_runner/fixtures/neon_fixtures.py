@@ -1014,7 +1014,7 @@ def neon_env_and_metrics_server(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address,
-) -> Iterator[Tuple[NeonEnv, SimpleQueue[Any]]]:
+) -> Tuple[NeonEnv, HTTPServer, SimpleQueue[Any]]:
     """
     Fixture to create a Neon environment and metrics server.
     """
@@ -1068,9 +1068,7 @@ def neon_env_and_metrics_server(
         ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
     )
 
-    yield (env, uploads)
-
-    httpserver.check()
+    return (env, httpserver, uploads)
 
 
 @dataclass

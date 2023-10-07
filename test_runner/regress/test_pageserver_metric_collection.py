@@ -11,10 +11,13 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.types import TenantId, TimelineId
+from pytest_httpserver import HTTPServer
 
 
-def test_metric_collection(neon_env_and_metrics_server: Tuple[NeonEnv, SimpleQueue[Any]]):
-    (env, uploads) = neon_env_and_metrics_server
+def test_metric_collection(
+    neon_env_and_metrics_server: Tuple[NeonEnv, HTTPServer, SimpleQueue[Any]]
+):
+    (env, httpserver, uploads) = neon_env_and_metrics_server
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -107,11 +110,13 @@ def test_metric_collection(neon_env_and_metrics_server: Tuple[NeonEnv, SimpleQue
             (events, is_last) = events
             v.ingest(events, is_last)
 
+    httpserver.check()
+
 
 def test_metric_collection_cleans_up_tempfile(
-    neon_env_and_metrics_server: Tuple[NeonEnv, SimpleQueue[Any]]
+    neon_env_and_metrics_server: Tuple[NeonEnv, HTTPServer, SimpleQueue[Any]]
 ):
-    (env, uploads) = neon_env_and_metrics_server
+    (env, httpserver, uploads) = neon_env_and_metrics_server
     pageserver_http = env.pageserver.http_client()
 
     tenant_id = env.initial_tenant
@@ -182,6 +187,8 @@ def test_metric_collection_cleans_up_tempfile(
         initially.matching.intersection(later.matching) == only
     ), "only initial tempfile should had been removed"
     assert initially.other.issuperset(later.other), "no other files should had been removed"
+
+    httpserver.check()
 
 
 @dataclass
