@@ -273,7 +273,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_range_by_lsn:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_range_of_lsn:
     parameters:
       - name: tenant_id
         in: path
