@@ -27,7 +27,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
-        cur.execute(f"INSERT INTO foo VALUES({i})")
+        cur.execute("INSERT INTO foo VALUES(%s)", (i,))
         # Get the timestamp at UTC
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
         tbl.append([i, after_timestamp])
@@ -89,7 +89,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
-        cur.execute(f"INSERT INTO foo VALUES({i})")
+        cur.execute("INSERT INTO foo VALUES(%s)", (i,))
         # Get the timestamp at UTC
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
@@ -145,7 +145,8 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             env.pageserver.allowed_errors.append(".*could not find data for key.*")
 
         # Probe a bunch of timestamps in the valid range
-        for i in range(1, len(tbl), 100):
+        step_size = 100
+        for i in range(1, len(tbl), step_size):
             after_timestamp = tbl[i][1]
             after_lsn = tbl[i][2]
             result = client.timeline_get_time_range_of_lsn(
@@ -163,5 +164,5 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             assert min <= max, "min smaller than max"
             assert max < after_timestamp, "after_timestamp after max"
             if i > 1:
-                before_timestamp = tbl[i - 100][1]
+                before_timestamp = tbl[i - step_size][1]
                 assert min >= before_timestamp, "before_timestamp before min"
