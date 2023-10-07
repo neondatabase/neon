@@ -3,6 +3,7 @@ use std::{fmt, str::FromStr};
 use anyhow::Context;
 use hex::FromHex;
 use rand::Rng;
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,8 +21,63 @@ pub enum IdError {
 ///
 /// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
 /// Check the `serde_with::serde_as` documentation for options for more complex types.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Id([u8; 16]);
+
+impl Serialize for Id {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct IdVisitor;
+
+        impl<'de> Visitor<'de> for IdVisitor {
+            type Value = Id;
+
+            // TODO: improve the "expecting" description
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(
+                    "value in either sequence form([u8; 16]) or serde_json form(hex string)",
+                )
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let s = serde::de::value::SeqAccessDeserializer::new(seq);
+                let id: [u8; 16] = Deserialize::deserialize(s)?;
+                Ok(Id::from(id))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Id::from_str(v).map_err(E::custom)
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(IdVisitor)
+        } else {
+            deserializer.deserialize_tuple(16, IdVisitor)
+        }
+    }
+}
 
 impl Id {
     pub fn get_from_buf(buf: &mut impl bytes::Buf) -> Id {
