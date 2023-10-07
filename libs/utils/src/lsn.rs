@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 
 use camino::Utf8Path;
-use serde::{Deserialize, Serialize};
+use serde::{de::Visitor, Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 use std::str::FromStr;
@@ -13,9 +13,59 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Lsn(pub u64);
+
+impl Serialize for Lsn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Lsn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LsnVisitor;
+
+        impl<'de> Visitor<'de> for LsnVisitor {
+            type Value = Lsn;
+
+            // TODO: improve the "expecting" description
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("u64 value in either bincode form(u64) or serde_json form({upper_u32_hex}/{lower_u32_hex})")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Lsn(v))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Lsn::from_str(v).map_err(|e| E::custom(e))
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(LsnVisitor)
+        } else {
+            deserializer.deserialize_u64(LsnVisitor)
+        }
+    }
+}
 
 /// We tried to parse an LSN from a string, but failed
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -346,8 +396,6 @@ mod tests {
         assert_eq!(lsn.fetch_max(Lsn(6000)), Lsn(5678));
         assert_eq!(lsn.fetch_max(Lsn(5000)), Lsn(6000));
     }
-
-    // these tests error out because currently the type serializer never produces a string
 
     #[test]
     fn lsn_serde_tokens_humanreadable() {
