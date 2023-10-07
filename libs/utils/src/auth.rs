@@ -9,7 +9,6 @@ use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 
 use crate::id::TenantId;
 
@@ -32,11 +31,9 @@ pub enum Scope {
 }
 
 /// JWT payload. See docs/authentication.md for the format
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Claims {
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub tenant_id: Option<TenantId>,
     pub scope: Scope,
 }

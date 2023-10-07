@@ -5,10 +5,8 @@ use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use tokio::fs;
 
-use serde_with::DisplayFromStr;
 use std::cmp::max;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,7 +40,6 @@ use crate::SafeKeeperConf;
 use crate::{debug_dump, wal_storage};
 
 /// Things safekeeper should know about timeline state on peers.
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub sk_id: NodeId,
@@ -56,7 +53,6 @@ pub struct PeerInfo {
     pub commit_lsn: Lsn,
     /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
     /// sk since backup_lsn.
-    #[serde_as(as = "DisplayFromStr")]
     pub local_start_lsn: Lsn,
     /// When info was received. Serde annotations are not very useful but make
     /// the code compile -- we don't rely on this field externally.

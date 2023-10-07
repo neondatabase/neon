@@ -811,10 +811,8 @@ async fn tenant_size_handler(
     }
 
     /// The type resides in the pageserver not to expose `ModelInputs`.
-    #[serde_with::serde_as]
     #[derive(serde::Serialize)]
     struct TenantHistorySize {
-        #[serde_as(as = "serde_with::DisplayFromStr")]
         id: TenantId,
         /// Size is a mixture of WAL and logical size, so the unit is bytes.
         ///

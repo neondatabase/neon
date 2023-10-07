@@ -153,7 +153,6 @@ pub struct ProjectData {
     pub maintenance_set: Option<String>,
 }
 
-#[serde_with::serde_as]
 #[derive(Debug, serde::Deserialize)]
 pub struct BranchData {
     pub id: BranchId,
@@ -161,12 +160,10 @@ pub struct BranchData {
     pub updated_at: DateTime<Utc>,
     pub name: String,
     pub project_id: ProjectId,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
     #[serde(default)]
     pub parent_id: Option<BranchId>,
     #[serde(default)]
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     pub parent_lsn: Option<Lsn>,
     pub default: bool,
     pub deleted: bool,

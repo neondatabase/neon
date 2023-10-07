@@ -1,5 +1,4 @@
 use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
-use serde_with::serde_as;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -7,12 +6,9 @@ use super::{metrics::Name, Cache, MetricsKey, RawMetric};
 use utils::id::{TenantId, TimelineId};
 
 /// How the metrics from pageserver are identified.
-#[serde_with::serde_as]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq)]
 struct Ids {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub(super) tenant_id: TenantId,
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) timeline_id: Option<TimelineId>,
 }

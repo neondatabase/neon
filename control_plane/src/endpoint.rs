@@ -46,7 +46,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
@@ -57,13 +56,10 @@ use compute_api::responses::{ComputeState, ComputeStatus};
 use compute_api::spec::{Cluster, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
-#[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct EndpointConf {
     endpoint_id: String,
-    #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     timeline_id: TimelineId,
     mode: ComputeMode,
     pg_port: u16,
