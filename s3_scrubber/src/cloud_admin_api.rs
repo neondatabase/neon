@@ -100,7 +100,6 @@ pub struct SafekeeperData {
     pub availability_zone_id: String,
 }
 
-#[serde_with::serde_as]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProjectData {
     pub id: ProjectId,
@@ -109,7 +108,6 @@ pub struct ProjectData {
     pub platform_id: String,
     pub user_id: String,
     pub pageserver_id: u64,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub tenant: TenantId,
     pub safekeepers: Vec<SafekeeperData>,
     pub deleted: bool,
@@ -126,7 +124,6 @@ pub struct ProjectData {
     pub maintenance_set: Option<String>,
 }
 
-#[serde_with::serde_as]
 #[derive(Debug, serde::Deserialize)]
 pub struct BranchData {
     pub id: BranchId,
@@ -134,12 +131,10 @@ pub struct BranchData {
     pub updated_at: DateTime<Utc>,
     pub name: String,
     pub project_id: ProjectId,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
     #[serde(default)]
     pub parent_id: Option<BranchId>,
     #[serde(default)]
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     pub parent_lsn: Option<Lsn>,
     pub default: bool,
     pub deleted: bool,

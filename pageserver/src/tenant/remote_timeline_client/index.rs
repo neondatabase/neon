@@ -6,7 +6,6 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use utils::bin_ser::SerializeError;
 
 use crate::tenant::metadata::TimelineMetadata;
@@ -58,7 +57,6 @@ impl LayerFileMetadata {
 ///
 /// This type needs to be backwards and forwards compatible. When changing the fields,
 /// remember to add a test case for the changed version.
-#[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct IndexPart {
     /// Debugging aid describing the version of this type.
@@ -78,7 +76,6 @@ pub struct IndexPart {
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
     // private because internally we would read from metadata instead.
-    #[serde_as(as = "DisplayFromStr")]
     disk_consistent_lsn: Lsn,
 
     #[serde(rename = "metadata_bytes")]
