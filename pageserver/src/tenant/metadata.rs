@@ -406,4 +406,123 @@ mod tests {
             METADATA_OLD_FORMAT_VERSION, METADATA_FORMAT_VERSION
         );
     }
+
+    #[test]
+    fn test_metadata_bincode_serde() {
+        let original_metadata = TimelineMetadata::new(
+            Lsn(0x200),
+            Some(Lsn(0x100)),
+            Some(TIMELINE_ID),
+            Lsn(0),
+            Lsn(0),
+            Lsn(0),
+            // Any version will do here, so use the default
+            crate::DEFAULT_PG_VERSION,
+        );
+        let metadata_bytes = original_metadata
+            .to_bytes()
+            .expect("Cannot create bytes array from metadata");
+
+        let metadata_bincode_be_bytes = original_metadata
+            .ser()
+            .expect("Cannot serialize the metadata");
+
+        // 8 bytes for the length of the vector
+        assert_eq!(metadata_bincode_be_bytes.len(), 8 + metadata_bytes.len());
+
+        let expected_bincode_bytes = {
+            let mut temp = vec![];
+            let len_bytes = metadata_bytes.len().to_be_bytes();
+            temp.extend_from_slice(&len_bytes);
+            temp.extend_from_slice(&metadata_bytes);
+            temp
+        };
+        assert_eq!(metadata_bincode_be_bytes, expected_bincode_bytes);
+
+        let deserialized_metadata = TimelineMetadata::des(&metadata_bincode_be_bytes).unwrap();
+        // Deserialized metadata has the metadata header, which is different from the serialized one.
+        //   Reference: TimelineMetaData::to_bytes()
+        let expected_metadata = {
+            let mut temp_metadata = original_metadata;
+            let body_bytes = temp_metadata
+                .body
+                .ser()
+                .expect("Cannot serialize the metadata body");
+            let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+            let hdr = TimelineMetadataHeader {
+                size: metadata_size as u16,
+                format_version: METADATA_FORMAT_VERSION,
+                checksum: crc32c::crc32c(&body_bytes),
+            };
+            temp_metadata.hdr = hdr;
+            temp_metadata
+        };
+        assert_eq!(deserialized_metadata, expected_metadata);
+    }
+
+    #[test]
+    fn test_metadata_bincode_serde_ensure_roundtrip() {
+        let original_metadata = TimelineMetadata::new(
+            Lsn(0x200),
+            Some(Lsn(0x100)),
+            Some(TIMELINE_ID),
+            Lsn(0),
+            Lsn(0),
+            Lsn(0),
+            // Any version will do here, so use the default
+            crate::DEFAULT_PG_VERSION,
+        );
+        let expected_bytes = vec![
+            /* bincode length encoding bytes */
+            0, 0, 0, 0, 0, 0, 2, 0, // 8 bytes for the length of the serialized vector
+            /* TimelineMetadataHeader */
+            4, 37, 101, 34, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
+            /* TimelineMetadataBodyV2 */
+            0, 0, 0, 0, 0, 0, 2, 0, // disk_consistent_lsn (8 bytes)
+            1, 0, 0, 0, 0, 0, 0, 1, 0, // prev_record_lsn (9 bytes)
+            1, 17, 34, 51, 68, 85, 102, 119, 136, 17, 34, 51, 68, 85, 102, 119,
+            136, // ancestor_timeline (17 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // ancestor_lsn (8 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
+            0, 0, 0, 15, // pg_version (4 bytes)
+            /* padding bytes */
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ];
+        let metadata_ser_bytes = original_metadata.ser().unwrap();
+        assert_eq!(metadata_ser_bytes, expected_bytes);
+
+        let expected_metadata = {
+            let mut temp_metadata = original_metadata;
+            let body_bytes = temp_metadata
+                .body
+                .ser()
+                .expect("Cannot serialize the metadata body");
+            let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+            let hdr = TimelineMetadataHeader {
+                size: metadata_size as u16,
+                format_version: METADATA_FORMAT_VERSION,
+                checksum: crc32c::crc32c(&body_bytes),
+            };
+            temp_metadata.hdr = hdr;
+            temp_metadata
+        };
+        let des_metadata = TimelineMetadata::des(&metadata_ser_bytes).unwrap();
+        assert_eq!(des_metadata, expected_metadata);
+    }
 }
