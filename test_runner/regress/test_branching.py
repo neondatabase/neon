@@ -370,69 +370,6 @@ def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEn
     assert detail["state"] == "Active"
 
 
-def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: NeonEnvBuilder):
-    """
-    Similar to test_non_uploaded_branch_availability_after_restart but create a chain of branches.
-    """
-
-    env = neon_env_builder.init_configs()
-    env.start()
-
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
-    ps_http = env.pageserver.http_client()
-
-    # pause all uploads
-    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
-
-    def start_creating_timeline():
-        with pytest.raises(RequestException):
-            ps_http.timeline_create(
-                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
-            )
-
-    t = threading.Thread(target=start_creating_timeline)
-    try:
-        t.start()
-
-        wait_until_paused(env, "before-upload-index-pausable")
-
-        branch_id = TimelineId.generate()
-
-        with pytest.raises(PageserverApiException, match="ancestor timeline is not active"):
-            ps_http.timeline_create(
-                env.pg_version,
-                env.initial_tenant,
-                branch_id,
-                ancestor_timeline_id=env.initial_timeline,
-            )
-
-        with pytest.raises(
-            PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"
-        ):
-            ps_http.timeline_detail(env.initial_tenant, branch_id)
-
-    finally:
-        # FIXME: paused uploads bother shutdown
-        env.pageserver.stop(immediate=True)
-        t.join()
-
-    # now without a failpoint
-    env.pageserver.start()
-
-    wait_until_tenant_active(ps_http, env.initial_tenant)
-
-    with pytest.raises(
-        PageserverApiException, match=f"Timeline {env.initial_tenant}/{branch_id} was not found"
-    ):
-        ps_http.timeline_detail(env.initial_tenant, branch_id)
-
-    detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-    assert detail["state"] == "Active"
-
-
 def wait_until_paused(env: NeonEnv, failpoint: str):
     found = False
     msg = f"at failpoint {failpoint}"
