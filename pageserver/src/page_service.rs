@@ -65,69 +65,6 @@ use crate::trace::Tracer;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream<IO>(pgb: &mut PostgresBackend<IO>) -> impl Stream<Item = io::Result<Bytes>> + '_
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    async_stream::try_stream! {
-        loop {
-            let msg = tokio::select! {
-                biased;
-
-                _ = task_mgr::shutdown_watcher() => {
-                    // We were requested to shut down.
-                    let msg = "pageserver is shutting down";
-                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
-                    Err(QueryError::Other(anyhow::anyhow!(msg)))
-                }
-
-                msg = pgb.read_message() => { msg.map_err(QueryError::from)}
-            };
-
-            match msg {
-                Ok(Some(message)) => {
-                    let copy_data_bytes = match message {
-                        FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => { break },
-                        FeMessage::Sync => continue,
-                        FeMessage::Terminate => {
-                            let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                            break;
-                        }
-                        m => {
-                            let msg = format!("unexpected message {m:?}");
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::Other, msg))?;
-                            break;
-                        }
-                    };
-
-                    yield copy_data_bytes;
-                }
-                Ok(None) => {
-                    let msg = "client closed connection during COPY";
-                    let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    // error can't happen here, ErrorResponse serialization should be always ok
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                    pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                }
-                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
-                    Err(io_error)?;
-                }
-                Err(other) => {
-                    Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
-                }
-            };
-        }
-    }
-}
-
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -367,6 +304,72 @@ impl PageServerHandler {
         )
     }
 
+    fn copyin_stream<'a, IO>(
+        &'a self,
+        pgb: &'a mut PostgresBackend<IO>,
+    ) -> impl Stream<Item = io::Result<Bytes>> + 'a
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        async_stream::try_stream! {
+            loop {
+                let msg = tokio::select! {
+                    biased;
+
+                    _ = task_mgr::shutdown_watcher() => {
+                        // We were requested to shut down.
+                        let msg = "pageserver is shutting down";
+                        let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
+                        Err(QueryError::Other(anyhow::anyhow!(msg)))
+                    }
+
+                    msg = pgb.read_message() => { msg.map_err(QueryError::from)}
+                };
+
+                match msg {
+                    Ok(Some(message)) => {
+                        let copy_data_bytes = match message {
+                            FeMessage::CopyData(bytes) => bytes,
+                            FeMessage::CopyDone => { break },
+                            FeMessage::Sync => continue,
+                            FeMessage::Terminate => {
+                                let msg = "client terminated connection with Terminate message during COPY";
+                                let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                                break;
+                            }
+                            m => {
+                                let msg = format!("unexpected message {m:?}");
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                                break;
+                            }
+                        };
+
+                        yield copy_data_bytes;
+                    }
+                    Ok(None) => {
+                        let msg = "client closed connection during COPY";
+                        let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                        // error can't happen here, ErrorResponse serialization should be always ok
+                        pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                        pgb.flush().await?;
+                        Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                    }
+                    Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
+                        Err(io_error)?;
+                    }
+                    Err(other) => {
+                        Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
+                    }
+                };
+            }
+        }
+    }
+
     #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
         &self,
@@ -541,7 +544,7 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         self.flush_cancellable(pgb).await?;
 
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb)));
         timeline
             .import_basebackup_from_tar(
                 &mut copyin_reader,
@@ -595,7 +598,7 @@ impl PageServerHandler {
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         self.flush_cancellable(pgb).await?;
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
