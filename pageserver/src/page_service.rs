@@ -122,6 +122,7 @@ pub async fn libpq_listener_main(
     listener: TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -130,7 +131,7 @@ pub async fn libpq_listener_main(
     while let Some(res) = tokio::select! {
         biased;
 
-        _ = task_mgr::shutdown_watcher() => {
+        _ = cancel.cancelled() => {
             // We were requested to shut down.
             None
         }
@@ -316,7 +317,7 @@ impl PageServerHandler {
                 let msg = tokio::select! {
                     biased;
 
-                    _ = task_mgr::shutdown_watcher() => {
+                    _ = self.cancel.cancelled() => {
                         // We were requested to shut down.
                         let msg = "pageserver is shutting down";
                         let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
@@ -414,7 +415,7 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = task_mgr::shutdown_watcher() => {
+                _ = self.cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     break;
