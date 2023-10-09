@@ -1039,7 +1039,7 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        mgr::detach_tenant(conf, tenant_id, true)
+        mgr::detach_tenant(conf, tenant_id, true, &state.deletion_queue_client)
             .instrument(info_span!("tenant_detach", %tenant_id))
             .await?;
         return json_response(StatusCode::OK, ());
