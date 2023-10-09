@@ -1166,8 +1166,8 @@ impl Tenant {
                             LoadLocalTimelineError::Load(source) => {
                                 // We tried to load deleted timeline, this is a bug.
                                 return Err(anyhow::anyhow!(source).context(
-                                "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
-                            ));
+                                    "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
+                                ));
                             }
                             LoadLocalTimelineError::ResumeDeletion(source) => {
                                 // Make sure resumed deletion wont fail loading for entire tenant.
@@ -1271,8 +1271,9 @@ impl Tenant {
                     // We're loading fresh timeline that didnt yet make it into remote.
                     //
                     // If we were to declare this timeline as being deleted (and delete it now) as a
-                    // retry never completed to a client, we must then remember it and delete any
-                    // children we come across.
+                    // creation was never retried to completion in the point of view of control
+                    // plane. This timeline should never have any children or compute as they are
+                    // denied until upload.
                     (None, Some(remote_client))
                 }
                 Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
