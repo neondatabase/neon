@@ -314,6 +314,16 @@ impl PageServerNode {
         Ok(())
     }
 
+    pub fn check_tenants_loaded(&self) -> Result<()> {
+        self.http_request(
+            Method::GET,
+            format!("{}/tenants_loaded", self.http_base_url),
+        )?
+        .send()?
+        .error_from_body()?;
+        Ok(())
+    }
+
     pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
             .http_request(Method::GET, format!("{}/tenant", self.http_base_url))?

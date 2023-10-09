@@ -909,6 +909,16 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
         }
 
+        Some(("tenants-loaded", subcommand_args)) => {
+            match get_pageserver(env, subcommand_args)?.check_tenants_loaded() {
+                Ok(_) => println!("Page server loaded the tenants"),
+                Err(err) => {
+                    eprintln!("pageserver tenants-loaded failed: {}", err);
+                    exit(1);
+                }
+            }
+        }
+
         Some((sub_name, _)) => bail!("Unexpected pageserver subcommand '{}'", sub_name),
         None => bail!("no pageserver subcommand provided"),
     }
@@ -1301,6 +1311,9 @@ fn cli() -> Command {
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
                     .arg(pageserver_config_args.clone())
+                )
+                .subcommand(Command::new("tenants-loaded")
+                    .about("Wait till pageserver loads tenants")
                 )
         )
         .subcommand(

@@ -62,7 +62,8 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     tenant_load_delay_ms = 5000
     env.pageserver.stop()
     env.pageserver.start(
-        extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"}
+        extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"},
+        wait_tenants_loaded=False,
     )
 
     # Check that it's in Loading state

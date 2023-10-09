@@ -171,7 +171,7 @@ class PageserverHttpClient(requests.Session):
 
     def wait_tenants_loaded(self):
         """
-        Wait till pageserver loads the tenants
+        Wait till pageserver loads tenants
         """
         self.get(f"http://localhost:{self.port}/v1/tenants_loaded").raise_for_status()
 

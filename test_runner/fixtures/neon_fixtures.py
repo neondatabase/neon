@@ -1336,6 +1336,15 @@ class NeonCli(AbstractNeonCli):
         log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
+    def pageserver_loaded_tenants(self, id: int) -> "subprocess.CompletedProcess[str]":
+        """
+        Wait till pageserver loads tenants
+        """
+        cmd = ["pageserver", "tenants-loaded", f"--id={id}"]
+
+        log.info(f"Waiting till pageserver loads tenants with {cmd}")
+        return self.raw_cli(cmd)
+
     def safekeeper_start(
         self, id: int, extra_opts: Optional[List[str]] = None
     ) -> "subprocess.CompletedProcess[str]":
@@ -1667,7 +1676,7 @@ class NeonPageserver(PgProtocol):
         )
         self.running = True
         if wait_tenants_loaded:
-            self.http_client().wait_tenants_loaded()
+            self.env.neon_cli.pageserver_loaded_tenants(self.id)
         return self
 
     def stop(self, immediate: bool = False) -> "NeonPageserver":
