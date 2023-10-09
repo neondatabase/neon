@@ -460,23 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lsn_ensure_roundtrip() {
-        let original_lsn = Lsn(0xaaaabbbb);
-
-        let serializer = Serializer::builder().is_human_readable(false).build();
-        let ser_tokens = original_lsn.serialize(&serializer).unwrap();
-
-        let mut deserializer = Deserializer::builder()
-            .is_human_readable(false)
-            .tokens(ser_tokens)
-            .build();
-
-        let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
-        assert_eq!(des_lsn, original_lsn);
-    }
-
-    #[test]
-    fn test_lsn_bincode_serde() {
+    fn test_lsn_bincode_roundtrips() {
         let lsn = Lsn(0x0123456789abcdef);
         let expected_bytes = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
 
@@ -485,17 +469,5 @@ mod tests {
 
         let des_lsn = Lsn::des(&ser_bytes).unwrap();
         assert_eq!(des_lsn, lsn);
-    }
-
-    #[test]
-    fn test_lsn_bincode_ensure_roundtrip() {
-        let original_lsn = Lsn(0x01_02_03_04_05_06_07_08);
-        let expected_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-
-        let ser_bytes = original_lsn.ser().unwrap();
-        assert_eq!(ser_bytes, expected_bytes);
-
-        let des_lsn = Lsn::des(&ser_bytes).unwrap();
-        assert_eq!(des_lsn, original_lsn);
     }
 }
