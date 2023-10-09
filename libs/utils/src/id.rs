@@ -71,11 +71,7 @@ impl<'de> Deserialize<'de> for Id {
             }
         }
 
-        if deserializer.is_human_readable() {
-            deserializer.deserialize_str(IdVisitor)
-        } else {
-            deserializer.deserialize_tuple(16, IdVisitor)
-        }
+        deserializer.deserialize_any(IdVisitor)
     }
 }
 
