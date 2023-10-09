@@ -67,7 +67,7 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
-    init_done_rx: Barrier,
+    tenants_loaded: Barrier,
 }
 
 impl State {
@@ -92,7 +92,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
-            init_done_rx,
+            tenants_loaded: init_done_rx,
         })
     }
 
@@ -360,13 +360,13 @@ async fn status_handler(
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
 
-async fn ready_handler(
+async fn tenants_loaded_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
     let state = get_state(&request);
-    state.init_done_rx.clone().wait().await;
+    state.tenants_loaded.clone().wait().await;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
@@ -1638,7 +1638,13 @@ pub fn make_router(
     Ok(router
         .data(state)
         .get("/v1/status", |r| api_handler(r, status_handler))
-        .get("/v1/ready", |r| api_handler(r, ready_handler))
+        .get("/v1/tenants_loaded", |r| {
+            testing_api_handler(
+                "block till pageserver loads tenants",
+                r,
+                tenants_loaded_handler,
+            )
+        })
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
         })

@@ -1630,6 +1630,7 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        wait_tenants_loaded=True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -1642,7 +1643,8 @@ class NeonPageserver(PgProtocol):
             self.id, overrides=overrides, extra_env_vars=extra_env_vars
         )
         self.running = True
-        self.http_client().check_ready()
+        if wait_tenants_loaded:
+            self.http_client().wait_tenants_loaded()
         return self
 
     def stop(self, immediate: bool = False) -> "NeonPageserver":
