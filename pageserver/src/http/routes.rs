@@ -1640,7 +1640,7 @@ pub fn make_router(
         .get("/v1/status", |r| api_handler(r, status_handler))
         .get("/v1/tenants_loaded", |r| {
             testing_api_handler(
-                "block till pageserver loads tenants",
+                "wait till pageserver loads tenants",
                 r,
                 tenants_loaded_handler,
             )
