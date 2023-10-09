@@ -435,9 +435,10 @@ def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: 
 
 def wait_until_paused(env: NeonEnv, failpoint: str):
     found = False
+    msg = f"at failpoint {failpoint}"
     for _ in range(20):
         time.sleep(1)
-        found = env.pageserver.log_contains("msg") is not None
+        found = env.pageserver.log_contains(msg) is not None
         if found:
             break
-    assert found is not None
+    assert found
