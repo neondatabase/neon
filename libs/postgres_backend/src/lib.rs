@@ -19,8 +19,8 @@ use tracing::{debug, error, info, trace};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
-    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_INTERNAL_ERROR,
-    SQLSTATE_SUCCESSFUL_COMPLETION,
+    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_ADMIN_SHUTDOWN,
+    SQLSTATE_INTERNAL_ERROR, SQLSTATE_SUCCESSFUL_COMPLETION,
 };
 
 /// An error, occurred during query processing:
@@ -30,6 +30,9 @@ pub enum QueryError {
     /// The connection was lost while processing the query.
     #[error(transparent)]
     Disconnected(#[from] ConnectionError),
+    /// We were instructed to shutdown while processing the query
+    #[error("Shutting down")]
+    Shutdown,
     /// Some other error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -44,7 +47,8 @@ impl From<io::Error> for QueryError {
 impl QueryError {
     pub fn pg_error_code(&self) -> &'static [u8; 5] {
         match self {
-            Self::Disconnected(_) => b"08006",         // connection failure
+            Self::Disconnected(_) => b"08006", // connection failure
+            Self::Shutdown => SQLSTATE_ADMIN_SHUTDOWN,
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
         }
     }
@@ -923,6 +927,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, I
 pub fn short_error(e: &QueryError) -> String {
     match e {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
+        QueryError::Shutdown => "shutdown".to_string(),
         QueryError::Other(e) => format!("{e:#}"),
     }
 }
@@ -938,6 +943,9 @@ fn log_query_error(query: &str, e: &QueryError) {
         }
         QueryError::Disconnected(other_connection_error) => {
             error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+        }
+        QueryError::Shutdown => {
+            info!("query handler for '{query}' cancelled during tenant shutdown")
         }
         QueryError::Other(e) => {
             error!("query handler for '{query}' failed: {e:?}");

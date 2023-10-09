@@ -299,7 +299,7 @@ impl PageServerHandler {
                 Ok(flush_r?)
             },
             _ = self.cancel.cancelled() => {
-                Err(QueryError::Other(anyhow::anyhow!("Shutting down")))
+                Err(QueryError::Shutdown)
             }
         )
     }
