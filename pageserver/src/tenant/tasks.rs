@@ -14,52 +14,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 
-static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
-    once_cell::sync::Lazy::new(|| {
-        let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
-        let permits = usize::max(
-            1,
-            // while a lot of the work is done on spawn_blocking, we still do
-            // repartitioning in the async context. this should give leave us some workers
-            // unblocked to be blocked on other work, hopefully easing any outside visible
-            // effects of restarts.
-            //
-            // 6/8 is a guess; previously we ran with unlimited 8 and more from
-            // spawn_blocking.
-            (total_threads * 3).checked_div(4).unwrap_or(0),
-        );
-        assert_ne!(permits, 0, "we will not be adding in permits later");
-        assert!(
-            permits < total_threads,
-            "need threads avail for shorter work"
-        );
-        tokio::sync::Semaphore::new(permits)
-    });
-
-pub(crate) async fn concurrent_background_tasks_rate_limit(
-    _ctx: &RequestContext,
-    cancel: &CancellationToken,
-) -> ControlFlow<(), impl Drop> {
-    // TODO: use request context TaskKind to get statistics on how many tasks of what kind are waiting for background task semaphore
-    tokio::select! {
-        permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
-            ControlFlow::Continue(permit)
-        },
-        _ = cancel.cancelled() => {
-            ControlFlow::Break(())
-        }
-    }
-}
-
-macro_rules! background_task_wait_permit {
-    ($ctx:expr, $cancel_token:expr) => {
-        match concurrent_background_tasks_concurrency_limit(ctx, cancel).await {
-            ControlFlow::Break(()) => return Ok(()),
-            ControlFlow::Continue(permit) => permit,
-        }
-    };
-}
-
 /// Start per tenant background loops: compaction and gc.
 pub fn start_background_loops(
     tenant: &Arc<Tenant>,
