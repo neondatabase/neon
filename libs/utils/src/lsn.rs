@@ -347,38 +347,47 @@ mod tests {
         assert_eq!(lsn.fetch_max(Lsn(5000)), Lsn(6000));
     }
 
-    #[test]
-    fn test_lsn_serde() {
-        let original_lsn = Lsn(0x0123456789abcdef);
-        let expected_readable_tokens = Tokens(vec![Token::U64(0x0123456789abcdef)]);
-        let expected_non_readable_tokens =
-            Tokens(vec![Token::Str(String::from("1234567/89ABCDEF"))]);
+    // these tests error out because currently the type serializer never produces a string
 
-        // Testing human_readable ser/de
-        let serializer = Serializer::builder().is_human_readable(false).build();
+    #[test]
+    fn lsn_serde_tokens_humanreadable() {
+        // Serializer::is_human_readable is for example json
+        let original_lsn = Lsn(0x0123456789abcdef);
+        let expected_readable_tokens = Tokens(vec![Token::Str(String::from("1234567/89ABCDEF"))]);
+
+        let serializer = Serializer::builder().is_human_readable(true).build();
         let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
         assert_eq!(readable_ser_tokens, expected_readable_tokens);
 
         let mut deserializer = Deserializer::builder()
-            .is_human_readable(false)
+            .is_human_readable(true)
             .tokens(readable_ser_tokens)
             .build();
         let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
         assert_eq!(des_lsn, original_lsn);
+    }
 
-        // Testing NON human_readable ser/de
-        let serializer = Serializer::builder().is_human_readable(true).build();
+    #[test]
+    fn lsn_serde_tokens_nonhumanreadable() {
+        // !Serializer::is_human_readable is for example bincode
+        let original_lsn = Lsn(0x0123456789abcdef);
+        let expected_non_readable_tokens = Tokens(vec![Token::U64(0x0123456789abcdef)]);
+
+        let serializer = Serializer::builder().is_human_readable(false).build();
         let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
         assert_eq!(non_readable_ser_tokens, expected_non_readable_tokens);
 
         let mut deserializer = Deserializer::builder()
-            .is_human_readable(true)
+            .is_human_readable(false)
             .tokens(non_readable_ser_tokens)
             .build();
         let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
         assert_eq!(des_lsn, original_lsn);
+    }
 
-        // Testing mismatching ser/de
+    #[test]
+    fn non_human_readable_does_not_accept_string() {
+        let original_lsn = Lsn(0x0123456789abcdef);
         let serializer = Serializer::builder().is_human_readable(false).build();
         let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
 
@@ -387,7 +396,11 @@ mod tests {
             .tokens(non_readable_ser_tokens)
             .build();
         Lsn::deserialize(&mut deserializer).unwrap_err();
+    }
 
+    #[test]
+    fn human_readable_does_not_accept_u64() {
+        let original_lsn = Lsn(0x0123456789abcdef);
         let serializer = Serializer::builder().is_human_readable(true).build();
         let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
 
