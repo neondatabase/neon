@@ -230,6 +230,7 @@ impl ListWriter {
         let list_name_pattern =
             Regex::new("(?<sequence>[a-zA-Z0-9]{16})-(?<version>[a-zA-Z0-9]{2}).list").unwrap();
 
+        let temp_extension = format!(".{TEMP_SUFFIX}");
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
         while let Some(dentry) = dir.next_entry().await? {
@@ -241,7 +242,7 @@ impl ListWriter {
                 continue;
             }
 
-            if dentry_str.ends_with(TEMP_SUFFIX) {
+            if dentry_str.ends_with(&temp_extension) {
                 info!("Cleaning up temporary file {dentry_str}");
                 let absolute_path =
                     deletion_directory.join(dentry.file_name().to_str().expect("non-Unicode path"));
