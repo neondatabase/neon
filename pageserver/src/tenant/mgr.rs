@@ -24,7 +24,7 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::{LocationConf, LocationMode, TenantConfOpt};
+use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
     create_tenant_files, AttachedTenantConf, CreateTenantFilesMode, Tenant, TenantState,
@@ -694,6 +694,18 @@ pub(crate) async fn upsert_location(
 
     if let Some(tenant) = shutdown_tenant {
         let (_guard, progress) = utils::completion::channel();
+
+        match tenant.get_attach_mode() {
+            AttachmentMode::Single | AttachmentMode::Multi => {
+                // Before we leave our state as the presumed holder of latest generation,
+                // flush any outstanding deletions to reduce the risk of leaking objects.
+                deletion_queue_client.flush_advisory()
+            }
+            AttachmentMode::Stale => {
+                // If we're stale there's not point trying to flush deletions
+            }
+        };
+
         info!("Shutting down attached tenant");
         match tenant.shutdown(progress, false).await {
             Ok(()) => {}
