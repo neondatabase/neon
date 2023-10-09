@@ -158,7 +158,7 @@ pub struct Timeline {
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
     /// Never changes for the lifetime of this [`Timeline`] object.
-    ///  
+    ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
@@ -684,38 +684,9 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
-        // static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
-        //     once_cell::sync::Lazy::new(|| {
-        //         let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
-        //         let permits = usize::max(
-        //             1,
-        //             // while a lot of the work is done on spawn_blocking, we still do
-        //             // repartitioning in the async context. this should give leave us some workers
-        //             // unblocked to be blocked on other work, hopefully easing any outside visible
-        //             // effects of restarts.
-        //             //
-        //             // 6/8 is a guess; previously we ran with unlimited 8 and more from
-        //             // spawn_blocking.
-        //             (total_threads * 3).checked_div(4).unwrap_or(0),
-        //         );
-        //         assert_ne!(permits, 0, "we will not be adding in permits later");
-        //         assert!(
-        //             permits < total_threads,
-        //             "need threads avail for shorter work"
-        //         );
-        //         tokio::sync::Semaphore::new(permits)
-        //     });
-
-        // // this wait probably never needs any "long time spent" logging, because we already nag if
-        // // compaction task goes over it's period (20s) which is quite often in production.
-        // let _permit = tokio::select! {
-        //     permit = CONCURRENT_COMPACTIONS.acquire() => {
-        //         permit
-        //     },
-        //     _ = cancel.cancelled() => {
-        //         return Ok(());
-        //     }
-        // };
+        // this wait probably never needs any "long time spent" logging, because we already nag if
+        // compaction task goes over it's period (20s) which is quite often in production.
+        let permit = crate::tenant::tasks::background_task_wait_permit!(ctx, cancel);
 
         let last_record_lsn = self.get_last_record_lsn();
 

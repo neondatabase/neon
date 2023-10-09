@@ -150,6 +150,8 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
+        let permit = crate::tenant::tasks::background_task_wait_permit!(ctx, cancel);
+
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.
         // The reason is that the restart empties the caches, and so, the values
