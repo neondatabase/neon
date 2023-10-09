@@ -443,7 +443,7 @@ impl PageCache {
     ///
     /// Store an image of the given page in the cache.
     ///
-    #[instrument(skip_all, level = "trace", fields(%key, %lsn))]
+    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(%key, %lsn)))]
     pub async fn memorize_materialized_page(
         &'static self,
         tenant_id: TenantId,
@@ -536,7 +536,7 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with immutable file pages.
 
-    #[instrument(skip_all, level = "trace", fields(?file_id, ?blkno))]
+    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(?file_id, ?blkno)))]
     pub async fn read_immutable_buf(
         &'static self,
         file_id: FileId,

@@ -82,6 +82,7 @@ impl<T> Queue<T> {
         }
     }
     pub fn begin(&self) -> Result<Position<T>, ()> {
+        #[cfg(test)]
         tracing::trace!("get in line locking inner");
         let mut inner = self.inner.lock().unwrap();
         inner.integrity_check();
@@ -102,10 +103,12 @@ impl<T> Queue<T> {
 
 impl<'q, T> Position<'q, T> {
     pub fn complete_and_wait(self, datum: T) -> impl std::future::Future<Output = T> + 'q {
+        #[cfg(test)]
         tracing::trace!("found victim locking waiters");
         let mut inner = self.queue.inner.lock().unwrap();
         inner.integrity_check();
         let winner_idx = inner.waiters.pop_front().expect("we put ourselves in");
+        #[cfg(test)]
         tracing::trace!(winner_idx, "putting victim into next waiters slot");
         let winner_slot = inner.slots[winner_idx].as_mut().unwrap();
         let prev = winner_slot.1.replace(datum);
@@ -114,6 +117,7 @@ impl<'q, T> Position<'q, T> {
             "ensure we didn't mess up this simple ring buffer structure"
         );
         if let Some(waker) = winner_slot.0.take() {
+            #[cfg(test)]
             tracing::trace!(winner_idx, "waking up winner");
             waker.wake()
         }
@@ -129,6 +133,7 @@ impl<'q, T> Position<'q, T> {
         poll_fn(move |cx| {
             let my_waitslot_idx = self.idx;
             poll_num += 1;
+            #[cfg(test)]
             tracing::trace!(poll_num, "poll_fn locking waiters");
             let mut inner = self.queue.inner.lock().unwrap();
             inner.integrity_check();
@@ -139,6 +144,7 @@ impl<'q, T> Position<'q, T> {
             //     my_waitslot.1.is_some()
             // );
             if let Some(res) = my_waitslot.1.take() {
+                #[cfg(test)]
                 tracing::trace!(poll_num, "have cache slot");
                 // above .take() resets the waiters slot to None
                 debug_assert!(my_waitslot.0.is_none());
@@ -157,9 +163,11 @@ impl<'q, T> Position<'q, T> {
                 .unwrap_or(false)
             {
                 let prev = my_waitslot.0.replace(cx.waker().clone());
+                #[cfg(test)]
                 tracing::trace!(poll_num, prev_is_some = prev.is_some(), "updating waker");
             }
             inner.integrity_check();
+            #[cfg(test)]
             tracing::trace!(poll_num, "waiting to be woken up");
             Poll::Pending
         })
