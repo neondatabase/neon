@@ -27,6 +27,7 @@ members = [
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
     "libs/walproposer",
+    "libs/nostarve_queue",
 ]
 
 [workspace.package]
@@ -192,6 +193,7 @@ tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
 walproposer = { version = "0.1", path = "./libs/walproposer/" }
+nostarve_queue = { path = "./libs/nostarve_queue" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
