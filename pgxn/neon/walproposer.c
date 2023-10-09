@@ -126,9 +126,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		}
 
 		initStringInfo(&wp->safekeeper[wp->n_safekeepers].outbuf);
-		wp->safekeeper[wp->n_safekeepers].xlogreader = wp->api.wal_reader_allocate(wp);
-		if (wp->safekeeper[wp->n_safekeepers].xlogreader == NULL)
-			walprop_log(FATAL, "Failed to allocate xlog reader");
+		wp->api.wal_reader_allocate(&wp->safekeeper[wp->n_safekeepers]);
 		wp->safekeeper[wp->n_safekeepers].flushWrite = false;
 		wp->safekeeper[wp->n_safekeepers].startStreamingAt = InvalidXLogRecPtr;
 		wp->safekeeper[wp->n_safekeepers].streamingAt = InvalidXLogRecPtr;
@@ -1377,7 +1375,7 @@ SendAppendRequests(Safekeeper *sk)
 		/* write the WAL itself */
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
 		/* wal_read will raise error on failure */
-		wp->api.wal_read(sk->xlogreader,
+		wp->api.wal_read(sk,
 						 &sk->outbuf.data[sk->outbuf.len],
 						 req->beginLsn,
 						 req->endLsn - req->beginLsn);

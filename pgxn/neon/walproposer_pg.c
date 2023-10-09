@@ -1383,11 +1383,11 @@ XLogWalPropClose(XLogRecPtr recptr)
 }
 
 static void
-walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count)
+walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count)
 {
 	WALReadError errinfo;
 
-	if (!WALRead(state,
+	if (!WALRead(sk->xlogreader,
 				 buf,
 				 startptr,
 				 count,
@@ -1398,10 +1398,12 @@ walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size
 	}
 }
 
-static XLogReaderState *
-walprop_pg_wal_reader_allocate(WalProposer *wp)
+static void
+walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
-	return XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+	sk->xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+	if (sk->xlogreader == NULL)
+		elog(FATAL, "Failed to allocate xlog reader");
 }
 
 static WaitEventSet *waitEvents;

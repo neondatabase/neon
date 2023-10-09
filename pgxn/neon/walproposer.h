@@ -491,10 +491,10 @@ typedef struct walproposer_api
 	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
 	/* Read WAL from disk to buf. */
-	void		(*wal_read) (XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count);
+	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
 
 	/* Allocate WAL reader. */
-	XLogReaderState *(*wal_reader_allocate) (WalProposer *wp);
+	void (*wal_reader_allocate) (Safekeeper *sk);
 
 	/* Deallocate event set. */
 	void		(*free_event_set) (WalProposer *wp);
