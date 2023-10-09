@@ -1278,8 +1278,6 @@ impl Tenant {
                 Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
             },
             None => {
-                // TODO: this would go away with not supporting remote timeline client = None
-                // No remote client
                 if found_delete_mark {
                     // There is no remote client, we found local metadata.
                     // Continue cleaning up local disk.
