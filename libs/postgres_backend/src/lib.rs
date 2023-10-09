@@ -460,6 +460,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 _ = shutdown_watcher() => {
                     // We were requested to shut down.
                     tracing::info!("shutdown request received during response flush");
+
+                    // If we exited process_message with a shutdown error, there may be
+                    // some valid response content on in our transmit buffer: permit sending
+                    // this within a short timeout.  This is a best effort thing so we don't
+                    // care about the result.
+                    tokio::time::timeout(std::time::Duration::from_millis(500), self.flush()).await.ok();
+
                     return Err(QueryError::Shutdown)
                 },
                 flush_r = self.flush() => {
