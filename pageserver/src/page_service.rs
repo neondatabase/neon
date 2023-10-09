@@ -309,7 +309,7 @@ impl PageServerHandler {
         pgb: &'a mut PostgresBackend<IO>,
     ) -> impl Stream<Item = io::Result<Bytes>> + 'a
     where
-        IO: AsyncRead + AsyncWrite + Unpin,
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         async_stream::try_stream! {
             loop {
@@ -356,7 +356,7 @@ impl PageServerHandler {
                         let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                         // error can't happen here, ErrorResponse serialization should be always ok
                         pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                        pgb.flush().await?;
+                        self.flush_cancellable(pgb).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                         Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                     }
                     Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
