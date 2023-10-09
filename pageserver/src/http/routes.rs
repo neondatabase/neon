@@ -397,7 +397,7 @@ async fn timeline_create_handler(
                 ))
             }
             Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
-                json_response(StatusCode::INTERNAL_SERVER_ERROR, HttpErrorBody::from_msg(e.to_string()))
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
             }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
