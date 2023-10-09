@@ -72,20 +72,18 @@
 //!
 
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque, HashSet},
+    collections::{hash_map::Entry, HashMap},
     convert::TryInto,
-    future::poll_fn,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc, Mutex, Weak,
+        Arc, Weak,
     },
-    task::{Poll, Waker},
     time::Duration,
 };
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
-use tracing::{Instrument, instrument};
+use tracing::instrument;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -254,18 +252,10 @@ pub struct PageCache {
     /// This is interpreted modulo the page cache size.
     next_evict_slot: AtomicUsize,
 
-    find_victim_waiters: Mutex<(
-        VecDeque<usize>,
-        VecDeque<usize>,
-        Vec<
-            Option<(
-                Option<Waker>,
-                Option<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
-            )>,
-        >,
-    )>,
-
     size_metrics: &'static PageCacheSizeMetrics,
+
+    find_victim_waiters:
+        nostarve_queue::Queue<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
 }
 
 struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
@@ -879,62 +869,10 @@ impl PageCache {
         &'static self,
         _permit_witness: &PinnedSlotsPermit,
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
-        let integrity_check = |guard: &std::sync::MutexGuard<(
-            VecDeque<usize>,
-            VecDeque<usize>,
-            Vec<
-                Option<(
-                    Option<Waker>,
-                    Option<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)>,
-                )>,
-            >,
-        )>| {
-            let (waiters, free, slots) = &**guard;
-            let waiters = waiters.iter().copied().collect::<HashSet<_>>();
-            let free = free.iter().copied().collect::<HashSet<_>>();
-            for (slot_idx, slot) in slots.iter().enumerate() {
-                match slot {
-                    None => {
-                        assert!(!waiters.contains(&slot_idx));
-                        assert!(free.contains(&slot_idx));
-                    }
-                    Some((None, None)) => {
-                        assert!(waiters.contains(&slot_idx));
-                        assert!(!free.contains(&slot_idx));
-                    }
-                    Some((Some(_), Some(_))) => {
-                        assert!(!waiters.contains(&slot_idx));
-                        assert!(!free.contains(&slot_idx));
-                    }
-                    Some((Some(_), None)) => {
-                        assert!(waiters.contains(&slot_idx));
-                        assert!(!free.contains(&slot_idx));
-                    }
-                    Some((None, Some(_))) => {
-                        assert!(!waiters.contains(&slot_idx));
-                        assert!(!free.contains(&slot_idx));
-                    }
-                }
-            }
-        };
+        let nostarve_position = self.find_victim_waiters.begin()
+            .expect("we initialize the nostarve queue to the same size as the slots semaphore, and the caller is presenting a permit");
 
-        // Get in line.
-        let my_waitslot_idx = {
-                    tracing::trace!("get in line locking waiters");
-            let mut guard = self.find_victim_waiters.lock().unwrap();
-            integrity_check(&guard);
-            let (waiters, free, waitslot) = &mut *guard;
-            let my_waitslot_idx = free
-                .pop_front()
-                .expect("can't happen, len(slots) = len(waiters");
-            waiters.push_back(my_waitslot_idx);
-            let prev = waitslot[my_waitslot_idx].replace((None, None));
-            debug_assert!(prev.is_none());
-            integrity_check(&guard);
-            my_waitslot_idx
-        };
-
-        let span = tracing::info_span!("find_victim", my_waitslot_idx);
+        let span = tracing::info_span!("find_victim", ?nostarve_position);
         let _enter = span.enter();
 
         let mut iters = 0;
@@ -961,67 +899,7 @@ impl PageCache {
                 }
                 crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
 
-                // put in the victim we found
-                {
-                    tracing::trace!("found victim locking waiters");
-                    let mut guard = self.find_victim_waiters.lock().unwrap();
-                    integrity_check(&guard);
-                    let (waiters, _, waitslots) = &mut *guard;
-                    let winner_idx = waiters.pop_front().expect("we put ourselves in");
-                    tracing::trace!(winner_idx, "putting victim into next waiters slot");
-                    let winner_slot = waitslots[winner_idx].as_mut().unwrap();
-                    let prev = winner_slot.1.replace((slot_idx, inner));
-                    debug_assert!(
-                        prev.is_none(),
-                        "ensure we didn't mess up this simple ring buffer structure"
-                    );
-                    if let Some(waker) = winner_slot.0.take() {
-                        tracing::trace!(winner_idx, "waking up winner");
-                        waker.wake()
-                    }
-                    integrity_check(&guard);
-                }
-
-                let mut poll_num = 0;
-                let mut drop_guard = Some(scopeguard::guard((), |()| {
-                    panic!("must not drop this future until Ready");
-                }));
-
-                // take the victim that was found by someone else
-                return Ok(poll_fn(move |cx| {
-                    poll_num += 1;
-                    tracing::trace!(poll_num, "poll_fn locking waiters");
-                    let mut guard = self.find_victim_waiters.lock().unwrap();
-                    integrity_check(&guard);
-                    let (_, free, waitslots) = &mut *guard;
-                    let my_waitslot = waitslots[my_waitslot_idx].as_mut().unwrap();
-                    // assert!(
-                    //     poll_num <= 2,
-                    //     "once we place the waker in the slot, next wakeup should have a result: {}",
-                    //     my_waitslot.1.is_some()
-                    // );
-                    if let Some(res) = my_waitslot.1.take() {
-                        tracing::trace!(poll_num, "have cache slot");
-                        // above .take() resets the waiters slot to None
-                        free.push_back(my_waitslot_idx);
-                        debug_assert!(my_waitslot.0.is_none());
-                        debug_assert!(my_waitslot.1.is_none());
-                        waitslots[my_waitslot_idx] = None;
-                        let _ = scopeguard::ScopeGuard::into_inner(drop_guard.take().unwrap());
-                        integrity_check(&guard);
-                        return Poll::Ready(res);
-                    }
-                    // assert_eq!(poll_num, 1);
-                    if !my_waitslot.0.as_ref().map(|existing| cx.waker().will_wake(existing)).unwrap_or(false) {
-                        let prev = my_waitslot.0.replace(cx.waker().clone());
-                        tracing::trace!(poll_num, prev_is_some=prev.is_some(), "updating waker");
-                    }
-                    integrity_check(&guard);
-                    tracing::trace!(poll_num, "waiting to be woken up");
-                    Poll::Pending
-                })
-                .instrument(span.clone())
-                .await);
+                return Ok(nostarve_position.complete_and_wait((slot_idx, inner)).await);
             }
         }
     }
@@ -1065,11 +943,7 @@ impl PageCache {
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
             pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
-            find_victim_waiters: Mutex::new((VecDeque::new(), (0..num_pages).collect(), {
-                let mut v = Vec::with_capacity(num_pages);
-                v.resize_with(num_pages, || None);
-                v
-            })),
+            find_victim_waiters: ::nostarve_queue::Queue::new(num_pages),
         }
     }
 }
