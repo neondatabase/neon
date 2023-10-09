@@ -321,7 +321,7 @@ impl PageServerHandler {
                         // We were requested to shut down.
                         let msg = "pageserver is shutting down";
                         let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
-                        Err(QueryError::Other(anyhow::anyhow!(msg)))
+                        Err(QueryError::Shutdown)
                     }
 
                     msg = pgb.read_message() => { msg.map_err(QueryError::from)}
@@ -418,7 +418,7 @@ impl PageServerHandler {
                 _ = self.cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
-                    break;
+                    return Err(QueryError::Shutdown)
                 }
 
                 msg = pgb.read_message() => { msg }
