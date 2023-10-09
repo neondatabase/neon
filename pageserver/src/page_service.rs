@@ -349,6 +349,24 @@ impl PageServerHandler {
         }
     }
 
+    /// Wrap PostgresBackend::flush to respect our CancellationToken: it is important to use
+    /// this rather than naked flush() in order to shut down promptly.  Without this, we would
+    /// block shutdown of a tenant if a postgres client was failing to consume bytes we send
+    /// in the flush.
+    async fn flush_cancellable<IO>(&self, pgb: &mut PostgresBackend<IO>) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        tokio::select!(
+            flush_r = pgb.flush() => {
+                Ok(flush_r?)
+            },
+            _ = self.cancel.cancelled() => {
+                Err(QueryError::Other(anyhow::anyhow!("Shutting down")))
+            }
+        )
+    }
+
     #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
         &self,
@@ -385,7 +403,7 @@ impl PageServerHandler {
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
 
@@ -478,7 +496,7 @@ impl PageServerHandler {
             });
 
             pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
-            pgb.flush().await?;
+            self.flush_cancellable(pgb).await?;
         }
         Ok(())
     }
@@ -521,7 +539,7 @@ impl PageServerHandler {
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         timeline
@@ -576,7 +594,7 @@ impl PageServerHandler {
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
         let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
@@ -785,7 +803,7 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
@@ -837,7 +855,7 @@ impl PageServerHandler {
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         let basebackup_after = started
             .elapsed()
