@@ -326,7 +326,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         create_root.join()
 
 
-def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEnvBuilder):
+def test_non_uploaded_initial_timeline_availability_after_restart(neon_env_builder: NeonEnvBuilder):
     """
     Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
 
@@ -366,9 +366,61 @@ def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEn
 
     wait_until_tenant_active(ps_http, env.initial_tenant)
 
-    # currently it lives on and will get eventually uploaded, but this will change
-    detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-    assert detail["state"] == "Active"
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+
+def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
+
+    This test likely duplicates some other test, but it's easier to write one than to make sure there will be a failing test when the rfc is implemented.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.append(
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    )
+    ps_http = env.pageserver.http_client()
+
+    ps_http.tenant_create(env.initial_tenant)
+    ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline)
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    branch_id = TimelineId.generate()
+
+    def start_creating_timeline():
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version,
+                env.initial_tenant,
+                branch_id,
+                ancestor_timeline_id=env.initial_timeline,
+                timeout=60,
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, branch_id)
 
 
 def wait_until_paused(env: NeonEnv, failpoint: str):
