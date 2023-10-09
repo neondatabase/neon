@@ -6,11 +6,11 @@ use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
+use camino::Utf8PathBuf;
 use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
 use utils::id::{TenantId, TimelineId};
@@ -40,7 +40,9 @@ impl EphemeralFile {
 
         let filename = conf
             .timeline_path(&tenant_id, &timeline_id)
-            .join(PathBuf::from(format!("ephemeral-{filename_disambiguator}")));
+            .join(Utf8PathBuf::from(format!(
+                "ephemeral-{filename_disambiguator}"
+            )));
 
         let file = VirtualFile::open_with_options(
             &filename,
@@ -70,38 +72,32 @@ impl EphemeralFile {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
-            loop {
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
-                    .await
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.file.path.display(),
-                                e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
-                            .await?;
-                        write_guard.mark_valid();
-
-                        // Swap for read lock
-                        continue;
-                    }
-                };
-            }
+            match cache
+                .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
+                .await
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        // order path before error because error is anyhow::Error => might have many contexts
+                        format!(
+                            "ephemeral file: read immutable page #{}: {}: {:#}",
+                            blknum, self.file.path, e,
+                        ),
+                    )
+                })? {
+                page_cache::ReadBufResult::Found(guard) => {
+                    return Ok(BlockLease::PageReadGuard(guard))
+                }
+                page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                    let buf: &mut [u8] = write_guard.deref_mut();
+                    debug_assert_eq!(buf.len(), PAGE_SZ);
+                    self.file
+                        .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                        .await?;
+                    let read_guard = write_guard.mark_valid();
+                    return Ok(BlockLease::PageReadGuard(read_guard));
+                }
+            };
         } else {
             debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
             Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
@@ -171,7 +167,7 @@ impl EphemeralFile {
                                         let buf: &mut [u8] = write_guard.deref_mut();
                                         debug_assert_eq!(buf.len(), PAGE_SZ);
                                         buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
-                                        write_guard.mark_valid();
+                                        let _ = write_guard.mark_valid();
                                         // pre-warm successful
                                     }
                                     Err(e) => {
@@ -195,7 +191,7 @@ impl EphemeralFile {
                                         "ephemeral_file: write_blob: write-back full tail blk #{}: {:#}: {}",
                                         self.blknum,
                                         e,
-                                        self.ephemeral_file.file.path.display(),
+                                        self.ephemeral_file.file.path,
                                     ),
                                 ));
                             }
@@ -258,8 +254,7 @@ impl Drop for EphemeralFile {
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 error!(
                     "could not remove ephemeral file '{}': {}",
-                    self.file.path.display(),
-                    e
+                    self.file.path, e
                 );
             }
         }

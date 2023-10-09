@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
@@ -113,11 +115,39 @@ class TenantConfig:
 
 
 class PageserverHttpClient(requests.Session):
-    def __init__(self, port: int, is_testing_enabled_or_skip: Fn, auth_token: Optional[str] = None):
+    def __init__(
+        self,
+        port: int,
+        is_testing_enabled_or_skip: Fn,
+        auth_token: Optional[str] = None,
+        retries: Optional[Retry] = None,
+    ):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
         self.is_testing_enabled_or_skip = is_testing_enabled_or_skip
+
+        if retries is None:
+            # We apply a retry policy that is different to the default `requests` behavior,
+            # because the pageserver has various transiently unavailable states that benefit
+            # from a client retrying on 503
+
+            retries = Retry(
+                # Status retries are for retrying on 503 while e.g. waiting for tenants to activate
+                status=5,
+                # Connection retries are for waiting for the pageserver to come up and listen
+                connect=5,
+                # No read retries: if a request hangs that is not expected behavior
+                # (this may change in future if we do fault injection of a kind that causes
+                #  requests TCP flows to stick)
+                read=False,
+                backoff_factor=0,
+                status_forcelist=[503],
+                allowed_methods=None,
+                remove_headers_on_redirect=[],
+            )
+
+        self.mount("http://", HTTPAdapter(max_retries=retries))
 
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"

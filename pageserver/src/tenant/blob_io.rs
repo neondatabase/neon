@@ -238,14 +238,14 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
-        let temp_dir = tempfile::tempdir()?;
-        let path = temp_dir.path().join("file");
+        let temp_dir = camino_tempfile::tempdir()?;
+        let pathbuf = temp_dir.path().join("file");
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(&path).await?;
+            let file = VirtualFile::create(pathbuf.as_path()).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let offs = wtr.write_blob(blob).await?;
@@ -258,7 +258,7 @@ mod tests {
             wtr.flush_buffer().await?;
         }
 
-        let file = VirtualFile::open(&path).await?;
+        let file = VirtualFile::open(pathbuf.as_path()).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {

@@ -3,13 +3,14 @@
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
 use anyhow::Result;
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
-use std::{fs, path::Path, str};
+use std::{fs, str};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
@@ -98,7 +99,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-async fn get_holes(path: &Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
+async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path).await?);
     let summary_blk = file.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
@@ -167,7 +168,9 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {
-                        layer_file.holes = get_holes(&layer.path(), max_holes, &ctx).await?;
+                        let layer_path =
+                            Utf8PathBuf::from_path_buf(layer.path()).expect("non-Unicode path");
+                        layer_file.holes = get_holes(&layer_path, max_holes, &ctx).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

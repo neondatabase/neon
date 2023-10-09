@@ -4,15 +4,10 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{
-    borrow::Cow,
-    future::Future,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    pin::Pin,
-};
+use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin};
 
 use anyhow::{bail, ensure, Context};
+use camino::{Utf8Path, Utf8PathBuf};
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -28,20 +23,20 @@ const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
 #[derive(Debug, Clone)]
 pub struct LocalFs {
-    storage_root: PathBuf,
+    storage_root: Utf8PathBuf,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
     /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
-    pub fn new(mut storage_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(mut storage_root: Utf8PathBuf) -> anyhow::Result<Self> {
         if !storage_root.exists() {
             std::fs::create_dir_all(&storage_root).with_context(|| {
                 format!("Failed to create all directories in the given root path {storage_root:?}")
             })?;
         }
         if !storage_root.is_absolute() {
-            storage_root = storage_root.canonicalize().with_context(|| {
+            storage_root = storage_root.canonicalize_utf8().with_context(|| {
                 format!("Failed to represent path {storage_root:?} as an absolute path")
             })?;
         }
@@ -50,7 +45,7 @@ impl LocalFs {
     }
 
     // mirrors S3Bucket::s3_object_to_relative_path
-    fn local_file_to_relative_path(&self, key: PathBuf) -> RemotePath {
+    fn local_file_to_relative_path(&self, key: Utf8PathBuf) -> RemotePath {
         let relative_path = key
             .strip_prefix(&self.storage_root)
             .expect("relative path must contain storage_root as prefix");
@@ -59,22 +54,18 @@ impl LocalFs {
 
     async fn read_storage_metadata(
         &self,
-        file_path: &Path,
+        file_path: &Utf8Path,
     ) -> anyhow::Result<Option<StorageMetadata>> {
         let metadata_path = storage_metadata_path(file_path);
         if metadata_path.exists() && metadata_path.is_file() {
             let metadata_string = fs::read_to_string(&metadata_path).await.with_context(|| {
-                format!(
-                    "Failed to read metadata from the local storage at '{}'",
-                    metadata_path.display()
-                )
+                format!("Failed to read metadata from the local storage at '{metadata_path}'")
             })?;
 
             serde_json::from_str(&metadata_string)
                 .with_context(|| {
                     format!(
-                        "Failed to deserialize metadata from the local storage at '{}'",
-                        metadata_path.display()
+                        "Failed to deserialize metadata from the local storage at '{metadata_path}'",
                     )
                 })
                 .map(|metadata| Some(StorageMetadata(metadata)))
@@ -171,25 +162,21 @@ impl RemoteStorage for LocalFs {
             }
         }
 
-        // Note that PathBuf starts_with only considers full path segments, but
+        // Note that Utf8PathBuf starts_with only considers full path segments, but
         // object prefixes are arbitrary strings, so we need the strings for doing
         // starts_with later.
-        let prefix = full_path.to_string_lossy();
+        let prefix = full_path.as_str();
 
         let mut files = vec![];
-        let mut directory_queue = vec![initial_dir.clone()];
+        let mut directory_queue = vec![initial_dir];
         while let Some(cur_folder) = directory_queue.pop() {
-            let mut entries = fs::read_dir(cur_folder.clone()).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let file_name: PathBuf = entry.file_name().into();
-                let full_file_name = cur_folder.clone().join(&file_name);
-                if full_file_name
-                    .to_str()
-                    .map(|s| s.starts_with(prefix.as_ref()))
-                    .unwrap_or(false)
-                {
+            let mut entries = cur_folder.read_dir_utf8()?;
+            while let Some(Ok(entry)) = entries.next() {
+                let file_name = entry.file_name();
+                let full_file_name = cur_folder.join(file_name);
+                if full_file_name.as_str().starts_with(prefix) {
                     let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
-                    files.push(file_remote_path.clone());
+                    files.push(file_remote_path);
                     if full_file_name.is_dir() {
                         directory_queue.push(full_file_name);
                     }
@@ -230,10 +217,7 @@ impl RemoteStorage for LocalFs {
                 .open(&temp_file_path)
                 .await
                 .with_context(|| {
-                    format!(
-                        "Failed to open target fs destination at '{}'",
-                        target_file_path.display()
-                    )
+                    format!("Failed to open target fs destination at '{target_file_path}'")
                 })?,
         );
 
@@ -244,8 +228,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to upload file (write temp) to the local storage at '{}'",
-                    temp_file_path.display()
+                    "Failed to upload file (write temp) to the local storage at '{temp_file_path}'",
                 )
             })?;
 
@@ -262,8 +245,7 @@ impl RemoteStorage for LocalFs {
 
         destination.flush().await.with_context(|| {
             format!(
-                "Failed to upload (flush temp) file to the local storage at '{}'",
-                temp_file_path.display()
+                "Failed to upload (flush temp) file to the local storage at '{temp_file_path}'",
             )
         })?;
 
@@ -271,8 +253,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to upload (rename) file to the local storage at '{}'",
-                    target_file_path.display()
+                    "Failed to upload (rename) file to the local storage at '{target_file_path}'",
                 )
             })?;
 
@@ -286,8 +267,7 @@ impl RemoteStorage for LocalFs {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to write metadata to the local storage at '{}'",
-                    storage_metadata_path.display()
+                    "Failed to write metadata to the local storage at '{storage_metadata_path}'",
                 )
             })?;
         }
@@ -393,16 +373,16 @@ impl RemoteStorage for LocalFs {
     }
 }
 
-fn storage_metadata_path(original_path: &Path) -> PathBuf {
+fn storage_metadata_path(original_path: &Utf8Path) -> Utf8PathBuf {
     path_with_suffix_extension(original_path, "metadata")
 }
 
 fn get_all_files<'a, P>(
     directory_path: P,
     recursive: bool,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<PathBuf>>> + Send + Sync + 'a>>
+) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<Utf8PathBuf>>> + Send + Sync + 'a>>
 where
-    P: AsRef<Path> + Send + Sync + 'a,
+    P: AsRef<Utf8Path> + Send + Sync + 'a,
 {
     Box::pin(async move {
         let directory_path = directory_path.as_ref();
@@ -412,7 +392,13 @@ where
                 let mut dir_contents = fs::read_dir(directory_path).await?;
                 while let Some(dir_entry) = dir_contents.next_entry().await? {
                     let file_type = dir_entry.file_type().await?;
-                    let entry_path = dir_entry.path();
+                    let entry_path =
+                        Utf8PathBuf::from_path_buf(dir_entry.path()).map_err(|pb| {
+                            anyhow::Error::msg(format!(
+                                "non-Unicode path: {}",
+                                pb.to_string_lossy()
+                            ))
+                        })?;
                     if file_type.is_symlink() {
                         debug!("{entry_path:?} is a symlink, skipping")
                     } else if file_type.is_dir() {
@@ -435,13 +421,10 @@ where
     })
 }
 
-async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> {
+async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<()> {
     let target_dir = match target_file_path.parent() {
         Some(parent_dir) => parent_dir,
-        None => bail!(
-            "File path '{}' has no parent directory",
-            target_file_path.display()
-        ),
+        None => bail!("File path '{target_file_path}' has no parent directory"),
     };
     if !target_dir.exists() {
         fs::create_dir_all(target_dir).await?;
@@ -449,13 +432,9 @@ async fn create_target_directory(target_file_path: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn file_exists(file_path: &Path) -> anyhow::Result<bool> {
+fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
     if file_path.exists() {
-        ensure!(
-            file_path.is_file(),
-            "file path '{}' is not a file",
-            file_path.display()
-        );
+        ensure!(file_path.is_file(), "file path '{file_path}' is not a file");
         Ok(true)
     } else {
         Ok(false)
@@ -466,13 +445,13 @@ fn file_exists(file_path: &Path) -> anyhow::Result<bool> {
 mod fs_tests {
     use super::*;
 
+    use camino_tempfile::tempdir;
     use std::{collections::HashMap, io::Write};
-    use tempfile::tempdir;
 
     async fn read_and_assert_remote_file_contents(
         storage: &LocalFs,
         #[allow(clippy::ptr_arg)]
-        // have to use &PathBuf due to `storage.local_path` parameter requirements
+        // have to use &Utf8PathBuf due to `storage.local_path` parameter requirements
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
@@ -519,7 +498,7 @@ mod fs_tests {
     async fn upload_file_negatives() -> anyhow::Result<()> {
         let storage = create_storage()?;
 
-        let id = RemotePath::new(Path::new("dummy"))?;
+        let id = RemotePath::new(Utf8Path::new("dummy"))?;
         let content = std::io::Cursor::new(b"12345");
 
         // Check that you get an error if the size parameter doesn't match the actual
@@ -544,7 +523,8 @@ mod fs_tests {
     }
 
     fn create_storage() -> anyhow::Result<LocalFs> {
-        LocalFs::new(tempdir()?.path().to_owned())
+        let storage_root = tempdir()?.path().to_path_buf();
+        LocalFs::new(storage_root)
     }
 
     #[tokio::test]
@@ -561,7 +541,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Path::new(non_existing_path))?).await {
+        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -775,7 +755,7 @@ mod fs_tests {
     }
 
     async fn create_file_for_upload(
-        path: &Path,
+        path: &Utf8Path,
         contents: &str,
     ) -> anyhow::Result<(io::BufReader<fs::File>, usize)> {
         std::fs::create_dir_all(path.parent().unwrap())?;

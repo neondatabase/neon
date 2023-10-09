@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::env;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use camino::Utf8Path;
 use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
@@ -55,7 +56,7 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
     let test_client = Arc::clone(&ctx.enabled.client);
     let expected_remote_prefixes = ctx.remote_prefixes.clone();
 
-    let base_prefix = RemotePath::new(Path::new(ctx.enabled.base_prefix))
+    let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
         .list_prefixes(None)
@@ -108,7 +109,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
     };
     let test_client = Arc::clone(&ctx.enabled.client);
     let base_prefix =
-        RemotePath::new(Path::new("folder1")).context("common_prefix construction")?;
+        RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
         .list_files(None)
         .await
@@ -129,9 +130,9 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
     let trim_remote_blobs: HashSet<_> = ctx
         .remote_blobs
         .iter()
-        .map(|x| x.get_path().to_str().expect("must be valid name"))
+        .map(|x| x.get_path())
         .filter(|x| x.starts_with("folder1"))
-        .map(|x| RemotePath::new(Path::new(x)).expect("must be valid name"))
+        .map(|x| RemotePath::new(x).expect("must be valid path"))
         .collect();
     assert_eq!(
         nested_remote_files, trim_remote_blobs,
@@ -148,10 +149,9 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
         MaybeEnabledS3::Disabled => return Ok(()),
     };
 
-    let path = RemotePath::new(&PathBuf::from(format!(
-        "{}/for_sure_there_is_nothing_there_really",
-        ctx.base_prefix,
-    )))
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/for_sure_there_is_nothing_there_really", ctx.base_prefix).as_str(),
+    ))
     .with_context(|| "RemotePath conversion")?;
 
     ctx.client.delete(&path).await.expect("should succeed");
@@ -167,13 +167,13 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
         MaybeEnabledS3::Disabled => return Ok(()),
     };
 
-    let path1 = RemotePath::new(&PathBuf::from(format!("{}/path1", ctx.base_prefix,)))
+    let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let path2 = RemotePath::new(&PathBuf::from(format!("{}/path2", ctx.base_prefix,)))
+    let path2 = RemotePath::new(Utf8Path::new(format!("{}/path2", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let path3 = RemotePath::new(&PathBuf::from(format!("{}/path3", ctx.base_prefix,)))
+    let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
     let data1 = "remote blob data1".as_bytes();
@@ -427,10 +427,10 @@ async fn upload_s3_data(
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
         upload_tasks.spawn(async move {
-            let prefix = PathBuf::from(format!("{base_prefix_str}/sub_prefix_{i}/"));
-            let blob_prefix = RemotePath::new(&prefix)
+            let prefix = format!("{base_prefix_str}/sub_prefix_{i}/");
+            let blob_prefix = RemotePath::new(Utf8Path::new(&prefix))
                 .with_context(|| format!("{prefix:?} to RemotePath conversion"))?;
-            let blob_path = blob_prefix.join(Path::new(&format!("blob_{i}")));
+            let blob_path = blob_prefix.join(Utf8Path::new(&format!("blob_{i}")));
             debug!("Creating remote item {i} at path {blob_path:?}");
 
             let data = format!("remote blob data {i}").into_bytes();
@@ -512,8 +512,10 @@ async fn upload_simple_s3_data(
         let task_client = Arc::clone(client);
         upload_tasks.spawn(async move {
             let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
-            let blob_path = RemotePath::new(&blob_path)
-                .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
+            let blob_path = RemotePath::new(
+                Utf8Path::from_path(blob_path.as_path()).expect("must be valid blob path"),
+            )
+            .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
             debug!("Creating remote item {i} at path {blob_path:?}");
 
             let data = format!("remote blob data {i}").into_bytes();

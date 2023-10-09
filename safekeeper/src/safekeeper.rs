@@ -456,7 +456,7 @@ impl ProposerAcceptorMessage {
 
                 Ok(ProposerAcceptorMessage::AppendRequest(msg))
             }
-            _ => bail!("unknown proposer-acceptor message tag: {}", tag,),
+            _ => bail!("unknown proposer-acceptor message tag: {}", tag),
         }
     }
 }

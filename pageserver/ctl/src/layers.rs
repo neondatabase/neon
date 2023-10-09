@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use camino::Utf8Path;
 use clap::Subcommand;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
@@ -47,7 +48,7 @@ pub(crate) enum LayerCmd {
 }
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
-    let path = path.as_ref();
+    let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(10);
     page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path).await?);
