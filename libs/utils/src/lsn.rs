@@ -39,9 +39,8 @@ impl<'de> Deserialize<'de> for Lsn {
         impl<'de> Visitor<'de> for LsnVisitor {
             type Value = Lsn;
 
-            // TODO: improve the "expecting" description
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("u64 value in either bincode form(u64) or serde_json form({upper_u32_hex}/{lower_u32_hex})")
+                formatter.write_str("LSN as either split hex string or plain unsigned integer")
             }
 
             fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
@@ -59,11 +58,7 @@ impl<'de> Deserialize<'de> for Lsn {
             }
         }
 
-        if deserializer.is_human_readable() {
-            deserializer.deserialize_str(LsnVisitor)
-        } else {
-            deserializer.deserialize_u64(LsnVisitor)
-        }
+        deserializer.deserialize_any(LsnVisitor)
     }
 }
 
