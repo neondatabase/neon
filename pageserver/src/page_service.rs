@@ -35,6 +35,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
 use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
@@ -284,7 +285,13 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(
+        conf,
+        broker_client,
+        auth,
+        connection_ctx,
+        task_mgr::shutdown_token(),
+    );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -318,6 +325,10 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+
+    /// A token that should fire when the tenant transitions from
+    /// attached state, or when the pageserver is shutting down.
+    cancel: CancellationToken,
 }
 
 impl PageServerHandler {
@@ -326,6 +337,7 @@ impl PageServerHandler {
         broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<JwtAuth>>,
         connection_ctx: RequestContext,
+        cancel: CancellationToken,
     ) -> Self {
         PageServerHandler {
             _conf: conf,
@@ -333,6 +345,7 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
+            cancel,
         }
     }
 
