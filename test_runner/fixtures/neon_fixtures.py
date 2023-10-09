@@ -1642,6 +1642,7 @@ class NeonPageserver(PgProtocol):
             self.id, overrides=overrides, extra_env_vars=extra_env_vars
         )
         self.running = True
+        self.http_client().check_ready()
         return self
 
     def stop(self, immediate: bool = False) -> "NeonPageserver":

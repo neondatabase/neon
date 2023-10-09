@@ -382,7 +382,7 @@ fn start_pageserver(
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
-        let init_done_rx = init_done_rx;
+        let init_done_rx = init_done_rx.clone();
         let shutdown_pageserver = shutdown_pageserver.clone();
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
@@ -475,6 +475,7 @@ fn start_pageserver(
                 broker_client.clone(),
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
+                init_done_rx,
             )
             .context("Failed to initialize router state")?,
         );

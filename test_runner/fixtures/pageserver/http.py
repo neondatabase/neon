@@ -169,6 +169,12 @@ class PageserverHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def check_ready(self):
+        """
+        Blocks till pageserver initialization is done
+        """
+        self.get(f"http://localhost:{self.port}/v1/ready").raise_for_status()
+
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         self.is_testing_enabled_or_skip()
 

@@ -18,6 +18,7 @@ use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::completion::Barrier;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -66,6 +67,7 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
+    init_done_rx: Barrier,
 }
 
 impl State {
@@ -76,6 +78,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
+        init_done_rx: Barrier,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -89,6 +92,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
+            init_done_rx,
         })
     }
 
@@ -352,6 +356,17 @@ async fn status_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
+    let config = get_config(&request);
+    json_response(StatusCode::OK, StatusResponse { id: config.id })
+}
+
+async fn ready_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let state = get_state(&request);
+    state.init_done_rx.clone().wait().await;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
@@ -1623,6 +1638,7 @@ pub fn make_router(
     Ok(router
         .data(state)
         .get("/v1/status", |r| api_handler(r, status_handler))
+        .get("/v1/ready", |r| api_handler(r, ready_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
         })
