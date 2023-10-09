@@ -744,8 +744,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			hash_seq_init(&status, lfc_hash);
 			while ((entry = hash_seq_search(&status)) != NULL)
 			{
-				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
-					n_pages += (entry->bitmap[i >> 5] & (1 << (i & 31))) != 0;
+				for (int i = 0; i < BLOCKS_PER_CHUNK/32; i++)
+					n_pages += pg_popcount32(entry->bitmap[i]);
 			}
 		}
 		fctx->record = (LocalCachePagesRec *)
