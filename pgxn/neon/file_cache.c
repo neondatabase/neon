@@ -654,7 +654,10 @@ PG_FUNCTION_INFO_V1(local_cache_hits);
 Datum
 local_cache_hits(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(lfc_ctl ? lfc_ctl->hits : -1);
+	if (lfc_ctl)
+		PG_RETURN_INT64(lfc_ctl->hits);
+	else
+		PG_RETURN_NULL();
 }
 
 
@@ -662,7 +665,10 @@ PG_FUNCTION_INFO_V1(local_cache_misses);
 Datum
 local_cache_misses(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(lfc_ctl ? lfc_ctl->misses : -1);
+	if (lfc_ctl)
+		PG_RETURN_INT64(lfc_ctl->misses);
+	else
+		PG_RETURN_NULL();
 }
 
 
@@ -762,14 +768,10 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		if (n_pages != 0)
 		{
 			/*
-			 * Scan through all the buffers, saving the relevant fields in the
+			 * Scan through all the cache entries, saving the relevant fields in the
 			 * fctx->record structure.
-			 *
-			 * We don't hold the partition locks, so we don't get a consistent
-			 * snapshot across all buffers, but we do grab the buffer header
-			 * locks, so the information of each buffer is self-consistent.
 			 */
-			n_pages = 0;
+			uint32 n = 0;
 			hash_seq_init(&status, lfc_hash);
 			while ((entry = hash_seq_search(&status)) != NULL)
 			{
@@ -777,18 +779,18 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				{
 					if (entry->bitmap[i >> 5] & (1 << (i & 31)))
 					{
-						fctx->record[n_pages].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
-						fctx->record[n_pages].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n_pages].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n_pages].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
-						fctx->record[n_pages].forknum = entry->key.forkNum;
-						fctx->record[n_pages].blocknum = entry->key.blockNum + i;
-						fctx->record[n_pages].accesscount = entry->access_count;
-						n_pages += 1;
+						fctx->record[n].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
+						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].forknum = entry->key.forkNum;
+						fctx->record[n].blocknum = entry->key.blockNum + i;
+						fctx->record[n].accesscount = entry->access_count;
+						n += 1;
 					}
 				}
 			}
-			Assert(n_pages == funcctx->max_calls);
+			Assert(n_pages == n);
 		}
 		LWLockRelease(lfc_lock);
 	}
