@@ -400,7 +400,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         // socket might be already closed, e.g. if previously received error,
         // so ignore result.
         self.framed.shutdown().await.ok();
-        ret
+        match ret {
+            Ok(()) => Ok(()),
+            Err(QueryError::Shutdown) => {
+                info!("Stopped due to shutdown");
+                Ok(())
+            }
+            Err(QueryError::Disconnected(e)) => {
+                info!("Disconnected ({e:#})");
+                // Disconnection is not an error: we just use it that way internally to drop
+                // out of loops.
+                Ok(())
+            }
+            e => e,
+        }
     }
 
     async fn run_message_loop<F, S>(
@@ -420,15 +433,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             _ = shutdown_watcher() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received during handshake");
-                return Ok(())
+                return Err(QueryError::Shutdown)
             },
 
-            result = self.handshake(handler) => {
-                // Handshake complete.
-                result?;
-                if self.state == ProtoState::Closed {
-                    return Ok(()); // EOF during handshake
-                }
+            handshake_r = self.handshake(handler) => {
+                handshake_r?;
             }
         );
 
@@ -439,7 +448,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             _ = shutdown_watcher() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received in run_message_loop");
-                Ok(None)
+                return Err(QueryError::Shutdown)
             },
             msg = self.read_message() => { msg },
         )? {
@@ -451,7 +460,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 _ = shutdown_watcher() => {
                     // We were requested to shut down.
                     tracing::info!("shutdown request received during response flush");
-                    return Ok(())
+                    return Err(QueryError::Shutdown)
                 },
                 flush_r = self.flush() => {
                     flush_r?;
@@ -564,7 +573,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                         self.peer_addr
                     );
                     self.state = ProtoState::Closed;
-                    return Ok(());
+                    return Err(QueryError::Disconnected(ConnectionError::Protocol(
+                        ProtocolError::Protocol("EOF during handshake".to_string()),
+                    )));
                 }
             }
         }
@@ -603,7 +614,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                         self.peer_addr
                     );
                     self.state = ProtoState::Closed;
-                    return Ok(());
+                    return Err(QueryError::Disconnected(ConnectionError::Protocol(
+                        ProtocolError::Protocol("EOF during auth".to_string()),
+                    )));
                 }
             }
         }
