@@ -149,6 +149,10 @@ fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
     }
 }
 
+// FIXME: DO NOT ADD new query methods like this, which will have a next step of parsing timelineid
+// from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
+// from the name.
+
 pub fn is_uninit_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
 }
