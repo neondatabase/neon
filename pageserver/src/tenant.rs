@@ -1268,13 +1268,60 @@ impl Tenant {
                         .map_err(LoadLocalTimelineError::ResumeDeletion);
                     }
 
-                    // We're loading fresh timeline that didnt yet make it into remote.
+                    // see if there is at most one layer file and a metadata file in the directory
+                    // if not, we should fail the loading
                     //
-                    // If we were to declare this timeline as being deleted (and delete it now) as a
-                    // creation was never retried to completion in the point of view of control
-                    // plane. This timeline should never have any children or compute as they are
-                    // denied until upload.
-                    (None, Some(remote_client))
+                    // otherwise delete the not yet uploaded timeline.
+                    //
+                    // this timeline cannot have children because those are not allowed to be
+                    // created before uploading.
+
+                    let path = self.conf.timeline_path(&self.tenant_id, &timeline_id);
+
+                    return tokio::task::spawn_blocking({
+                        let path = path.clone();
+                        move || {
+                            let mut metadata = false;
+                            let mut layers = 0;
+                            let mut others = 0;
+                            for dentry in path.read_dir_utf8()? {
+                                let dentry = dentry?;
+                                let file_name = dentry.file_name();
+
+                                if file_name == "metadata" {
+                                    metadata = true;
+                                    continue;
+                                }
+
+                                use std::str::FromStr;
+
+                                if crate::tenant::storage_layer::LayerFileName::from_str(file_name)
+                                    .is_ok()
+                                {
+                                    layers += 1;
+                                    continue;
+                                }
+
+                                others += 1;
+                            }
+
+                            // bootstrapped have the one image layer file, or one partial temp file
+                            if !(metadata && layers + others <= 1) {
+                                anyhow::bail!("unexpected assumed fresh timeline: found metadata={}, layers={}, others={}", metadata, layers, others);
+                            }
+
+                            let tmp_path =
+                                path.with_file_name(format!("{timeline_id}{}", TEMP_FILE_SUFFIX));
+                            std::fs::rename(path, &tmp_path)?;
+                            std::fs::remove_dir_all(&tmp_path)?;
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .and_then(|x| x)
+                    .context("delete unuploaded fresh timeline")
+                    .map_err(LoadLocalTimelineError::Load);
                 }
                 Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
             },
