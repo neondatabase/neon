@@ -1,1 +1,1 @@
-void test_call(void);
+#include "walproposer.h"

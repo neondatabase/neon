@@ -186,9 +186,9 @@ walproposer-lib: neon-pg-ext-v16
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	ar d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
+	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
 		pg_strong_random.o
-	ar d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
+	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
 		pg_crc32c.o \
 		hmac_openssl.o \
 		cryptohash_openssl.o \
