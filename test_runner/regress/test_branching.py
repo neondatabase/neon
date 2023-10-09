@@ -18,6 +18,7 @@ from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
+from requests.exceptions import RetryError
 
 
 # Test branch creation
@@ -215,7 +216,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
         branch_id = TimelineId.generate()
 
-        with pytest.raises(PageserverApiException, match="ancestor timeline is not active"):
+        with pytest.raises(RetryError, match="too many 503 error responses"):
             ps_http.timeline_create(
                 env.pg_version,
                 env.initial_tenant,
