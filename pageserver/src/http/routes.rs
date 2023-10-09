@@ -78,7 +78,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
-        init_done_rx: Barrier,
+        tenants_loaded: Barrier,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -92,7 +92,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
-            tenants_loaded: init_done_rx,
+            tenants_loaded,
         })
     }
 
