@@ -72,13 +72,11 @@ def wait_until_tenant_state(
     Does not use `wait_until` for debugging purposes
     """
     for _ in range(iterations):
-        tenant = None
         try:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
         except Exception as e:
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
-
-        if tenant is not None:
+        else:
             log.debug(f"Tenant {tenant_id} data: {tenant}")
             if tenant["state"]["slug"] == expected_state:
                 return tenant
