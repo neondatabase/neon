@@ -367,7 +367,7 @@ def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEn
 
     # currently it lives on and will get eventually uploaded, but this will change
     detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-    assert detail is not None
+    assert detail["state"] == "Active"
 
 
 def test_non_uploaded_branch_chain_availability_after_restart(neon_env_builder: NeonEnvBuilder):
