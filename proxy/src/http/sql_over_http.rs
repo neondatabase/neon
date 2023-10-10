@@ -201,8 +201,7 @@ pub async fn handle(
             Err(e) => {
                 let message = format!("{:?}", e);
                 let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
-                    e.code()
-                        .and_then(|s| Some(serde_json::to_value(s.code()).unwrap_or_default()))
+                    e.code().map(|s| serde_json::to_value(s.code()).unwrap_or_default())
                 });
                 let code = match code {
                     Some(c) => c,
