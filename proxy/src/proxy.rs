@@ -7,7 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
-    http,
+    http::StatusCode,
     metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
@@ -418,28 +418,33 @@ const fn bool_to_str(x: bool) -> &'static str {
 fn report_error(e: &WakeComputeError, retry: bool) {
     use crate::console::errors::ApiError;
     let retry = bool_to_str(retry);
-    match e {
-        WakeComputeError::BadComputeAddress(_) => NUM_WAKEUP_FAILURES
-            .with_label_values(&[retry, "bad_compute_address"])
-            .inc(),
-        WakeComputeError::ApiError(ApiError::Transport(_)) => NUM_WAKEUP_FAILURES
-            .with_label_values(&[retry, "api_transport_error"])
-            .inc(),
-        WakeComputeError::ApiError(ApiError::Console { status, .. }) => match status {
-            &http::StatusCode::BAD_REQUEST => NUM_WAKEUP_FAILURES
-                .with_label_values(&[retry, "api_console_bad_request"])
-                .inc(),
-            &http::StatusCode::LOCKED => NUM_WAKEUP_FAILURES
-                .with_label_values(&[retry, "api_console_locked"])
-                .inc(),
-            x if x.is_server_error() => NUM_WAKEUP_FAILURES
-                .with_label_values(&[retry, "api_console_other_server_error"])
-                .inc(),
-            _ => NUM_WAKEUP_FAILURES
-                .with_label_values(&[retry, "api_console_other_error"])
-                .inc(),
-        },
-    }
+    let kind = match e {
+        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
+        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ref text,
+        }) if text.contains("written data quota exceeded")
+            || text.contains("the limit for current plan reached") =>
+        {
+            "quota_exceeded"
+        }
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ..
+        }) => "api_console_locked",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::BAD_REQUEST,
+            ..
+        }) => "api_console_bad_request",
+        WakeComputeError::ApiError(ApiError::Console { status, .. })
+            if status.is_server_error() =>
+        {
+            "api_console_other_server_error"
+        }
+        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+    };
+    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
 }
 
 /// Try to connect to the compute node, retrying if necessary.
