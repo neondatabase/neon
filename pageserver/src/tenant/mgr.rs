@@ -24,7 +24,7 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::{LocationConf, LocationMode, TenantConfOpt};
+use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
     create_tenant_files, AttachedTenantConf, CreateTenantFilesMode, Tenant, TenantState,
@@ -206,8 +206,7 @@ async fn init_load_generations(
     if resources.remote_storage.is_some() {
         resources
             .deletion_queue_client
-            .recover(generations.clone())
-            .await?;
+            .recover(generations.clone())?;
     }
 
     Ok(Some(generations))
@@ -695,6 +694,18 @@ pub(crate) async fn upsert_location(
 
     if let Some(tenant) = shutdown_tenant {
         let (_guard, progress) = utils::completion::channel();
+
+        match tenant.get_attach_mode() {
+            AttachmentMode::Single | AttachmentMode::Multi => {
+                // Before we leave our state as the presumed holder of the latest generation,
+                // flush any outstanding deletions to reduce the risk of leaking objects.
+                deletion_queue_client.flush_advisory()
+            }
+            AttachmentMode::Stale => {
+                // If we're stale there's not point trying to flush deletions
+            }
+        };
+
         info!("Shutting down attached tenant");
         match tenant.shutdown(progress, false).await {
             Ok(()) => {}
@@ -849,8 +860,16 @@ pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     detach_ignored: bool,
+    deletion_queue_client: &DeletionQueueClient,
 ) -> Result<(), TenantStateError> {
-    let tmp_path = detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await?;
+    let tmp_path = detach_tenant0(
+        conf,
+        &TENANTS,
+        tenant_id,
+        detach_ignored,
+        deletion_queue_client,
+    )
+    .await?;
     // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
     let task_tenant_id = None;
@@ -875,6 +894,7 @@ async fn detach_tenant0(
     tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
+    deletion_queue_client: &DeletionQueueClient,
 ) -> Result<Utf8PathBuf, TenantStateError> {
     let tenant_dir_rename_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
@@ -885,6 +905,10 @@ async fn detach_tenant0(
 
     let removal_result =
         remove_tenant_from_memory(tenants, tenant_id, tenant_dir_rename_operation(tenant_id)).await;
+
+    // Flush pending deletions, so that they have a good chance of passing validation
+    // before this tenant is potentially re-attached elsewhere.
+    deletion_queue_client.flush_advisory();
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
