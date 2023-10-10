@@ -102,9 +102,9 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
         // convert to text with escaping
         Value::Bool(_) => serde_json::to_string(value).map(Some),
         Value::Number(_) => serde_json::to_string(value).map(Some),
-        Value::Object(_) => serde_json::to_string(value).map(Some),
 
         // here string needs to be escaped, as it is part of the array
+        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
         Value::String(_) => serde_json::to_string(value).map(Some),
 
         // recurse into array
@@ -695,6 +695,14 @@ mod tests {
             vec![Some(
                 "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
             )]
+        );
+        // array of objects
+        let json = r#"[{"foo": 1},{"bar": 2}]"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        assert_eq!(
+            pg_params,
+            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
         );
     }
 
