@@ -85,7 +85,7 @@ pub(super) struct ListWriter {
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
-    rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
 
     // Outbound requests to the backend to execute deletion lists we have composed.
     tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
@@ -111,7 +111,7 @@ impl ListWriter {
 
     pub(super) fn new(
         conf: &'static PageServerConf,
-        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
         cancel: CancellationToken,
     ) -> Self {
