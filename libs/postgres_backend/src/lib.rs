@@ -442,10 +442,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             trace!("got message {:?}", msg);
 
             let result = self.process_message(handler, msg, &mut query_string).await;
-            self.flush().await?;
+            tokio::select!(
+                biased;
+                _ = shutdown_watcher() => {
+                    // We were requested to shut down.
+                    tracing::info!("shutdown request received during response flush");
+                    return Ok(())
+                },
+                flush_r = self.flush() => {
+                    flush_r?;
+                }
+            );
+
             match result? {
                 ProcessMsgResult::Continue => {
-                    self.flush().await?;
                     continue;
                 }
                 ProcessMsgResult::Break => break,

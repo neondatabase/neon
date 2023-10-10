@@ -1464,6 +1464,29 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
+    def map_branch(
+        self, name: str, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> "subprocess.CompletedProcess[str]":
+        """
+        Map tenant id and timeline id to a neon_local branch name. They do not have to exist.
+        Usually needed when creating branches via PageserverHttpClient and not neon_local.
+
+        After creating a name mapping, you can use EndpointFactory.create_start
+        with this registered branch name.
+        """
+        args = [
+            "mappings",
+            "map",
+            "--branch-name",
+            name,
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+        ]
+
+        return self.raw_cli(args, check_return_code=True)
+
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
 
