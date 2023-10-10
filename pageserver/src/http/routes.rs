@@ -77,7 +77,7 @@ impl State {
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
+        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
