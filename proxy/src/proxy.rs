@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    http::StatusCode,
     metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
@@ -71,6 +72,15 @@ static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
         "proxy_connection_failures_total",
         "Number of connection failures (per kind).",
         &["kind"],
+    )
+    .unwrap()
+});
+
+static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_breakdown",
+        "Number of wake-up failures (per kind).",
+        &["retry", "kind"],
     )
     .unwrap()
 });
@@ -397,6 +407,46 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
+const fn bool_to_str(x: bool) -> &'static str {
+    if x {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn report_error(e: &WakeComputeError, retry: bool) {
+    use crate::console::errors::ApiError;
+    let retry = bool_to_str(retry);
+    let kind = match e {
+        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
+        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ref text,
+        }) if text.contains("written data quota exceeded")
+            || text.contains("the limit for current plan reached") =>
+        {
+            "quota_exceeded"
+        }
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ..
+        }) => "api_console_locked",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::BAD_REQUEST,
+            ..
+        }) => "api_console_bad_request",
+        WakeComputeError::ApiError(ApiError::Console { status, .. })
+            if status.is_server_error() =>
+        {
+            "api_console_other_server_error"
+        }
+        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+    };
+    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
+}
+
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
@@ -440,10 +490,12 @@ where
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                report_error(&e, false);
                 return Err(e.into());
             }
             // failed to wake up but we can continue to retry
             Ok(ControlFlow::Continue(e)) => {
+                report_error(&e, true);
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
             }
             // successfully woke up a compute node and can break the wakeup loop
