@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    mgr::{GetTenantError, TenantsMap},
+    mgr::{GetTenantError, TenantSlotError, TenantSlotUpsertError, TenantsMap},
     remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
     span,
     timeline::delete::DeleteTimelineFlow,
@@ -35,11 +35,20 @@ pub(crate) enum DeleteTenantError {
     #[error("GetTenant {0}")]
     Get(#[from] GetTenantError),
 
+    #[error("Tenant not attached")]
+    NotAttached,
+
     #[error("Invalid state {0}. Expected Active or Broken")]
     InvalidState(TenantState),
 
     #[error("Tenant deletion is already in progress")]
     AlreadyInProgress,
+
+    #[error("Tenant map slot error {0}")]
+    SlotError(#[from] TenantSlotError),
+
+    #[error("Tenant map slot upsert error {0}")]
+    SlotUpsertError(#[from] TenantSlotUpsertError),
 
     #[error("Timeline {0}")]
     Timeline(#[from] DeleteTimelineError),
@@ -301,12 +310,12 @@ impl DeleteTenantFlow {
     pub(crate) async fn run(
         conf: &'static PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        tenant_id: TenantId,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
+        tenant: Arc<Tenant>,
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let (tenant, mut guard) = Self::prepare(tenants, tenant_id).await?;
+        let mut guard = Self::prepare(&tenant).await?;
 
         if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
             tenant.set_broken(format!("{e:#}")).await;
@@ -411,7 +420,7 @@ impl DeleteTenantFlow {
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         init_order: Option<&InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
@@ -448,7 +457,7 @@ impl DeleteTenantFlow {
     pub(crate) async fn resume_from_attach(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
@@ -474,15 +483,8 @@ impl DeleteTenantFlow {
     }
 
     async fn prepare(
-        tenants: &tokio::sync::RwLock<TenantsMap>,
-        tenant_id: TenantId,
-    ) -> Result<(Arc<Tenant>, tokio::sync::OwnedMutexGuard<Self>), DeleteTenantError> {
-        let m = tenants.read().await;
-
-        let tenant = m
-            .get(&tenant_id)
-            .ok_or(GetTenantError::NotFound(tenant_id))?;
-
+        tenant: &Arc<Tenant>,
+    ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {
         // FIXME: unsure about active only. Our init jobs may not be cancellable properly,
         // so at least for now allow deletions only for active tenants. TODO recheck
         // Broken and Stopping is needed for retries.
@@ -516,14 +518,14 @@ impl DeleteTenantFlow {
             )));
         }
 
-        Ok((Arc::clone(tenant), guard))
+        Ok(guard)
     }
 
     fn schedule_background(
         guard: OwnedMutexGuard<Self>,
         conf: &'static PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: Arc<Tenant>,
     ) {
         let tenant_id = tenant.tenant_id;
@@ -556,7 +558,7 @@ impl DeleteTenantFlow {
         mut guard: OwnedMutexGuard<Self>,
         conf: &PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: &Arc<Tenant>,
     ) -> Result<(), DeleteTenantError> {
         // Tree sort timelines, schedule delete for them. Mention retries from the console side.
@@ -604,7 +606,7 @@ impl DeleteTenantFlow {
             .await
             .context("cleanup_remaining_fs_traces")?;
 
-        let mut locked = tenants.write().await;
+        let mut locked = tenants.write().unwrap();
         if locked.remove(&tenant.tenant_id).is_none() {
             warn!("Tenant got removed from tenants map during deletion");
         };

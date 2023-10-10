@@ -3,13 +3,14 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use rand::{distributions::Alphanumeric, Rng};
-use std::collections::{hash_map, HashMap};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 use tokio::fs;
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
-use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -50,10 +51,13 @@ use super::TenantSharedResources;
 /// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
-#[derive(Clone)]
+#[derive(Debug)]
 pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary,
+    /// In this state, other administrative operations acting on the TenantId should
+    /// block, or return a retry indicator equivalent to HTTP 503
+    InProgress(Arc<tokio::sync::Notify>),
 }
 
 impl TenantSlot {
@@ -62,14 +66,7 @@ impl TenantSlot {
         match self {
             Self::Attached(t) => Some(t),
             Self::Secondary => None,
-        }
-    }
-
-    /// Consume self and return the `Tenant` that was in this slot if attached, else None
-    fn into_attached(self) -> Option<Arc<Tenant>> {
-        match self {
-            Self::Attached(t) => Some(t),
-            Self::Secondary => None,
+            Self::InProgress(_) => None,
         }
     }
 }
@@ -80,7 +77,7 @@ pub(crate) enum TenantsMap {
     /// [`init_tenant_mgr`] is not done yet.
     Initializing,
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
-    /// New tenants can be added using [`tenant_map_insert`].
+    /// New tenants can be added using [`tenant_map_acquire_slot`].
     Open(HashMap<TenantId, TenantSlot>),
     /// The pageserver has entered shutdown mode via [`shutdown_all_tenants`].
     /// Existing tenants are still accessible, but no new tenants can be created.
@@ -100,19 +97,10 @@ impl TenantsMap {
         }
     }
 
-    /// Get the contents of the map at this tenant ID, even if it is in secondary state.
-    pub(crate) fn get_slot(&self, tenant_id: &TenantId) -> Option<&TenantSlot> {
+    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<TenantSlot> {
         match self {
             TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.get(tenant_id),
-        }
-    }
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<Arc<Tenant>> {
-        match self {
-            TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                m.remove(tenant_id).and_then(TenantSlot::into_attached)
-            }
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
         }
     }
 }
@@ -150,7 +138,8 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
     Ok(tmp_path)
 }
 
-static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
+static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
+    Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
 
 /// Create a directory, including parents.  This does no fsyncs and makes
 /// no guarantees about the persistence of the resulting metadata: for
@@ -458,7 +447,7 @@ pub async fn init_tenant_mgr(
 
     info!("Processed {} local tenants at startup", tenants.len());
 
-    let mut tenants_map = TENANTS.write().await;
+    let mut tenants_map = TENANTS.write().unwrap();
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
     *tenants_map = TenantsMap::Open(tenants);
     Ok(())
@@ -472,7 +461,7 @@ pub(crate) fn schedule_local_tenant_processing(
     location_conf: AttachedTenantConf,
     resources: TenantSharedResources,
     init_order: Option<InitializationOrder>,
-    tenants: &'static tokio::sync::RwLock<TenantsMap>,
+    tenants: &'static std::sync::RwLock<TenantsMap>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -553,12 +542,13 @@ pub(crate) async fn shutdown_all_tenants() {
     shutdown_all_tenants0(&TENANTS).await
 }
 
-async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
+async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     use utils::completion;
 
-    // Prevent new tenants from being created.
-    let tenants_to_shut_down = {
-        let mut m = tenants.write().await;
+    // Under write lock (prevent any new tenants being created), extract the list
+    // of tenants to shut down.
+    let (in_progress_ops, tenants_to_shut_down) = {
+        let mut m = tenants.write().unwrap();
         match &mut *m {
             TenantsMap::Initializing => {
                 *m = TenantsMap::ShuttingDown(HashMap::default());
@@ -566,9 +556,28 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
                 return;
             }
             TenantsMap::Open(tenants) => {
-                let tenants_clone = tenants.clone();
-                *m = TenantsMap::ShuttingDown(std::mem::take(tenants));
-                tenants_clone
+                let mut shutdown_state = HashMap::new();
+                let mut in_progress_ops = Vec::new();
+                let mut tenants_to_shut_down = Vec::new();
+
+                for (k, v) in tenants.drain() {
+                    match v {
+                        TenantSlot::Attached(t) => {
+                            tenants_to_shut_down.push(t.clone());
+                            shutdown_state.insert(k, TenantSlot::Attached(t));
+                        }
+                        TenantSlot::Secondary => {
+                            shutdown_state.insert(k, TenantSlot::Secondary);
+                        }
+                        TenantSlot::InProgress(notify) => {
+                            // InProgress tenants are not visible in TenantsMap::ShuttingDown: we will
+                            // wait for their notifications to fire in this function.
+                            in_progress_ops.push(notify);
+                        }
+                    }
+                }
+                *m = TenantsMap::ShuttingDown(shutdown_state);
+                (in_progress_ops, tenants_to_shut_down)
             }
             TenantsMap::ShuttingDown(_) => {
                 // TODO: it is possible that detach and shutdown happen at the same time. as a
@@ -579,25 +588,29 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
         }
     };
 
+    info!(
+        "Waiting for {} InProgress tenants to complete...",
+        in_progress_ops.len()
+    );
+    for notify in in_progress_ops {
+        notify.notified().await;
+    }
+
+    info!(
+        "Waiting for {} attached tenants to shut down...",
+        tenants_to_shut_down.len()
+    );
     let started_at = std::time::Instant::now();
     let mut join_set = JoinSet::new();
-    for (tenant_id, tenant) in tenants_to_shut_down {
+    for tenant in tenants_to_shut_down {
+        let tenant_id = tenant.get_tenant_id();
         join_set.spawn(
             async move {
                 let freeze_and_flush = true;
 
                 let res = {
                     let (_guard, shutdown_progress) = completion::channel();
-                    match tenant {
-                        TenantSlot::Attached(t) => {
-                            t.shutdown(shutdown_progress, freeze_and_flush).await
-                        }
-                        TenantSlot::Secondary => {
-                            // TODO: once secondary mode downloads are implemented,
-                            // ensure they have all stopped before we reach this point.
-                            Ok(())
-                        }
-                    }
+                    tenant.shutdown(shutdown_progress, freeze_and_flush).await
                 };
 
                 if let Err(other_progress) = res {
@@ -669,30 +682,44 @@ pub(crate) async fn create_tenant(
     resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || async {
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
 
-        let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
-        // We're holding the tenants lock in write mode while doing local IO.
-        // If this section ever becomes contentious, introduce a new `TenantState::Creating`
-        // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+    // We're holding the tenants lock in write mode while doing local IO.
+    // If this section ever becomes contentious, introduce a new `TenantState::Creating`
+    // and do the work in that state.
+    let tenant_directory = super::create_tenant_files(
+        conf,
+        &location_conf,
+        &tenant_id,
+        CreateTenantFilesMode::Create,
+    )
+    .await?;
+    // TODO: tenant directory remains on disk if we bail out from here on.
+    //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant =
-            schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
+    let created_tenant = schedule_local_tenant_processing(
+        conf,
+        tenant_id,
+        &tenant_directory,
+        AttachedTenantConf::try_from(location_conf)?,
+        resources,
+        None,
+        &TENANTS,
+        ctx,
+    )?;
+    // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+    //      See https://github.com/neondatabase/neon/issues/4233
 
-        let crated_tenant_id = created_tenant.tenant_id();
-        anyhow::ensure!(
-                tenant_id == crated_tenant_id,
-                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
-            );
-        Ok(created_tenant)
-    }).await
+    let created_tenant_id = created_tenant.tenant_id();
+    if tenant_id != created_tenant_id {
+        return Err(TenantMapInsertError::Other(anyhow::anyhow!("loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {created_tenant_id})")));
+    }
+
+    tenant_guard.upsert(TenantSlot::Attached(created_tenant.clone()))?;
+
+    Ok(created_tenant)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -709,7 +736,7 @@ pub(crate) async fn set_new_tenant_config(
     tenant_id: TenantId,
 ) -> Result<(), SetNewTenantConfigError> {
     info!("configuring tenant {tenant_id}");
-    let tenant = get_tenant(tenant_id, true).await?;
+    let tenant = get_tenant(tenant_id, true)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
@@ -735,32 +762,49 @@ pub(crate) async fn upsert_location(
 ) -> Result<(), anyhow::Error> {
     info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
 
-    let mut existing_tenant = match get_tenant(tenant_id, false).await {
-        Ok(t) => Some(t),
-        Err(GetTenantError::NotFound(_)) => None,
-        Err(e) => anyhow::bail!(e),
-    };
+    // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
+    // then we do not need to set the slot to InProgress, we can just call into the
+    // existng tenant.
+    {
+        let locked = TENANTS.read().unwrap();
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id)?;
+        match (&new_location_config.mode, peek_slot) {
+            (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
+                if attach_conf.generation == tenant.generation {
+                    // A transition from Attached to Attached in the same generation, we may
+                    // take our fast path and just provide the updated configuration
+                    // to the tenant.
+                    tenant.set_new_location_config(AttachedTenantConf::try_from(
+                        new_location_config,
+                    )?);
 
-    // If we need to shut down a Tenant, do that first
-    let shutdown_tenant = match (&new_location_config.mode, &existing_tenant) {
-        (LocationMode::Secondary(_), Some(t)) => Some(t),
-        (LocationMode::Attached(attach_conf), Some(t)) => {
-            if attach_conf.generation != t.generation {
-                Some(t)
-            } else {
-                None
+                    // Persist the new config in the background, to avoid holding up any
+                    // locks while we do so.
+                    // TODO
+
+                    return Ok(());
+                } else {
+                    // Different generations, fall through to general case
+                }
+            }
+            _ => {
+                // Not an Attached->Attached transition, fall through to general case
             }
         }
-        _ => None,
-    };
+    }
 
-    // TODO: currently we risk concurrent operations interfering with the tenant
-    // while we await shutdown, but we also should not hold the TenantsMap lock
-    // across the whole operation.  Before we start using this function in production,
-    // a follow-on change will revise how concurrency is handled in TenantsMap.
-    // (https://github.com/neondatabase/neon/issues/5378)
+    // General case for upserts to TenantsMap, excluding the case above: we will substitute an
+    // InProgress value to the slot while we make whatever changes are required.  The state for
+    // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
+    // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
+    // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
+    let mut tenant_guard = tenant_map_acquire_slot(&tenant_id, None)?;
 
-    if let Some(tenant) = shutdown_tenant {
+    if let Some(TenantSlot::Attached(tenant)) = tenant_guard.take_value() {
+        // The case where we keep a Tenant alive was covered above in the special case
+        // for Attached->Attached transitions in the same generation.  By this point,
+        // if we see an attached tenant we know it will be discarded and should be
+        // shut down.
         let (_guard, progress) = utils::completion::channel();
 
         match tenant.get_attach_mode() {
@@ -782,88 +826,65 @@ pub(crate) async fn upsert_location(
                 barrier.wait().await;
             }
         }
-        existing_tenant = None;
     }
 
-    if let Some(tenant) = existing_tenant {
-        // Update the existing tenant
-        Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
-            .await
-            .map_err(SetNewTenantConfigError::Persist)?;
-        tenant.set_new_location_config(AttachedTenantConf::try_from(new_location_config)?);
-    } else {
-        // Upsert a fresh TenantSlot into TenantsMap.  Do it within the map write lock,
-        // and re-check that the state of anything we are replacing is as expected.
-        tenant_map_upsert_slot(tenant_id, |old_value| async move {
-            if let Some(TenantSlot::Attached(t)) = old_value {
-                if !matches!(t.current_state(), TenantState::Stopping { .. }) {
-                    anyhow::bail!("Tenant state changed during location configuration update");
-                }
-            }
+    let new_slot = match &new_location_config.mode {
+        LocationMode::Secondary(_) => {
+            let tenant_path = conf.tenant_path(&tenant_id);
+            // Directory doesn't need to be fsync'd because if we crash it can
+            // safely be recreated next time this tenant location is configured.
+            unsafe_create_dir_all(&tenant_path)
+                .await
+                .with_context(|| format!("Creating {tenant_path}"))?;
 
-            let new_slot = match &new_location_config.mode {
-                LocationMode::Secondary(_) => {
-                    let tenant_path = conf.tenant_path(&tenant_id);
-                    // Directory doesn't need to be fsync'd because if we crash it can
-                    // safely be recreated next time this tenant location is configured.
-                    unsafe_create_dir_all(&tenant_path)
-                        .await
-                        .with_context(|| format!("Creating {tenant_path}"))?;
+            Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+                .await
+                .map_err(SetNewTenantConfigError::Persist)?;
 
-                    Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
-                        .await
-                        .map_err(SetNewTenantConfigError::Persist)?;
+            TenantSlot::Secondary
+        }
+        LocationMode::Attached(_attach_config) => {
+            let timelines_path = conf.timelines_path(&tenant_id);
 
-                    TenantSlot::Secondary
-                }
-                LocationMode::Attached(_attach_config) => {
-                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
-                    // we have the same problem in load_tenant/attach_tenant.  Probably
-                    // need a lock in TenantSlot to fix this.
-                    let timelines_path = conf.timelines_path(&tenant_id);
+            // Directory doesn't need to be fsync'd because we do not depend on
+            // it to exist after crashes: it may be recreated when tenant is
+            // re-attached, see https://github.com/neondatabase/neon/issues/5550
+            unsafe_create_dir_all(&timelines_path)
+                .await
+                .with_context(|| format!("Creating {timelines_path}"))?;
 
-                    // Directory doesn't need to be fsync'd because we do not depend on
-                    // it to exist after crashes: it may be recreated when tenant is
-                    // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                    unsafe_create_dir_all(&timelines_path)
-                        .await
-                        .with_context(|| format!("Creating {timelines_path}"))?;
+            Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+                .await
+                .map_err(SetNewTenantConfigError::Persist)?;
 
-                    Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
-                        .await
-                        .map_err(SetNewTenantConfigError::Persist)?;
-
-                    let tenant = match Tenant::spawn_attach(
-                        conf,
-                        tenant_id,
-                        TenantSharedResources {
-                            broker_client,
-                            remote_storage,
-                            deletion_queue_client,
-                        },
-                        AttachedTenantConf::try_from(new_location_config)?,
-                        &TENANTS,
-                        // The LocationConf API does not use marker files, because we have Secondary
-                        // locations where the directory's existence is not a signal that it contains
-                        // all timelines.  See https://github.com/neondatabase/neon/issues/5550
-                        AttachMarkerMode::Ignore,
-                        ctx,
-                    ) {
-                        Ok(tenant) => tenant,
-                        Err(e) => {
-                            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                        }
-                    };
-
-                    TenantSlot::Attached(tenant)
+            let tenant = match Tenant::spawn_attach(
+                conf,
+                tenant_id,
+                TenantSharedResources {
+                    broker_client,
+                    remote_storage,
+                    deletion_queue_client,
+                },
+                AttachedTenantConf::try_from(new_location_config)?,
+                &TENANTS,
+                // The LocationConf API does not use marker files, because we have Secondary
+                // locations where the directory's existence is not a signal that it contains
+                // all timelines.  See https://github.com/neondatabase/neon/issues/5550
+                AttachMarkerMode::Ignore,
+                ctx,
+            ) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
                 }
             };
 
-            Ok(new_slot)
-        })
-        .await?;
-    }
+            TenantSlot::Attached(tenant)
+        }
+    };
+    tenant_guard.upsert(new_slot)?;
+
     Ok(())
 }
 
@@ -884,11 +905,11 @@ pub(crate) enum GetTenantError {
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
 ///
 /// This method is cancel-safe.
-pub(crate) async fn get_tenant(
+pub(crate) fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
-    let m = TENANTS.read().await;
+    let m = TENANTS.read().unwrap();
     let tenant = m
         .get(&tenant_id)
         .ok_or(GetTenantError::NotFound(tenant_id))?;
@@ -914,7 +935,35 @@ pub(crate) async fn delete_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     tenant_id: TenantId,
 ) -> Result<(), DeleteTenantError> {
-    DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant_id).await
+    // We acquire a SlotGuard during this function to protect against concurrent
+    // changes while the ::prepare phase of DeleteTenantFlow executes, but then
+    // have to return the Tenant to the map while the background deletion runs.
+    //
+    // TODO: refactor deletion to happen outside the lifetime of a Tenant.
+    // Currently, deletion requires a reference to the tenants map in order to
+    // keep the Tenant in the map until deletion is complete, and then remove
+    // it at the end.
+    //
+    // See https://github.com/neondatabase/neon/issues/5080
+
+    let mut slot_guard = tenant_map_acquire_slot(&tenant_id, Some(true))?;
+
+    // unwrap is safe because we used expect_exist=true when acquiring the slot
+    let slot = slot_guard.take_value().unwrap();
+
+    let tenant = match &slot {
+        TenantSlot::Attached(tenant) => tenant.clone(),
+        _ => {
+            // Express "not attached" as equivalent to "not found"
+            return Err(DeleteTenantError::NotAttached);
+        }
+    };
+
+    let result = DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant).await;
+
+    // Replace our InProgress marker with the Tenant in attached state, after the prepare phase of deletion is done
+    slot_guard.upsert(slot)?;
+    result
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -931,17 +980,19 @@ pub(crate) async fn delete_timeline(
     timeline_id: TimelineId,
     _ctx: &RequestContext,
 ) -> Result<(), DeleteTimelineError> {
-    let tenant = get_tenant(tenant_id, true).await?;
+    let tenant = get_tenant(tenant_id, true)?;
     DeleteTimelineFlow::run(&tenant, timeline_id, false).await?;
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantStateError {
-    #[error("Tenant {0} not found")]
-    NotFound(TenantId),
     #[error("Tenant {0} is stopping")]
     IsStopping(TenantId),
+    #[error(transparent)]
+    SlotError(#[from] TenantSlotError),
+    #[error(transparent)]
+    SlotUpsertError(#[from] TenantSlotUpsertError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -981,7 +1032,7 @@ pub(crate) async fn detach_tenant(
 
 async fn detach_tenant0(
     conf: &'static PageServerConf,
-    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenants: &std::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
     deletion_queue_client: &DeletionQueueClient,
@@ -1002,7 +1053,12 @@ async fn detach_tenant0(
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
-    if detach_ignored && matches!(removal_result, Err(TenantStateError::NotFound(_))) {
+    if detach_ignored
+        && matches!(
+            removal_result,
+            Err(TenantStateError::SlotError(TenantSlotError::NotFound(_)))
+        )
+    {
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
         if tenant_ignore_mark.exists() {
             info!("Detaching an ignored tenant");
@@ -1025,31 +1081,42 @@ pub(crate) async fn load_tenant(
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || async {
-        let tenant_path = conf.tenant_path(&tenant_id);
-        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
-        if tenant_ignore_mark.exists() {
-            std::fs::remove_file(&tenant_ignore_mark)
-                .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
-        }
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
+    let tenant_path = conf.tenant_path(&tenant_id);
 
-        let resources = TenantSharedResources {
-            broker_client,
-            remote_storage,
-            deletion_queue_client
-        };
+    let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
+    if tenant_ignore_mark.exists() {
+        std::fs::remove_file(&tenant_ignore_mark).with_context(|| {
+            format!(
+                "Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"
+            )
+        })?;
+    }
 
-        let mut location_conf = Tenant::load_tenant_config(conf, &tenant_id).map_err( TenantMapInsertError::Other)?;
-        location_conf.attach_in_generation(generation);
-        Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
+    let resources = TenantSharedResources {
+        broker_client,
+        remote_storage,
+        deletion_queue_client,
+    };
 
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, AttachedTenantConf::try_from(location_conf)?, resources, None,  &TENANTS, ctx)
-            .with_context(|| {
-                format!("Failed to schedule tenant processing in path {tenant_path:?}")
-            })?;
+    let mut location_conf =
+        Tenant::load_tenant_config(conf, &tenant_id).map_err(TenantMapInsertError::Other)?;
+    location_conf.attach_in_generation(generation);
+    Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        Ok(new_tenant)
-    }).await?;
+    let new_tenant = schedule_local_tenant_processing(
+        conf,
+        tenant_id,
+        &tenant_path,
+        AttachedTenantConf::try_from(location_conf)?,
+        resources,
+        None,
+        &TENANTS,
+        ctx,
+    )
+    .with_context(|| format!("schedule tenant processing in path {tenant_path:?}"))?;
+
+    tenant_guard.upsert(TenantSlot::Attached(new_tenant))?;
     Ok(())
 }
 
@@ -1062,7 +1129,7 @@ pub(crate) async fn ignore_tenant(
 
 async fn ignore_tenant0(
     conf: &'static PageServerConf,
-    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenants: &std::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenants, tenant_id, async {
@@ -1090,7 +1157,7 @@ pub(crate) enum TenantMapListError {
 /// Get list of tenants, for the mgmt API
 ///
 pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
-    let tenants = TENANTS.read().await;
+    let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
         TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
@@ -1099,6 +1166,7 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, Tenan
         .filter_map(|(id, tenant)| match tenant {
             TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
             TenantSlot::Secondary => None,
+            TenantSlot::InProgress(_) => None,
         })
         .collect())
 }
@@ -1115,107 +1183,325 @@ pub(crate) async fn attach_tenant(
     resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, || async {
-        let location_conf = LocationConf::attached_single(tenant_conf, generation);
-        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
 
-        // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
-        let marker_file_exists = conf
-            .tenant_attaching_mark_file_path(&tenant_id)
-            .try_exists()
-            .context("check for attach marker file existence")?;
-        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
-
-        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
-
-        let attached_tenant_id = attached_tenant.tenant_id();
-        anyhow::ensure!(
-            tenant_id == attached_tenant_id,
-            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
-        );
-        Ok(attached_tenant)
-    })
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let tenant_dir = create_tenant_files(
+        conf,
+        &location_conf,
+        &tenant_id,
+        CreateTenantFilesMode::Attach,
+    )
     .await?;
+    // TODO: tenant directory remains on disk if we bail out from here on.
+    //       See https://github.com/neondatabase/neon/issues/4233
+
+    // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
+    let marker_file_exists = conf
+        .tenant_attaching_mark_file_path(&tenant_id)
+        .try_exists()
+        .context("check for attach marker file existence")?;
+    if !marker_file_exists {
+        return Err(TenantMapInsertError::Other(anyhow::anyhow!(
+            "create_tenant_files should have created the attach marker file"
+        )));
+    }
+
+    let attached_tenant = schedule_local_tenant_processing(
+        conf,
+        tenant_id,
+        &tenant_dir,
+        AttachedTenantConf::try_from(location_conf)?,
+        resources,
+        None,
+        &TENANTS,
+        ctx,
+    )?;
+    // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+    //      See https://github.com/neondatabase/neon/issues/4233
+
+    let attached_tenant_id = attached_tenant.tenant_id();
+    if tenant_id != attached_tenant_id {
+        return Err(TenantMapInsertError::Other(anyhow::anyhow!(
+            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+        )));
+    }
+
+    tenant_guard.upsert(TenantSlot::Attached(attached_tenant))?;
+
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantMapInsertError {
-    #[error("tenant map is still initializing")]
-    StillInitializing,
-    #[error("tenant map is shutting down")]
-    ShuttingDown,
-    #[error("tenant {0} already exists, state: {1:?}")]
-    TenantAlreadyExists(TenantId, TenantState),
-    #[error("tenant {0} already exists in secondary state")]
-    TenantExistsSecondary(TenantId),
+    #[error(transparent)]
+    SlotError(#[from] TenantSlotError),
+    #[error(transparent)]
+    SlotUpsertError(#[from] TenantSlotUpsertError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-/// Give the given closure access to the tenants map entry for the given `tenant_id`, iff that
-/// entry is vacant. The closure is responsible for creating the tenant object and inserting
-/// it into the tenants map through the vacnt entry that it receives as argument.
-///
-/// NB: the closure should return quickly because the current implementation of tenants map
-/// serializes access through an `RwLock`.
-async fn tenant_map_insert<F, R>(
+/// Superset of TenantMapError: issues that can occur when acquiring a slot
+/// for a particular tenant ID.
+#[derive(Debug, thiserror::Error)]
+pub enum TenantSlotError {
+    /// When acquiring a slot with the expectation that the tenant already exists.
+    #[error("Tenant {0} not found")]
+    NotFound(TenantId),
+
+    /// When acquiring a slot with the expectation that the tenant does not already exist.
+    #[error("tenant {0} already exists, state: {1:?}")]
+    AlreadyExists(TenantId, TenantState),
+
+    #[error("tenant {0} already exists in but is not attached")]
+    Conflict(TenantId),
+
+    // Tried to read a slot that is currently being mutated by another administrative
+    // operation.
+    #[error("tenant has a state change in progress, try again later")]
+    InProgress,
+
+    #[error(transparent)]
+    MapState(#[from] TenantMapError),
+}
+
+/// Superset of TenantMapError: issues that can occur when using a SlotGuard
+/// to insert a new value.
+#[derive(Debug, thiserror::Error)]
+pub enum TenantSlotUpsertError {
+    /// An error where the slot is in an unexpected state, indicating a code bug
+    #[error("Internal error updating Tenant")]
+    InternalError(Cow<'static, str>),
+
+    #[error(transparent)]
+    MapState(#[from] TenantMapError),
+}
+
+/// Errors that can happen any time we are walking the tenant map to try and acquire
+/// the TenantSlot for a particular tenant.
+#[derive(Debug, thiserror::Error)]
+pub enum TenantMapError {
+    // Tried to read while initializing
+    #[error("tenant map is still initializing")]
+    StillInitializing,
+
+    // Tried to read while shutting down
+    #[error("tenant map is shutting down")]
+    ShuttingDown,
+}
+
+/// Guards a particular tenant_id's content in the TenantsMap.  While this
+/// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
+/// for this tenant, which acts as a marker for any operations targeting
+/// this tenant to retry later, or wait for the InProgress state to end.
+pub struct SlotGuard {
     tenant_id: TenantId,
-    insert_fn: F,
-) -> Result<Arc<Tenant>, TenantMapInsertError>
-where
-    F: FnOnce() -> R,
-    R: std::future::Future<Output = anyhow::Result<Arc<Tenant>>>,
-{
-    let mut guard = TENANTS.write().await;
-    let m = match &mut *guard {
-        TenantsMap::Initializing => return Err(TenantMapInsertError::StillInitializing),
-        TenantsMap::ShuttingDown(_) => return Err(TenantMapInsertError::ShuttingDown),
-        TenantsMap::Open(m) => m,
-    };
-    match m.entry(tenant_id) {
-        hash_map::Entry::Occupied(e) => match e.get() {
-            TenantSlot::Attached(t) => Err(TenantMapInsertError::TenantAlreadyExists(
-                tenant_id,
-                t.current_state(),
-            )),
-            TenantSlot::Secondary => Err(TenantMapInsertError::TenantExistsSecondary(tenant_id)),
-        },
-        hash_map::Entry::Vacant(v) => match insert_fn().await {
-            Ok(tenant) => {
-                v.insert(TenantSlot::Attached(tenant.clone()));
-                Ok(tenant)
+    old_value: Option<TenantSlot>,
+    upserted: bool,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+unsafe impl Send for SlotGuard {}
+unsafe impl Sync for SlotGuard {}
+
+impl SlotGuard {
+    fn new(
+        tenant_id: TenantId,
+        old_value: Option<TenantSlot>,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            old_value,
+            upserted: false,
+            notify,
+        }
+    }
+
+    /// Take any value that was present in the slot before we acquired ownership
+    /// of it: in state transitions, this will be the old state.
+    fn take_value(&mut self) -> Option<TenantSlot> {
+        self.old_value.take()
+    }
+
+    /// Emplace a new value in the slot.  This consumes the guard, and after
+    /// returning, the slot is no longer protected from concurrent changes.
+    fn upsert(mut self, new_value: TenantSlot) -> Result<(), TenantSlotUpsertError> {
+        let mut locked = TENANTS.write().unwrap();
+
+        if let TenantSlot::InProgress(_) = new_value {
+            // It is never expected to try and upsert InProgress via this path: it should
+            // only be written via the tenant_map_acquire_slot path.  If we hit this it's a bug.
+            return Err(TenantSlotUpsertError::InternalError(
+                "Attempt to upsert an InProgress state".into(),
+            ));
+        }
+
+        let m = match &mut *locked {
+            TenantsMap::Initializing => return Err(TenantMapError::StillInitializing.into()),
+            TenantsMap::ShuttingDown(_) => {
+                self.notify.notify_waiters();
+                return Err(TenantMapError::ShuttingDown.into());
             }
-            Err(e) => Err(TenantMapInsertError::Other(e)),
-        },
+            TenantsMap::Open(m) => m,
+        };
+
+        let replaced = m.insert(self.tenant_id, new_value);
+        self.upserted = true;
+
+        // Sanity check: on an upsert we should always be replacing an InProgress marker
+        let result = match replaced {
+            Some(TenantSlot::InProgress(_)) => {
+                // Expected case: we find our InProgress in the map: nothing should have
+                // replaced it because the code that acquires slots will not grant another
+                // one for the same TenantId.
+                Ok(())
+            }
+            None => {
+                error!(
+                    tenant_id = %self.tenant_id,
+                    "Missing InProgress marker during tenant upsert, this is a bug."
+                );
+                Err(TenantSlotUpsertError::InternalError(
+                    "Missing InProgress marker during tenant upsert".into(),
+                ))
+            }
+            Some(slot) => {
+                error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
+                Err(TenantSlotUpsertError::InternalError(
+                    "Unexpected contents of TenantSlot".into(),
+                ))
+            }
+        };
+
+        self.notify.notify_waiters();
+
+        result
     }
 }
 
-async fn tenant_map_upsert_slot<'a, F, R>(
-    tenant_id: TenantId,
-    upsert_fn: F,
-) -> Result<(), TenantMapInsertError>
-where
-    F: FnOnce(Option<TenantSlot>) -> R,
-    R: std::future::Future<Output = anyhow::Result<TenantSlot>>,
-{
-    let mut guard = TENANTS.write().await;
-    let m = match &mut *guard {
-        TenantsMap::Initializing => return Err(TenantMapInsertError::StillInitializing),
-        TenantsMap::ShuttingDown(_) => return Err(TenantMapInsertError::ShuttingDown),
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if !self.upserted {
+            let mut locked = TENANTS.write().unwrap();
+
+            let m = match &mut *locked {
+                TenantsMap::Initializing | TenantsMap::ShuttingDown(_) => {
+                    self.notify.notify_waiters();
+                    return;
+                }
+                TenantsMap::Open(m) => m,
+            };
+
+            let slot = m.remove(&self.tenant_id);
+            match slot {
+                Some(slot) => match slot {
+                    TenantSlot::InProgress(_) => {
+                        // Normal case: nothing should have replaced the TenantSlot value
+                        // that was set when we were constructed.
+                    }
+                    _ => {
+                        error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
+                    }
+                },
+                None => {
+                    error!(
+                        tenant_id = %self.tenant_id,
+                        "Missing InProgress marker during SlotGuard drop, this is a bug."
+                    );
+                }
+            }
+
+            self.notify.notify_waiters();
+        }
+    }
+}
+
+fn tenant_map_peek_slot<'a>(
+    tenants: &'a std::sync::RwLockReadGuard<'a, TenantsMap>,
+    tenant_id: &TenantId,
+) -> Result<Option<&'a TenantSlot>, TenantMapError> {
+    let m = match tenants.deref() {
+        TenantsMap::Initializing => return Err(TenantMapError::StillInitializing),
+        TenantsMap::ShuttingDown(_) => return Err(TenantMapError::ShuttingDown),
         TenantsMap::Open(m) => m,
     };
 
-    match upsert_fn(m.remove(&tenant_id)).await {
-        Ok(upsert_val) => {
-            m.insert(tenant_id, upsert_val);
-            Ok(())
+    Ok(m.get(tenant_id))
+}
+
+fn tenant_map_acquire_slot(
+    tenant_id: &TenantId,
+    expect_exist: Option<bool>,
+) -> Result<SlotGuard, TenantSlotError> {
+    tenant_map_acquire_slot_impl(tenant_id, &TENANTS, expect_exist)
+}
+
+fn tenant_map_acquire_slot_impl(
+    tenant_id: &TenantId,
+    tenants: &std::sync::RwLock<TenantsMap>,
+    expect_exist: Option<bool>,
+) -> Result<SlotGuard, TenantSlotError> {
+    let mut locked = tenants.write().unwrap();
+    let span = tracing::info_span!("acquire_slot", %tenant_id);
+    let _guard = span.enter();
+
+    let m = match &mut *locked {
+        TenantsMap::Initializing => return Err(TenantMapError::StillInitializing.into()),
+        TenantsMap::ShuttingDown(_) => return Err(TenantMapError::ShuttingDown.into()),
+        TenantsMap::Open(m) => m,
+    };
+
+    use std::collections::hash_map::Entry;
+    let entry = m.entry(*tenant_id);
+    match entry {
+        Entry::Vacant(v) => {
+            if let Some(true) = expect_exist {
+                tracing::debug!("Vacant & expect_exist: return NotFound");
+                return Err(TenantSlotError::NotFound(*tenant_id));
+            }
+
+            let notify = Arc::new(tokio::sync::Notify::new());
+            v.insert(TenantSlot::InProgress(notify.clone()));
+            tracing::debug!("Vacant, inserted InProgress");
+            Ok(SlotGuard::new(*tenant_id, None, notify))
         }
-        Err(e) => Err(TenantMapInsertError::Other(e)),
+        Entry::Occupied(mut o) => {
+            match (o.get(), expect_exist) {
+                (TenantSlot::InProgress(_), _) => {
+                    tracing::debug!("Occupied, failing for InProgress");
+                    return Err(TenantSlotError::InProgress);
+                }
+                (slot, Some(false)) => match slot {
+                    TenantSlot::Attached(tenant) => {
+                        tracing::debug!("Attached & !expected_exist, return AlreadyExists");
+                        return Err(TenantSlotError::AlreadyExists(
+                            *tenant_id,
+                            tenant.current_state(),
+                        ));
+                    }
+                    _ => {
+                        // FIXME: the AlreadyExists error assumes that we have a Tenant
+                        // to get the state from
+                        tracing::debug!("Occupied & !expected_exist, return AlreadyExists");
+                        return Err(TenantSlotError::AlreadyExists(
+                            *tenant_id,
+                            TenantState::Broken {
+                                reason: "Present but not attached".to_string(),
+                                backtrace: "".to_string(),
+                            },
+                        ));
+                    }
+                },
+                _ => {}
+            };
+
+            let notify = Arc::new(tokio::sync::Notify::new());
+            let old_value = o.insert(TenantSlot::InProgress(notify.clone()));
+            tracing::debug!("Occupied, replaced with InProgress");
+            Ok(SlotGuard::new(*tenant_id, Some(old_value), notify))
+        }
     }
 }
 
@@ -1224,7 +1510,7 @@ where
 /// If the cleanup fails, tenant will stay in memory in [`TenantState::Broken`] state, and another removal
 /// operation would be needed to remove it.
 async fn remove_tenant_from_memory<V, F>(
-    tenants: &tokio::sync::RwLock<TenantsMap>,
+    tenants: &std::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     tenant_cleanup: F,
 ) -> Result<V, TenantStateError>
@@ -1233,20 +1519,14 @@ where
 {
     use utils::completion;
 
-    // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
-    // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
-    // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
-    // avoid holding the lock for the entire process.
-    let tenant = {
-        match tenants
-            .write()
-            .await
-            .get_slot(&tenant_id)
-            .ok_or(TenantStateError::NotFound(tenant_id))?
-        {
-            TenantSlot::Attached(t) => Some(t.clone()),
-            TenantSlot::Secondary => None,
-        }
+    let mut tenant_guard = tenant_map_acquire_slot_impl(&tenant_id, tenants, Some(true))?;
+    let tenant_slot = tenant_guard.take_value();
+
+    // The SlotGuard allows us to manipulate the Tenant object without fear of some
+    // concurrent API request doing something else for the same tenant ID.
+    let attached_tenant = match tenant_slot {
+        Some(TenantSlot::Attached(t)) => Some(t),
+        _ => None,
     };
 
     // allow pageserver shutdown to await for our completion
@@ -1254,7 +1534,7 @@ where
 
     // If the tenant was attached, shut it down gracefully.  For secondary
     // locations this part is not necessary
-    match tenant {
+    match &attached_tenant {
         Some(attached_tenant) => {
             // whenever we remove a tenant from memory, we don't want to flush and wait for upload
             let freeze_and_flush = false;
@@ -1279,24 +1559,14 @@ where
         .await
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))
     {
-        Ok(hook_value) => {
-            let mut tenants_accessor = tenants.write().await;
-            if tenants_accessor.remove(&tenant_id).is_none() {
-                warn!("Tenant {tenant_id} got removed from memory before operation finished");
-            }
-            Ok(hook_value)
-        }
+        Ok(hook_value) => Ok(hook_value),
         Err(e) => {
-            let tenants_accessor = tenants.read().await;
-            match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => {
-                    tenant.set_broken(e.to_string()).await;
-                }
-                None => {
-                    warn!("Tenant {tenant_id} got removed from memory");
-                    return Err(TenantStateError::NotFound(tenant_id));
-                }
+            // If we had a Tenant, set it to Broken and put it back in the TenantsMap
+            if let Some(attached_tenant) = attached_tenant {
+                attached_tenant.set_broken(e.to_string()).await;
+                tenant_guard.upsert(TenantSlot::Attached(attached_tenant))?;
             }
+
             Err(TenantStateError::Other(e))
         }
     }
@@ -1313,7 +1583,7 @@ pub(crate) async fn immediate_gc(
     gc_req: TimelineGcRequest,
     ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
-    let guard = TENANTS.read().await;
+    let guard = TENANTS.read().unwrap();
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
@@ -1366,14 +1636,12 @@ mod tests {
 
     use super::{super::harness::TenantHarness, TenantsMap};
 
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_joins_remove_tenant_from_memory() {
-        // the test is a bit ugly with the lockstep together with spawned tasks. the aim is to make
-        // sure `shutdown_all_tenants0` per-tenant processing joins in any active
-        // remove_tenant_from_memory calls, which is enforced by making the operation last until
-        // we've ran `shutdown_all_tenants0` for a long time.
+    #[tokio::test]
+    async fn shutdown_awaits_in_progress_tenant() {
+        // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
+        // wait for it to complete before proceeding.
 
-        let (t, _ctx) = TenantHarness::create("shutdown_joins_detach")
+        let (t, _ctx) = TenantHarness::create("shutdown_awaits_in_progress_tenant")
             .unwrap()
             .load()
             .await;
@@ -1386,13 +1654,14 @@ mod tests {
         let _e = info_span!("testing", tenant_id = %id).entered();
 
         let tenants = HashMap::from([(id, TenantSlot::Attached(t.clone()))]);
-        let tenants = Arc::new(tokio::sync::RwLock::new(TenantsMap::Open(tenants)));
+        let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
+
+        // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
+        // permit it to proceed: that will stick the tenant in InProgress
 
         let (until_cleanup_completed, can_complete_cleanup) = utils::completion::channel();
         let (until_cleanup_started, cleanup_started) = utils::completion::channel();
-
-        // start a "detaching operation", which will take a while, until can_complete_cleanup
-        let cleanup_task = {
+        let mut remove_tenant_from_memory_task = {
             let jh = tokio::spawn({
                 let tenants = tenants.clone();
                 async move {
@@ -1411,12 +1680,6 @@ mod tests {
             jh
         };
 
-        let mut cleanup_progress = std::pin::pin!(t
-            .shutdown(utils::completion::Barrier::default(), false)
-            .await
-            .unwrap_err()
-            .wait());
-
         let mut shutdown_task = {
             let (until_shutdown_started, shutdown_started) = utils::completion::channel();
 
@@ -1429,37 +1692,17 @@ mod tests {
             shutdown_task
         };
 
-        // if the joining in is removed from shutdown_all_tenants0, the shutdown_task should always
-        // get to complete within timeout and fail the test. it is expected to continue awaiting
-        // until completion or SIGKILL during normal shutdown.
-        //
-        // the timeout is long to cover anything that shutdown_task could be doing, but it is
-        // handled instantly because we use tokio's time pausing in this test. 100s is much more than
-        // what we get from systemd on shutdown (10s).
-        let long_time = std::time::Duration::from_secs(100);
+        let long_time = std::time::Duration::from_secs(15);
         tokio::select! {
-            _ = &mut shutdown_task => unreachable!("shutdown must continue, until_cleanup_completed is not dropped"),
-            _ = &mut cleanup_progress => unreachable!("cleanup progress must continue, until_cleanup_completed is not dropped"),
+            _ = &mut shutdown_task => unreachable!("shutdown should block on remove_tenant_from_memory completing"),
+            _ = &mut remove_tenant_from_memory_task => unreachable!("remove_tenant_from_memory_task should not complete until explicitly unblocked"),
             _ = tokio::time::sleep(long_time) => {},
         }
 
-        // allow the remove_tenant_from_memory and thus eventually the shutdown to continue
         drop(until_cleanup_completed);
 
-        let (je, ()) = tokio::join!(shutdown_task, cleanup_progress);
-        je.expect("Tenant::shutdown shutdown not have panicked");
-        cleanup_task
-            .await
-            .expect("no panicking")
-            .expect("remove_tenant_from_memory failed");
-
-        futures::future::poll_immediate(
-            t.shutdown(utils::completion::Barrier::default(), false)
-                .await
-                .unwrap_err()
-                .wait(),
-        )
-        .await
-        .expect("the stopping progress must still be complete");
+        // Now that we allow it to proceed, shutdown should complete immediately
+        remove_tenant_from_memory_task.await.unwrap().unwrap();
+        shutdown_task.await.unwrap();
     }
 }
