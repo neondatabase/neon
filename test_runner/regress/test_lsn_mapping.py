@@ -124,7 +124,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
                 probe_lsn,
             )
             # There should always be an error here.
-            AssertionError()
+            raise RuntimeError("there should have been an 'Invalid LSN' error")
         except PageserverApiException as error:
             assert error.status_code == 500
             assert str(error) == "Invalid LSN"
@@ -139,7 +139,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
                 probe_lsn,
             )
             # There should always be an error here.
-            AssertionError()
+            raise RuntimeError("there should have been an 'could not find data for key' error")
         except PageserverApiException as error:
             assert error.status_code == 500
             assert str(error).startswith("could not find data for key")
