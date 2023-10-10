@@ -3,7 +3,10 @@ use crate::{
     config::ProxyConfig,
     error::io_error,
     protocol2::{ProxyProtocolAccept, WithClientIp},
-    proxy::{handle_client, ClientMode},
+    proxy::{
+        handle_client, ClientMode, NUM_CLIENT_CONNECTION_CLOSED_COUNTER,
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER,
+    },
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
@@ -275,23 +278,25 @@ pub async fn task_main(
             let conn_pool = conn_pool.clone();
 
             async move {
-                Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| {
-                    let sni_name = sni_name.clone();
-                    let conn_pool = conn_pool.clone();
+                Ok::<_, Infallible>(MetricService::new(hyper::service::service_fn(
+                    move |req: Request<Body>| {
+                        let sni_name = sni_name.clone();
+                        let conn_pool = conn_pool.clone();
 
-                    async move {
-                        let cancel_map = Arc::new(CancelMap::default());
-                        let session_id = uuid::Uuid::new_v4();
+                        async move {
+                            let cancel_map = Arc::new(CancelMap::default());
+                            let session_id = uuid::Uuid::new_v4();
 
-                        ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
-                            .instrument(info_span!(
-                                "ws-client",
-                                session = %session_id,
-                                %peer_addr,
-                            ))
-                            .await
-                    }
-                }))
+                            ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
+                                .instrument(info_span!(
+                                    "ws-client",
+                                    session = %session_id,
+                                    %peer_addr,
+                                ))
+                                .await
+                        }
+                    },
+                )))
             }
         },
     );
@@ -302,4 +307,42 @@ pub async fn task_main(
         .await?;
 
     Ok(())
+}
+
+struct MetricService<S> {
+    inner: S,
+}
+
+impl<S> MetricService<S> {
+    fn new(inner: S) -> MetricService<S> {
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER
+            .with_label_values(&["http"])
+            .inc();
+        MetricService { inner }
+    }
+}
+
+impl<S> Drop for MetricService<S> {
+    fn drop(&mut self) {
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
+            .with_label_values(&["http"])
+            .inc();
+    }
+}
+
+impl<S, ReqBody> hyper::service::Service<Request<ReqBody>> for MetricService<S>
+where
+    S: hyper::service::Service<Request<ReqBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        self.inner.call(req)
+    }
 }

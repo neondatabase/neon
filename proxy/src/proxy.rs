@@ -39,19 +39,55 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_accepted_connections_total",
-        "Number of TCP client connections accepted.",
+        "proxy_opened_db_connections_total",
+        "Number of opened connections to a database.",
         &["protocol"],
     )
     .unwrap()
 });
 
-static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_closed_db_connections_total",
+        "Number of closed connections to a database.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_opened_client_connections_total",
+        "Number of opened connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_closed_client_connections_total",
+        "Number of closed connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_total",
+        "Number of client connections accepted.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_closed_connections_total",
-        "Number of TCP client connections closed.",
+        "Number of client connections closed.",
         &["protocol"],
     )
     .unwrap()
@@ -218,12 +254,16 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         "handling interactive connection from client"
     );
 
-    // The `closed` counter will increase when this future is destroyed.
+    let proto = mode.protocol_label();
+    NUM_CLIENT_CONNECTION_OPENED_COUNTER
+        .with_label_values(&[proto])
+        .inc();
     NUM_CONNECTIONS_ACCEPTED_COUNTER
-        .with_label_values(&[mode.protocol_label()])
+        .with_label_values(&[proto])
         .inc();
     scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[mode.protocol_label()]).inc();
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER.with_label_values(&[proto]).inc();
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
     }
 
     let tls = config.tls_config.as_ref();
@@ -258,7 +298,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode.allow_cleartext()))
+        .with_session(|session| client.connect_to_db(session, mode))
         .await
 }
 
@@ -734,7 +774,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
-        allow_cleartext: bool,
+        mode: ClientMode,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -750,7 +790,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         };
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, allow_cleartext)
+            .authenticate(&extra, &mut stream, mode.allow_cleartext())
             .await
         {
             Ok(auth_result) => auth_result,
@@ -775,6 +815,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         let mut node = connect_to_compute(&TcpMechanism { params }, node_info, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
+
+        let proto = mode.protocol_label();
+        NUM_DB_CONNECTIONS_OPENED_COUNTER
+            .with_label_values(&[proto])
+            .inc();
+        scopeguard::defer! {
+            NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
+        }
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the

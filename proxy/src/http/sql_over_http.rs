@@ -24,6 +24,8 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
+
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
 
@@ -245,6 +247,13 @@ async fn handle_inner(
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
 ) -> anyhow::Result<Response<Body>> {
+    NUM_CONNECTIONS_ACCEPTED_COUNTER
+        .with_label_values(&["http"])
+        .inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
+    }
+
     //
     // Determine the destination and connection params
     //
