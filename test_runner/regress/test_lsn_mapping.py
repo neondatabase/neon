@@ -102,9 +102,9 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     cur.execute("INSERT INTO foo VALUES (-1)")
 
     # Wait until WAL is received by pageserver
-    wait_for_last_flush_lsn(env, endpoint_main, env.initial_tenant, new_timeline_id)
-
-    last_flush_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    last_flush_lsn = wait_for_last_flush_lsn(
+        env, endpoint_main, env.initial_tenant, new_timeline_id
+    )
 
     with env.pageserver.http_client() as client:
         # Check edge cases: lsn larger than the last flush lsn
