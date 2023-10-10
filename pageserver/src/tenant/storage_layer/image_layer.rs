@@ -559,11 +559,11 @@ impl ImageLayerWriterInner {
             },
         );
         info!("new image layer {path}");
-        let mut file = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options.write(true).create_new(true);
-            VirtualFile::open_with_options_async(&path, options).await?
-        };
+        let mut file = VirtualFile::open_with_options(
+            &path,
+            std::fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .await?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);

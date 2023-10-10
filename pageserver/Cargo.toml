@@ -84,7 +84,6 @@ enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 tokio-epoll-uring = { path = "/home/admin/tokio-epoll-uring/tokio-epoll-uring" }
-#tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/hacky-openat" }
 
 [dev-dependencies]
 criterion.workspace = true
