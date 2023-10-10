@@ -443,7 +443,7 @@ impl PageCache {
     ///
     /// Store an image of the given page in the cache.
     ///
-    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(%key, %lsn)))]
+    // #[cfg_attr(test, instrument(skip_all, level = "trace", fields(%key, %lsn)))]
     pub async fn memorize_materialized_page(
         &'static self,
         tenant_id: TenantId,
@@ -536,7 +536,7 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with immutable file pages.
 
-    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(?file_id, ?blkno)))]
+    // #[cfg_attr(test, instrument(skip_all, level = "trace", fields(?file_id, ?blkno)))]
     pub async fn read_immutable_buf(
         &'static self,
         file_id: FileId,
@@ -872,8 +872,8 @@ impl PageCache {
         let nostarve_position = self.find_victim_waiters.begin()
             .expect("we initialize the nostarve queue to the same size as the slots semaphore, and the caller is presenting a permit");
 
-        let span = tracing::info_span!("find_victim", ?nostarve_position);
-        let _enter = span.enter();
+        // let span = tracing::trace_span!("find_victim", ?nostarve_position);
+        // let _enter = span.enter();
 
         let mut iters = 0;
         loop {
