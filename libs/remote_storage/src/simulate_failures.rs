@@ -18,13 +18,29 @@ pub struct UnreliableWrapper {
 }
 
 /// Used to identify retries of different unique operation.
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq)]
 enum RemoteOp {
     ListPrefixes(Option<RemotePath>),
     Upload(RemotePath),
     Download(RemotePath),
     Delete(RemotePath),
     DeleteObjects(Vec<RemotePath>),
+}
+
+impl std::fmt::Debug for RemoteOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use RemoteOp::*;
+        match self {
+            ListPrefixes(arg0) => f.debug_tuple("ListPrefixes").field(arg0).finish(),
+            Upload(arg0) => f.debug_tuple("Upload").field(arg0).finish(),
+            Download(arg0) => f.debug_tuple("Download").field(arg0).finish(),
+            Delete(arg0) => f.debug_tuple("Delete").field(arg0).finish(),
+            DeleteObjects(many) if many.len() > 3 => {
+                write!(f, "DeleteObjects({} paths)", many.len())
+            }
+            DeleteObjects(few) => f.debug_tuple("DeleteObjects").field(few).finish(),
+        }
+    }
 }
 
 impl UnreliableWrapper {
@@ -59,13 +75,12 @@ impl UnreliableWrapper {
                     e.remove();
                     Ok(attempts_before_this)
                 } else {
-                    let error =
-                        anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
+                    let error = anyhow::anyhow!(SimulatedError::from(e.key()));
                     Err(DownloadError::Other(error))
                 }
             }
             Entry::Vacant(e) => {
-                let error = anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
+                let error = anyhow::anyhow!(SimulatedError::from(e.key()));
                 e.insert(1);
                 Err(DownloadError::Other(error))
             }
@@ -79,6 +94,26 @@ impl UnreliableWrapper {
         self.inner.delete(path).await
     }
 }
+
+/// `pub` type for checking if this is the root cause around logging.
+///
+/// This is just a string to avoid cloning a huge number of paths a second time.
+#[derive(Debug)]
+pub struct SimulatedError(String);
+
+impl<'a> From<&'a RemoteOp> for SimulatedError {
+    fn from(value: &'_ RemoteOp) -> Self {
+        SimulatedError(format!("simulated failure of remote operation {:?}", value))
+    }
+}
+
+impl std::fmt::Display for SimulatedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SimulatedError {}
 
 #[async_trait::async_trait]
 impl RemoteStorage for UnreliableWrapper {

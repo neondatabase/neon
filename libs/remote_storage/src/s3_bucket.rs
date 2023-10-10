@@ -380,7 +380,7 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .context("Failed to list S3 prefixes")
+                .context("list S3 prefixes")
                 .map_err(DownloadError::Other);
 
             let started_at = ScopeGuard::into_inner(started_at);
@@ -432,7 +432,7 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
-                .context("Failed to list files in S3 bucket");
+                .context("list files in S3 bucket");
 
             let started_at = ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
@@ -556,10 +556,7 @@ impl RemoteStorage for S3Bucket {
                         .deleted_objects_total
                         .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
-                        return Err(anyhow::format_err!(
-                            "Failed to delete {} objects",
-                            errors.len()
-                        ));
+                        return Err(anyhow::anyhow!("delete {} objects", errors.len()));
                     }
                 }
                 Err(e) => {
