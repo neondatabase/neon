@@ -31,7 +31,7 @@ use crate::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
         timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant,
+        LogicalSizeCalculationCause, Tenant, tasks::RateLimitError,
     },
 };
 
@@ -149,6 +149,11 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
+
+        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(ctx, cancel).await {
+            Ok(permit) => permit,
+            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        };
 
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.

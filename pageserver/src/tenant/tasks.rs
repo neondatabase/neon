@@ -14,6 +14,50 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 
+static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| {
+        let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+        let permits = usize::max(
+            1,
+            // while a lot of the work is done on spawn_blocking, we still do
+            // repartitioning in the async context. this should give leave us some workers
+            // unblocked to be blocked on other work, hopefully easing any outside visible
+            // effects of restarts.
+            //
+            // 6/8 is a guess; previously we ran with unlimited 8 and more from
+            // spawn_blocking.
+            (total_threads * 3).checked_div(4).unwrap_or(0),
+        );
+        assert_ne!(permits, 0, "we will not be adding in permits later");
+        assert!(
+            permits < total_threads,
+            "need threads avail for shorter work"
+        );
+        tokio::sync::Semaphore::new(permits)
+    });
+
+pub(crate) enum RateLimitError {
+    Cancelled,
+}
+
+pub(crate) async fn concurrent_background_tasks_rate_limit(
+    _ctx: &RequestContext,
+    cancel: &CancellationToken,
+) -> Result<impl Drop, RateLimitError> {
+    // TODO: use request context TaskKind to get statistics on how many tasks of what kind are waiting for background task semaphore
+    tokio::select! {
+        permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
+            match permit {
+                Ok(permit) => Ok(permit),
+                Err(_closed) => unreachable!("we never close the semaphore"),
+            }
+        },
+        _ = cancel.cancelled() => {
+            Err(RateLimitError::Cancelled)
+        }
+    }
+}
+
 /// Start per tenant background loops: compaction and gc.
 pub fn start_background_loops(
     tenant: &Arc<Tenant>,
