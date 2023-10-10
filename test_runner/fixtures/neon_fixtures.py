@@ -1085,15 +1085,32 @@ class AbstractNeonCli(abc.ABC):
             stderr=subprocess.PIPE,
             timeout=timeout,
         )
+
+        indent = "  "
         if not res.returncode:
-            log.info(f"Run {res.args} success: {res.stdout}")
+            stripped = res.stdout.strip()
+            lines = stripped.splitlines()
+            if len(lines) < 2:
+                log.debug(f"Run {res.args} success: {stripped}")
+            else:
+                log.debug("Run %s success:\n%s" % (res.args, textwrap.indent(stripped, indent)))
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run {res.args} failed:
-              stdout: {res.stdout}
-              stderr: {res.stderr}
+            indent = indent * 2
+            msg = textwrap.dedent(
+                """\
+            Run %s failed:
+              stdout:
+            %s
+              stderr:
+            %s
             """
+            )
+            msg = msg % (
+                res.args,
+                textwrap.indent(res.stdout.strip(), indent),
+                textwrap.indent(res.stderr.strip(), indent),
+            )
             log.info(msg)
             raise RuntimeError(msg) from subprocess.CalledProcessError(
                 res.returncode, res.args, res.stdout, res.stderr
@@ -1446,6 +1463,29 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
 
         return self.raw_cli(args, check_return_code=check_return_code)
+
+    def map_branch(
+        self, name: str, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> "subprocess.CompletedProcess[str]":
+        """
+        Map tenant id and timeline id to a neon_local branch name. They do not have to exist.
+        Usually needed when creating branches via PageserverHttpClient and not neon_local.
+
+        After creating a name mapping, you can use EndpointFactory.create_start
+        with this registered branch name.
+        """
+        args = [
+            "mappings",
+            "map",
+            "--branch-name",
+            name,
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+        ]
+
+        return self.raw_cli(args, check_return_code=True)
 
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)

@@ -45,6 +45,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::config::AttachedLocationConfig;
+use self::config::AttachmentMode;
 use self::config::LocationConf;
 use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
@@ -406,6 +407,8 @@ pub enum CreateTimelineError {
     AlreadyExists,
     #[error(transparent)]
     AncestorLsn(anyhow::Error),
+    #[error("ancestor timeline is not active")]
+    AncestorNotActive,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1587,6 +1590,12 @@ impl Tenant {
                     .get_timeline(ancestor_timeline_id, false)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
 
+                // instead of waiting around, just deny the request because ancestor is not yet
+                // ready for other purposes either.
+                if !ancestor_timeline.is_active() {
+                    return Err(CreateTimelineError::AncestorNotActive);
+                }
+
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
 
@@ -1619,8 +1628,6 @@ impl Tenant {
             }
         };
 
-        loaded_timeline.activate(broker_client, None, ctx);
-
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
             // Ok, the timeline is durable in remote storage.
@@ -1631,6 +1638,8 @@ impl Tenant {
                 format!("wait for {} timeline initial uploads to complete", kind)
             })?;
         }
+
+        loaded_timeline.activate(broker_client, None, ctx);
 
         Ok(loaded_timeline)
     }
@@ -2067,6 +2076,15 @@ impl Tenant {
                 }
             }
         }
+    }
+
+    pub(crate) fn get_attach_mode(&self) -> AttachmentMode {
+        self.tenant_conf
+            .read()
+            .unwrap()
+            .location
+            .attach_mode
+            .clone()
     }
 }
 

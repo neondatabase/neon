@@ -72,36 +72,32 @@ impl EphemeralFile {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
             let cache = page_cache::get();
-            loop {
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
-                    .await
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum, self.file.path, e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        let buf: &mut [u8] = write_guard.deref_mut();
-                        debug_assert_eq!(buf.len(), PAGE_SZ);
-                        self.file
-                            .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
-                            .await?;
-                        write_guard.mark_valid();
-
-                        // Swap for read lock
-                        continue;
-                    }
-                };
-            }
+            match cache
+                .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
+                .await
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        // order path before error because error is anyhow::Error => might have many contexts
+                        format!(
+                            "ephemeral file: read immutable page #{}: {}: {:#}",
+                            blknum, self.file.path, e,
+                        ),
+                    )
+                })? {
+                page_cache::ReadBufResult::Found(guard) => {
+                    return Ok(BlockLease::PageReadGuard(guard))
+                }
+                page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                    let buf: &mut [u8] = write_guard.deref_mut();
+                    debug_assert_eq!(buf.len(), PAGE_SZ);
+                    self.file
+                        .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                        .await?;
+                    let read_guard = write_guard.mark_valid();
+                    return Ok(BlockLease::PageReadGuard(read_guard));
+                }
+            };
         } else {
             debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
             Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
@@ -171,7 +167,7 @@ impl EphemeralFile {
                                         let buf: &mut [u8] = write_guard.deref_mut();
                                         debug_assert_eq!(buf.len(), PAGE_SZ);
                                         buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
-                                        write_guard.mark_valid();
+                                        let _ = write_guard.mark_valid();
                                         // pre-warm successful
                                     }
                                     Err(e) => {

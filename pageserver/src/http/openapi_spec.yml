@@ -93,9 +93,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     delete:
       description: |
-        Attempts to delete specified tenant. 500 and 409 errors should be retried until 404 is retrieved.
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
         404 means that deletion successfully finished"
       responses:
         "400":
@@ -134,6 +141,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline:
     parameters:
@@ -178,6 +192,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
@@ -226,6 +247,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     delete:
       description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
@@ -265,13 +293,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PreconditionFailedError"
-
         "500":
           description: Generic operation error
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_range_of_lsn:
     parameters:
@@ -383,6 +417,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
       - name: tenant_id
@@ -430,6 +471,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -520,6 +568,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/detach:
     parameters:
@@ -573,6 +628,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/ignore:
     parameters:
@@ -615,6 +677,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/load:
     parameters:
@@ -659,6 +728,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/synthetic_size:
     parameters:
@@ -696,6 +772,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/size:
     parameters:
@@ -759,6 +841,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
@@ -835,6 +924,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/:
     get:
       description: Get tenants list
@@ -865,6 +961,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     post:
       description: |
         Create a tenant. Returns new tenant id on success.
@@ -915,6 +1018,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/config:
     put:
@@ -960,6 +1070,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/config/:
     parameters:
       - name: tenant_id
@@ -1009,6 +1126,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 components:
   securitySchemes:
     JWT:
@@ -1284,6 +1408,13 @@ components:
         msg:
           type: string
     ForbiddenError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ServiceUnavailableError:
       type: object
       required:
         - msg

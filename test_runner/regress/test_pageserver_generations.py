@@ -10,6 +10,7 @@ of the pageserver are:
 """
 
 
+import enum
 import re
 import time
 from typing import Optional
@@ -81,7 +82,7 @@ def generate_uploads_and_deletions(
                     f"""
                 INSERT INTO foo (id, val)
                 SELECT g, '{data}'
-                FROM generate_series(1, 20000) g
+                FROM generate_series(1, 200) g
                 ON CONFLICT (id) DO UPDATE
                 SET val = EXCLUDED.val
                 """,
@@ -276,15 +277,28 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
 
 
-@pytest.mark.parametrize("keep_attachment", [True, False])
-@pytest.mark.parametrize("validate_before", [True, False])
+class KeepAttachment(str, enum.Enum):
+    KEEP = "keep"
+    LOSE = "lose"
+
+
+class ValidateBefore(str, enum.Enum):
+    VALIDATE = "validate"
+    NO_VALIDATE = "no-validate"
+
+
+@pytest.mark.parametrize("keep_attachment", [KeepAttachment.KEEP, KeepAttachment.LOSE])
+@pytest.mark.parametrize("validate_before", [ValidateBefore.VALIDATE, ValidateBefore.NO_VALIDATE])
 def test_deletion_queue_recovery(
-    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, keep_attachment: bool, validate_before: bool
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    keep_attachment: KeepAttachment,
+    validate_before: ValidateBefore,
 ):
     """
-    :param keep_attachment: If true, we re-attach after restart.  Else, we act as if some other
+    :param keep_attachment: whether to re-attach after restart.  Else, we act as if some other
     node took the attachment while we were restarting.
-    :param validate_before: If true, we wait for deletions to be validated before restart.  This
+    :param validate_before: whether to wait for deletions to be validated before restart.  This
     makes them elegible to be executed after restart, if the same node keeps the attachment.
     """
     neon_env_builder.enable_generations = True
@@ -300,7 +314,7 @@ def test_deletion_queue_recovery(
         ("deletion-queue-before-execute", "return"),
     ]
 
-    if not validate_before:
+    if validate_before == ValidateBefore.NO_VALIDATE:
         failpoints.append(
             # Prevent deletion lists from being validated, we will test that they are
             # dropped properly during recovery.  'pause' is okay here because we kill
@@ -320,20 +334,25 @@ def test_deletion_queue_recovery(
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
-    if validate_before:
+    if validate_before == ValidateBefore.VALIDATE:
 
         def assert_validation_complete():
             assert get_deletion_queue_submitted(ps_http) == get_deletion_queue_validated(ps_http)
 
         wait_until(20, 1, assert_validation_complete)
-        # A short wait to let the DeletionHeader get written out, as this happens after
-        # the validated count gets incremented.
-        time.sleep(1)
+
+        # The validatated keys statistic advances before the header is written, so we
+        # also wait to see the header hit the disk: this seems paranoid but the race
+        # can really happen on a heavily overloaded test machine.
+        def assert_header_written():
+            assert (env.pageserver.workdir / "deletion" / "header-01").exists()
+
+        wait_until(20, 1, assert_header_written)
 
     log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
     env.pageserver.stop(immediate=True)
 
-    if not keep_attachment:
+    if keep_attachment == KeepAttachment.LOSE:
         some_other_pageserver = 101010
         assert env.attachment_service is not None
         env.attachment_service.attach_hook(env.initial_tenant, some_other_pageserver)
@@ -352,7 +371,7 @@ def test_deletion_queue_recovery(
     ps_http.deletion_queue_flush(execute=True)
     wait_until(10, 1, lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
 
-    if keep_attachment or validate_before:
+    if keep_attachment == KeepAttachment.KEEP or validate_before == ValidateBefore.VALIDATE:
         # - If we kept the attachment, then our pre-restart deletions should execute
         #   because on re-attach they were from the immediately preceding generation
         # - If we validated before restart, then the deletions should execute because the
@@ -378,3 +397,73 @@ def test_deletion_queue_recovery(
 
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
+
+
+def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    neon_env_builder.enable_generations = True
+    neon_env_builder.enable_pageserver_remote_storage(
+        RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    ps_http = env.pageserver.http_client()
+
+    generate_uploads_and_deletions(env)
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # When the pageserver can't reach the control plane, it will complain
+            ".*calling control plane generation validation API failed.*",
+            # Emergency mode is a big deal, we log errors whenever it is used.
+            ".*Emergency mode!.*",
+        ]
+    )
+
+    # Simulate a major incident: the control plane goes offline
+    assert env.attachment_service is not None
+    env.attachment_service.stop()
+
+    # Remember how many validations had happened before the control plane went offline
+    validated = get_deletion_queue_validated(ps_http)
+
+    generate_uploads_and_deletions(env, init=False)
+
+    # The running pageserver should stop progressing deletions
+    time.sleep(10)
+    assert get_deletion_queue_validated(ps_http) == validated
+
+    # Restart the pageserver: ordinarily we would _avoid_ doing this during such an
+    # incident, but it might be unavoidable: if so, we want to be able to start up
+    # and serve clients.
+    env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
+    env.pageserver.start(
+        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",)
+    )
+
+    # The pageserver should provide service to clients
+    generate_uploads_and_deletions(env, init=False)
+
+    # The pageserver should neither validate nor execute any deletions, it should have
+    # loaded the DeletionLists from before though
+    time.sleep(10)
+    assert get_deletion_queue_depth(ps_http) > 0
+    assert get_deletion_queue_validated(ps_http) == 0
+    assert get_deletion_queue_executed(ps_http) == 0
+
+    # When the control plane comes back up, normal service should resume
+    env.attachment_service.start()
+
+    ps_http.deletion_queue_flush(execute=True)
+    assert get_deletion_queue_depth(ps_http) == 0
+    assert get_deletion_queue_validated(ps_http) > 0
+    assert get_deletion_queue_executed(ps_http) > 0
+
+    # The pageserver should work fine when subsequently restarted in non-emergency mode
+    env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
+    env.pageserver.start()
+
+    generate_uploads_and_deletions(env, init=False)
+    ps_http.deletion_queue_flush(execute=True)
+    assert get_deletion_queue_depth(ps_http) == 0
+    assert get_deletion_queue_validated(ps_http) > 0
+    assert get_deletion_queue_executed(ps_http) > 0
