@@ -254,6 +254,12 @@ pub struct Tenant {
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 }
 
+impl std::fmt::Debug for Tenant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.tenant_id, self.current_state())
+    }
+}
+
 pub(crate) enum WalRedoManager {
     Prod(PostgresRedoManager),
     #[cfg(test)]
@@ -526,7 +532,7 @@ impl Tenant {
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         init_order: Option<InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -1833,6 +1839,7 @@ impl Tenant {
             }
             Err(SetStoppingError::AlreadyStopping(other)) => {
                 // give caller the option to wait for this this shutdown
+                info!("Tenant::shutdown: AlreadyStopping");
                 return Err(other);
             }
         };
@@ -2110,6 +2117,9 @@ where
 }
 
 impl Tenant {
+    pub fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.read().unwrap().tenant_conf
     }
@@ -4236,11 +4246,7 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness
-            .try_load_local(&ctx)
-            .await
-            .err()
-            .expect("should fail");
+        let err = harness.try_load_local(&ctx).await.expect_err("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
         let expected = "failed to load metadata";
