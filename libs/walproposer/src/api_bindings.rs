@@ -3,13 +3,13 @@
 use std::ffi::CStr;
 use std::ffi::CString;
 
-use crate::bindings::StringInfoData;
 use crate::bindings::uint32;
 use crate::bindings::walproposer_api;
 use crate::bindings::PGAsyncReadResult;
 use crate::bindings::PGAsyncWriteResult;
 use crate::bindings::Safekeeper;
 use crate::bindings::Size;
+use crate::bindings::StringInfoData;
 use crate::bindings::TimeLineID;
 use crate::bindings::TimestampTz;
 use crate::bindings::WalProposer;
@@ -132,11 +132,11 @@ extern "C" fn conn_async_read(
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         let (res, result) = (*api).conn_async_read(&mut (*sk));
-        
+
         let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or(Vec::new());
 
         inbuf.clear();
-        inbuf.extend_from_slice(&res);
+        inbuf.extend_from_slice(res);
 
         *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
         *amount = res.len() as i32;
@@ -175,7 +175,7 @@ extern "C" fn conn_blocking_write(
 
 extern "C" fn recovery_download(
     sk: *mut Safekeeper,
-    timeline: TimeLineID,
+    _timeline: TimeLineID,
     startpos: XLogRecPtr,
     endpos: XLogRecPtr,
 ) -> bool {
@@ -192,7 +192,7 @@ extern "C" fn wal_read(
     startptr: XLogRecPtr,
     count: Size,
 ) {
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count as usize) };
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
 
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
@@ -255,17 +255,17 @@ extern "C" fn wait_event_set(
             WaitResult::Latch => {
                 *event_sk = std::ptr::null_mut();
                 *events = 1; // FIXME: import defines
-                return 1;
+                1
             }
             WaitResult::Timeout => {
                 *event_sk = std::ptr::null_mut();
                 *events = 0;
-                return 0;
+                0
             }
             WaitResult::Network(sk, event_mask) => {
                 *event_sk = sk;
                 *events = event_mask;
-                return 1;
+                1
             }
         }
     }

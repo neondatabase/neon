@@ -18,7 +18,9 @@ fn main() -> anyhow::Result<()> {
 
     let pg_install_abs = std::fs::canonicalize(pg_install_dir)?;
     let walproposer_lib_dir = pg_install_abs.join("build/walproposer-lib");
-    let walproposer_lib_search_str = walproposer_lib_dir.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
+    let walproposer_lib_search_str = walproposer_lib_dir
+        .to_str()
+        .ok_or(anyhow!("Bad non-UTF path"))?;
 
     let pgxn_neon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pgxn/neon");
     let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
