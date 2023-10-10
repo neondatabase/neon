@@ -77,6 +77,8 @@ pub fn init(
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
 
+    let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+
     // NB: the order of the with() calls does not matter.
     // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
     use tracing_subscriber::prelude::*;
@@ -94,6 +96,7 @@ pub fn init(
         log_layer.with_filter(rust_log_env_filter())
     });
     let r = r.with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
+    let r = r.with(flame_layer);
     match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => r
             .with(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
