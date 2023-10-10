@@ -36,15 +36,38 @@ static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore
         tokio::sync::Semaphore::new(permits)
     });
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum BackgroundLoopKind {
+    Compaction,
+    Gc,
+    Eviction,
+    ConsumptionMetricsCollectMetrics,
+    ConsumptionMetricsSyntheticSizeWorker,
+}
+
+impl BackgroundLoopKind {
+    fn as_static_str(&self) -> &'static str {
+        let s: &'static str = self.into();
+        s
+    }
+}
+
 pub(crate) enum RateLimitError {
     Cancelled,
 }
 
 pub(crate) async fn concurrent_background_tasks_rate_limit(
+    loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
     cancel: &CancellationToken,
 ) -> Result<impl Drop, RateLimitError> {
-    // TODO: use request context TaskKind to get statistics on how many tasks of what kind are waiting for background task semaphore
+    crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT
+        .with_label_values(&[loop_kind.as_static_str()])
+        .inc();
+    scopeguard::defer!(
+        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT.with_label_values(&[loop_kind.as_static_str()]).inc();
+    );
     tokio::select! {
         permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
             match permit {
@@ -160,7 +183,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, "compaction");
+            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -228,7 +251,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, "gc");
+            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -302,7 +325,11 @@ pub(crate) async fn random_init_delay(
 }
 
 /// Attention: the `task` and `period` beocme labels of a pageserver-wide prometheus metric.
-pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
+pub(crate) fn warn_when_period_overrun(
+    elapsed: Duration,
+    period: Duration,
+    task: BackgroundLoopKind,
+) {
     // Duration::ZERO will happen because it's the "disable [bgtask]" value.
     if elapsed >= period && period != Duration::ZERO {
         // humantime does no significant digits clamping whereas Duration's debug is a bit more
@@ -311,11 +338,11 @@ pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task
         warn!(
             ?elapsed,
             period = %humantime::format_duration(period),
-            task,
+            ?task,
             "task iteration took longer than the configured period"
         );
         crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
-            .with_label_values(&[task, &format!("{}", period.as_secs())])
+            .with_label_values(&[task.as_static_str(), &format!("{}", period.as_secs())])
             .inc();
     }
 }

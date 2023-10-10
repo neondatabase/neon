@@ -30,8 +30,9 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        tasks::{BackgroundLoopKind, RateLimitError},
         timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant, tasks::RateLimitError,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -129,7 +130,11 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::tenant::tasks::warn_when_period_overrun(
+                    elapsed,
+                    p.period,
+                    BackgroundLoopKind::Eviction,
+                );
                 crate::metrics::EVICTION_ITERATION_DURATION
                     .get_metric_with_label_values(&[
                         &format!("{}", p.period.as_secs()),
@@ -150,7 +155,13 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(ctx, cancel).await {
+        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+            cancel,
+        )
+        .await
+        {
             Ok(permit) => permit,
             Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
         };

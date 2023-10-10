@@ -44,7 +44,7 @@ use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerFileName, RemoteLayer,
 };
-use crate::tenant::tasks::RateLimitError;
+use crate::tenant::tasks::{BackgroundLoopKind, RateLimitError};
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -687,7 +687,12 @@ impl Timeline {
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
-        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(ctx, cancel).await
+        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Compaction,
+            ctx,
+            cancel,
+        )
+        .await
         {
             Ok(permit) => permit,
             Err(RateLimitError::Cancelled) => return Ok(()),
