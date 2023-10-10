@@ -32,11 +32,13 @@
 #include "storage/latch.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "utils/builtins.h"
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 #include "storage/fd.h"
 #include "storage/pg_shmem.h"
 #include "storage/buf_internals.h"
+#include "pgstat.h"
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -496,6 +498,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		/* Page is not cached */
 		lfc_ctl->misses += 1; /* race condition here, but precise value is not needed */
+		pgBufferUsage.file_cache.misses += 1;
 		LWLockRelease(lfc_lock);
 		return false;
 	}
@@ -521,6 +524,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		Assert(LFC_ENABLED());
 		lfc_ctl->hits += 1;
+		pgBufferUsage.file_cache.hits += 1;
 		Assert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
@@ -650,25 +654,27 @@ typedef struct
 } LocalCachePagesContext;
 
 
-PG_FUNCTION_INFO_V1(local_cache_hits);
+PG_FUNCTION_INFO_V1(neon_get_stat);
 Datum
-local_cache_hits(PG_FUNCTION_ARGS)
+neon_get_stat(PG_FUNCTION_ARGS)
 {
-	if (lfc_ctl)
-		PG_RETURN_INT64(lfc_ctl->hits);
-	else
-		PG_RETURN_NULL();
-}
-
-
-PG_FUNCTION_INFO_V1(local_cache_misses);
-Datum
-local_cache_misses(PG_FUNCTION_ARGS)
-{
-	if (lfc_ctl)
-		PG_RETURN_INT64(lfc_ctl->misses);
-	else
-		PG_RETURN_NULL();
+	char *key = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	if (strcmp(key, "file_cache_misses") == 0)
+	{
+		if (lfc_ctl)
+			PG_RETURN_INT64(lfc_ctl->misses);
+	}
+	else if (strcmp(key, "file_cache_hits") == 0)
+	{
+		if (lfc_ctl)
+			PG_RETURN_INT64(lfc_ctl->hits);
+	}
+	else if (strcmp(key, "file_cache_used") == 0)
+	{
+		if (lfc_ctl)
+			PG_RETURN_INT64(lfc_ctl->used);
+	}
+	PG_RETURN_NULL();
 }
 
 

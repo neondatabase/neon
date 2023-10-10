@@ -22,16 +22,6 @@ AS 'MODULE_PATHNAME', 'backpressure_throttling_time'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
-CREATE FUNCTION local_cache_hits() RETURNS bigint
-AS 'MODULE_PATHNAME', 'local_cache_hits'
-LANGUAGE C PARALLEL SAFE;
-
-
-CREATE FUNCTION local_cache_misses() RETURNS bigint
-AS 'MODULE_PATHNAME', 'local_cache_misses'
-LANGUAGE C PARALLEL SAFE;
-
-
 CREATE FUNCTION local_cache_pages()
 RETURNS SETOF RECORD
 AS 'MODULE_PATHNAME', 'local_cache_pages'
