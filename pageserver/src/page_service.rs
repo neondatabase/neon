@@ -213,9 +213,9 @@ async fn page_service_conn_main(
     // no write timeout is used, because the kernel is assumed to error writes after some time.
     let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
 
-    // timeout should be lower, but trying out multiple days for
-    // <https://github.com/neondatabase/neon/issues/4205>
-    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 60 * 24 * 3)));
+    // A timeout here does not mean the client died, it can happen if it's just idle for
+    // a while: we will tear down this PageServerHandler and instantiate a new one if/when they reconnect.
+    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 10)));
     let socket = std::pin::pin!(socket);
 
     // XXX: pgbackend.run() should take the connection_ctx,
