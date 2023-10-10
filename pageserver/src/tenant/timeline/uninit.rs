@@ -1,6 +1,7 @@
-use std::{collections::hash_map::Entry, fs, path::PathBuf, sync::Arc};
+use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use tracing::{error, info, info_span, warn};
 use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
 
@@ -155,12 +156,12 @@ pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
 #[must_use]
 pub(crate) struct TimelineUninitMark {
     uninit_mark_deleted: bool,
-    uninit_mark_path: PathBuf,
-    pub(crate) timeline_path: PathBuf,
+    uninit_mark_path: Utf8PathBuf,
+    pub(crate) timeline_path: Utf8PathBuf,
 }
 
 impl TimelineUninitMark {
-    pub(crate) fn new(uninit_mark_path: PathBuf, timeline_path: PathBuf) -> Self {
+    pub(crate) fn new(uninit_mark_path: Utf8PathBuf, timeline_path: Utf8PathBuf) -> Self {
         Self {
             uninit_mark_deleted: false,
             uninit_mark_path,
@@ -197,14 +198,13 @@ impl Drop for TimelineUninitMark {
             if self.timeline_path.exists() {
                 error!(
                     "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path.display(),
-                    self.timeline_path.display()
+                    self.uninit_mark_path, self.timeline_path
                 )
             } else {
                 // unblock later timeline creation attempts
                 warn!(
                     "Removing intermediate uninit mark file {}",
-                    self.uninit_mark_path.display()
+                    self.uninit_mark_path
                 );
                 if let Err(e) = self.delete_mark_file_if_present() {
                     error!("Failed to remove the uninit mark file: {e}")

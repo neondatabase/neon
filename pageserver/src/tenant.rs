@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
@@ -34,8 +35,6 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::ops::Bound::Included;
-use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
@@ -45,6 +44,8 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use self::config::AttachedLocationConfig;
+use self::config::LocationConf;
 use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
 use self::metadata::LoadMetadataError;
@@ -65,6 +66,7 @@ use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETI
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::config::LocationMode;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -161,6 +163,28 @@ pub struct TenantSharedResources {
     pub deletion_queue_client: DeletionQueueClient,
 }
 
+/// A [`Tenant`] is really an _attached_ tenant.  The configuration
+/// for an attached tenant is a subset of the [`LocationConf`], represented
+/// in this struct.
+pub(super) struct AttachedTenantConf {
+    tenant_conf: TenantConfOpt,
+    location: AttachedLocationConfig,
+}
+
+impl AttachedTenantConf {
+    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+        match &location_conf.mode {
+            LocationMode::Attached(attach_conf) => Ok(Self {
+                tenant_conf: location_conf.tenant_conf,
+                location: attach_conf.clone(),
+            }),
+            LocationMode::Secondary(_) => {
+                anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
+            }
+        }
+    }
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -178,12 +202,15 @@ pub struct Tenant {
     // We keep TenantConfOpt sturct here to preserve the information
     // about parameters that are not set.
     // This is necessary to allow global config updates.
-    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     tenant_id: TenantId,
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
+    ///  
+    /// This duplicates the generation stored in LocationConf, but that structure is mutable:
+    /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
 
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
@@ -379,6 +406,8 @@ pub enum CreateTimelineError {
     AlreadyExists,
     #[error(transparent)]
     AncestorLsn(anyhow::Error),
+    #[error("ancestor timeline is not active")]
+    AncestorNotActive,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -527,14 +556,13 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        generation: Generation,
         resources: TenantSharedResources,
+        attached_conf: AttachedTenantConf,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
-        let tenant_conf =
-            Self::load_tenant_config(conf, &tenant_id).context("load tenant config")?;
+        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
 
         let TenantSharedResources {
             broker_client,
@@ -542,14 +570,12 @@ impl Tenant {
             deletion_queue_client,
         } = resources;
 
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
-            tenant_conf,
+            attached_conf,
             wal_redo_manager,
             tenant_id,
-            generation,
             remote_storage.clone(),
             deletion_queue_client,
         ));
@@ -772,7 +798,7 @@ impl Tenant {
         }
 
         std::fs::remove_file(&marker_file)
-            .with_context(|| format!("unlink attach marker file {}", marker_file.display()))?;
+            .with_context(|| format!("unlink attach marker file {marker_file}"))?;
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
@@ -860,10 +886,9 @@ impl Tenant {
                 backtrace: String::new(),
             },
             conf,
-            TenantConfOpt::default(),
+            AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
             wal_redo_manager,
             tenant_id,
-            Generation::broken(),
             None,
             DeletionQueueClient::broken(),
         ))
@@ -882,21 +907,13 @@ impl Tenant {
     pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        generation: Generation,
+        attached_conf: AttachedTenantConf,
         resources: TenantSharedResources,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         span::debug_assert_current_span_has_tenant_id();
-
-        let tenant_conf = match Self::load_tenant_config(conf, &tenant_id) {
-            Ok(conf) => conf,
-            Err(e) => {
-                error!("load tenant config failed: {:?}", e);
-                return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
-            }
-        };
 
         let broker_client = resources.broker_client;
         let remote_storage = resources.remote_storage;
@@ -905,10 +922,9 @@ impl Tenant {
         let tenant = Tenant::new(
             TenantState::Loading,
             conf,
-            tenant_conf,
+            attached_conf,
             wal_redo_manager,
             tenant_id,
-            generation,
             remote_storage.clone(),
             resources.deletion_queue_client.clone(),
         );
@@ -1024,58 +1040,47 @@ impl Tenant {
 
         let timelines_dir = self.conf.timelines_path(&self.tenant_id);
 
-        for entry in
-            std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+        for entry in timelines_dir
+            .read_dir_utf8()
+            .context("list timelines directory for tenant")?
         {
             let entry = entry.context("read timeline dir entry")?;
             let timeline_dir = entry.path();
 
-            if crate::is_temporary(&timeline_dir) {
-                info!(
-                    "Found temporary timeline directory, removing: {}",
-                    timeline_dir.display()
-                );
-                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                    error!(
-                        "Failed to remove temporary directory '{}': {:?}",
-                        timeline_dir.display(),
-                        e
-                    );
+            if crate::is_temporary(timeline_dir) {
+                info!("Found temporary timeline directory, removing: {timeline_dir}");
+                if let Err(e) = std::fs::remove_dir_all(timeline_dir) {
+                    error!("Failed to remove temporary directory '{timeline_dir}': {e:?}");
                 }
-            } else if is_uninit_mark(&timeline_dir) {
+            } else if is_uninit_mark(timeline_dir) {
                 if !timeline_dir.exists() {
-                    warn!(
-                        "Timeline dir entry become invalid: {}",
-                        timeline_dir.display()
-                    );
+                    warn!("Timeline dir entry become invalid: {timeline_dir}");
                     continue;
                 }
 
                 let timeline_uninit_mark_file = &timeline_dir;
                 info!(
-                    "Found an uninit mark file {}, removing the timeline and its uninit mark",
-                    timeline_uninit_mark_file.display()
+                    "Found an uninit mark file {timeline_uninit_mark_file}, removing the timeline and its uninit mark",
                 );
-                let timeline_id = TimelineId::try_from(timeline_uninit_mark_file.file_stem())
-                    .with_context(|| {
-                        format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {}",
-                            timeline_uninit_mark_file.display()
+                let timeline_id =
+                    TimelineId::try_from(timeline_uninit_mark_file.file_stem())
+                        .with_context(|| {
+                            format!(
+                            "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
                         )
-                    })?;
+                        })?;
                 let timeline_dir = self.conf.timeline_path(&self.tenant_id, &timeline_id);
                 if let Err(e) =
                     remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                 {
                     error!("Failed to clean up uninit marked timeline: {e:?}");
                 }
-            } else if crate::is_delete_mark(&timeline_dir) {
+            } else if crate::is_delete_mark(timeline_dir) {
                 // If metadata exists, load as usual, continue deletion
-                let timeline_id =
-                    TimelineId::try_from(timeline_dir.file_stem()).with_context(|| {
+                let timeline_id = TimelineId::try_from(timeline_dir.file_stem())
+                    .with_context(|| {
                         format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {}",
-                            timeline_dir.display()
+                            "Could not parse timeline id out of the timeline uninit mark name {timeline_dir}",
                         )
                     })?;
 
@@ -1114,17 +1119,13 @@ impl Tenant {
                 }
             } else {
                 if !timeline_dir.exists() {
-                    warn!(
-                        "Timeline dir entry become invalid: {}",
-                        timeline_dir.display()
-                    );
+                    warn!("Timeline dir entry become invalid: {timeline_dir}");
                     continue;
                 }
-                let timeline_id =
-                    TimelineId::try_from(timeline_dir.file_name()).with_context(|| {
+                let timeline_id = TimelineId::try_from(timeline_dir.file_name())
+                    .with_context(|| {
                         format!(
-                            "Could not parse timeline id out of the timeline dir name {}",
-                            timeline_dir.display()
+                            "Could not parse timeline id out of the timeline dir name {timeline_dir}",
                         )
                     })?;
                 let timeline_uninit_mark_file = self
@@ -1136,7 +1137,7 @@ impl Tenant {
                         "Found an uninit mark file, removing the timeline and its uninit mark",
                     );
                     if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
+                        remove_timeline_and_uninit_mark(timeline_dir, &timeline_uninit_mark_file)
                     {
                         error!("Failed to clean up uninit marked timeline: {e:?}");
                     }
@@ -1152,18 +1153,13 @@ impl Tenant {
                 }
 
                 let file_name = entry.file_name();
-                if let Ok(timeline_id) =
-                    file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                {
+                if let Ok(timeline_id) = file_name.parse::<TimelineId>() {
                     let metadata = load_metadata(self.conf, &self.tenant_id, &timeline_id)
                         .context("failed to load metadata")?;
                     timelines_to_load.insert(timeline_id, metadata);
                 } else {
                     // A file or directory that doesn't look like a timeline ID
-                    warn!(
-                        "unexpected file or directory in timelines directory: {}",
-                        file_name.to_string_lossy()
-                    );
+                    warn!("unexpected file or directory in timelines directory: {file_name}");
                 }
             }
         }
@@ -1593,6 +1589,12 @@ impl Tenant {
                     .get_timeline(ancestor_timeline_id, false)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
 
+                // instead of waiting around, just deny the request because ancestor is not yet
+                // ready for other purposes either.
+                if !ancestor_timeline.is_active() {
+                    return Err(CreateTimelineError::AncestorNotActive);
+                }
+
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
 
@@ -1625,8 +1627,6 @@ impl Tenant {
             }
         };
 
-        loaded_timeline.activate(broker_client, None, ctx);
-
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
             // Ok, the timeline is durable in remote storage.
@@ -1637,6 +1637,8 @@ impl Tenant {
                 format!("wait for {} timeline initial uploads to complete", kind)
             })?;
         }
+
+        loaded_timeline.activate(broker_client, None, ctx);
 
         Ok(loaded_timeline)
     }
@@ -1667,6 +1669,15 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
+        {
+            let conf = self.tenant_conf.read().unwrap();
+
+            if !conf.location.may_delete_layers_hint() {
+                info!("Skipping GC in location state {:?}", conf.location);
+                return Ok(GcResult::default());
+            }
+        }
+
         self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
             .await
     }
@@ -1684,6 +1695,14 @@ impl Tenant {
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
         );
+
+        {
+            let conf = self.tenant_conf.read().unwrap();
+            if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
+                info!("Skipping compaction in location state {:?}", conf.location);
+                return Ok(());
+            }
+        }
 
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
@@ -2110,7 +2129,7 @@ where
 
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
-        *self.tenant_conf.read().unwrap()
+        self.tenant_conf.read().unwrap().tenant_conf
     }
 
     pub fn effective_config(&self) -> TenantConf {
@@ -2119,84 +2138,95 @@ impl Tenant {
     }
 
     pub fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     pub fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     pub fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     pub fn get_compaction_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_period
             .unwrap_or(self.conf.default_tenant_conf.compaction_period)
     }
 
     pub fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_horizon
             .unwrap_or(self.conf.default_tenant_conf.gc_horizon)
     }
 
     pub fn get_gc_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_period
             .unwrap_or(self.conf.default_tenant_conf.gc_period)
     }
 
     pub fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     pub fn get_pitr_interval(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .pitr_interval
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .trace_read_requests
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .min_resident_size_override
             .or(self.conf.default_tenant_conf.min_resident_size_override)
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
-        *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.list_timelines();
+        for timeline in timelines {
+            timeline.tenant_conf_updated();
+        }
+    }
+
+    pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
+        *self.tenant_conf.write().unwrap() = new_conf;
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2266,10 +2296,9 @@ impl Tenant {
     fn new(
         state: TenantState,
         conf: &'static PageServerConf,
-        tenant_conf: TenantConfOpt,
+        attached_conf: AttachedTenantConf,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         tenant_id: TenantId,
-        generation: Generation,
         remote_storage: Option<GenericRemoteStorage>,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
@@ -2329,12 +2358,12 @@ impl Tenant {
 
         Tenant {
             tenant_id,
-            generation,
+            generation: attached_conf.location.generation,
             conf,
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
             loading_started_at: Instant::now(),
-            tenant_conf: Arc::new(RwLock::new(tenant_conf)),
+            tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
@@ -2352,54 +2381,124 @@ impl Tenant {
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_id: &TenantId,
-    ) -> anyhow::Result<TenantConfOpt> {
-        let target_config_path = conf.tenant_config_path(tenant_id);
-        let target_config_display = target_config_path.display();
+    ) -> anyhow::Result<LocationConf> {
+        let legacy_config_path = conf.tenant_config_path(tenant_id);
+        let config_path = conf.tenant_location_config_path(tenant_id);
 
-        info!("loading tenantconf from {target_config_display}");
+        if config_path.exists() {
+            // New-style config takes precedence
+            let deserialized = Self::read_config(&config_path)?;
+            Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
+        } else if legacy_config_path.exists() {
+            // Upgrade path: found an old-style configuration only
+            let deserialized = Self::read_config(&legacy_config_path)?;
 
-        // FIXME If the config file is not found, assume that we're attaching
-        // a detached tenant and config is passed via attach command.
-        // https://github.com/neondatabase/neon/issues/1555
-        // OR: we're loading after incomplete deletion that managed to remove config.
-        if !target_config_path.exists() {
-            info!("tenant config not found in {target_config_display}");
-            return Ok(TenantConfOpt::default());
+            let mut tenant_conf = TenantConfOpt::default();
+            for (key, item) in deserialized.iter() {
+                match key {
+                    "tenant_config" => {
+                        tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
+                            format!("Failed to parse config from file '{legacy_config_path}' as pageserver config")
+                        })?;
+                    }
+                    _ => bail!(
+                        "config file {legacy_config_path} has unrecognized pageserver option '{key}'"
+                    ),
+                }
+            }
+
+            // Legacy configs are implicitly in attached state
+            Ok(LocationConf::attached_single(
+                tenant_conf,
+                Generation::none(),
+            ))
+        } else {
+            // FIXME If the config file is not found, assume that we're attaching
+            // a detached tenant and config is passed via attach command.
+            // https://github.com/neondatabase/neon/issues/1555
+            // OR: we're loading after incomplete deletion that managed to remove config.
+            info!(
+                "tenant config not found in {} or {}",
+                config_path, legacy_config_path
+            );
+            Ok(LocationConf::default())
         }
+    }
+
+    fn read_config(path: &Utf8Path) -> anyhow::Result<toml_edit::Document> {
+        info!("loading tenant configuration from {path}");
 
         // load and parse file
-        let config = fs::read_to_string(&target_config_path).with_context(|| {
-            format!("Failed to load config from path '{target_config_display}'")
-        })?;
+        let config = fs::read_to_string(path)
+            .with_context(|| format!("Failed to load config from path '{path}'"))?;
 
-        let toml = config.parse::<toml_edit::Document>().with_context(|| {
-            format!("Failed to parse config from file '{target_config_display}' as toml file")
-        })?;
-
-        let mut tenant_conf = TenantConfOpt::default();
-        for (key, item) in toml.iter() {
-            match key {
-                "tenant_config" => {
-                    tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
-                        format!("Failed to parse config from file '{target_config_display}' as pageserver config")
-                    })?;
-                }
-                _ => bail!("config file {target_config_display} has unrecognized pageserver option '{key}'"),
-
-            }
-        }
-
-        Ok(tenant_conf)
+        config
+            .parse::<toml_edit::Document>()
+            .with_context(|| format!("Failed to parse config from file '{path}' as toml file"))
     }
 
     #[tracing::instrument(skip_all, fields(%tenant_id))]
     pub(super) async fn persist_tenant_config(
+        conf: &'static PageServerConf,
         tenant_id: &TenantId,
-        target_config_path: &Path,
-        tenant_conf: TenantConfOpt,
+        location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        // imitate a try-block with a closure
-        info!("persisting tenantconf to {}", target_config_path.display());
+        let legacy_config_path = conf.tenant_config_path(tenant_id);
+        let config_path = conf.tenant_location_config_path(tenant_id);
+        Self::persist_tenant_config_at(tenant_id, &config_path, &legacy_config_path, location_conf)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    pub(super) async fn persist_tenant_config_at(
+        tenant_id: &TenantId,
+        config_path: &Utf8Path,
+        legacy_config_path: &Utf8Path,
+        location_conf: &LocationConf,
+    ) -> anyhow::Result<()> {
+        // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
+        Self::persist_tenant_config_legacy(
+            tenant_id,
+            legacy_config_path,
+            &location_conf.tenant_conf,
+        )
+        .await?;
+
+        if let LocationMode::Attached(attach_conf) = &location_conf.mode {
+            // Once we use LocationMode, generations are mandatory.  If we aren't using generations,
+            // then drop out after writing legacy-style config.
+            if attach_conf.generation.is_none() {
+                tracing::debug!("Running without generations, not writing new-style LocationConf");
+                return Ok(());
+            }
+        }
+
+        info!("persisting tenantconf to {config_path}");
+
+        let mut conf_content = r#"# This file contains a specific per-tenant's config.
+#  It is read in case of pageserver restart.
+"#
+        .to_string();
+
+        // Convert the config to a toml file.
+        conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
+
+        let conf_content = conf_content.as_bytes();
+
+        let temp_path = path_with_suffix_extension(config_path, TEMP_FILE_SUFFIX);
+        VirtualFile::crashsafe_overwrite(config_path, &temp_path, conf_content)
+            .await
+            .with_context(|| format!("write tenant {tenant_id} config to {config_path}"))?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(%tenant_id))]
+    async fn persist_tenant_config_legacy(
+        tenant_id: &TenantId,
+        target_config_path: &Utf8Path,
+        tenant_conf: &TenantConfOpt,
+    ) -> anyhow::Result<()> {
+        info!("persisting tenantconf to {target_config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
@@ -2416,12 +2515,7 @@ impl Tenant {
         let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
         VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
             .await
-            .with_context(|| {
-                format!(
-                    "write tenant {tenant_id} config to {}",
-                    target_config_path.display()
-                )
-            })?;
+            .with_context(|| format!("write tenant {tenant_id} config to {target_config_path}"))?;
         Ok(())
     }
 
@@ -2788,10 +2882,7 @@ impl Tenant {
         // current initdb was not run yet, so remove whatever was left from the previous runs
         if initdb_path.exists() {
             fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!(
-                    "Failed to remove already existing initdb directory: {}",
-                    initdb_path.display()
-                )
+                format!("Failed to remove already existing initdb directory: {initdb_path}")
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
@@ -2800,7 +2891,7 @@ impl Tenant {
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{}': {}", initdb_path.display(), e);
+                error!("Failed to remove temporary initdb directory '{initdb_path}': {e}");
             }
         }
         let pgdata_path = &initdb_path;
@@ -2950,7 +3041,7 @@ impl Tenant {
 
     async fn create_timeline_files(
         &self,
-        timeline_path: &Path,
+        timeline_path: &Utf8Path,
         new_timeline_id: &TimelineId,
         new_metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
@@ -2984,8 +3075,7 @@ impl Tenant {
         let timeline_path = self.conf.timeline_path(&tenant_id, &timeline_id);
         anyhow::ensure!(
             !timeline_path.exists(),
-            "Timeline {} already exists, cannot create its uninit mark file",
-            timeline_path.display()
+            "Timeline {timeline_path} already exists, cannot create its uninit mark file",
         );
 
         let uninit_mark_path = self
@@ -3077,7 +3167,10 @@ impl Tenant {
     }
 }
 
-fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> anyhow::Result<()> {
+fn remove_timeline_and_uninit_mark(
+    timeline_dir: &Utf8Path,
+    uninit_mark: &Utf8Path,
+) -> anyhow::Result<()> {
     fs::remove_dir_all(timeline_dir)
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -3089,17 +3182,10 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
             }
         })
         .with_context(|| {
-            format!(
-                "Failed to remove unit marked timeline directory {}",
-                timeline_dir.display()
-            )
+            format!("Failed to remove unit marked timeline directory {timeline_dir}")
         })?;
-    fs::remove_file(uninit_mark).with_context(|| {
-        format!(
-            "Failed to remove timeline uninit mark file {}",
-            uninit_mark.display()
-        )
-    })?;
+    fs::remove_file(uninit_mark)
+        .with_context(|| format!("Failed to remove timeline uninit mark file {uninit_mark}"))?;
 
     Ok(())
 }
@@ -3111,10 +3197,10 @@ pub(crate) enum CreateTenantFilesMode {
 
 pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
+    location_conf: &LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Utf8PathBuf> {
     let target_tenant_directory = conf.tenant_path(tenant_id);
     anyhow::ensure!(
         !target_tenant_directory
@@ -3125,22 +3211,16 @@ pub(crate) async fn create_tenant_files(
 
     let temporary_tenant_dir =
         path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
-    debug!(
-        "Creating temporary directory structure in {}",
-        temporary_tenant_dir.display()
-    );
+    debug!("Creating temporary directory structure in {temporary_tenant_dir}");
 
     // top-level dir may exist if we are creating it through CLI
     crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!(
-            "could not create temporary tenant directory {}",
-            temporary_tenant_dir.display()
-        )
+        format!("could not create temporary tenant directory {temporary_tenant_dir}")
     })?;
 
     let creation_result = try_create_target_tenant_dir(
         conf,
-        tenant_conf,
+        location_conf,
         tenant_id,
         mode,
         &temporary_tenant_dir,
@@ -3166,11 +3246,11 @@ pub(crate) async fn create_tenant_files(
 
 async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
+    location_conf: &LocationConf,
     tenant_id: &TenantId,
     mode: CreateTenantFilesMode,
-    temporary_tenant_dir: &Path,
-    target_tenant_directory: &Path,
+    temporary_tenant_dir: &Utf8Path,
+    target_tenant_directory: &Utf8Path,
 ) -> Result<(), anyhow::Error> {
     match mode {
         CreateTenantFilesMode::Create => {} // needs no attach marker, writing tenant conf + atomic rename of dir is good enough
@@ -3196,20 +3276,31 @@ async fn try_create_target_tenant_dir(
         temporary_tenant_dir,
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary timelines dir"))?;
-    let temporary_tenant_config_path = rebase_directory(
+    let temporary_legacy_tenant_config_path = rebase_directory(
         &conf.tenant_config_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
     .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
+    let temporary_tenant_config_path = rebase_directory(
+        &conf.tenant_location_config_path(tenant_id),
+        target_tenant_directory,
+        temporary_tenant_dir,
+    )
+    .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(tenant_id, &temporary_tenant_config_path, tenant_conf).await?;
+    Tenant::persist_tenant_config_at(
+        tenant_id,
+        &temporary_tenant_config_path,
+        &temporary_legacy_tenant_config_path,
+        location_conf,
+    )
+    .await?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
             "create tenant {} temporary timelines directory {}",
-            tenant_id,
-            temporary_tenant_timelines_dir.display()
+            tenant_id, temporary_tenant_timelines_dir,
         )
     })?;
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
@@ -3224,35 +3315,34 @@ async fn try_create_target_tenant_dir(
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
             "move tenant {} temporary directory {} into the permanent one {}",
-            tenant_id,
-            temporary_tenant_dir.display(),
-            target_tenant_directory.display()
+            tenant_id, temporary_tenant_dir, target_tenant_directory
         )
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
             "get tenant {} dir parent for {}",
-            tenant_id,
-            target_tenant_directory.display()
+            tenant_id, target_tenant_directory,
         )
     })?;
     crashsafe::fsync(target_dir_parent).with_context(|| {
         format!(
             "fsync renamed directory's parent {} for tenant {}",
-            target_dir_parent.display(),
-            tenant_id,
+            target_dir_parent, tenant_id,
         )
     })?;
 
     Ok(())
 }
 
-fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyhow::Result<PathBuf> {
+fn rebase_directory(
+    original_path: &Utf8Path,
+    base: &Utf8Path,
+    new_base: &Utf8Path,
+) -> anyhow::Result<Utf8PathBuf> {
     let relative_path = original_path.strip_prefix(base).with_context(|| {
         format!(
             "Failed to strip base prefix '{}' off path '{}'",
-            base.display(),
-            original_path.display()
+            base, original_path
         )
     })?;
     Ok(new_base.join(relative_path))
@@ -3262,20 +3352,18 @@ fn rebase_directory(original_path: &Path, base: &Path, new_base: &Path) -> anyho
 /// to get bootstrap data for timeline initialization.
 fn run_initdb(
     conf: &'static PageServerConf,
-    initdb_target_dir: &Path,
+    initdb_target_dir: &Utf8Path,
     pg_version: u32,
 ) -> anyhow::Result<()> {
     let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
     let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
         "running {} in {}, libdir: {}",
-        initdb_bin_path.display(),
-        initdb_target_dir.display(),
-        initdb_lib_dir.display(),
+        initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
     let initdb_output = Command::new(&initdb_bin_path)
-        .args(["-D", &initdb_target_dir.to_string_lossy()])
+        .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
@@ -3290,8 +3378,7 @@ fn run_initdb(
         .with_context(|| {
             format!(
                 "failed to execute {} at target dir {}",
-                initdb_bin_path.display(),
-                initdb_target_dir.display()
+                initdb_bin_path, initdb_target_dir,
             )
         })?;
     if !initdb_output.status.success() {
@@ -3311,7 +3398,7 @@ impl Drop for Tenant {
 }
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(
-    path: &Path,
+    path: &Utf8Path,
     verbose: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
@@ -3344,8 +3431,8 @@ pub async fn dump_layerfile_from_path(
 pub mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::OnceCell;
+    use std::fs;
     use std::sync::Arc;
-    use std::{fs, path::PathBuf};
     use utils::logging;
     use utils::lsn::Lsn;
 
@@ -3410,7 +3497,7 @@ pub mod harness {
         pub tenant_id: TenantId,
         pub generation: Generation,
         pub remote_storage: GenericRemoteStorage,
-        pub remote_fs_dir: PathBuf,
+        pub remote_fs_dir: Utf8PathBuf,
         pub deletion_queue: MockDeletionQueue,
     }
 
@@ -3489,10 +3576,13 @@ pub mod harness {
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
                 self.conf,
-                TenantConfOpt::from(self.tenant_conf),
+                AttachedTenantConf::try_from(LocationConf::attached_single(
+                    TenantConfOpt::from(self.tenant_conf),
+                    self.generation,
+                ))
+                .unwrap(),
                 walredo_mgr,
                 self.tenant_id,
-                self.generation,
                 Some(self.remote_storage.clone()),
                 self.deletion_queue.new_client(),
             ));
@@ -3509,7 +3599,7 @@ pub mod harness {
             Ok(tenant)
         }
 
-        pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
+        pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
             self.conf.timeline_path(&self.tenant_id, timeline_id)
         }
     }

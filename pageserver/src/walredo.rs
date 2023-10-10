@@ -38,6 +38,9 @@ use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
+#[cfg(feature = "testing")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
     WAL_REDO_WAIT_TIME,
@@ -113,6 +116,9 @@ struct ProcessOutput {
 pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
+    /// Counter to separate same sized walredo inputs failing at the same millisecond.
+    #[cfg(feature = "testing")]
+    dump_sequence: AtomicUsize,
 
     stdout: Mutex<Option<ProcessOutput>>,
     stdin: Mutex<Option<ProcessInput>>,
@@ -224,6 +230,8 @@ impl PostgresRedoManager {
         PostgresRedoManager {
             tenant_id,
             conf,
+            #[cfg(feature = "testing")]
+            dump_sequence: AtomicUsize::default(),
             stdin: Mutex::new(None),
             stdout: Mutex::new(None),
             stderr: Mutex::new(None),
@@ -290,25 +298,27 @@ impl PostgresRedoManager {
             WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
             debug!(
-				"postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-				len,
-				nbytes,
-				duration.as_micros(),
-				lsn
-			);
+                "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+                len,
+                nbytes,
+                duration.as_micros(),
+                lsn
+            );
 
             // If something went wrong, don't try to reuse the process. Kill it, and
             // next request will launch a new one.
-            if result.is_err() {
+            if let Err(e) = result.as_ref() {
                 error!(
-                "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}",
-                records.len(),
-				records.first().map(|p| p.0).unwrap_or(Lsn(0)),
-				records.last().map(|p| p.0).unwrap_or(Lsn(0)),
-                nbytes,
-				base_img_lsn,
-                lsn
-            );
+                    n_attempts,
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
+                    records.len(),
+                    records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+                    records.last().map(|p| p.0).unwrap_or(Lsn(0)),
+                    nbytes,
+                    base_img_lsn,
+                    lsn,
+                    utils::error::report_compact_sources(e),
+                );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
                 // The owning objects (ChildStdout and ChildStderr) are stored in
@@ -325,6 +335,8 @@ impl PostgresRedoManager {
                 if let Some(proc) = self.stdin.lock().unwrap().take() {
                     proc.child.kill_and_wait();
                 }
+            } else if n_attempts != 0 {
+                info!(n_attempts, "retried walredo succeeded");
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
@@ -742,7 +754,7 @@ impl PostgresRedoManager {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%input.as_ref().unwrap().child.id()))]
     fn apply_wal_records(
         &self,
-        mut input: MutexGuard<Option<ProcessInput>>,
+        input: MutexGuard<Option<ProcessInput>>,
         tag: BufferTag,
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
@@ -779,6 +791,23 @@ impl PostgresRedoManager {
         build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
+        let res = self.apply_wal_records0(&writebuf, input, wal_redo_timeout);
+
+        if res.is_err() {
+            // not all of these can be caused by this particular input, however these are so rare
+            // in tests so capture all.
+            self.record_and_log(&writebuf);
+        }
+
+        res
+    }
+
+    fn apply_wal_records0(
+        &self,
+        writebuf: &[u8],
+        mut input: MutexGuard<Option<ProcessInput>>,
+        wal_redo_timeout: Duration,
+    ) -> Result<Bytes, std::io::Error> {
         let proc = input.as_mut().unwrap();
         let mut nwrite = 0usize;
         let stdout_fd = proc.stdout_fd;
@@ -796,7 +825,7 @@ impl PostgresRedoManager {
         while nwrite < writebuf.len() {
             let n = loop {
                 match nix::poll::poll(&mut pollfds[0..2], wal_redo_timeout.as_millis() as i32) {
-                    Err(e) if e == nix::errno::Errno::EINTR => continue,
+                    Err(nix::errno::Errno::EINTR) => continue,
                     res => break res,
                 }
             }?;
@@ -888,7 +917,7 @@ impl PostgresRedoManager {
                 // and forward any logging information that the child writes to its stderr to the page server's log.
                 let n = loop {
                     match nix::poll::poll(&mut pollfds[1..3], wal_redo_timeout.as_millis() as i32) {
-                        Err(e) if e == nix::errno::Errno::EINTR => continue,
+                        Err(nix::errno::Errno::EINTR) => continue,
                         res => break res,
                     }
                 }?;
@@ -984,6 +1013,38 @@ impl PostgresRedoManager {
         }
         Ok(res)
     }
+
+    #[cfg(feature = "testing")]
+    fn record_and_log(&self, writebuf: &[u8]) {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        let seq = self.dump_sequence.fetch_add(1, Ordering::Relaxed);
+
+        // these files will be collected to an allure report
+        let filename = format!("walredo-{millis}-{}-{seq}.walredo", writebuf.len());
+
+        let path = self.conf.tenant_path(&self.tenant_id).join(&filename);
+
+        let res = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .read(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(writebuf));
+
+        // trip up allowed_errors
+        if let Err(e) = res {
+            tracing::error!(target=%filename, length=writebuf.len(), "failed to write out the walredo errored input: {e}");
+        } else {
+            tracing::error!(filename, "erroring walredo input saved");
+        }
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn record_and_log(&self, _: &[u8]) {}
 }
 
 /// Wrapper type around `std::process::Child` which guarantees that the child
@@ -1217,13 +1278,13 @@ mod tests {
 
     struct RedoHarness {
         // underscored because unused, except for removal at drop
-        _repo_dir: tempfile::TempDir,
+        _repo_dir: camino_tempfile::Utf8TempDir,
         manager: PostgresRedoManager,
     }
 
     impl RedoHarness {
         fn new() -> anyhow::Result<Self> {
-            let repo_dir = tempfile::tempdir()?;
+            let repo_dir = camino_tempfile::tempdir()?;
             let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
             let conf = Box::leak(Box::new(conf));
             let tenant_id = TenantId::generate();

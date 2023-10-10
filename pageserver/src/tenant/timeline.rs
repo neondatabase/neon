@@ -9,6 +9,7 @@ mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -29,7 +30,6 @@ use utils::id::TenantTimelineId;
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
-use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -56,7 +56,7 @@ use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-    RECONSTRUCT_TIME, UNEXPECTED_ONDEMAND_DOWNLOADS,
+    UNEXPECTED_ONDEMAND_DOWNLOADS,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -91,12 +91,12 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::debug_assert_current_span_has_tenant_and_timeline_id;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{
     AsLayerDesc, DeltaLayer, ImageLayer, LayerAccessStatsReset, PersistentLayerDesc,
 };
+use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -149,7 +149,7 @@ pub struct TimelineResources {
 
 pub struct Timeline {
     conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<TenantConfOpt>>,
+    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     myself: Weak<Self>,
 
@@ -158,6 +158,9 @@ pub struct Timeline {
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
     /// Never changes for the lifetime of this [`Timeline`] object.
+    ///
+    /// This duplicates the generation stored in LocationConf, but that structure is mutable:
+    /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
 
     pub pg_version: u32,
@@ -496,13 +499,39 @@ impl Timeline {
         };
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
+        let path = self
+            .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
 
-        RECONSTRUCT_TIME
-            .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
-            .await
+        let start = Instant::now();
+        let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
+        let elapsed = start.elapsed();
+        crate::metrics::RECONSTRUCT_TIME
+            .for_result(&res)
+            .observe(elapsed.as_secs_f64());
+
+        if cfg!(feature = "testing") && res.is_err() {
+            // it can only be walredo issue
+            use std::fmt::Write;
+
+            let mut msg = String::new();
+
+            path.into_iter().for_each(|(res, cont_lsn, layer)| {
+                writeln!(
+                    msg,
+                    "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
+                    layer(),
+                )
+                .expect("string grows")
+            });
+
+            // this is to rule out or provide evidence that we could in some cases read a duplicate
+            // walrecord
+            tracing::info!("walredo failed, path:\n{msg}");
+        }
+
+        res
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1352,42 +1381,42 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
@@ -1403,7 +1432,7 @@ impl Timeline {
     }
 
     fn get_gc_feedback(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap();
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .gc_feedback
             .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
@@ -1416,7 +1445,7 @@ impl Timeline {
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &self.tenant_conf.read().unwrap(),
+                &self.tenant_conf.read().unwrap().tenant_conf,
                 &self.conf.default_tenant_conf,
             );
             let tenant_id_str = self.tenant_id.to_string();
@@ -1435,7 +1464,7 @@ impl Timeline {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         conf: &'static PageServerConf,
-        tenant_conf: Arc<RwLock<TenantConfOpt>>,
+        tenant_conf: Arc<RwLock<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
@@ -1458,7 +1487,7 @@ impl Timeline {
 
         let evictions_low_residence_duration_metric_threshold =
             Self::get_evictions_low_residence_duration_metric_threshold(
-                &tenant_conf_guard,
+                &tenant_conf_guard.tenant_conf,
                 &conf.default_tenant_conf,
             );
         drop(tenant_conf_guard);
@@ -1623,12 +1652,15 @@ impl Timeline {
 
         let tenant_conf_guard = self.tenant_conf.read().unwrap();
         let wal_connect_timeout = tenant_conf_guard
+            .tenant_conf
             .walreceiver_connect_timeout
             .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
         let lagging_wal_timeout = tenant_conf_guard
+            .tenant_conf
             .lagging_wal_timeout
             .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
         let max_lsn_wal_lag = tenant_conf_guard
+            .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
         drop(tenant_conf_guard);
@@ -1710,7 +1742,7 @@ impl Timeline {
                         Discovered::Temporary(name) => (name, "temporary timeline file"),
                         Discovered::TemporaryDownload(name) => (name, "temporary download"),
                     };
-                    path.push(name);
+                    path.push(Utf8Path::new(&name));
                     init::cleanup(&path, kind)?;
                     path.pop();
                 }
@@ -2191,10 +2223,10 @@ impl TraversalLayerExt for Arc<dyn PersistentLayer> {
         let timeline_id = self.layer_desc().timeline_id;
         match self.local_path() {
             Some(local_path) => {
-                debug_assert!(local_path.to_str().unwrap().contains(&format!("{}", timeline_id)),
+                debug_assert!(local_path.to_string().contains(&format!("{}", timeline_id)),
                     "need timeline ID to uniquely identify the layer when traversal crosses ancestor boundary",
                 );
-                format!("{}", local_path.display())
+                format!("{local_path}")
             }
             None => {
                 format!("remote {}/{self}", timeline_id)
@@ -2224,7 +2256,7 @@ impl Timeline {
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<Vec<TraversalPathItem>, PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -2255,12 +2287,12 @@ impl Timeline {
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
-                ValueReconstructResult::Complete => return Ok(()),
+                ValueReconstructResult::Complete => return Ok(traversal_path),
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
                         MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
-                        return Ok(());
+                        return Ok(traversal_path);
                     }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
@@ -2331,7 +2363,7 @@ impl Timeline {
                 // during branch creation.
                 match ancestor.wait_to_become_active(ctx).await {
                     Ok(()) => {}
-                    Err(state) if state == TimelineState::Stopping => {
+                    Err(TimelineState::Stopping) => {
                         return Err(PageReconstructError::AncestorStopping(ancestor.timeline_id));
                     }
                     Err(state) => {
@@ -3696,6 +3728,11 @@ impl Timeline {
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+
+            if !new_layers.is_empty() {
+                fail_point!("after-timeline-compacted-first-L1");
+            }
+
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
@@ -3717,7 +3754,7 @@ impl Timeline {
                     );
                 }
             }
-            let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
+            let mut layer_paths: Vec<Utf8PathBuf> = new_layers.iter().map(|l| l.path()).collect();
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
@@ -3827,10 +3864,7 @@ impl Timeline {
             let new_delta_path = l.path();
 
             let metadata = new_delta_path.metadata().with_context(|| {
-                format!(
-                    "read file metadata for new created layer {}",
-                    new_delta_path.display()
-                )
+                format!("read file metadata for new created layer {new_delta_path}")
             })?;
 
             if let Some(remote_client) = &self.remote_client {
@@ -3853,6 +3887,7 @@ impl Timeline {
             );
             let l = l as Arc<dyn PersistentLayer>;
             if guard.contains(&l) {
+                tracing::error!(layer=%l, "duplicated L1 layer");
                 duplicated_layers.insert(l.layer_desc().key());
             } else {
                 if LayerMap::is_l0(l.layer_desc()) {
@@ -4764,11 +4799,10 @@ fn is_send() {
 
 /// Add a suffix to a layer file's name: .{num}.old
 /// Uses the first available num (starts at 0)
-fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
+fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
     let filename = path
         .file_name()
-        .ok_or_else(|| anyhow!("Path {} don't have a file name", path.display()))?
-        .to_string_lossy();
+        .ok_or_else(|| anyhow!("Path {path} don't have a file name"))?;
     let mut new_path = path.to_owned();
 
     for i in 0u32.. {

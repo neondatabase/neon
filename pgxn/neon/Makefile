@@ -7,12 +7,12 @@ OBJS = \
 	extension_server.o \
 	file_cache.o \
 	libpagestore.o \
-	libpqwalproposer.o \
 	neon.o \
+	neon_utils.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
-	walproposer_utils.o \
+	walproposer_pg.o \
 	control_plane_connector.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)

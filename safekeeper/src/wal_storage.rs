@@ -9,13 +9,13 @@
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
 use std::io::{self, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
@@ -72,7 +72,7 @@ pub trait Storage {
 /// When storage is created first time, all LSNs are zeroes and there are no segments on disk.
 pub struct PhysicalStorage {
     metrics: WalStorageMetrics,
-    timeline_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
     conf: SafeKeeperConf,
 
     /// Size of WAL segment in bytes.
@@ -123,7 +123,7 @@ impl PhysicalStorage {
     /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         ttid: &TenantTimelineId,
-        timeline_dir: PathBuf,
+        timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
         state: &SafeKeeperState,
     ) -> Result<PhysicalStorage> {
@@ -142,7 +142,11 @@ impl PhysicalStorage {
 
             dispatch_pgversion!(
                 version,
-                pgv::xlog_utils::find_end_of_wal(&timeline_dir, wal_seg_size, state.commit_lsn,)?,
+                pgv::xlog_utils::find_end_of_wal(
+                    timeline_dir.as_std_path(),
+                    wal_seg_size,
+                    state.commit_lsn,
+                )?,
                 bail!("unsupported postgres version: {}", version)
             )
         };
@@ -458,7 +462,7 @@ impl Storage for PhysicalStorage {
 
 /// Remove all WAL segments in timeline_dir that match the given predicate.
 async fn remove_segments_from_disk(
-    timeline_dir: &Path,
+    timeline_dir: &Utf8Path,
     wal_seg_size: usize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
@@ -497,8 +501,8 @@ async fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
-    workdir: PathBuf,
-    timeline_dir: PathBuf,
+    workdir: Utf8PathBuf,
+    timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
     wal_segment: Option<Pin<Box<dyn AsyncRead + Send + Sync>>>,
@@ -519,8 +523,8 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
-        workdir: PathBuf,
-        timeline_dir: PathBuf,
+        workdir: Utf8PathBuf,
+        timeline_dir: Utf8PathBuf,
         state: &SafeKeeperState,
         start_pos: Lsn,
         enable_remote_read: bool,
@@ -687,7 +691,7 @@ impl WalReader {
     }
 
     /// Helper function for opening a wal file.
-    async fn open_wal_file(wal_file_path: &Path) -> Result<tokio::fs::File> {
+    async fn open_wal_file(wal_file_path: &Utf8Path) -> Result<tokio::fs::File> {
         // First try to open the .partial file.
         let mut partial_path = wal_file_path.to_owned();
         partial_path.set_extension("partial");
@@ -722,10 +726,10 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
 
 /// Helper returning full path to WAL segment file and its .partial brother.
 fn wal_file_paths(
-    timeline_dir: &Path,
+    timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());
     let wal_file_partial_path = timeline_dir.join(wal_file_name + ".partial");

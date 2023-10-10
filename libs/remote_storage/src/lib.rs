@@ -13,12 +13,12 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
-    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
 
 use anyhow::{bail, Context};
+use camino::{Utf8Path, Utf8PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::io;
@@ -52,7 +52,7 @@ const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 /// The prefix is an implementation detail, that allows representing local paths
 /// as the remote ones, stripping the local storage prefix away.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RemotePath(PathBuf);
+pub struct RemotePath(Utf8PathBuf);
 
 impl Serialize for RemotePath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -69,18 +69,18 @@ impl<'de> Deserialize<'de> for RemotePath {
         D: serde::Deserializer<'de>,
     {
         let str = String::deserialize(deserializer)?;
-        Ok(Self(PathBuf::from(&str)))
+        Ok(Self(Utf8PathBuf::from(&str)))
     }
 }
 
 impl std::fmt::Display for RemotePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.display())
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
 impl RemotePath {
-    pub fn new(relative_path: &Path) -> anyhow::Result<Self> {
+    pub fn new(relative_path: &Utf8Path) -> anyhow::Result<Self> {
         anyhow::ensure!(
             relative_path.is_relative(),
             "Path {relative_path:?} is not relative"
@@ -89,30 +89,30 @@ impl RemotePath {
     }
 
     pub fn from_string(relative_path: &str) -> anyhow::Result<Self> {
-        Self::new(Path::new(relative_path))
+        Self::new(Utf8Path::new(relative_path))
     }
 
-    pub fn with_base(&self, base_path: &Path) -> PathBuf {
+    pub fn with_base(&self, base_path: &Utf8Path) -> Utf8PathBuf {
         base_path.join(&self.0)
     }
 
     pub fn object_name(&self) -> Option<&str> {
-        self.0.file_name().and_then(|os_str| os_str.to_str())
+        self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Path) -> Self {
+    pub fn join(&self, segment: &Utf8Path) -> Self {
         Self(self.0.join(segment))
     }
 
-    pub fn get_path(&self) -> &PathBuf {
+    pub fn get_path(&self) -> &Utf8PathBuf {
         &self.0
     }
 
     pub fn extension(&self) -> Option<&str> {
-        self.0.extension()?.to_str()
+        self.0.extension()
     }
 
-    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Path, std::path::StripPrefixError> {
+    pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
 }
@@ -311,7 +311,7 @@ impl GenericRemoteStorage {
     pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
-                info!("Using fs root '{}' as a remote storage", root.display());
+                info!("Using fs root '{root}' as a remote storage");
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
@@ -379,7 +379,7 @@ pub struct RemoteStorageConfig {
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
     /// Specify a root folder to place all stored files into.
-    LocalFs(PathBuf),
+    LocalFs(Utf8PathBuf),
     /// AWS S3 based storage, storing all files in the S3 bucket
     /// specified by the config
     AwsS3(S3Config),
@@ -474,7 +474,7 @@ impl RemoteStorageConfig {
                 concurrency_limit,
                 max_keys_per_list_response,
             }),
-            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
+            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(Utf8PathBuf::from(
                 parse_toml_string("local_path", local_path)?,
             )),
             (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
@@ -519,23 +519,23 @@ mod tests {
 
     #[test]
     fn test_object_name() {
-        let k = RemotePath::new(Path::new("a/b/c")).unwrap();
+        let k = RemotePath::new(Utf8Path::new("a/b/c")).unwrap();
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RemotePath::new(Path::new("a/b/c/")).unwrap();
+        let k = RemotePath::new(Utf8Path::new("a/b/c/")).unwrap();
         assert_eq!(k.object_name(), Some("c"));
 
-        let k = RemotePath::new(Path::new("a/")).unwrap();
+        let k = RemotePath::new(Utf8Path::new("a/")).unwrap();
         assert_eq!(k.object_name(), Some("a"));
 
         // XXX is it impossible to have an empty key?
-        let k = RemotePath::new(Path::new("")).unwrap();
+        let k = RemotePath::new(Utf8Path::new("")).unwrap();
         assert_eq!(k.object_name(), None);
     }
 
     #[test]
     fn rempte_path_cannot_be_created_from_absolute_ones() {
-        let err = RemotePath::new(Path::new("/")).expect_err("Should fail on absolute paths");
+        let err = RemotePath::new(Utf8Path::new("/")).expect_err("Should fail on absolute paths");
         assert_eq!(err.to_string(), "Path \"/\" is not relative");
     }
 }

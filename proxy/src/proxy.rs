@@ -130,6 +130,11 @@ pub async fn task_main(
                     }),
                 );
             }
+            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
+                if !e.is_panic() && !e.is_cancelled() {
+                    warn!("unexpected error from joined connection task: {e:?}");
+                }
+            }
             _ = cancellation_token.cancelled() => {
                 drop(listener);
                 break;

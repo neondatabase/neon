@@ -11,6 +11,7 @@ use std::process::Child;
 use std::{io, result};
 
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
@@ -97,8 +98,9 @@ impl SafekeeperNode {
         SafekeeperNode::datadir_path_by_id(&self.env, self.id)
     }
 
-    pub fn pid_file(&self) -> PathBuf {
-        self.datadir_path().join("safekeeper.pid")
+    pub fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.datadir_path().join("safekeeper.pid"))
+            .expect("non-Unicode path")
     }
 
     pub fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<Child> {

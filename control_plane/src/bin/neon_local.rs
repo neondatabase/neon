@@ -116,6 +116,7 @@ fn main() -> Result<()> {
             "attachment_service" => handle_attachment_service(sub_args, &env),
             "safekeeper" => handle_safekeeper(sub_args, &env),
             "endpoint" => handle_endpoint(sub_args, &env),
+            "mappings" => handle_mappings(sub_args, &mut env),
             "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
             _ => bail!("unexpected subcommand {sub_name}"),
         };
@@ -816,6 +817,38 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
     Ok(())
 }
 
+fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
+    let (sub_name, sub_args) = match sub_match.subcommand() {
+        Some(ep_subcommand_data) => ep_subcommand_data,
+        None => bail!("no mappings subcommand provided"),
+    };
+
+    match sub_name {
+        "map" => {
+            let branch_name = sub_args
+                .get_one::<String>("branch-name")
+                .expect("branch-name argument missing");
+
+            let tenant_id = sub_args
+                .get_one::<String>("tenant-id")
+                .map(|x| TenantId::from_str(x))
+                .expect("tenant-id argument missing")
+                .expect("malformed tenant-id arg");
+
+            let timeline_id = sub_args
+                .get_one::<String>("timeline-id")
+                .map(|x| TimelineId::from_str(x))
+                .expect("timeline-id argument missing")
+                .expect("malformed timeline-id arg");
+
+            env.register_branch_mapping(branch_name.to_owned(), tenant_id, timeline_id)?;
+
+            Ok(())
+        }
+        other => unimplemented!("mappings subcommand {other}"),
+    }
+}
+
 fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
         let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
@@ -1084,6 +1117,7 @@ fn cli() -> Command {
     // --id, when using a pageserver command
     let pageserver_id_arg = Arg::new("pageserver-id")
         .long("id")
+        .global(true)
         .help("pageserver id")
         .required(false);
     // --pageserver-id when using a non-pageserver command
@@ -1254,17 +1288,20 @@ fn cli() -> Command {
             Command::new("pageserver")
                 .arg_required_else_help(true)
                 .about("Manage pageserver")
+                .arg(pageserver_id_arg)
                 .subcommand(Command::new("status"))
-                .arg(pageserver_id_arg.clone())
-                .subcommand(Command::new("start").about("Start local pageserver")
-                .arg(pageserver_id_arg.clone())
-                .arg(pageserver_config_args.clone()))
-                .subcommand(Command::new("stop").about("Stop local pageserver")
-                .arg(pageserver_id_arg.clone())
-                            .arg(stop_mode_arg.clone()))
-                .subcommand(Command::new("restart").about("Restart local pageserver")
-                .arg(pageserver_id_arg.clone())
-                .arg(pageserver_config_args.clone()))
+                .subcommand(Command::new("start")
+                    .about("Start local pageserver")
+                    .arg(pageserver_config_args.clone())
+                )
+                .subcommand(Command::new("stop")
+                    .about("Stop local pageserver")
+                    .arg(stop_mode_arg.clone())
+                )
+                .subcommand(Command::new("restart")
+                    .about("Restart local pageserver")
+                    .arg(pageserver_config_args.clone())
+                )
         )
         .subcommand(
             Command::new("attachment_service")
@@ -1321,8 +1358,8 @@ fn cli() -> Command {
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
                     .arg(tenant_id_arg.clone())
-                    .arg(branch_name_arg)
-                    .arg(timeline_id_arg)
+                    .arg(branch_name_arg.clone())
+                    .arg(timeline_id_arg.clone())
                     .arg(lsn_arg)
                     .arg(pg_port_arg)
                     .arg(http_port_arg)
@@ -1335,7 +1372,7 @@ fn cli() -> Command {
                 .subcommand(
                     Command::new("stop")
                     .arg(endpoint_id_arg)
-                    .arg(tenant_id_arg)
+                    .arg(tenant_id_arg.clone())
                     .arg(
                         Arg::new("destroy")
                             .help("Also delete data directory (now optional, should be default in future)")
@@ -1345,6 +1382,18 @@ fn cli() -> Command {
                         )
                 )
 
+        )
+        .subcommand(
+            Command::new("mappings")
+                .arg_required_else_help(true)
+                .about("Manage neon_local branch name mappings")
+                .subcommand(
+                    Command::new("map")
+                        .about("Create new mapping which cannot exist already")
+                        .arg(branch_name_arg.clone())
+                        .arg(tenant_id_arg.clone())
+                        .arg(timeline_id_arg.clone())
+                )
         )
         // Obsolete old name for 'endpoint'. We now just print an error if it's used.
         .subcommand(

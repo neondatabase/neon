@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+camino.workspace = true
 clap = { workspace = true, features = ["string"] }
 git-version.workspace = true
 pageserver = { path = ".." }

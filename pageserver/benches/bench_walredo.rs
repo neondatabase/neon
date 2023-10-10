@@ -25,7 +25,7 @@ fn redo_scenarios(c: &mut Criterion) {
     // input to the stderr.
     // utils::logging::init(utils::logging::LogFormat::Plain).unwrap();
 
-    let repo_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
