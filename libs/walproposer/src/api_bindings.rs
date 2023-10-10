@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+use std::ffi::CStr;
+use std::ffi::CString;
+
+use crate::bindings::StringInfoData;
 use crate::bindings::uint32;
 use crate::bindings::walproposer_api;
 use crate::bindings::PGAsyncReadResult;
@@ -15,55 +19,130 @@ use crate::bindings::WalProposerExecStatusType;
 use crate::bindings::WalproposerShmemState;
 use crate::bindings::XLogRecPtr;
 use crate::walproposer::ApiImpl;
+use crate::walproposer::WaitResult;
 
 extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemState {
-    std::ptr::null_mut()
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).get_shmem_state()
+    }
 }
 
-extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {}
+extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).start_streaming(startpos)
+    }
+}
 
 extern "C" fn get_flush_rec_ptr(wp: *mut WalProposer) -> XLogRecPtr {
-    0
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).get_flush_rec_ptr()
+    }
 }
 
 extern "C" fn get_current_timestamp(wp: *mut WalProposer) -> TimestampTz {
-    0
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).get_current_timestamp()
+    }
 }
 
 extern "C" fn conn_error_message(sk: *mut Safekeeper) -> *mut ::std::os::raw::c_char {
-    std::ptr::null_mut()
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        let msg = (*api).conn_error_message(&mut (*sk));
+        let msg = CString::new(msg).unwrap();
+        // FIXME: leaking error message
+        msg.into_raw()
+    }
 }
 
 extern "C" fn conn_status(sk: *mut Safekeeper) -> WalProposerConnStatusType {
-    0
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_status(&mut (*sk))
+    }
 }
 
-extern "C" fn conn_connect_start(sk: *mut Safekeeper) {}
+extern "C" fn conn_connect_start(sk: *mut Safekeeper) {
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_connect_start(&mut (*sk))
+    }
+}
 
 extern "C" fn conn_connect_poll(sk: *mut Safekeeper) -> WalProposerConnectPollStatusType {
-    0
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_connect_poll(&mut (*sk))
+    }
 }
 
 extern "C" fn conn_send_query(sk: *mut Safekeeper, query: *mut ::std::os::raw::c_char) -> bool {
-    false
+    let query = unsafe { CStr::from_ptr(query) };
+    let query = query.to_str().unwrap();
+
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_send_query(&mut (*sk), query)
+    }
 }
 
 extern "C" fn conn_get_query_result(sk: *mut Safekeeper) -> WalProposerExecStatusType {
-    0
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_get_query_result(&mut (*sk))
+    }
 }
 
 extern "C" fn conn_flush(sk: *mut Safekeeper) -> ::std::os::raw::c_int {
-    0
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_flush(&mut (*sk))
+    }
 }
 
-extern "C" fn conn_finish(sk: *mut Safekeeper) {}
+extern "C" fn conn_finish(sk: *mut Safekeeper) {
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_finish(&mut (*sk))
+    }
+}
 
 extern "C" fn conn_async_read(
     sk: *mut Safekeeper,
     buf: *mut *mut ::std::os::raw::c_char,
     amount: *mut ::std::os::raw::c_int,
 ) -> PGAsyncReadResult {
-    0
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        let (res, result) = (*api).conn_async_read(&mut (*sk));
+        
+        let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or(Vec::new());
+
+        inbuf.clear();
+        inbuf.extend_from_slice(&res);
+
+        *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
+        *amount = res.len() as i32;
+
+        result
+    }
 }
 
 extern "C" fn conn_async_write(
@@ -71,7 +150,13 @@ extern "C" fn conn_async_write(
     buf: *const ::std::os::raw::c_void,
     size: usize,
 ) -> PGAsyncWriteResult {
-    0
+    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, size) };
+
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_async_write(&mut (*sk), buf)
+    }
 }
 
 extern "C" fn conn_blocking_write(
@@ -79,7 +164,13 @@ extern "C" fn conn_blocking_write(
     buf: *const ::std::os::raw::c_void,
     size: usize,
 ) -> bool {
-    false
+    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, size) };
+
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).conn_blocking_write(&mut (*sk), buf)
+    }
 }
 
 extern "C" fn recovery_download(
@@ -88,7 +179,11 @@ extern "C" fn recovery_download(
     startpos: XLogRecPtr,
     endpos: XLogRecPtr,
 ) -> bool {
-    false
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).recovery_download(&mut (*sk), startpos, endpos)
+    }
 }
 
 extern "C" fn wal_read(
@@ -97,6 +192,13 @@ extern "C" fn wal_read(
     startptr: XLogRecPtr,
     count: Size,
 ) {
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count as usize) };
+
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).wal_read(&mut (*sk), buf, startptr)
+    }
 }
 
 extern "C" fn wal_reader_allocate(sk: *mut Safekeeper) {
@@ -108,7 +210,11 @@ extern "C" fn wal_reader_allocate(sk: *mut Safekeeper) {
 }
 
 extern "C" fn free_event_set(wp: *mut WalProposer) {
-
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).free_event_set(&mut (*wp));
+    }
 }
 
 extern "C" fn init_event_set(wp: *mut WalProposer) {
@@ -120,20 +226,49 @@ extern "C" fn init_event_set(wp: *mut WalProposer) {
 }
 
 extern "C" fn update_event_set(sk: *mut Safekeeper, events: uint32) {
-
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).update_event_set(&mut (*sk), events);
+    }
 }
 
 extern "C" fn add_safekeeper_event_set(sk: *mut Safekeeper, events: uint32) {
-
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).add_safekeeper_event_set(&mut (*sk), events);
+    }
 }
 
 extern "C" fn wait_event_set(
     wp: *mut WalProposer,
     timeout: ::std::os::raw::c_long,
-    sk: *mut *mut Safekeeper,
+    event_sk: *mut *mut Safekeeper,
     events: *mut uint32,
 ) -> ::std::os::raw::c_int {
-    0
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        let result = (*api).wait_event_set(&mut (*wp), timeout);
+        match result {
+            WaitResult::Latch => {
+                *event_sk = std::ptr::null_mut();
+                *events = 1; // FIXME: import defines
+                return 1;
+            }
+            WaitResult::Timeout => {
+                *event_sk = std::ptr::null_mut();
+                *events = 0;
+                return 0;
+            }
+            WaitResult::Network(sk, event_mask) => {
+                *event_sk = sk;
+                *events = event_mask;
+                return 1;
+            }
+        }
+    }
 }
 
 extern "C" fn strong_random(
@@ -151,19 +286,35 @@ extern "C" fn strong_random(
 }
 
 extern "C" fn get_redo_start_lsn(wp: *mut WalProposer) -> XLogRecPtr {
-    0
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).get_redo_start_lsn()
+    }
 }
 
 extern "C" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
-
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).finish_sync_safekeepers(lsn)
+    }
 }
 
 extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, commit_lsn: XLogRecPtr) {
-
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).process_safekeeper_feedback(&mut (*wp), commit_lsn)
+    }
 }
 
 extern "C" fn confirm_wal_streamed(wp: *mut WalProposer, lsn: XLogRecPtr) {
-
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).confirm_wal_streamed(&mut (*wp), lsn)
+    }
 }
 
 pub(crate) fn create_api() -> walproposer_api {
@@ -197,4 +348,36 @@ pub(crate) fn create_api() -> walproposer_api {
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         confirm_wal_streamed: Some(confirm_wal_streamed),
     }
+}
+
+fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
+    if pg.data.is_null() {
+        return None;
+    }
+
+    let ptr = pg.data as *mut u8;
+    let length = pg.len as usize;
+    let capacity = pg.maxlen as usize;
+
+    pg.data = std::ptr::null_mut();
+    pg.len = 0;
+    pg.maxlen = 0;
+
+    unsafe { Some(Vec::from_raw_parts(ptr, length, capacity)) }
+}
+
+fn store_vec_u8(pg: &mut StringInfoData, vec: Vec<u8>) -> *mut ::std::os::raw::c_char {
+    let ptr = vec.as_ptr() as *mut ::std::os::raw::c_char;
+    let length = vec.len();
+    let capacity = vec.capacity();
+
+    assert!(pg.data.is_null());
+
+    pg.data = ptr;
+    pg.len = length as i32;
+    pg.maxlen = capacity as i32;
+
+    std::mem::forget(vec);
+
+    ptr
 }

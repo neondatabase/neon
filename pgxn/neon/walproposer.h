@@ -374,6 +374,14 @@ typedef struct Safekeeper
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
+
+#ifdef WALPROPOSER_LIB
+	/*
+	 * Buffer for incoming messages. Usually Rust vector is stored here.
+	 * Caller is responsible for freeing the buffer.
+	 */
+	StringInfoData inbuf;
+#endif
 } Safekeeper;
 
 /* Re-exported PostgresPollingStatusType */
@@ -478,7 +486,12 @@ typedef struct walproposer_api
 	/* Close the connection, aka PQfinish. */
 	void		(*conn_finish) (Safekeeper *sk);
 
-	/* Try to read CopyData message, aka PQgetCopyData. */
+	/*
+	 * Try to read CopyData message from the safekeeper, aka PQgetCopyData. 
+	 *
+	 * On success, the data is placed in *buf. It is valid until the next call
+	 * to this function.
+	 */
 	PGAsyncReadResult (*conn_async_read) (Safekeeper *sk, char **buf, int *amount);
 
 	/* Try to write CopyData message, aka PQputCopyData. */

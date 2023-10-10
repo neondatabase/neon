@@ -18,7 +18,11 @@ fn main() -> anyhow::Result<()> {
 
     let pg_install_abs = std::fs::canonicalize(pg_install_dir)?;
     let walproposer_lib_dir = pg_install_abs.join("build/walproposer-lib");
-    let walproposer_lib_search_str = walproposer_lib_dir.to_str().ok_or(anyhow!("Bad path"))?;
+    let walproposer_lib_search_str = walproposer_lib_dir.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
+
+    let pgxn_neon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pgxn/neon");
+    let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
+    let pgxn_neon = pgxn_neon.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
 
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
@@ -70,10 +74,8 @@ fn main() -> anyhow::Result<()> {
         .allowlist_function("WalProposerBroadcast")
         .allowlist_function("WalProposerPoll")
         .clang_arg("-DWALPROPOSER_LIB")
-        .clang_arg(format!("-I/home/admin/neon/pgxn/neon"))
-        .clang_arg(format!("-I/home/admin/neon/pg_install/v16/include"))
+        .clang_arg(format!("-I{pgxn_neon}"))
         .clang_arg(format!("-I{inc_server_path}"))
-        .clang_arg(format!("-I/home/admin/neon/pg_install/v16/include/postgresql/internal"))
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.
