@@ -47,7 +47,7 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-const HTTP_CONNECTION_TIMEOUT_SECS: u64 = 15;
+const HTTP_CONNECTION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -191,21 +191,21 @@ pub async fn handle(
     session_id: uuid::Uuid,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(HTTP_CONNECTION_TIMEOUT_SECS),
+        HTTP_CONNECTION_TIMEOUT,
         handle_inner(request, sni_hostname, conn_pool, session_id),
     )
     .await;
-
     let mut response = match result {
         Ok(r) => match r {
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
-                let code = match e.downcast_ref::<tokio_postgres::Error>() {
-                    Some(e) => match e.code() {
-                        Some(e) => serde_json::to_value(e.code()).unwrap(),
-                        None => Value::Null,
-                    },
+                let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
+                    e.code()
+                        .and_then(|s| Some(serde_json::to_value(s.code()).unwrap_or_default()))
+                });
+                let code = match code {
+                    Some(c) => c,
                     None => Value::Null,
                 };
                 error!(
@@ -220,7 +220,10 @@ pub async fn handle(
             }
         },
         Err(_) => {
-            let message = format!("HTTP-Connection timed out, execution time exeeded {HTTP_CONNECTION_TIMEOUT_SECS} seconds");
+            let message = format!(
+                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                HTTP_CONNECTION_TIMEOUT.as_secs()
+            );
             error!(message);
             json_response(
                 StatusCode::GATEWAY_TIMEOUT,
