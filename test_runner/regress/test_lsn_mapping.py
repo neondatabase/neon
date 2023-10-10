@@ -34,6 +34,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
+    cur.execute("SET synchronous_commit=on")
     cur.execute("INSERT INTO foo VALUES (-1)")
 
     # Wait until WAL is received by pageserver
@@ -97,6 +98,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
+    cur.execute("SET synchronous_commit=on")
     cur.execute("INSERT INTO foo VALUES (-1)")
 
     # Wait until WAL is received by pageserver
@@ -112,7 +114,6 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             new_timeline_id,
             probe_lsn,
         )
-        # assert result == "future"
 
         # lsn of zero
         try:
