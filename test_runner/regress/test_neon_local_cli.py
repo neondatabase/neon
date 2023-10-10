@@ -1,3 +1,4 @@
+import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.port_distributor import PortDistributor
 
@@ -11,20 +12,22 @@ def test_neon_cli_basics(neon_env_builder: NeonEnvBuilder, port_distributor: Por
         env.neon_cli.start()
         env.neon_cli.create_tenant(tenant_id=env.initial_tenant, set_default=True)
 
+        main_branch_name = "main"
         pg_port = port_distributor.get_port()
         http_port = port_distributor.get_port()
-        env.neon_cli.endpoint_start(
-            endpoint_id="ep-basic-main", pg_port=pg_port, http_port=http_port
+        env.neon_cli.endpoint_create(
+            main_branch_name, pg_port, http_port, endpoint_id="ep-basic-main"
         )
+        env.neon_cli.endpoint_start("ep-basic-main")
 
         branch_name = "migration-check"
-
-        env.neon_cli.create_branch(new_branch_name=branch_name)
+        env.neon_cli.create_branch(branch_name)
         pg_port = port_distributor.get_port()
         http_port = port_distributor.get_port()
-        env.neon_cli.endpoint_start(
-            f"ep-{branch_name}", pg_port, http_port, branch_name=branch_name
+        env.neon_cli.endpoint_create(
+            branch_name, pg_port, http_port, endpoint_id=f"ep-{branch_name}"
         )
+        env.neon_cli.endpoint_start(f"ep-{branch_name}")
     finally:
         env.neon_cli.stop()
 
