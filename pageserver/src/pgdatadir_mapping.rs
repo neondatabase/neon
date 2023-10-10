@@ -406,15 +406,14 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Option<(TimestampTz, TimestampTz, TimestampTz)>, PageReconstructError> {
         let mut timestamps = Vec::new();
-        let () = self
-            .map_all_timestamps(probe_lsn, ctx, |timestamp| {
-                timestamps.push(timestamp);
-                ControlFlow::Continue(())
-            })
-            .await?;
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            timestamps.push(timestamp);
+            ControlFlow::Continue(())
+        })
+        .await?;
 
-        let min = timestamps.iter().map(|v| *v).min();
-        let max = timestamps.iter().map(|v| *v).max();
+        let min = timestamps.iter().copied().min();
+        let max = timestamps.iter().copied().max();
         if let (Some(min), Some(max)) = (min, max) {
             let median = median_ts(&mut timestamps);
             Ok(Some((min, max, median)))
