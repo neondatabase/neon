@@ -524,10 +524,11 @@ async fn get_time_range_of_lsn_handler(
     let result = timeline.get_timestamp_range_for_lsn(lsn, &ctx).await?;
 
     let result = match result {
-        Some((min, max)) => {
+        Some((min, max, median)) => {
             let min = format_rfc3339(postgres_ffi::from_pg_timestamp(min));
             let max = format_rfc3339(postgres_ffi::from_pg_timestamp(max));
-            serde_json::json!({ "min": format!("{min}"), "max": format!("{max}") })
+            let median = format_rfc3339(postgres_ffi::from_pg_timestamp(median));
+            serde_json::json!({ "min": format!("{min}"), "max": format!("{max}"), "median": format!("{median}") })
         }
         None => serde_json::json!({ "empty": true }),
     };

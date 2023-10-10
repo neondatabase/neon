@@ -397,35 +397,27 @@ impl Timeline {
         .await
     }
 
-    /// Obtain the possible timestamp range for the given lsn
+    /// Obtain the possible timestamp range for the given lsn.
     ///
-    /// If the lsn has no timestamps, returns None
+    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
     pub async fn get_timestamp_range_for_lsn(
         &self,
         probe_lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<Option<(TimestampTz, TimestampTz)>, PageReconstructError> {
-        let mut min: Option<TimestampTz> = None;
-        let mut max: Option<TimestampTz> = None;
-
+    ) -> Result<Option<(TimestampTz, TimestampTz, TimestampTz)>, PageReconstructError> {
+        let mut timestamps = Vec::new();
         let () = self
             .map_all_timestamps(probe_lsn, ctx, |timestamp| {
-                if let Some(min) = &mut min {
-                    *min = (*min).min(timestamp);
-                } else {
-                    min = Some(timestamp);
-                }
-                if let Some(max) = &mut max {
-                    *max = (*max).max(timestamp);
-                } else {
-                    max = Some(timestamp);
-                }
+                timestamps.push(timestamp);
                 ControlFlow::Continue(())
             })
             .await?;
 
+        let min = timestamps.iter().map(|v| *v).min();
+        let max = timestamps.iter().map(|v| *v).max();
         if let (Some(min), Some(max)) = (min, max) {
-            Ok(Some((min, max)))
+            let median = median_ts(&mut timestamps);
+            Ok(Some((min, max, median)))
         } else {
             Ok(None)
         }
@@ -1678,11 +1670,26 @@ fn is_slru_block_key(key: Key) -> bool {
         && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
+/// Returns the median, if there is an odd number of timestamps, and the average if there is an even number
+fn median_ts(timestamps: &mut [TimestampTz]) -> TimestampTz {
+    if let [single] = timestamps {
+        return *single;
+    }
+    let tl = timestamps.len();
+    let val_at_half = *timestamps.select_nth_unstable(tl / 2).1;
+    if tl % 2 == 1 {
+        val_at_half
+    } else {
+        let val_before = timestamps[tl / 2 - 1];
+        val_before + (val_at_half - val_before) / 2
+    }
+}
+
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
     //use super::repo_harness::*;
-    //use super::*;
+    use super::*;
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {
@@ -1693,6 +1700,13 @@ mod tests {
             assert_eq!(incremental, non_incremental);
         }
     */
+
+    #[test]
+    fn test_median_ts() {
+        assert_eq!(median_ts(&mut [1]), 1);
+        assert_eq!(median_ts(&mut [0, 1, 2, 3, 4]), 2);
+        assert_eq!(median_ts(&mut [4, 2, 0, 3, 1]), 2);
+    }
 
     /*
     ///

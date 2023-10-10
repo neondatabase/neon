@@ -1188,6 +1188,9 @@ components:
         max:
           type: string
           format: date-time
+        median:
+          type: string
+          format: date-time
 
     SyntheticSizeResponse:
       type: object
