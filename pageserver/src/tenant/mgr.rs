@@ -697,7 +697,7 @@ pub(crate) async fn upsert_location(
 
         match tenant.get_attach_mode() {
             AttachmentMode::Single | AttachmentMode::Multi => {
-                // Before we leave our state as the presumed holder of latest generation,
+                // Before we leave our state as the presumed holder of the latest generation,
                 // flush any outstanding deletions to reduce the risk of leaking objects.
                 deletion_queue_client.flush_advisory()
             }
