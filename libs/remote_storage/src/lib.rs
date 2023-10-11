@@ -4,7 +4,10 @@
 //! [`RemoteStorage`] trait a CRUD-like generic abstraction to use for adapting external storages with a few implementations:
 //!   * [`local_fs`] allows to use local file system as an external storage
 //!   * [`s3_bucket`] uses AWS S3 bucket as an external storage
+//!   * [`azure_blob`] allows to use Azure Blob storage as an external storage
 //!
+
+mod azure_blob;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
@@ -25,7 +28,10 @@ use tokio::io;
 use toml_edit::Item;
 use tracing::info;
 
-pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
+pub use self::{
+    azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
+    simulate_failures::UnreliableWrapper,
+};
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
 /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
@@ -217,6 +223,7 @@ impl std::error::Error for DownloadError {}
 pub enum GenericRemoteStorage {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
+    AzureBlob(Arc<AzureBlobStorage>),
     Unreliable(Arc<UnreliableWrapper>),
 }
 
@@ -228,6 +235,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.list_files(folder).await,
             Self::AwsS3(s) => s.list_files(folder).await,
+            Self::AzureBlob(s) => s.list_files(folder).await,
             Self::Unreliable(s) => s.list_files(folder).await,
         }
     }
@@ -242,6 +250,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.list_prefixes(prefix).await,
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
+            Self::AzureBlob(s) => s.list_prefixes(prefix).await,
             Self::Unreliable(s) => s.list_prefixes(prefix).await,
         }
     }
@@ -256,6 +265,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
         }
     }
@@ -264,6 +274,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.download(from).await,
             Self::AwsS3(s) => s.download(from).await,
+            Self::AzureBlob(s) => s.download(from).await,
             Self::Unreliable(s) => s.download(from).await,
         }
     }
@@ -283,6 +294,10 @@ impl GenericRemoteStorage {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
             }
+            Self::AzureBlob(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
             Self::Unreliable(s) => {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
@@ -294,6 +309,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.delete(path).await,
             Self::AwsS3(s) => s.delete(path).await,
+            Self::AzureBlob(s) => s.delete(path).await,
             Self::Unreliable(s) => s.delete(path).await,
         }
     }
@@ -302,6 +318,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.delete_objects(paths).await,
             Self::AwsS3(s) => s.delete_objects(paths).await,
+            Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
         }
     }
