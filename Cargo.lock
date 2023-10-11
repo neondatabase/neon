@@ -726,6 +726,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_storage_blobs"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f91a52da2d192cfe43759f61e8bb31a5969f1722d5b85ac89627f356ad674ab4"
+dependencies = [
+ "RustyXML",
+ "azure_core",
+ "azure_storage",
+ "bytes",
+ "futures",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "time",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3640,6 +3660,7 @@ dependencies = [
  "aws-smithy-http",
  "aws-types",
  "azure_storage",
+ "azure_storage_blobs",
  "camino",
  "camino-tempfile",
  "hyper",

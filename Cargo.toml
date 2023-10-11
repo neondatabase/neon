@@ -37,6 +37,7 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
 azure_storage = "0.16"
+azure_storage_blobs = "0.16.0"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
