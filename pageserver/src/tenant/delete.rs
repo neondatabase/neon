@@ -31,7 +31,7 @@ use super::{
 const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeleteTenantError {
+pub(crate) enum DeleteTenantError {
     #[error("GetTenant {0}")]
     Get(#[from] GetTenantError),
 
@@ -376,7 +376,7 @@ impl DeleteTenantFlow {
         Ok(())
     }
 
-    pub async fn should_resume_deletion(
+    pub(crate) async fn should_resume_deletion(
         conf: &'static PageServerConf,
         remote_storage: Option<&GenericRemoteStorage>,
         tenant: &Tenant,
