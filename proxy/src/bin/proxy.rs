@@ -1,5 +1,6 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
 use proxy::metrics;
@@ -79,6 +80,9 @@ struct ProxyCliArgs {
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
+    /// timeout for http connections
+    #[clap(long, default_value_t = 15)]
+    connection_timeout_secs: u64,
 }
 
 #[tokio::main]
@@ -220,12 +224,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             auth::BackendType::Link(Cow::Owned(url))
         }
     };
-
+    let http_config = HttpConfig {
+        connection_timeout_secs: args.connection_timeout_secs,
+    };
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
+        http_config,
     }));
 
     Ok(config)

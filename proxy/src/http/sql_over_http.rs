@@ -24,6 +24,7 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::config::HttpConfig;
 use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
 
 use super::conn_pool::ConnInfo;
@@ -49,7 +50,6 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-const HTTP_CONNECTION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -191,9 +191,11 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
+    let timeout = config.connection_timeout_secs;
     let result = tokio::time::timeout(
-        HTTP_CONNECTION_TIMEOUT,
+        tokio::time::Duration::from_secs(timeout),
         handle_inner(request, sni_hostname, conn_pool, session_id),
     )
     .await;
@@ -222,10 +224,8 @@ pub async fn handle(
             }
         },
         Err(_) => {
-            let message = format!(
-                "HTTP-Connection timed out, execution time exeeded {} seconds",
-                HTTP_CONNECTION_TIMEOUT.as_secs()
-            );
+            let message =
+                format!("HTTP-Connection timed out, execution time exeeded {timeout} seconds",);
             error!(message);
             json_response(
                 StatusCode::GATEWAY_TIMEOUT,
