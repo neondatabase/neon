@@ -1,4 +1,4 @@
-use pageserver_api::models::*;
+use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method};
 use utils::{
     http::error::HttpErrorBody,
@@ -160,6 +160,18 @@ impl Client {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
         Ok(())
+    }
+
+    pub async fn tenant_secondary_download(&self, tenant_id: TenantShardId) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/secondary/download",
+            self.mgmt_api_endpoint, tenant_id
+        );
+        self.request(Method::POST, &uri, ())
+            .await?
+            .error_for_status()
+            .map(|_| ())
+            .map_err(|e| Error::ApiError(format!("{}", e)))
     }
 
     pub async fn location_config(
