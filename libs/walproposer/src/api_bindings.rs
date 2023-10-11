@@ -59,7 +59,7 @@ extern "C" fn conn_error_message(sk: *mut Safekeeper) -> *mut ::std::os::raw::c_
         let api = callback_data as *mut Box<dyn ApiImpl>;
         let msg = (*api).conn_error_message(&mut (*sk));
         let msg = CString::new(msg).unwrap();
-        // FIXME: leaking error message
+        // TODO: fix leaking error message
         msg.into_raw()
     }
 }
@@ -133,11 +133,15 @@ extern "C" fn conn_async_read(
         let api = callback_data as *mut Box<dyn ApiImpl>;
         let (res, result) = (*api).conn_async_read(&mut (*sk));
 
+        // This function has guarantee that returned buf will be valid until
+        // the next call. So we can store a Vec in each Safekeeper and reuse
+        // it on the next call.
         let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or(Vec::new());
 
         inbuf.clear();
         inbuf.extend_from_slice(res);
 
+        // Put a Vec back to sk->inbuf and return data ptr.
         *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
         *amount = res.len() as i32;
 
@@ -150,9 +154,8 @@ extern "C" fn conn_async_write(
     buf: *const ::std::os::raw::c_void,
     size: usize,
 ) -> PGAsyncWriteResult {
-    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, size) };
-
     unsafe {
+        let buf = std::slice::from_raw_parts(buf as *const u8, size);
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).conn_async_write(&mut (*sk), buf)
@@ -164,9 +167,8 @@ extern "C" fn conn_blocking_write(
     buf: *const ::std::os::raw::c_void,
     size: usize,
 ) -> bool {
-    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, size) };
-
     unsafe {
+        let buf = std::slice::from_raw_parts(buf as *const u8, size);
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).conn_blocking_write(&mut (*sk), buf)
@@ -192,9 +194,8 @@ extern "C" fn wal_read(
     startptr: XLogRecPtr,
     count: Size,
 ) {
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
-
     unsafe {
+        let buf = std::slice::from_raw_parts_mut(buf as *mut u8, count);
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).wal_read(&mut (*sk), buf, startptr)
@@ -254,12 +255,12 @@ extern "C" fn wait_event_set(
         match result {
             WaitResult::Latch => {
                 *event_sk = std::ptr::null_mut();
-                *events = 1; // FIXME: import defines
+                *events = crate::bindings::WL_LATCH_SET;
                 1
             }
             WaitResult::Timeout => {
                 *event_sk = std::ptr::null_mut();
-                *events = 0;
+                *events = crate::bindings::WL_TIMEOUT;
                 0
             }
             WaitResult::Network(sk, event_mask) => {
@@ -276,9 +277,8 @@ extern "C" fn strong_random(
     buf: *mut ::std::os::raw::c_void,
     len: usize,
 ) -> bool {
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, len) };
-
     unsafe {
+        let buf = std::slice::from_raw_parts_mut(buf as *mut u8, len);
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).strong_random(buf)
@@ -411,6 +411,7 @@ impl std::fmt::Display for Level {
     }
 }
 
+/// Take ownership of `Vec<u8>` from StringInfoData.
 pub(crate) fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
     if pg.data.is_null() {
         return None;
@@ -427,6 +428,7 @@ pub(crate) fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
     unsafe { Some(Vec::from_raw_parts(ptr, length, capacity)) }
 }
 
+/// Store `Vec<u8>` in StringInfoData.
 fn store_vec_u8(pg: &mut StringInfoData, vec: Vec<u8>) -> *mut ::std::os::raw::c_char {
     let ptr = vec.as_ptr() as *mut ::std::os::raw::c_char;
     let length = vec.len();

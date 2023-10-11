@@ -172,11 +172,11 @@ neon-pg-ext-clean-%:
 # in the pgxn/neon directory.
 # 
 # We also need to include libpgport.a and libpgcommon.a, because walproposer
-# uses some of the functions from there.
+# uses some functions from those libraries.
 # 
-# We need to remove some of the object files from libpgport.a and libpgcommon.a
-# because they depend on openssl and other libraries which are not included
-# in our Rust build.
+# Some object files are removed from libpgport.a and libpgcommon.a because
+# they depend on openssl and other libraries that are not included in our
+# Rust build.
 .PHONY: walproposer-lib
 walproposer-lib: neon-pg-ext-v16
 	+@echo "Compiling walproposer-lib"

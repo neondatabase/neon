@@ -11,7 +11,10 @@ use crate::{
     },
 };
 
-/// Rust high-level wrapper for C walproposer API.
+/// Rust high-level wrapper for C walproposer API. Many methods are not required
+/// for simple cases, hence todo!() in default implementations.
+///
+/// Refer to `pgxn/neon/walproposer.h` for documentation.
 pub trait ApiImpl {
     fn get_shmem_state(&self) -> &mut crate::bindings::WalproposerShmemState {
         todo!()
@@ -147,13 +150,20 @@ pub enum WaitResult {
 }
 
 pub struct Config {
+    /// Tenant and timeline id
     pub ttid: TenantTimelineId,
+    /// List of safekeepers in format `host:port`
     pub safekeepers_list: Vec<String>,
+    /// Safekeeper reconnect timeout in milliseconds
     pub safekeeper_reconnect_timeout: i32,
+    /// Safekeeper connection timeout in milliseconds
     pub safekeeper_connection_timeout: i32,
+    /// walproposer mode, finish when all safekeepers are synced or subscribe
+    /// to WAL streaming
     pub sync_safekeepers: bool,
 }
 
+/// WalProposer main struct. C methods are reexported as Rust functions.
 pub struct Wrapper {
     wp: *mut WalProposer,
     _safekeepers_list_vec: Vec<u8>,
@@ -238,22 +248,25 @@ mod tests {
     use super::ApiImpl;
 
     #[derive(Clone, Copy, Debug)]
-    struct SyncData {
+    struct WaitEventsData {
         sk: *mut crate::bindings::Safekeeper,
         event_mask: u32,
     }
 
-    struct SyncImpl {
-        data: Cell<SyncData>,
+    struct MockImpl {
+        // data to return from wait_event_set
+        wait_events: Cell<WaitEventsData>,
+        // walproposer->safekeeper messages
         expected_messages: Vec<Vec<u8>>,
         expected_ptr: AtomicUsize,
+        // safekeeper->walproposer messages
         safekeeper_replies: Vec<Vec<u8>>,
         replies_ptr: AtomicUsize,
-        // channel to send lsn to main thread
+        // channel to send LSN to the main thread
         sync_channel: std::sync::mpsc::SyncSender<u64>,
     }
 
-    impl SyncImpl {
+    impl MockImpl {
         fn check_walproposer_msg(&self, msg: &[u8]) {
             let ptr = self
                 .expected_ptr
@@ -280,7 +293,7 @@ mod tests {
         }
     }
 
-    impl ApiImpl for SyncImpl {
+    impl ApiImpl for MockImpl {
         fn get_current_timestamp(&self) -> i64 {
             println!("get_current_timestamp");
             0
@@ -355,7 +368,7 @@ mod tests {
                 "update_event_set, sk={:?}, events_mask={:#b}",
                 sk as *mut crate::bindings::Safekeeper, event_mask
             );
-            self.data.set(SyncData { sk, event_mask });
+            self.wait_events.set(WaitEventsData { sk, event_mask });
         }
 
         fn add_safekeeper_event_set(&self, sk: &mut crate::bindings::Safekeeper, event_mask: u32) {
@@ -363,7 +376,7 @@ mod tests {
                 "add_safekeeper_event_set, sk={:?}, events_mask={:#b}",
                 sk as *mut crate::bindings::Safekeeper, event_mask
             );
-            self.data.set(SyncData { sk, event_mask });
+            self.wait_events.set(WaitEventsData { sk, event_mask });
         }
 
         fn wait_event_set(
@@ -371,7 +384,7 @@ mod tests {
             _: &mut crate::bindings::WalProposer,
             timeout_millis: i64,
         ) -> super::WaitResult {
-            let data = self.data.get();
+            let data = self.wait_events.get();
             println!(
                 "wait_event_set, timeout_millis={}, res={:?}",
                 timeout_millis, data
@@ -395,9 +408,11 @@ mod tests {
         }
     }
 
-    // Run this test with valgrind to detect leaks:
-    //
-    // `valgrind --leak-check=full target/debug/deps/walproposer-90e5648456956740`
+    /// Test that walproposer can successfully connect to safekeeper and finish
+    /// sync_safekeepers. API is mocked in MockImpl.
+    ///
+    /// Run this test with valgrind to detect leaks:
+    /// `valgrind --leak-check=full target/debug/deps/walproposer-<build>`
     #[test]
     fn test_simple_sync_safekeepers() -> anyhow::Result<()> {
         let ttid = TenantTimelineId::new(
@@ -407,8 +422,8 @@ mod tests {
 
         let (sender, receiver) = sync_channel(1);
 
-        let my_impl: Box<dyn ApiImpl> = Box::new(SyncImpl {
-            data: Cell::new(SyncData {
+        let my_impl: Box<dyn ApiImpl> = Box::new(MockImpl {
+            wait_events: Cell::new(WaitEventsData {
                 sk: std::ptr::null_mut(),
                 event_mask: 0,
             }),
@@ -452,10 +467,11 @@ mod tests {
 
         let wp = Wrapper::new(my_impl, config);
 
+        // walproposer will panic when it finishes sync_safekeepers
         std::panic::catch_unwind(|| wp.start()).unwrap_err();
-
+        // validate the resulting LSN
         assert_eq!(receiver.recv()?, 1337);
         Ok(())
-        // destructor will free up resources here
+        // drop() will free up resources here
     }
 }

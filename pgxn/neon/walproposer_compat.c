@@ -10,19 +10,19 @@
 #include "miscadmin.h"
 
 void ExceptionalCondition(const char *conditionName,
-                          const char *fileName, int lineNumber)
+						  const char *fileName, int lineNumber)
 {
-    fprintf(stderr, "ExceptionalCondition: %s:%d: %s\n",
-            fileName, lineNumber, conditionName);
-    fprintf(stderr, "aborting...\n");
-    exit(1);
+	fprintf(stderr, "ExceptionalCondition: %s:%d: %s\n",
+			fileName, lineNumber, conditionName);
+	fprintf(stderr, "aborting...\n");
+	exit(1);
 }
 
 void
 pq_copymsgbytes(StringInfo msg, char *buf, int datalen)
 {
 	if (datalen < 0 || datalen > (msg->len - msg->cursor))
-        ExceptionalCondition("insufficient data left in message", __FILE__, __LINE__);
+		ExceptionalCondition("insufficient data left in message", __FILE__, __LINE__);
 	memcpy(buf, &msg->data[msg->cursor], datalen);
 	msg->cursor += datalen;
 }
@@ -56,8 +56,8 @@ pq_getmsgint(StringInfo msg, int b)
 			result = pg_ntoh32(n32);
 			break;
 		default:
-            fprintf(stderr, "unsupported integer size %d\n", b);
-            ExceptionalCondition("unsupported integer size", __FILE__, __LINE__);
+			fprintf(stderr, "unsupported integer size %d\n", b);
+			ExceptionalCondition("unsupported integer size", __FILE__, __LINE__);
 			result = 0;			/* keep compiler quiet */
 			break;
 	}
@@ -90,7 +90,7 @@ int
 pq_getmsgbyte(StringInfo msg)
 {
 	if (msg->cursor >= msg->len)
-        ExceptionalCondition("no data left in message", __FILE__, __LINE__);
+		ExceptionalCondition("no data left in message", __FILE__, __LINE__);
 	return (unsigned char) msg->data[msg->cursor++];
 }
 
@@ -107,7 +107,7 @@ pq_getmsgbytes(StringInfo msg, int datalen)
 	const char *result;
 
 	if (datalen < 0 || datalen > (msg->len - msg->cursor))
-        ExceptionalCondition("insufficient data left in message", __FILE__, __LINE__);
+		ExceptionalCondition("insufficient data left in message", __FILE__, __LINE__);
 	result = &msg->data[msg->cursor];
 	msg->cursor += datalen;
 	return result;
@@ -135,10 +135,10 @@ pq_getmsgstring(StringInfo msg)
 	 */
 	slen = strlen(str);
 	if (msg->cursor + slen >= msg->len)
-        ExceptionalCondition("invalid string in message", __FILE__, __LINE__);
+		ExceptionalCondition("invalid string in message", __FILE__, __LINE__);
 	msg->cursor += slen + 1;
 
-    return str;
+	return str;
 }
 
 /* --------------------------------
@@ -149,7 +149,7 @@ void
 pq_getmsgend(StringInfo msg)
 {
 	if (msg->cursor != msg->len)
-        ExceptionalCondition("invalid msg format", __FILE__, __LINE__);
+		ExceptionalCondition("invalid msg format", __FILE__, __LINE__);
 }
 
 
@@ -163,16 +163,16 @@ timestamptz_to_str(TimestampTz t)
 {
 	static char buf[MAXDATELEN + 1];
 
-    snprintf(buf, sizeof(buf), "TimestampTz(%ld)", t);
+	snprintf(buf, sizeof(buf), "TimestampTz(%ld)", t);
 	return buf;
 }
 
 bool
 TimestampDifferenceExceeds(TimestampTz start_time,
-                                TimestampTz stop_time,
-                                int msec)
+								TimestampTz stop_time,
+								int msec)
 {
-    TimestampTz diff = stop_time - start_time;
+	TimestampTz diff = stop_time - start_time;
 	return (diff >= msec * INT64CONST(1000));
 }
 
