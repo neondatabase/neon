@@ -497,7 +497,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
-		lfc_ctl->misses += 1; /* race condition here, but precise value is not needed */
+		lfc_ctl->misses += 1;
 		pgBufferUsage.file_cache.misses += 1;
 		LWLockRelease(lfc_lock);
 		return false;
