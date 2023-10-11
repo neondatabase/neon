@@ -82,7 +82,7 @@ struct ProxyCliArgs {
     allow_self_signed_compute: bool,
     /// timeout for http connections
     #[clap(long, default_value_t = 15)]
-    connection_timeout_secs: u64,
+    sql_over_http_timeout: u64,
 }
 
 #[tokio::main]
@@ -225,7 +225,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
     let http_config = HttpConfig {
-        connection_timeout_secs: args.connection_timeout_secs,
+        sql_over_http_timeout: args.sql_over_http_timeout,
     };
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,

@@ -193,7 +193,7 @@ pub async fn handle(
     session_id: uuid::Uuid,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
-    let timeout = config.connection_timeout_secs;
+    let timeout = config.sql_over_http_timeout;
     let result = tokio::time::timeout(
         tokio::time::Duration::from_secs(timeout),
         handle_inner(request, sni_hostname, conn_pool, session_id),
