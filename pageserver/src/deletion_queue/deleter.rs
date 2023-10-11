@@ -12,7 +12,6 @@ use remote_storage::MAX_KEYS_PER_DELETE;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use tracing::warn;
 
 use crate::metrics;
 
@@ -88,7 +87,10 @@ impl Deleter {
                     self.accumulator.clear();
                 }
                 Err(e) => {
-                    warn!("DeleteObjects request failed: {e:#}, will retry");
+                    // The RemoteStorage interface doesn't discriminate between
+                    // real errors and 503/429 responses, so we log at INFO level
+                    // to avoid propagating spurious error-severity logs.
+                    info!("DeleteObjects request failed: {e:#}, will retry");
                     metrics::DELETION_QUEUE
                         .remote_errors
                         .with_label_values(&["execute"])
