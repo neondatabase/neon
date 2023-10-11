@@ -622,11 +622,11 @@ walprop_connect_start(Safekeeper *sk)
 	pg_conn = PQconnectStartParams(keywords, values, 1);
 
 	/*
-	 * Allocation of a PQconn can fail, and will return NULL. We want to fully
-	 * replicate the behavior of PQconnectStart here.
+	 * "If the result is null, then libpq has been unable to allocate a new
+	 * PGconn structure"
 	 */
 	if (!pg_conn)
-		return;
+		elog(FATAL, "failed to allocate new PGconn object");
 
 	/*
 	 * And in theory this allocation can fail as well, but it's incredibly
@@ -793,10 +793,14 @@ walprop_flush(Safekeeper *sk)
 static void
 walprop_finish(Safekeeper *sk)
 {
+	if (!sk->conn)
+		return;
+
 	if (sk->conn->recvbuf != NULL)
 		PQfreemem(sk->conn->recvbuf);
 	PQfinish(sk->conn->pg_conn);
 	pfree(sk->conn);
+	sk->conn = NULL;
 }
 
 /*
@@ -1416,6 +1420,11 @@ walprop_pg_free_event_set(WalProposer *wp)
 		FreeWaitEventSet(waitEvents);
 		waitEvents = NULL;
 	}
+
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		wp->safekeeper[i].eventPos = -1;
+	}
 }
 
 static void
@@ -1650,6 +1659,12 @@ walprop_pg_strong_random(WalProposer *wp, void *buf, size_t len)
 	return pg_strong_random(buf, len);
 }
 
+static void
+walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
+{
+	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
+}
+
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
 	.start_streaming = walprop_pg_start_streaming,
@@ -1679,4 +1694,5 @@ static const walproposer_api walprop_pg = {
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
+	.log_internal = walprop_pg_log_internal,
 };

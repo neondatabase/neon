@@ -317,6 +317,60 @@ extern "C" fn confirm_wal_streamed(wp: *mut WalProposer, lsn: XLogRecPtr) {
     }
 }
 
+extern "C" fn log_internal(
+    wp: *mut WalProposer,
+    level: ::std::os::raw::c_int,
+    line: *const ::std::os::raw::c_char,
+) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        let line = CStr::from_ptr(line);
+        let line = line.to_str().unwrap();
+        (*api).log_internal(&mut (*wp), Level::from(level as u32), line)
+    }
+}
+
+#[derive(Debug)]
+pub enum Level {
+    Debug5,
+    Debug4,
+    Debug3,
+    Debug2,
+    Debug1,
+    Log,
+    Info,
+    Notice,
+    Warning,
+    Error,
+    Fatal,
+    Panic,
+    WPEvent,
+}
+
+impl Level {
+    pub fn from(elevel: u32) -> Level {
+        use crate::bindings::*;
+
+        match elevel {
+            DEBUG5 => Level::Debug5,
+            DEBUG4 => Level::Debug4,
+            DEBUG3 => Level::Debug3,
+            DEBUG2 => Level::Debug2,
+            DEBUG1 => Level::Debug1,
+            LOG => Level::Log,
+            INFO => Level::Info,
+            NOTICE => Level::Notice,
+            WARNING => Level::Warning,
+            ERROR => Level::Error,
+            FATAL => Level::Fatal,
+            PANIC => Level::Panic,
+            WPEVENT => Level::WPEvent,
+            _ => panic!("unknown log level {}", elevel),
+        }
+    }
+}
+
 pub(crate) fn create_api() -> walproposer_api {
     walproposer_api {
         get_shmem_state: Some(get_shmem_state),
@@ -347,10 +401,17 @@ pub(crate) fn create_api() -> walproposer_api {
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         confirm_wal_streamed: Some(confirm_wal_streamed),
+        log_internal: Some(log_internal),
     }
 }
 
-fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
+impl std::fmt::Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+pub(crate) fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
     if pg.data.is_null() {
         return None;
     }

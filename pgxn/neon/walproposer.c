@@ -79,7 +79,7 @@ static int	CompareLsn(const void *a, const void *b);
 static char *FormatSafekeeperState(SafekeeperState state);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
-static char *FormatEvents(uint32 events);
+static char *FormatEvents(WalProposer *wp, uint32 events);
 
 WalProposer *
 WalProposerCreate(WalProposerConfig *config, walproposer_api api)
@@ -111,7 +111,6 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		wp->safekeeper[wp->n_safekeepers].host = host;
 		wp->safekeeper[wp->n_safekeepers].port = port;
 		wp->safekeeper[wp->n_safekeepers].state = SS_OFFLINE;
-		wp->safekeeper[wp->n_safekeepers].conn = NULL;
 		wp->safekeeper[wp->n_safekeepers].wp = wp;
 
 		{
@@ -161,6 +160,26 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->api.init_event_set(wp);
 
 	return wp;
+}
+
+void
+WalProposerFree(WalProposer *wp)
+{
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		Safekeeper *sk = &wp->safekeeper[i];
+
+		Assert(sk->outbuf.data != NULL);
+		pfree(sk->outbuf.data);
+		if (sk->voteResponse.termHistory.entries)
+			pfree(sk->voteResponse.termHistory.entries);
+		sk->voteResponse.termHistory.entries = NULL;
+	}
+	if (wp->propTermHistory.entries != NULL)
+		pfree(wp->propTermHistory.entries);
+	wp->propTermHistory.entries = NULL;
+	
+	pfree(wp);
 }
 
 /*
@@ -294,7 +313,7 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 {
 	WalProposer *wp = to_remove->wp;
 
-	/* Remove the existing event set */
+	/* Remove the existing event set, assign sk->eventPos = -1 */
 	wp->api.free_event_set(wp);
 	/* Re-initialize it without adding any safekeeper events */
 	wp->api.init_event_set(wp);
@@ -309,13 +328,11 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 		uint32		desired_events = WL_NO_EVENTS;
 		Safekeeper *sk = &wp->safekeeper[i];
 
-		sk->eventPos = -1;
-
 		if (sk == to_remove)
 			continue;
 
 		/* If this safekeeper isn't offline, add an event for it! */
-		if (sk->conn != NULL)
+		if (sk->state != SS_OFFLINE)
 		{
 			desired_events = SafekeeperStateDesiredEvents(sk->state);
 			/* will set sk->eventPos */
@@ -328,9 +345,7 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 static void
 ShutdownConnection(Safekeeper *sk)
 {
-	if (sk->conn)
-		sk->wp->api.conn_finish(sk);
-	sk->conn = NULL;
+	sk->wp->api.conn_finish(sk);
 	sk->state = SS_OFFLINE;
 	sk->flushWrite = false;
 	sk->streamingAt = InvalidXLogRecPtr;
@@ -364,13 +379,6 @@ ResetConnection(Safekeeper *sk)
 	wp->api.conn_connect_start(sk);
 
 	/*
-	 * "If the result is null, then libpq has been unable to allocate a new
-	 * PGconn structure"
-	 */
-	if (!sk->conn)
-		walprop_log(FATAL, "failed to allocate new PGconn object");
-
-	/*
 	 * PQconnectStart won't actually start connecting until we run
 	 * PQconnectPoll. Before we do that though, we need to check that it
 	 * didn't immediately fail.
@@ -394,7 +402,6 @@ ResetConnection(Safekeeper *sk)
 		 * object
 		 */
 		wp->api.conn_finish(sk);
-		sk->conn = NULL;
 		return;
 	}
 
@@ -465,6 +472,8 @@ ReconnectSafekeepers(WalProposer *wp)
 static void
 AdvancePollState(Safekeeper *sk, uint32 events)
 {
+	WalProposer *wp = sk->wp;
+
 	/*
 	 * Sanity check. We assume further down that the operations don't block
 	 * because the socket is ready.
@@ -1480,7 +1489,7 @@ RecvAppendResponses(Safekeeper *sk)
 
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
 void
-ParsePageserverFeedbackMessage(StringInfo reply_message, PageserverFeedback *rf)
+ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *rf)
 {
 	uint8		nkeys;
 	int			i;
@@ -1794,7 +1803,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 				msg->hs.xmin.value = pq_getmsgint64_le(&s);
 				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
 				if (buf_size > APPENDRESPONSE_FIXEDPART_SIZE)
-					ParsePageserverFeedbackMessage(&s, &msg->rf);
+					ParsePageserverFeedbackMessage(wp, &s, &msg->rf);
 				pq_getmsgend(&s);
 				return true;
 			}
@@ -1990,6 +1999,7 @@ FormatSafekeeperState(SafekeeperState state)
 static void
 AssertEventsOkForState(uint32 events, Safekeeper *sk)
 {
+	WalProposer *wp = sk->wp;
 	uint32		expected = SafekeeperStateDesiredEvents(sk->state);
 
 	/*
@@ -2013,7 +2023,7 @@ AssertEventsOkForState(uint32 events, Safekeeper *sk)
 		 * and then an assertion that's guaranteed to fail.
 		 */
 		walprop_log(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
-			 FormatEvents(events), sk->host, sk->port, FormatSafekeeperState(sk->state));
+			 FormatEvents(wp, events), sk->host, sk->port, FormatSafekeeperState(sk->state));
 		Assert(events_ok_for_state);
 	}
 }
@@ -2086,7 +2096,7 @@ SafekeeperStateDesiredEvents(SafekeeperState state)
  * The string should not be freed. It should also not be expected to remain the same between
  * function calls. */
 static char *
-FormatEvents(uint32 events)
+FormatEvents(WalProposer *wp, uint32 events)
 {
 	static char return_str[8];
 

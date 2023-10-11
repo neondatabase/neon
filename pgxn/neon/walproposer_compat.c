@@ -167,10 +167,26 @@ timestamptz_to_str(TimestampTz t)
 	return buf;
 }
 
-bool TimestampDifferenceExceeds(TimestampTz start_time,
+bool
+TimestampDifferenceExceeds(TimestampTz start_time,
                                 TimestampTz stop_time,
                                 int msec)
 {
     TimestampTz diff = stop_time - start_time;
 	return (diff >= msec * INT64CONST(1000));
+}
+
+void
+WalProposerLibLog(WalProposer *wp, int elevel, char *fmt, ...)
+{
+	char buf[1024];
+	va_list		args;
+
+	fmt = _(fmt);
+
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+
+	wp->api.log_internal(wp, elevel, buf);
 }

@@ -10,12 +10,6 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
-#ifdef WALPROPOSER_LIB
-#define walprop_log(...) while(0){}
-#else
-#define walprop_log elog
-#endif
-
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 
@@ -340,22 +334,9 @@ typedef struct Safekeeper
 	char		conninfo[MAXCONNINFO];
 
 	/*
-	 * postgres protocol connection to the WAL acceptor
-	 *
-	 * Equals NULL only when state = SS_OFFLINE. Nonblocking is set once we
-	 * reach SS_ACTIVE; not before.
-	 */
-	WalProposerConn *conn;
-
-	/*
 	 * Temporary buffer for the message being sent to the safekeeper.
 	 */
 	StringInfoData outbuf;
-
-	/*
-	 * WAL reader, allocated for each safekeeper.
-	 */
-	XLogReaderState *xlogreader;
 
 	/*
 	 * Streaming will start here; must be record boundary.
@@ -367,21 +348,43 @@ typedef struct Safekeeper
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
-	int			eventPos;		/* position in wait event set. Equal to -1 if*
-								 * no event */
 	SafekeeperState state;		/* safekeeper state machine state */
 	TimestampTz latestMsgReceivedAt;	/* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
 
-#ifdef WALPROPOSER_LIB
+
+	/* postgres-specific fields */
+	#ifndef WALPROPOSER_LIB
+	/*
+	 * postgres protocol connection to the WAL acceptor
+	 *
+	 * Equals NULL only when state = SS_OFFLINE. Nonblocking is set once we
+	 * reach SS_ACTIVE; not before.
+	 */
+	WalProposerConn *conn;
+
+	/*
+	 * WAL reader, allocated for each safekeeper.
+	 */
+	XLogReaderState *xlogreader;
+
+	/*
+	 * Position in wait event set. Equal to -1 if no event
+	 */
+	int			eventPos;
+	#endif
+
+
+	/* WalProposer library specifics */
+	#ifdef WALPROPOSER_LIB
 	/*
 	 * Buffer for incoming messages. Usually Rust vector is stored here.
 	 * Caller is responsible for freeing the buffer.
 	 */
 	StringInfoData inbuf;
-#endif
+	#endif
 } Safekeeper;
 
 /* Re-exported PostgresPollingStatusType */
@@ -558,6 +561,13 @@ typedef struct walproposer_api
 	 * and to free up disk space by deleting unnecessary WAL.
 	 */
 	void		(*confirm_wal_streamed) (WalProposer *wp, XLogRecPtr lsn);
+
+	/*
+	 * Write a log message to the internal log processor. This is used only
+	 * when walproposer is compiled as a library. Otherwise, all logging is
+	 * handled by elog().
+	 */
+	void		(*log_internal) (WalProposer *wp, int level, const char *line);
 } walproposer_api;
 
 /*
@@ -689,7 +699,16 @@ extern WalProposer *WalProposerCreate(WalProposerConfig *config, walproposer_api
 extern void WalProposerStart(WalProposer *wp);
 extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(WalProposer *wp);
-extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
-										   PageserverFeedback *rf);
+extern void WalProposerFree(WalProposer *wp);
+
+
+#define WPEVENT		1337	/* special log level for walproposer internal events */
+
+#ifdef WALPROPOSER_LIB
+void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt, ...);
+#define walprop_log(elevel, ...) WalProposerLibLog(wp, elevel, __VA_ARGS__)
+#else
+#define walprop_log(elevel, ...) elog(elevel, __VA_ARGS__)
+#endif
 
 #endif							/* __NEON_WALPROPOSER_H__ */

@@ -4,8 +4,11 @@ use postgres_ffi::WAL_SEGMENT_SIZE;
 use utils::id::TenantTimelineId;
 
 use crate::{
-    api_bindings::create_api,
-    bindings::{Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate},
+    api_bindings::{create_api, take_vec_u8, Level},
+    bindings::{
+        Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate, WalProposerFree,
+        WalProposerStart,
+    },
 };
 
 /// Rust high-level wrapper for C walproposer API.
@@ -131,6 +134,10 @@ pub trait ApiImpl {
     fn confirm_wal_streamed(&self, _wp: &mut WalProposer, _lsn: u64) {
         todo!()
     }
+
+    fn log_internal(&self, _wp: &mut WalProposer, _level: Level, _msg: &str) {
+        todo!()
+    }
 }
 
 pub enum WaitResult {
@@ -147,42 +154,75 @@ pub struct Config {
     pub sync_safekeepers: bool,
 }
 
-pub fn new(api: Box<dyn ApiImpl>, config: Config) -> *mut WalProposer {
-    let neon_tenant = CString::new(config.ttid.tenant_id.to_string())
-        .unwrap()
-        .into_raw();
-    let neon_timeline = CString::new(config.ttid.timeline_id.to_string())
-        .unwrap()
-        .into_raw();
-
-    let mut safekeepers_list = CString::new(config.safekeepers_list.join(","))
-        .unwrap()
-        .into_bytes_with_nul()
-        .into_boxed_slice();
-    let safekeepers_list = safekeepers_list.as_mut_ptr() as *mut i8;
-    let boxed_impl = Box::new(api);
-
-    let callback_data = Box::into_raw(boxed_impl) as *mut ::std::os::raw::c_void;
-
-    let c_config = WalProposerConfig {
-        neon_tenant,
-        neon_timeline,
-        safekeepers_list,
-        safekeeper_reconnect_timeout: config.safekeeper_reconnect_timeout,
-        safekeeper_connection_timeout: config.safekeeper_connection_timeout,
-        wal_segment_size: WAL_SEGMENT_SIZE as i32, // default 16MB
-        syncSafekeepers: config.sync_safekeepers,
-        systemId: 0,
-        pgTimeline: 1,
-        callback_data,
-    };
-    let c_config = Box::into_raw(Box::new(c_config));
-
-    let api = create_api();
-    unsafe { WalProposerCreate(c_config, api) }
+pub struct Wrapper {
+    wp: *mut WalProposer,
+    _safekeepers_list_vec: Vec<u8>,
 }
 
-// TODO: destruct
+impl Wrapper {
+    pub fn new(api: Box<dyn ApiImpl>, config: Config) -> Wrapper {
+        let neon_tenant = CString::new(config.ttid.tenant_id.to_string())
+            .unwrap()
+            .into_raw();
+        let neon_timeline = CString::new(config.ttid.timeline_id.to_string())
+            .unwrap()
+            .into_raw();
+
+        let mut safekeepers_list_vec = CString::new(config.safekeepers_list.join(","))
+            .unwrap()
+            .into_bytes_with_nul();
+        assert!(safekeepers_list_vec.len() == safekeepers_list_vec.capacity());
+        let safekeepers_list = safekeepers_list_vec.as_mut_ptr() as *mut i8;
+
+        let callback_data = Box::into_raw(Box::new(api)) as *mut ::std::os::raw::c_void;
+
+        let c_config = WalProposerConfig {
+            neon_tenant,
+            neon_timeline,
+            safekeepers_list,
+            safekeeper_reconnect_timeout: config.safekeeper_reconnect_timeout,
+            safekeeper_connection_timeout: config.safekeeper_connection_timeout,
+            wal_segment_size: WAL_SEGMENT_SIZE as i32, // default 16MB
+            syncSafekeepers: config.sync_safekeepers,
+            systemId: 0,
+            pgTimeline: 1,
+            callback_data,
+        };
+        let c_config = Box::into_raw(Box::new(c_config));
+
+        let api = create_api();
+        let wp = unsafe { WalProposerCreate(c_config, api) };
+        Wrapper {
+            wp,
+            _safekeepers_list_vec: safekeepers_list_vec,
+        }
+    }
+
+    pub fn start(&self) {
+        unsafe { WalProposerStart(self.wp) }
+    }
+}
+
+impl Drop for Wrapper {
+    fn drop(&mut self) {
+        unsafe {
+            let config = (*self.wp).config;
+            drop(Box::from_raw(
+                (*config).callback_data as *mut Box<dyn ApiImpl>,
+            ));
+            drop(CString::from_raw((*config).neon_tenant));
+            drop(CString::from_raw((*config).neon_timeline));
+            drop(Box::from_raw(config));
+
+            for i in 0..(*self.wp).n_safekeepers {
+                let sk = &mut (*self.wp).safekeeper[i as usize];
+                take_vec_u8(&mut sk.inbuf);
+            }
+
+            WalProposerFree(self.wp);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +233,7 @@ mod tests {
 
     use utils::id::TenantTimelineId;
 
-    use crate::bindings::WalProposerStart;
+    use crate::{api_bindings::Level, walproposer::Wrapper};
 
     use super::ApiImpl;
 
@@ -349,8 +389,15 @@ mod tests {
             self.sync_channel.send(lsn).unwrap();
             panic!("sync safekeepers finished at lsn={}", lsn);
         }
+
+        fn log_internal(&self, _wp: &mut crate::bindings::WalProposer, level: Level, msg: &str) {
+            println!("walprop_log[{}] {}", level, msg);
+        }
     }
 
+    // Run this test with valgrind to detect leaks:
+    //
+    // `valgrind --leak-check=full target/debug/deps/walproposer-90e5648456956740`
     #[test]
     fn test_simple_sync_safekeepers() -> anyhow::Result<()> {
         let ttid = TenantTimelineId::new(
@@ -403,11 +450,12 @@ mod tests {
             sync_safekeepers: true,
         };
 
-        let wp = crate::walproposer::new(my_impl, config);
+        let wp = Wrapper::new(my_impl, config);
 
-        std::panic::catch_unwind(|| unsafe { WalProposerStart(wp) }).unwrap_err();
+        std::panic::catch_unwind(|| wp.start()).unwrap_err();
 
         assert_eq!(receiver.recv()?, 1337);
         Ok(())
+        // destructor will free up resources here
     }
 }
