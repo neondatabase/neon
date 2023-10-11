@@ -55,12 +55,17 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     # create tenant using management token
     pageserver_http_client.tenant_create(TenantId.generate())
 
-    # fail to create tenant using tenant token
+    # fail to create tenant with another tenant's token
+    new_tenant_id = TenantId.generate()
     with pytest.raises(
-        PageserverApiException,
-        match="Forbidden: Attempt to access management api with tenant scope. Permission denied",
+        PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
     ):
-        tenant_http_client.tenant_create(TenantId.generate())
+        tenant_http_client.tenant_create(new_tenant_id)
+
+    # succeed with the tenant's token
+    new_tenant_token = env.auth_keys.generate_tenant_token(new_tenant_id)
+    new_tenant_http_client = env.pageserver.http_client(new_tenant_token)
+    new_tenant_http_client.tenant_create(new_tenant_id)
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):

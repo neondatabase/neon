@@ -929,7 +929,7 @@ async fn tenant_create_handler(
 ) -> Result<Response<Body>, ApiError> {
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let target_tenant_id = request_data.new_tenant_id;
-    check_permission(&request, None)?;
+    check_permission(&request, Some(target_tenant_id))?;
 
     let _timer = STORAGE_TIME_GLOBAL
         .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
