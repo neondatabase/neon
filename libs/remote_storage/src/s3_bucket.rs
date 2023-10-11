@@ -4,7 +4,7 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use anyhow::Context;
 use aws_config::{
@@ -556,6 +556,20 @@ impl RemoteStorage for S3Bucket {
                         .deleted_objects_total
                         .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
+                        // Log a bounded number of the errors within the response:
+                        // these requests can carry 1000 keys so logging each one
+                        // would be too verbose, especially as errors may lead us
+                        // to retry repeatedly.
+                        const LOG_UP_TO_N_ERRORS: usize = 10;
+                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                            tracing::warn!(
+                                "DeleteObjects key {} failed: {}: {}",
+                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                            );
+                        }
+
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()
