@@ -7,6 +7,7 @@ use crate::{
     compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
+    http::StatusCode,
     metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
@@ -38,19 +39,55 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_accepted_connections_total",
-        "Number of TCP client connections accepted.",
+        "proxy_opened_db_connections_total",
+        "Number of opened connections to a database.",
         &["protocol"],
     )
     .unwrap()
 });
 
-static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_closed_db_connections_total",
+        "Number of closed connections to a database.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_opened_client_connections_total",
+        "Number of opened connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_closed_client_connections_total",
+        "Number of closed connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_total",
+        "Number of client connections accepted.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_closed_connections_total",
-        "Number of TCP client connections closed.",
+        "Number of client connections closed.",
         &["protocol"],
     )
     .unwrap()
@@ -71,6 +108,15 @@ static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
         "proxy_connection_failures_total",
         "Number of connection failures (per kind).",
         &["kind"],
+    )
+    .unwrap()
+});
+
+static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_breakdown",
+        "Number of wake-up failures (per kind).",
+        &["retry", "kind"],
     )
     .unwrap()
 });
@@ -208,12 +254,16 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         "handling interactive connection from client"
     );
 
-    // The `closed` counter will increase when this future is destroyed.
+    let proto = mode.protocol_label();
+    NUM_CLIENT_CONNECTION_OPENED_COUNTER
+        .with_label_values(&[proto])
+        .inc();
     NUM_CONNECTIONS_ACCEPTED_COUNTER
-        .with_label_values(&[mode.protocol_label()])
+        .with_label_values(&[proto])
         .inc();
     scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[mode.protocol_label()]).inc();
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER.with_label_values(&[proto]).inc();
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
     }
 
     let tls = config.tls_config.as_ref();
@@ -248,7 +298,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode.allow_cleartext()))
+        .with_session(|session| client.connect_to_db(session, mode))
         .await
 }
 
@@ -397,6 +447,46 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
+const fn bool_to_str(x: bool) -> &'static str {
+    if x {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn report_error(e: &WakeComputeError, retry: bool) {
+    use crate::console::errors::ApiError;
+    let retry = bool_to_str(retry);
+    let kind = match e {
+        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
+        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ref text,
+        }) if text.contains("written data quota exceeded")
+            || text.contains("the limit for current plan reached") =>
+        {
+            "quota_exceeded"
+        }
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::LOCKED,
+            ..
+        }) => "api_console_locked",
+        WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::BAD_REQUEST,
+            ..
+        }) => "api_console_bad_request",
+        WakeComputeError::ApiError(ApiError::Console { status, .. })
+            if status.is_server_error() =>
+        {
+            "api_console_other_server_error"
+        }
+        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+    };
+    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
+}
+
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
@@ -440,10 +530,12 @@ where
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                report_error(&e, false);
                 return Err(e.into());
             }
             // failed to wake up but we can continue to retry
             Ok(ControlFlow::Continue(e)) => {
+                report_error(&e, true);
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
             }
             // successfully woke up a compute node and can break the wakeup loop
@@ -682,7 +774,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
-        allow_cleartext: bool,
+        mode: ClientMode,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -698,7 +790,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         };
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, allow_cleartext)
+            .authenticate(&extra, &mut stream, mode.allow_cleartext())
             .await
         {
             Ok(auth_result) => auth_result,
@@ -723,6 +815,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         let mut node = connect_to_compute(&TcpMechanism { params }, node_info, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
+
+        let proto = mode.protocol_label();
+        NUM_DB_CONNECTIONS_OPENED_COUNTER
+            .with_label_values(&[proto])
+            .inc();
+        scopeguard::defer! {
+            NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
+        }
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the

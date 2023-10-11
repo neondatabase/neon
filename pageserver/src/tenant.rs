@@ -45,6 +45,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use self::config::AttachedLocationConfig;
+use self::config::AttachmentMode;
 use self::config::LocationConf;
 use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
@@ -2075,6 +2076,15 @@ impl Tenant {
                 }
             }
         }
+    }
+
+    pub(crate) fn get_attach_mode(&self) -> AttachmentMode {
+        self.tenant_conf
+            .read()
+            .unwrap()
+            .location
+            .attach_mode
+            .clone()
     }
 }
 

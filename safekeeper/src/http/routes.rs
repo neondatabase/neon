@@ -374,8 +374,12 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> =
-                Lazy::new(|| ["/v1/status"].iter().map(|v| v.parse().unwrap()).collect());
+            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
+                ["/v1/status", "/metrics"]
+                    .iter()
+                    .map(|v| v.parse().unwrap())
+                    .collect()
+            });
             if ALLOWLIST_ROUTES.contains(request.uri()) {
                 None
             } else {
