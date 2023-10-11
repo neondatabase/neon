@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, Context};
 use cgroups_rs::{
     freezer::FreezerController,
     hierarchies::{self, is_cgroup2_unified_mode, UNIFIED_MOUNTPOINT},
@@ -14,13 +14,13 @@ use cgroups_rs::{
     Subsystem::{Freezer, Mem},
 };
 use inotify::{EventStream, Inotify, WatchMask};
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use pin_project_lite::pin_project;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 use tokio_stream::{Stream, StreamExt};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::protocol::Resources;
-use crate::MiB;
+use crate::{bytes_to_mebibytes, MiB};
 
 /// Monotonically increasing counter of the number of memory.high events
 /// the cgroup has experienced.
@@ -88,7 +88,7 @@ pub struct Config {
     //
     // TODO: there's some minor issues with this approach -- in particular, that we might have
     // memory in use by the kernel's page cache that we're actually ok with getting rid of.
-    pub(crate) memory_high_buffer_bytes: u64,
+    memory_high_buffer_bytes: u64,
 
     // The maximum duration, in milliseconds, that we're allowed to pause
     // the cgroup for while waiting for the autoscaler-agent to upscale us
@@ -145,7 +145,7 @@ impl Default for Config {
 /// a unique sequence number. Sequence numbers are monotonically increasing,
 /// allowing us to answer questions like "did this upscale happen after this
 /// memory.high event?" by comparing the sequence numbers of the two events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct Sequenced<T> {
     seqnum: u64,
     data: T,
@@ -168,23 +168,12 @@ impl<T> Sequenced<T> {
 /// cgroup happy.
 #[derive(Debug)]
 pub struct CgroupWatcher {
-    pub config: Config,
-
-    /// The sequence number of the last upscale.
-    ///
-    /// If we receive a memory.high event that has a _lower_ sequence number than
-    /// `last_upscale_seqnum`, then we know it occured before the upscale, and we
-    /// can safely ignore it.
-    ///
-    /// Note: Like the `events` field, this doesn't _need_ interior mutability but we
-    /// use it anyways so that methods take `&self`, not `&mut self`.
-    last_upscale_seqnum: AtomicU64,
-
-    /// A channel on which we send messages to request upscale from the dispatcher.
-    upscale_requester: mpsc::Sender<()>,
+    config: Config,
 
     /// The actual cgroup we are watching and managing.
     cgroup: cgroups_rs::Cgroup,
+
+    command_sender: mpsc::Sender<(CgroupCommand, oneshot::Sender<CgroupCommandResult>)>,
 }
 
 /// Read memory.events for the desired event type.
@@ -235,9 +224,11 @@ impl CgroupWatcher {
     #[tracing::instrument(skip_all, fields(%name))]
     pub fn new(
         name: String,
-        // A channel on which to send upscale requests
-        upscale_requester: mpsc::Sender<()>,
-    ) -> anyhow::Result<(Self, impl Stream<Item = Sequenced<u64>>)> {
+    ) -> anyhow::Result<(
+        Self,
+        CgroupWatchController,
+        impl Stream<Item = Sequenced<u64>>,
+    )> {
         // TODO: clarify exactly why we need v2
         // Make sure cgroups v2 (aka unified) are supported
         if !is_cgroup2_unified_mode() {
@@ -284,275 +275,481 @@ impl CgroupWatcher {
         // running in the cgroup before that caused it to be non-zero.
         MEMORY_EVENT_COUNT.fetch_max(initial_count, Ordering::AcqRel);
 
+        let (command_tx, command_rx) = mpsc::channel(1);
+
         Ok((
             Self {
-                cgroup,
-                upscale_requester,
-                last_upscale_seqnum: AtomicU64::new(0),
                 config: Default::default(),
+                cgroup,
+                command_sender: command_tx,
+            },
+            CgroupWatchController {
+                commands: command_rx,
             },
             memory_events,
         ))
     }
 
+    async fn do_command(&self, cmd: CgroupCommand) -> anyhow::Result<CgroupCommandResult> {
+        let (tx_result, rx_result) = oneshot::channel();
+
+        self.command_sender
+            .send((cmd, tx_result))
+            .await
+            .map_err(|_| anyhow!("cgroup command channel receiver dropped"))
+            .context("failed to send internal cgroup command")?;
+
+        rx_result
+            .await
+            .context("failed to receive internal cgroup command response")
+    }
+
+    pub async fn unset_memory_high(&self) -> anyhow::Result<()> {
+        match self.do_command(CgroupCommand::UnsetMemoryHigh).await? {
+            CgroupCommandResult::Failure { .. } => {
+                unreachable!("UnsetMemoryHigh command should never return graceful failure")
+            }
+            CgroupCommandResult::Success { message } => {
+                info!(status = message, "cgroup unset_memory_high successful");
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn set_initial_memory_high(&self, mem_size: MemorySize) -> anyhow::Result<()> {
+        match self
+            .do_command(CgroupCommand::SetInitialMemoryHigh(mem_size))
+            .await?
+        {
+            CgroupCommandResult::Failure { .. } => {
+                unreachable!("SetInitialMemoryHigh command should never return graceful failure")
+            }
+            CgroupCommandResult::Success { message } => {
+                info!(
+                    status = message,
+                    "cgroup set_initial_memory_high successful"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn downscale(
+        &self,
+        target_mem_size: MemorySize,
+    ) -> anyhow::Result<Result<String, String>> {
+        self.do_command(CgroupCommand::Downscale(Sequenced::new(target_mem_size)))
+            .await
+            .map(|res| match res {
+                CgroupCommandResult::Failure { message } => Err(message),
+                CgroupCommandResult::Success { message } => Ok(message),
+            })
+    }
+
+    pub async fn upscale(&self, mem_size: MemorySize) -> anyhow::Result<()> {
+        match self
+            .do_command(CgroupCommand::Upscale(Sequenced::new(mem_size)))
+            .await?
+        {
+            CgroupCommandResult::Failure { .. } => {
+                unreachable!("Upscale command should never return graceful failure")
+            }
+            CgroupCommandResult::Success { message } => {
+                info!(status = message, "cgroup upscale successful");
+                Ok(())
+            }
+        }
+    }
+}
+
+pub struct CgroupWatchController {
+    commands: mpsc::Receiver<(CgroupCommand, oneshot::Sender<CgroupCommandResult>)>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MemorySize {
+    pub bytes: u64,
+}
+
+#[derive(Debug, Copy, Clone)]
+enum CgroupCommand {
+    UnsetMemoryHigh,
+    SetInitialMemoryHigh(MemorySize),
+    Downscale(Sequenced<MemorySize>),
+    Upscale(Sequenced<MemorySize>),
+}
+
+enum CgroupCommandResult {
+    Success { message: String },
+    Failure { message: String },
+}
+
+pin_project! {
+    /// Object storing the state inside of [`CgroupWatcher::watch`]
+    #[project = CgroupWatcherStateProjected]
+    struct CgroupWatcherState {
+        // If not `None`, the time at which we last increased `memory.high` in order to reduce the
+        // risk of throttling while waiting for upscaling.
+        //
+        // We're not allowed to increase `memory.high` more often than
+        // `Config.memory_high_increase_every`.
+        last_memory_high_increase_at: Option<Instant>,
+
+        // If not `None`, the time at which we last froze the cgroup. We're not allowed to freeze
+        // the cgroup more often than `Config.do_not_freeze_more_often_than`.
+        last_frozen_at: Option<Instant>,
+
+        // Timer representing when we must unfreeze the cgroup, if we believe it's currently frozen
+        //
+        // This gets set on memory.high events when `wait_to_freeze` is elapsed, and is never more
+        // than `Config.max_upscale_wait`.
+        #[pin]
+        must_unfreeze_at: Option<tokio::time::Sleep>,
+
+        // True if we've requested upscaling that hasn't yet happened
+        waiting_on_upscale: bool,
+
+        last_upscale_seqnum: Option<u64>,
+    }
+}
+
+// `CgroupWatcher::watch` and supporting methods:
+impl CgroupWatcher {
     /// The entrypoint for the `CgroupWatcher`.
     #[tracing::instrument(skip_all)]
     pub async fn watch<E>(
         &self,
-        // These are ~dependency injected~ (fancy, I know) because this function
-        // should never return.
-        // -> therefore: when we tokio::spawn it, we don't await the JoinHandle.
-        // -> therefore: if we want to stick it in an Arc so many threads can access
-        //    it, methods can never take mutable access.
-        //     - note: we use the Arc strategy so that a) we can call this function
-        //             right here and b) the runner can call the set/get_memory methods
-        // -> since calling recv() on a tokio::sync::mpsc::Receiver takes &mut self,
-        //    we just pass them in here instead of holding them in fields, as that
-        //    would require this method to take &mut self.
-        mut upscales: mpsc::Receiver<Sequenced<Resources>>,
+        mut controller: CgroupWatchController,
+        upscale_requester: mpsc::Sender<()>,
         events: E,
     ) -> anyhow::Result<()>
     where
         E: Stream<Item = Sequenced<u64>>,
     {
-        let mut wait_to_freeze = pin!(tokio::time::sleep(Duration::ZERO));
-        let mut last_memory_high_increase_at: Option<Instant> = None;
         let mut events = pin!(events);
 
-        // Are we waiting to be upscaled? Could be true if we request upscale due
-        // to a memory.high event and it does not arrive in time.
-        let mut waiting_on_upscale = false;
+        let state = pin!(CgroupWatcherState {
+            last_memory_high_increase_at: None,
+            last_frozen_at: None,
+            must_unfreeze_at: None,
+            waiting_on_upscale: false,
+            last_upscale_seqnum: None,
+        });
+        let mut state = state.project();
 
         loop {
             tokio::select! {
-                upscale = upscales.recv() => {
-                    let Sequenced { seqnum, data } = upscale
-                        .context("failed to listen on upscale notification channel")?;
-                    waiting_on_upscale = false;
-                    last_memory_high_increase_at = None;
-                    self.last_upscale_seqnum.store(seqnum, Ordering::Release);
-                    info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
-                }
+                // We want the select! to be biased so that we always unfreeze if time's up, rather
+                // than e.g. spinning on incoming commands or memory.high events.
+                biased;
+
+                // convert &mut Pin<&mut Option<Sleep>> (needed so we don't move out of must_unfreeze_at)
+                //   → Pin<&mut Option<Sleep>>
+                //   → Option<Pin<&mut Sleep>> (so we can unwrap)
+                //   → Pin<&mut Sleep>         (so we get a Future out of it)
+                _ = state.must_unfreeze_at.as_mut().as_pin_mut().unwrap(), if state.must_unfreeze_at.is_some() => {
+                    info!("cgroup freeze limit expired without getting upscaled, thawing cgroup");
+                    self.thaw()?;
+                    state.must_unfreeze_at.set(None); // No longer need to unfreeze
+                },
+
+                // If the `Runner` has issued a command, then we should process that.
+                command_opt = controller.commands.recv() => {
+                    let (command, result_sender) = command_opt.ok_or_else(|| anyhow!("commands event stream closed"))?;
+                    if result_sender.is_closed() {
+                        warn!(?command, "skipping command because result sender is closed");
+                        continue;
+                    }
+
+                    let (ty, command_result) = match command {
+                        CgroupCommand::UnsetMemoryHigh => {
+                            ("'unset memory.high'", self.handle_unset_memory_high(&mut state)?)
+                        },
+                        CgroupCommand::SetInitialMemoryHigh(mem_size) => {
+                            ("'set initial memory.high'", self.handle_set_initial_memory_high(&mut state, mem_size)?)
+                        },
+                        CgroupCommand::Upscale(Sequenced { seqnum, data: resources }) => {
+                            ("upscale", self.handle_upscale_command(&mut state, seqnum, resources)?)
+                        },
+                        CgroupCommand::Downscale(Sequenced { seqnum, data: resources }) => {
+                            ("downscale", self.handle_downscale_command(&mut state, seqnum, resources)?)
+                        },
+                    };
+
+                    if let Err(_) = result_sender.send(command_result) {
+                        error!("Failed to send {ty} command result for cgroup");
+                    }
+                },
+
+                // Got a memory.high event, need to decide what to do
                 event = events.next() => {
-                    let Some(Sequenced { seqnum, .. }) = event else {
-                        bail!("failed to listen for memory.high events")
-                    };
-                    // The memory.high came before our last upscale, so we consider
-                    // it resolved
-                    if self.last_upscale_seqnum.fetch_max(seqnum, Ordering::AcqRel) > seqnum {
-                        info!(
-                            "received memory.high event, but it came before our last upscale -> ignoring it"
-                        );
-                        continue;
-                    }
-
-                    // The memory.high came after our latest upscale. We don't
-                    // want to do anything yet, so peek the next event in hopes
-                    // that it's an upscale.
-                    if let Some(upscale_num) = self
-                        .upscaled(&mut upscales)
-                        .context("failed to check if we were upscaled")?
-                    {
-                        if upscale_num > seqnum {
-                            info!(
-                                "received memory.high event, but it came before our last upscale -> ignoring it"
-                            );
-                            continue;
-                        }
-                    }
-
-                    // If it's been long enough since we last froze, freeze the
-                    // cgroup and request upscale
-                    if wait_to_freeze.is_elapsed() {
-                        info!("received memory.high event -> requesting upscale");
-                        waiting_on_upscale = self
-                            .handle_memory_high_event(&mut upscales)
-                            .await
-                            .context("failed to handle upscale")?;
-                        wait_to_freeze
-                            .as_mut()
-                            .reset(Instant::now() + self.config.do_not_freeze_more_often_than);
-                        continue;
-                    }
-
-                    // Ok, we can't freeze, just request upscale
-                    if !waiting_on_upscale {
-                        info!("received memory.high event, but too soon to refreeze -> requesting upscale");
-
-                        // Make check to make sure we haven't been upscaled in the
-                        // meantine (can happen if the agent independently decides
-                        // to upscale us again)
-                        if self
-                            .upscaled(&mut upscales)
-                            .context("failed to check if we were upscaled")?
-                            .is_some()
-                        {
-                            info!("no need to request upscaling because we got upscaled");
-                            continue;
-                        }
-                        self.upscale_requester
-                            .send(())
-                            .await
-                            .context("failed to request upscale")?;
-                        waiting_on_upscale = true;
-                        continue;
-                    }
-
-                    // Shoot, we can't freeze or and we're still waiting on upscale,
-                    // increase memory.high to reduce throttling
-                    let can_increase_memory_high = match last_memory_high_increase_at {
-                        None => true,
-                        Some(t) => t.elapsed() > self.config.memory_high_increase_every,
-                    };
-                    if can_increase_memory_high {
-                        info!(
-                            "received memory.high event, \
-                            but too soon to refreeze and already requested upscale \
-                            -> increasing memory.high"
-                        );
-
-                        // Make check to make sure we haven't been upscaled in the
-                        // meantine (can happen if the agent independently decides
-                        // to upscale us again)
-                        if self
-                            .upscaled(&mut upscales)
-                            .context("failed to check if we were upscaled")?
-                            .is_some()
-                        {
-                            info!("no need to increase memory.high because got upscaled");
-                            continue;
-                        }
-
-                        // Request upscale anyways (the agent will handle deduplicating
-                        // requests)
-                        self.upscale_requester
-                            .send(())
-                            .await
-                            .context("failed to request upscale")?;
-
-                        let memory_high =
-                            self.get_memory_high_bytes().context("failed to get memory.high")?;
-                        let new_high = memory_high + self.config.memory_high_increase_by_bytes;
-                        info!(
-                            current_high_bytes = memory_high,
-                            new_high_bytes = new_high,
-                            "updating memory.high"
-                        );
-                        self.set_memory_high_bytes(new_high)
-                            .context("failed to set memory.high")?;
-                        last_memory_high_increase_at = Some(Instant::now());
-                        continue;
-                    }
-
-                    info!("received memory.high event, but can't do anything");
-                }
+                    let event = event.ok_or_else(|| anyhow!("memory.high event stream closed"))?;
+                    self.handle_memory_high_event(&mut state, event, &upscale_requester).await?;
+                },
             };
         }
     }
 
-    /// Handle a `memory.high`, returning whether we are still waiting on upscale
-    /// by the time the function returns.
-    ///
-    /// The general plan for handling a `memory.high` event is as follows:
-    /// 1. Freeze the cgroup
-    /// 2. Start a timer for `self.config.max_upscale_wait`
-    /// 3. Request upscale
-    /// 4. After the timer elapses or we receive upscale, thaw the cgroup.
-    /// 5. Return whether or not we are still waiting for upscale. If we are,
-    ///    we'll increase the cgroups memory.high to avoid getting oom killed
-    #[tracing::instrument(skip_all)]
+    fn handle_unset_memory_high(
+        &self,
+        _state: &mut CgroupWatcherStateProjected,
+    ) -> anyhow::Result<CgroupCommandResult> {
+        // We don't *really* need to fetch memory.high here, but it's nice to do in order to
+        // improve the quality of the logs, and it should be minimally expensive.
+        let message = match self
+            .get_memory_high()
+            .context("failed to get memory.high")?
+        {
+            MaxValue::Max => {
+                let msg = "no need to update memory.high (currently set to 'max')";
+                info!("{msg}");
+                msg.to_owned()
+            }
+            MaxValue::Value(current_memory_high_bytes) => {
+                info!(current_memory_high_bytes, "updating memory.high to 'max'");
+                self.set_memory_high(MaxValue::Max)
+                    .context("failed to set memory.high")?;
+                "memory.high set to 'max'".to_owned()
+            }
+        };
+        Ok(CgroupCommandResult::Success { message })
+    }
+
+    fn handle_set_initial_memory_high(
+        &self,
+        _state: &mut CgroupWatcherStateProjected,
+        mem_size: MemorySize,
+    ) -> anyhow::Result<CgroupCommandResult> {
+        let new_memory_high_bytes = self.config.calculate_memory_high_value(mem_size.bytes);
+
+        match self
+            .get_memory_high()
+            .context("failed to get memory.high")?
+        {
+            MaxValue::Max => info!(
+                new_memory_high_bytes,
+                "updating memory.high (currently set to 'max')"
+            ),
+            MaxValue::Value(current_memory_high_bytes) => info!(
+                current_memory_high_bytes,
+                new_memory_high_bytes, "updating memory.high"
+            ),
+        }
+
+        self.set_memory_high(MaxValue::Value(new_memory_high_bytes as i64))
+            .context("failed to set memory.high")?;
+        Ok(CgroupCommandResult::Success {
+            message: format!(
+                "set cgroup memory.high to {} MiB",
+                bytes_to_mebibytes(new_memory_high_bytes),
+            ),
+        })
+    }
+
+    fn handle_upscale_command(
+        &self,
+        state: &mut CgroupWatcherStateProjected<'_>,
+        seqnum: u64,
+        mem_size: MemorySize,
+    ) -> anyhow::Result<CgroupCommandResult> {
+        info!(seqnum, ?mem_size, "received upscale command");
+
+        // On upscaling, we want to set memory.high to the appropriate value and reset any other
+        // temporary conditions that may have accumulated while waiting for upscale.
+
+        *state.waiting_on_upscale = false;
+        *state.last_upscale_seqnum = Some(seqnum);
+
+        if self
+            .is_frozen()
+            .context("failed to check if cgroup is frozen")?
+        {
+            info!("thawing cgroup");
+            self.thaw()?;
+            state.must_unfreeze_at.set(None);
+        }
+
+        let new_memory_high_bytes = self.config.calculate_memory_high_value(mem_size.bytes);
+
+        match self
+            .get_memory_high()
+            .context("failed to get memory.high")?
+        {
+            MaxValue::Max => info!(
+                new_memory_high_bytes,
+                "updating memory.high (currently set to 'max')"
+            ),
+            MaxValue::Value(current_memory_high_bytes) => info!(
+                current_memory_high_bytes,
+                new_memory_high_bytes, "updating memory.high"
+            ),
+        }
+
+        self.set_memory_high(MaxValue::Value(new_memory_high_bytes as i64))
+            .context("failed to set memory.high")?;
+
+        Ok(CgroupCommandResult::Success {
+            message: format!(
+                "set cgroup memory.high to {} MiB",
+                bytes_to_mebibytes(new_memory_high_bytes)
+            ),
+        })
+    }
+
+    fn handle_downscale_command(
+        &self,
+        _state: &mut CgroupWatcherStateProjected<'_>,
+        seqnum: u64,
+        mem_size: MemorySize,
+    ) -> anyhow::Result<CgroupCommandResult> {
+        info!(seqnum, ?mem_size, "received downscale command");
+
+        // On downscaling, we want to set memory.high, but only if the current
+        // memory usage is sufficiently below the target value.
+
+        let new_memory_high_bytes = self.config.calculate_memory_high_value(mem_size.bytes);
+        let current_memory_usage = self
+            .current_memory_usage()
+            .context("failed to fetch cgroup memory usage")?;
+
+        if new_memory_high_bytes < current_memory_usage + self.config.memory_high_buffer_bytes {
+            info!(
+                new_memory_high_bytes,
+                current_memory_usage,
+                buffer_bytes = self.config.memory_high_buffer_bytes,
+                "cgroup rejecting downscale because calculated memory.high is not sufficiently less than current usage",
+            );
+            return Ok(CgroupCommandResult::Failure {
+                message: format!(
+                    "calculated memory.high too low: {} MiB (new high) < {} (current usage) + {} (buffer)",
+                    bytes_to_mebibytes(new_memory_high_bytes),
+                    bytes_to_mebibytes(current_memory_usage),
+                    bytes_to_mebibytes(self.config.memory_high_buffer_bytes),
+                ),
+            });
+        }
+
+        // Ok, memory usage is low enough, let's decrease memory.high:
+        match self
+            .get_memory_high()
+            .context("failed to get memory.high")?
+        {
+            MaxValue::Max => info!(
+                new_memory_high_bytes,
+                "updating memory.high (currently set to 'max')"
+            ),
+            MaxValue::Value(current_memory_high_bytes) => info!(
+                current_memory_high_bytes,
+                new_memory_high_bytes, "updating memory.high"
+            ),
+        }
+
+        self.set_memory_high(MaxValue::Value(new_memory_high_bytes as i64))
+            .context("failed to set memory.high")?;
+        Ok(CgroupCommandResult::Success {
+            message: format!(
+                "set cgroup memory.high to {} MiB",
+                bytes_to_mebibytes(new_memory_high_bytes),
+            ),
+        })
+    }
+
     async fn handle_memory_high_event(
         &self,
-        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
-    ) -> anyhow::Result<bool> {
-        // Immediately freeze the cgroup before doing anything else.
-        info!("received memory.high event -> freezing cgroup");
-        self.freeze().context("failed to freeze cgroup")?;
-
-        // We'll use this for logging durations
-        let start_time = Instant::now();
-
-        // Await the upscale until we have to unfreeze
-        let timed =
-            tokio::time::timeout(self.config.max_upscale_wait, self.await_upscale(upscales));
-
-        // Request the upscale
-        info!(
-            wait = ?self.config.max_upscale_wait,
-            "sending request for immediate upscaling",
-        );
-        self.upscale_requester
-            .send(())
-            .await
-            .context("failed to request upscale")?;
-
-        let waiting_on_upscale = match timed.await {
-            Ok(Ok(())) => {
-                info!(elapsed = ?start_time.elapsed(), "received upscale in time");
-                false
-            }
-            // **important**: unfreeze the cgroup before ?-reporting the error
-            Ok(Err(e)) => {
-                info!("error waiting for upscale -> thawing cgroup");
-                self.thaw()
-                    .context("failed to thaw cgroup after errored waiting for upscale")?;
-                Err(e.context("failed to await upscale"))?
-            }
-            Err(_) => {
-                info!(elapsed = ?self.config.max_upscale_wait, "timed out waiting for upscale");
-                true
-            }
-        };
-
-        info!("thawing cgroup");
-        self.thaw().context("failed to thaw cgroup")?;
-
-        Ok(waiting_on_upscale)
-    }
-
-    /// Checks whether we were just upscaled, returning the upscale's sequence
-    /// number if so.
-    #[tracing::instrument(skip_all)]
-    fn upscaled(
-        &self,
-        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
-    ) -> anyhow::Result<Option<u64>> {
-        let Sequenced { seqnum, data } = match upscales.try_recv() {
-            Ok(upscale) => upscale,
-            Err(TryRecvError::Empty) => return Ok(None),
-            Err(TryRecvError::Disconnected) => {
-                bail!("upscale notification channel was disconnected")
-            }
-        };
-
-        // Make sure to update the last upscale sequence number
-        self.last_upscale_seqnum.store(seqnum, Ordering::Release);
-        info!(cpu = data.cpu, mem_bytes = data.mem, "received upscale");
-        Ok(Some(seqnum))
-    }
-
-    /// Await an upscale event, discarding any `memory.high` events received in
-    /// the process.
-    ///
-    /// This is used in `handle_memory_high_event`, where we need to listen
-    /// for upscales in particular so we know if we can thaw the cgroup early.
-    #[tracing::instrument(skip_all)]
-    async fn await_upscale(
-        &self,
-        upscales: &mut mpsc::Receiver<Sequenced<Resources>>,
+        state: &mut CgroupWatcherStateProjected<'_>,
+        event: Sequenced<u64>,
+        upscale_requester: &mpsc::Sender<()>,
     ) -> anyhow::Result<()> {
-        let Sequenced { seqnum, .. } = upscales
-            .recv()
-            .await
-            .context("error listening for upscales")?;
+        // The memory.high came before our last upscale, so we consider
+        // it resolved
+        if *state.last_upscale_seqnum > Some(event.seqnum) {
+            info!(
+                seqnum = event.seqnum,
+                last_upscale_seqnum = state
+                    .last_upscale_seqnum
+                    .expect("None should not be greater than Some"),
+                "ignoring memory.high event because it happened before before last upscale",
+            );
+            return Ok(());
+        }
 
-        self.last_upscale_seqnum.store(seqnum, Ordering::Release);
+        // Fetch the current time at the start, so that subsequent delays
+        // are more likely to under-estimate than over-estimate, which
+        // should help with reliability if the system is overloaded.
+        let now = Instant::now();
+
+        // The memory.high came after our latest upscale, now we need to
+        // decide what to do.
+        //
+        // If it's been long enough since we last froze, freeze the
+        // cgroup and request upscale
+        let long_enough_since_last_freeze = state
+            .last_frozen_at
+            .map(|t| now > t + self.config.do_not_freeze_more_often_than)
+            .unwrap_or(true);
+        if long_enough_since_last_freeze {
+            info!("received memory.high event, freezing cgroup and forwarding upscale request");
+
+            self.freeze().context("failed to freeze cgroup")?;
+            state.must_unfreeze_at.set(Some(tokio::time::sleep_until(
+                now + self.config.max_upscale_wait,
+            )));
+
+            Self::request_upscale(upscale_requester).await?;
+            *state.waiting_on_upscale = true;
+            return Ok(());
+        }
+
+        // If we're already waiting on upscaling, then increase
+        // memory.high (if able) to avoid throttling.
+        //
+        // In either case, we'll re-request upscaling afterwards, because
+        // our `Runner::run` (and downstream, the autoscaler-agent) both
+        // deduplicate incoming upscaling requests.
+        let can_increase_memory_high = state
+            .last_memory_high_increase_at
+            .map(|t| now > t + self.config.memory_high_increase_every)
+            .unwrap_or(true);
+        if *state.waiting_on_upscale && can_increase_memory_high {
+            info!("received memory.high event but too soon to refreeze, so increasing memory.high");
+
+            match self
+                .get_memory_high()
+                .context("failed to get memory.high")?
+            {
+                MaxValue::Max => {
+                    warn!("memory.high is already set to 'max', no further increases possible")
+                }
+                MaxValue::Value(current_memory_high_bytes) => {
+                    let new_memory_high_bytes = current_memory_high_bytes
+                        + self.config.memory_high_increase_by_bytes as i64;
+                    info!(
+                        current_memory_high_bytes,
+                        new_memory_high_bytes, "updating memory.high"
+                    );
+
+                    self.set_memory_high(MaxValue::Value(new_memory_high_bytes))
+                        .context("failed to set memory.high")?;
+                    *state.last_memory_high_increase_at = Some(now);
+                }
+            }
+        } else {
+            info!("received memory.high event, but too soon to refreeze or bump memory.high");
+        }
+
+        Self::request_upscale(upscale_requester).await?;
+        *state.waiting_on_upscale = true;
         Ok(())
     }
 
-    /// Get the cgroup's name.
-    pub fn path(&self) -> &str {
-        self.cgroup.path()
+    // TODO: make this non-async, using something like `tokio::sync::broadcast`,
+    // because it doesn't really matter *how many* times we request upscaling, just
+    // that we've done it at some point.
+    async fn request_upscale(upscale_requester: &mpsc::Sender<()>) -> anyhow::Result<()> {
+        upscale_requester
+            .send(())
+            .await
+            .context("failed to request upscale")
     }
 }
 
@@ -572,8 +769,18 @@ impl CgroupWatcher {
         }
     }
 
+    fn is_frozen(&self) -> anyhow::Result<bool> {
+        use cgroups_rs::freezer::FreezerState;
+
+        let state = self.freezer()?.state()?;
+        Ok(matches!(
+            state,
+            FreezerState::Freezing | FreezerState::Frozen
+        ))
+    }
+
     /// Attempt to freeze the cgroup.
-    pub fn freeze(&self) -> anyhow::Result<()> {
+    fn freeze(&self) -> anyhow::Result<()> {
         self.freezer()
             .context("failed to get freezer subsystem")?
             .freeze()
@@ -581,7 +788,7 @@ impl CgroupWatcher {
     }
 
     /// Attempt to thaw the cgroup.
-    pub fn thaw(&self) -> anyhow::Result<()> {
+    fn thaw(&self) -> anyhow::Result<()> {
         self.freezer()
             .context("failed to get freezer subsystem")?
             .thaw()
@@ -607,7 +814,7 @@ impl CgroupWatcher {
     }
 
     /// Get cgroup current memory usage.
-    pub fn current_memory_usage(&self) -> anyhow::Result<u64> {
+    fn current_memory_usage(&self) -> anyhow::Result<u64> {
         Ok(self
             .memory()
             .context("failed to get memory subsystem")?
@@ -616,16 +823,7 @@ impl CgroupWatcher {
     }
 
     /// Set cgroup memory.high threshold.
-    pub fn set_memory_high_bytes(&self, bytes: u64) -> anyhow::Result<()> {
-        self.set_memory_high_internal(MaxValue::Value(u64::min(bytes, i64::MAX as u64) as i64))
-    }
-
-    /// Set the cgroup's memory.high to 'max', disabling it.
-    pub fn unset_memory_high(&self) -> anyhow::Result<()> {
-        self.set_memory_high_internal(MaxValue::Max)
-    }
-
-    fn set_memory_high_internal(&self, value: MaxValue) -> anyhow::Result<()> {
+    fn set_memory_high(&self, value: MaxValue) -> anyhow::Result<()> {
         self.memory()
             .context("failed to get memory subsystem")?
             .set_mem(cgroups_rs::memory::SetMemory {
@@ -638,17 +836,13 @@ impl CgroupWatcher {
     }
 
     /// Get memory.high threshold.
-    pub fn get_memory_high_bytes(&self) -> anyhow::Result<u64> {
+    fn get_memory_high(&self) -> anyhow::Result<MaxValue> {
         let high = self
             .memory()
             .context("failed to get memory subsystem while getting memory statistics")?
             .get_mem()
             .map(|mem| mem.high)
             .context("failed to get memory statistics from subsystem")?;
-        match high {
-            Some(MaxValue::Max) => Ok(i64::MAX as u64),
-            Some(MaxValue::Value(high)) => Ok(high as u64),
-            None => anyhow::bail!("failed to read memory.high from memory subsystem"),
-        }
+        high.ok_or_else(|| anyhow!("failed to read memory.high from memory subsystem"))
     }
 }
