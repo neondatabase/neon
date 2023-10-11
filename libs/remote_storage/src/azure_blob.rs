@@ -23,7 +23,10 @@ impl AzureBlobStorage {
 #[async_trait::async_trait]
 impl RemoteStorage for AzureBlobStorage {
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        todo!()
+        self.list_prefixes(folder).await.map_err(|err| match err {
+            DownloadError::NotFound => anyhow::anyhow!("not found"), // TODO maybe return empty list?
+            DownloadError::BadInput(e) | DownloadError::Other(e) => e,
+        })
     }
 
     async fn list_prefixes(
