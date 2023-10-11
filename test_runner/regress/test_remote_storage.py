@@ -717,6 +717,10 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     def create_in_background():
         barrier.wait()
         try:
+            # retrying this kind of query makes no sense in real life as we do
+            # not lock in the lsn. with the immediate stop, we could in real
+            # life revert back the ancestor in startup, but most likely the lsn
+            # would still be branchable.
             client.timeline_create(
                 tenant_id=env.initial_tenant,
                 ancestor_timeline_id=env.initial_timeline,
@@ -737,13 +741,13 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         assert not new_branch_on_remote_storage.exists(), "failpoint should had stopped uploading"
 
         client.configure_failpoints(("before-upload-index", "off"))
-        conflict = q.get()
+        exception = q.get()
 
-        assert conflict, "create_timeline should not have succeeded"
         assert (
-            conflict.status_code == 409
-        ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+            exception is None
+        ), "create_timeline should have succeeded, because we deleted unuploaded local state"
 
+        # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
         assert (
