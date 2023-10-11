@@ -164,9 +164,6 @@ impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
             TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            TenantStateError::NotActive(_) => {
-                ApiError::ResourceUnavailable("Tenant not yet active".into())
-            }
             TenantStateError::IsStopping(_) => {
                 ApiError::ResourceUnavailable("Tenant is stopping".into())
             }

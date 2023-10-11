@@ -850,8 +850,6 @@ pub(crate) enum TenantStateError {
     NotFound(TenantId),
     #[error("Tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
