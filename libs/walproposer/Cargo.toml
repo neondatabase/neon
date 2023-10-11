@@ -5,33 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rand.workspace = true
-regex.workspace = true
-bytes.workspace = true
-byteorder.workspace = true
 anyhow.workspace = true
-crc32c.workspace = true
-hex.workspace = true
-once_cell.workspace = true
-log.workspace = true
-libc.workspace = true
-memoffset.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["json"] }
-serde.workspace = true
-scopeguard.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
-hyper.workspace = true
 
 workspace_hack.workspace = true
-
-[dev-dependencies]
-env_logger.workspace = true
-postgres.workspace = true
 
 [build-dependencies]
 anyhow.workspace = true
 bindgen.workspace = true
-cbindgen = "0.24.0"
