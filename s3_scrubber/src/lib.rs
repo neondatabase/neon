@@ -4,7 +4,6 @@ pub mod delete_batch_producer;
 pub mod metadata_stream;
 mod s3_deletion;
 pub mod scan_metadata;
-
 use std::env;
 use std::fmt::Display;
 use std::time::Duration;

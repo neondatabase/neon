@@ -33,9 +33,13 @@ reqwest = { workspace = true, default-features = false, features = ["rustls-tls"
 aws-config = { workspace = true, default-features = false, features = ["rustls", "credentials-sso"] }
 
 pageserver = { path = "../pageserver" }
+remote_storage = { path = "../libs/remote_storage" }
 
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { version = "0.3.17", features = ["ansi"] }
 clap.workspace = true
 tracing-appender = "0.2"
 histogram = "0.7"
+humantime.workspace = true
+camino.workspace = true
+aws-smithy-types = "0.56.1"

@@ -16,6 +16,8 @@ use tracing::{info, warn};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod restore_tenant_from_object_versioning;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -59,6 +61,9 @@ enum Command {
         skip_validation: bool,
     },
     ScanMetadata {},
+    RestoreTenantFromObjectVersioningMostRecentIndexPart(
+        restore_tenant_from_object_versioning::Command,
+    ),
 }
 
 async fn tidy(
@@ -247,5 +252,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Command::RestoreTenantFromObjectVersioningMostRecentIndexPart(arg) => {
+            match restore_tenant_from_object_versioning::doit(arg).await {
+                Err(e) => {
+                    tracing::error!("Failed: {e:?}");
+                    Err(e)
+                }
+                Ok(()) => Ok(()),
+            }
+        }
     }
 }
