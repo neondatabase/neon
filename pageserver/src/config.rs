@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde::de::IntoDeserializer;
 use std::env;
+use std::ops::Deref;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -153,7 +154,7 @@ pub struct PageServerConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // repositories.
-    pub workdir: Utf8PathBuf,
+    pub workdir: PageserverConfWorkdir,
 
     pub pg_distrib_dir: Utf8PathBuf,
 
@@ -241,6 +242,45 @@ impl<T> BuilderValue<T> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct PageserverConfWorkdir {
+    d: Utf8PathBuf,
+}
+
+impl Deref for PageServerConf {
+    type Target = PageserverConfWorkdir;
+
+    fn deref(&self) -> &Self::Target {
+        &self.workdir
+    }
+}
+
+impl Deref for PageserverConfWorkdir {
+    type Target = Utf8Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.d
+    }
+}
+
+impl AsRef<std::path::Path> for PageserverConfWorkdir {
+    fn as_ref(&self) -> &std::path::Path {
+        self.d.as_ref()
+    }
+}
+
+impl std::fmt::Debug for PageserverConfWorkdir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.d.fmt(f)
+    }
+}
+
+impl std::fmt::Display for PageserverConfWorkdir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.d.fmt(f)
+    }
+}
+
 // needed to simplify config construction
 struct PageServerConfigBuilder {
     listen_pg_addr: BuilderValue<String>,
@@ -257,7 +297,7 @@ struct PageServerConfigBuilder {
     page_cache_size: BuilderValue<usize>,
     max_file_descriptors: BuilderValue<usize>,
 
-    workdir: BuilderValue<Utf8PathBuf>,
+    workdir: BuilderValue<PageserverConfWorkdir>,
 
     pg_distrib_dir: BuilderValue<Utf8PathBuf>,
 
@@ -310,7 +350,9 @@ impl Default for PageServerConfigBuilder {
             superuser: Set(DEFAULT_SUPERUSER.to_string()),
             page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: Set(Utf8PathBuf::new()),
+            workdir: Set(PageserverConfWorkdir {
+                d: Utf8PathBuf::new(),
+            }),
             pg_distrib_dir: Set(Utf8PathBuf::from_path_buf(
                 env::current_dir().expect("cannot access current directory"),
             )
@@ -399,7 +441,7 @@ impl PageServerConfigBuilder {
     }
 
     pub fn workdir(&mut self, workdir: Utf8PathBuf) {
-        self.workdir = BuilderValue::Set(workdir)
+        self.workdir = BuilderValue::Set(PageserverConfWorkdir { d: workdir })
     }
 
     pub fn pg_distrib_dir(&mut self, pg_distrib_dir: Utf8PathBuf) {
@@ -599,17 +641,17 @@ impl PageServerConfigBuilder {
     }
 }
 
-impl PageServerConf {
+impl PageserverConfWorkdir {
     //
     // Repository paths, relative to workdir.
     //
 
     pub fn tenants_path(&self) -> Utf8PathBuf {
-        self.workdir.join(TENANTS_SEGMENT_NAME)
+        self.d.join(TENANTS_SEGMENT_NAME)
     }
 
     pub fn deletion_prefix(&self) -> Utf8PathBuf {
-        self.workdir.join("deletion")
+        self.d.join("deletion")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -692,7 +734,7 @@ impl PageServerConf {
     }
 
     pub fn traces_path(&self) -> Utf8PathBuf {
-        self.workdir.join("traces")
+        self.d.join("traces")
     }
 
     pub fn trace_path(
@@ -716,9 +758,11 @@ impl PageServerConf {
 
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
-        remote_path.with_base(&self.workdir)
+        remote_path.with_base(&self.d)
     }
+}
 
+impl PageServerConf {
     //
     // Postgres distribution paths
     //
@@ -958,6 +1002,9 @@ impl PageServerConf {
     }
 
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
+
+        let repo_dir = PageserverConfWorkdir { d: repo_dir };
+
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
         PageServerConf {
@@ -1495,10 +1542,12 @@ threshold = "20m"
         Ok(())
     }
 
-    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
+    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(PageserverConfWorkdir, Utf8PathBuf)> {
         let tempdir_path = tempdir.path();
 
-        let workdir = tempdir_path.join("workdir");
+        let workdir = PageserverConfWorkdir {
+            d: tempdir_path.join("workdir"),
+        };
         fs::create_dir_all(&workdir)?;
 
         let pg_distrib_dir = tempdir_path.join("pg_distrib");
