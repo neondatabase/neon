@@ -3129,6 +3129,7 @@ def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -
         if res:
             log.info(f"subscriber_lsn={res}")
             subscriber_lsn = Lsn(res)
+            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
             if subscriber_lsn >= publisher_lsn:
                 return subscriber_lsn
         time.sleep(0.5)
