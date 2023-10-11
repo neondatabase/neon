@@ -306,12 +306,10 @@ def test_ondemand_download_timetravel(
 #
 # Ensure that the `download_remote_layers` API works
 #
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_download_remote_layers_api(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start(
@@ -465,14 +463,11 @@ def test_download_remote_layers_api(
         assert query_scalar(cur, "select count(*) from testtab") == table_len
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
-def test_compaction_downloads_on_demand_without_image_creation(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder: NeonEnvBuilder):
     """
     Create a few layers, then evict, then make sure compaction runs successfully.
     """
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     conf = {
         # Disable background GC & compaction
@@ -547,17 +542,14 @@ def test_compaction_downloads_on_demand_without_image_creation(
     assert post_compact[1] >= 3, "should had downloaded the three layers"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
-def test_compaction_downloads_on_demand_with_image_creation(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: NeonEnvBuilder):
     """
     Create layers, compact with high image_creation_threshold, then run final compaction with all layers evicted.
 
     Due to current implementation, this will make image creation on-demand download layers, but we cannot really
     directly test for it.
     """
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     conf = {
         # Disable background GC & compaction
@@ -645,17 +637,14 @@ def test_compaction_downloads_on_demand_with_image_creation(
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ondemand_download_failure_to_replace(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+def test_ondemand_download_failure_to_replace(neon_env_builder: NeonEnvBuilder):
     """
     Make sure that we fail on being unable to replace a RemoteLayer instead of for example livelocking.
 
     See: https://github.com/neondatabase/neon/issues/3533
     """
 
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # disable gc and compaction via default tenant config because config is lost while detaching
     # so that compaction will not be the one to download the layer but the http handler is
