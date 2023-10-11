@@ -50,7 +50,7 @@ use super::TenantSharedResources;
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
 #[derive(Clone)]
-pub enum TenantSlot {
+pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary,
 }
@@ -481,7 +481,7 @@ pub(crate) fn schedule_local_tenant_processing(
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
 #[instrument(skip_all)]
-pub async fn shutdown_all_tenants() {
+pub(crate) async fn shutdown_all_tenants() {
     shutdown_all_tenants0(&TENANTS).await
 }
 
@@ -593,7 +593,7 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
     // caller will log how long we took
 }
 
-pub async fn create_tenant(
+pub(crate) async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -628,14 +628,14 @@ pub async fn create_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SetNewTenantConfigError {
+pub(crate) enum SetNewTenantConfigError {
     #[error(transparent)]
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
 }
 
-pub async fn set_new_tenant_config(
+pub(crate) async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -776,7 +776,7 @@ pub(crate) async fn upsert_location(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum GetTenantError {
+pub(crate) enum GetTenantError {
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
     #[error("Tenant {0} is not active")]
@@ -792,7 +792,7 @@ pub enum GetTenantError {
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
 ///
 /// This method is cancel-safe.
-pub async fn get_tenant(
+pub(crate) async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
@@ -817,7 +817,7 @@ pub async fn get_tenant(
     }
 }
 
-pub async fn delete_tenant(
+pub(crate) async fn delete_tenant(
     conf: &'static PageServerConf,
     remote_storage: Option<GenericRemoteStorage>,
     tenant_id: TenantId,
@@ -826,7 +826,7 @@ pub async fn delete_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeleteTimelineError {
+pub(crate) enum DeleteTimelineError {
     #[error("Tenant {0}")]
     Tenant(#[from] GetTenantError),
 
@@ -834,7 +834,7 @@ pub enum DeleteTimelineError {
     Timeline(#[from] crate::tenant::DeleteTimelineError),
 }
 
-pub async fn delete_timeline(
+pub(crate) async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     _ctx: &RequestContext,
@@ -845,18 +845,16 @@ pub async fn delete_timeline(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantStateError {
+pub(crate) enum TenantStateError {
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
     #[error("Tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-pub async fn detach_tenant(
+pub(crate) async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     detach_ignored: bool,
@@ -926,7 +924,7 @@ async fn detach_tenant0(
     removal_result
 }
 
-pub async fn load_tenant(
+pub(crate) async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     generation: Generation,
@@ -963,7 +961,7 @@ pub async fn load_tenant(
     Ok(())
 }
 
-pub async fn ignore_tenant(
+pub(crate) async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
@@ -991,7 +989,7 @@ async fn ignore_tenant0(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantMapListError {
+pub(crate) enum TenantMapListError {
     #[error("tenant map is still initiailizing")]
     Initializing,
 }
@@ -999,7 +997,7 @@ pub enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
     let tenants = TENANTS.read().await;
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1017,7 +1015,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 ///
 /// Downloading all the tenant data is performed in the background, this merely
 /// spawns the background task and returns quickly.
-pub async fn attach_tenant(
+pub(crate) async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     generation: Generation,
@@ -1054,7 +1052,7 @@ pub async fn attach_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantMapInsertError {
+pub(crate) enum TenantMapInsertError {
     #[error("tenant map is still initializing")]
     StillInitializing,
     #[error("tenant map is shutting down")]
@@ -1217,7 +1215,7 @@ use {
     utils::http::error::ApiError,
 };
 
-pub async fn immediate_gc(
+pub(crate) async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
