@@ -26,6 +26,7 @@ metrics.workspace = true
 utils.workspace = true
 pin-project-lite.workspace = true
 workspace_hack.workspace = true
+azure_storage.workspace = true
 
 [dev-dependencies]
 camino-tempfile.workspace = true
