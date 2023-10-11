@@ -612,7 +612,7 @@ fn _pg_array_parse(
                     }
                 }
             }
-            '}' => {
+            '}' if !quote => {
                 level -= 1;
                 if level == 0 {
                     push_checked(&mut entry, &mut entries, elem_type)?;
@@ -829,6 +829,25 @@ mod tests {
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
             json!([[[1, 2, 3], [4, 5, 6]]])
+        );
+    }
+    #[test]
+    fn test_pg_array_parse_json() {
+        fn pt(pg_arr: &str) -> Value {
+            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+        }
+        assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1, \"bar\": 2}"}"#),
+            json!([{"foo": 1, "bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1}", "{\"bar\": 2}"}"#),
+            json!([{"foo": 1}, {"bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{{"{\"foo\": 1}", "{\"bar\": 2}"}}"#),
+            json!([[{"foo": 1}, {"bar": 2}]])
         );
     }
 }
