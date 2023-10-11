@@ -28,7 +28,7 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub sql_over_http_timeout: u64,
+    pub sql_over_http_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {

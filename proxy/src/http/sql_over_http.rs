@@ -193,9 +193,8 @@ pub async fn handle(
     session_id: uuid::Uuid,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
-    let timeout = config.sql_over_http_timeout;
     let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(timeout),
+        config.sql_over_http_timeout,
         handle_inner(request, sni_hostname, conn_pool, session_id),
     )
     .await;
@@ -224,8 +223,10 @@ pub async fn handle(
             }
         },
         Err(_) => {
-            let message =
-                format!("HTTP-Connection timed out, execution time exeeded {timeout} seconds",);
+            let message = format!(
+                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                config.sql_over_http_timeout.as_secs()
+            );
             error!(message);
             json_response(
                 StatusCode::GATEWAY_TIMEOUT,

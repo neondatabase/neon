@@ -81,8 +81,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
     /// timeout for http connections
-    #[clap(long, default_value_t = 15)]
-    sql_over_http_timeout: u64,
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    sql_over_http_timeout: tokio::time::Duration,
 }
 
 #[tokio::main]
