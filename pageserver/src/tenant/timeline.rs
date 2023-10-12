@@ -4327,7 +4327,7 @@ impl Timeline {
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .context("Failed to reconstruct a page image:")
+                    .context("Failed to reconstruct a page image")
                 {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::from(e)),
