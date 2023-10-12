@@ -1282,9 +1282,12 @@ impl Tenant {
                     // the above log message.
                     let path = self.conf.timeline_path(&self.tenant_id, &timeline_id);
 
+                    let span = tracing::Span::current();
+
                     return tokio::task::spawn_blocking({
                         let path = path.clone();
                         move || {
+                            let _e = span.entered();
                             let mut metadata = false;
                             let mut layers = 0;
                             let mut others = 0;
