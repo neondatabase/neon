@@ -209,7 +209,7 @@ pub struct Tenant {
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
-    ///  
+    ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
@@ -768,8 +768,7 @@ impl Tenant {
         // initialization order is not passed to here.
         let init_order = None;
 
-        // timeline reattaching requires that we have the metadata locally; it used to be done
-        // in the beginning of timeline_init_and_sync
+        // timeline loading after attach expects to find metadata file for each metadata
         save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
             .await
             .context("save_metadata")
