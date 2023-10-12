@@ -630,6 +630,104 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 }
 
+typedef struct
+{
+	TupleDesc	tupdesc;
+} NeonGetStatsCtx;
+
+#define NUM_NEON_GET_STATS_COLS	2
+#define NUM_NEON_GET_STATS_ROWS	3
+
+PG_FUNCTION_INFO_V1(neon_get_stats);
+Datum
+neon_get_stats(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	NeonGetStatsCtx* fctx;
+	MemoryContext oldcontext;
+	TupleDesc	tupledesc;
+	Datum		result;
+	HeapTuple	tuple;
+	char const* key;
+	uint64      value;
+	Datum		values[NUM_NEON_GET_STATS_COLS];
+	bool		nulls[NUM_NEON_GET_STATS_COLS];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Switch context when allocating stuff to be used in later calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* Create a user function context for cross-call persistence */
+		fctx = (NeonGetStatsCtx*) palloc(sizeof(NeonGetStatsCtx));
+
+		/* Construct a tuple descriptor for the result rows. */
+		tupledesc = CreateTemplateTupleDesc(NUM_NEON_GET_STATS_COLS);
+
+		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "ns_key",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "ns_value",
+						   TEXTOID, -1, 0);
+
+		fctx->tupdesc = BlessTupleDesc(tupledesc);
+		funcctx->max_calls = NUM_NEON_GET_STATS_ROWS;
+		funcctx->user_fctx = fctx;
+
+		/* Return to original context when allocating transient memory */
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	/* Get the saved state */
+	fctx = (NeonGetStatsCtx*) funcctx->user_fctx;
+
+	switch (funcctx->call_cntr)
+	{
+		case 0:
+			key = "file_cache_misses";
+			if (lfc_ctl)
+				value = lfc_ctl->misses;
+			break;
+		case 1:
+			key = "file_cache_hits";
+			if (lfc_ctl)
+				value = lfc_ctl->hits;
+			break;
+		case 2:
+			key = "file_cache_used";
+			if (lfc_ctl)
+				value = lfc_ctl->used;
+			break;
+		default:
+			SRF_RETURN_DONE(funcctx);
+	}
+	values[0] = PointerGetDatum(cstring_to_text(key));
+	nulls[0] = false;
+	if (lfc_ctl)
+	{
+		char buf[64];
+		snprintf(buf, sizeof buf, "%llu", (long long)value);
+		nulls[1] = false;
+		values[1] = PointerGetDatum(cstring_to_text(buf));
+	}
+	else
+		nulls[1] = true;
+
+	tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
+	result = HeapTupleGetDatum(tuple);
+	SRF_RETURN_NEXT(funcctx, result);
+}
+
+
+/*
+ * Function returning data from the local file cache
+ * relation node/tablespace/database/blocknum and access_counter
+ */
+PG_FUNCTION_INFO_V1(local_cache_pages);
+
 /*
  * Record structure holding the to be exposed cache data.
  */
@@ -653,36 +751,6 @@ typedef struct
 	LocalCachePagesRec *record;
 } LocalCachePagesContext;
 
-
-PG_FUNCTION_INFO_V1(neon_get_stat);
-Datum
-neon_get_stat(PG_FUNCTION_ARGS)
-{
-	char *key = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	if (strcmp(key, "file_cache_misses") == 0)
-	{
-		if (lfc_ctl)
-			PG_RETURN_INT64(lfc_ctl->misses);
-	}
-	else if (strcmp(key, "file_cache_hits") == 0)
-	{
-		if (lfc_ctl)
-			PG_RETURN_INT64(lfc_ctl->hits);
-	}
-	else if (strcmp(key, "file_cache_used") == 0)
-	{
-		if (lfc_ctl)
-			PG_RETURN_INT64(lfc_ctl->used);
-	}
-	PG_RETURN_NULL();
-}
-
-
-/*
- * Function returning data from the local file cache
- * relation node/tablespace/database/blocknum and access_counter
- */
-PG_FUNCTION_INFO_V1(local_cache_pages);
 
 #define NUM_LOCALCACHE_PAGES_ELEM	7
 
