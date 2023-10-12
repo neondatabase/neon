@@ -45,6 +45,11 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// <https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/>
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
+/// We set this a little bit low as we currently buffer the entire file into RAM
+///
+/// Here, a limit of max 20k concurrent connections was noted.
+/// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
+pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 30;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
@@ -463,7 +468,7 @@ pub struct AzureConfig {
     ///
     /// Example: `http://127.0.0.1:5000`
     pub endpoint: Option<String>,
-    /// AWS S3 has various limits on its API calls, we need not to exceed those.
+    /// Azure has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
@@ -489,6 +494,10 @@ impl RemoteStorageConfig {
         let local_path = toml.get("local_path");
         let bucket_name = toml.get("bucket_name");
         let bucket_region = toml.get("bucket_region");
+        let container_name = toml.get("container_name");
+        let container_region = toml.get("container_region");
+
+        let use_azure = container_name.is_some() && container_region.is_some();
 
         let max_concurrent_syncs = NonZeroUsize::new(
             parse_optional_integer("max_concurrent_syncs", toml)?
@@ -502,9 +511,13 @@ impl RemoteStorageConfig {
         )
         .context("Failed to parse 'max_sync_errors' as a positive integer")?;
 
+        let default_concurrency_limit = if use_azure {
+            DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
+        } else {
+            DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+        };
         let concurrency_limit = NonZeroUsize::new(
-            parse_optional_integer("concurrency_limit", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+            parse_optional_integer("concurrency_limit", toml)?.unwrap_or(default_concurrency_limit),
         )
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
@@ -513,33 +526,71 @@ impl RemoteStorageConfig {
                 .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
                 .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
 
-        let storage = match (local_path, bucket_name, bucket_region) {
+        let endpoint = toml
+            .get("endpoint")
+            .map(|endpoint| parse_toml_string("endpoint", endpoint))
+            .transpose()?;
+
+        let storage = match (
+            local_path,
+            bucket_name,
+            bucket_region,
+            container_name,
+            container_region,
+        ) {
             // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
-            (None, None, None) => return Ok(None),
-            (_, Some(_), None) => {
+            (None, None, None, None, None) => return Ok(None),
+            (_, Some(_), None, ..) => {
                 bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
             }
-            (_, None, Some(_)) => {
+            (_, None, Some(_), ..) => {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
-            (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
-                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                prefix_in_bucket: toml
-                    .get("prefix_in_bucket")
-                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
-                    .transpose()?,
-                endpoint: toml
-                    .get("endpoint")
-                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
-                    .transpose()?,
-                concurrency_limit,
-                max_keys_per_list_response,
-            }),
-            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(Utf8PathBuf::from(
-                parse_toml_string("local_path", local_path)?,
-            )),
-            (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
+            (None, Some(bucket_name), Some(bucket_region), ..) => {
+                RemoteStorageKind::AwsS3(S3Config {
+                    bucket_name: parse_toml_string("bucket_name", bucket_name)?,
+                    bucket_region: parse_toml_string("bucket_region", bucket_region)?,
+                    prefix_in_bucket: toml
+                        .get("prefix_in_bucket")
+                        .map(|prefix_in_bucket| {
+                            parse_toml_string("prefix_in_bucket", prefix_in_bucket)
+                        })
+                        .transpose()?,
+                    endpoint,
+                    concurrency_limit,
+                    max_keys_per_list_response,
+                })
+            }
+            (_, _, _, Some(_), None) => {
+                bail!("'container_name' option is mandatory if 'container_region' is given ")
+            }
+            (_, _, _, None, Some(_)) => {
+                bail!("'container_name' option is mandatory if 'container_region' is given ")
+            }
+            (None, None, None, Some(container_name), Some(container_region)) => {
+                RemoteStorageKind::AzureContainer(AzureConfig {
+                    container_name: parse_toml_string("container_name", container_name)?,
+                    container_region: parse_toml_string("container_region", container_region)?,
+                    prefix_in_container: toml
+                        .get("prefix_in_container")
+                        .map(|prefix_in_container| {
+                            parse_toml_string("prefix_in_container", prefix_in_container)
+                        })
+                        .transpose()?,
+                    endpoint,
+                    concurrency_limit,
+                    max_keys_per_list_response,
+                })
+            }
+            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
+                Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
+            ),
+            (Some(_), Some(_), ..) => {
+                bail!("'local_path' and 'bucket_name' are mutually exclusive")
+            }
+            (Some(_), _, _, Some(_), Some(_)) => {
+                bail!("local_path and 'container_name' are mutually exclusive")
+            }
         };
 
         Ok(Some(RemoteStorageConfig {
