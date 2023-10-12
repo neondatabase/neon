@@ -1267,14 +1267,19 @@ impl Tenant {
                         .map_err(LoadLocalTimelineError::ResumeDeletion);
                     }
 
-                    // see if there is at most one layer file and a metadata file in the directory
-                    // if not, we should fail the loading
+                    // as the remote index_part.json did not exist, this timeline is a
+                    // not-yet-uploaded one. it should be deleted now, because the branching might
+                    // not have been valid as it's ancestor may have been restored to earlier state
+                    // as well. in practice, control plane will keep retrying.
                     //
-                    // otherwise delete the not yet uploaded timeline.
+                    // first ensure that the un-uploaded timeline looks like it should, as in we
+                    // are not accidentially deleting a timeline which was ever active:
+                    // - root timelines have metadata and one possibly partial layer
+                    // - branched timelines have metadata
                     //
-                    // this timeline cannot have children because those are not allowed to be
-                    // created before uploading.
-
+                    // if the timeline does not look like expected, fail loading of the tenant.
+                    // cleaning the timeline up manually and reloading the tenant is possible via
+                    // the above log message.
                     let path = self.conf.timeline_path(&self.tenant_id, &timeline_id);
 
                     return tokio::task::spawn_blocking({
