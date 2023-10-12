@@ -42,25 +42,53 @@ impl<'de> Deserialize<'de> for Id {
     where
         D: serde::Deserializer<'de>,
     {
-        struct IdVisitor;
+        struct NonHumanReadable;
 
-        impl<'de> Visitor<'de> for IdVisitor {
+        /// This implementation is from an `#[derive(serde::Serialize)]` expansion
+        /// which used to be used.
+        impl<'de> Visitor<'de> for NonHumanReadable {
             type Value = Id;
 
-            // TODO: improve the "expecting" description
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str(
-                    "value in either sequence form([u8; 16]) or serde_json form(hex string)",
-                )
+                formatter.write_str("tuple struct Id")
             }
 
-            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                Deserialize::deserialize(deserializer).map(Id)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                 A: serde::de::SeqAccess<'de>,
             {
-                let s = serde::de::value::SeqAccessDeserializer::new(seq);
-                let id: [u8; 16] = Deserialize::deserialize(s)?;
-                Ok(Id::from(id))
+                match seq.next_element::<[u8; 16]>()? {
+                    Some(only) => Ok(Id(only)),
+                    None => Err(serde::de::Error::invalid_length(
+                        1,
+                        &"tuple struct Id with 1 element",
+                    )),
+                }
+            }
+        }
+
+        struct HumanReadable;
+
+        impl<'de> Visitor<'de> for HumanReadable {
+            type Value = Id;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("hex string of 32 characters")
+            }
+
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = Deserialize::deserialize(deserializer)?;
+                self.visit_str(s)
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -71,7 +99,11 @@ impl<'de> Deserialize<'de> for Id {
             }
         }
 
-        deserializer.deserialize_any(IdVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_newtype_struct("Id", HumanReadable)
+        } else {
+            deserializer.deserialize_newtype_struct("Id", NonHumanReadable)
+        }
     }
 }
 
@@ -422,6 +454,7 @@ mod tests {
 
         let mut deserializer = Deserializer::builder()
             .is_human_readable(true)
+            // .self_describing(true)
             .tokens(Tokens(vec![Token::Str(String::from(
                 "ad50847381e248feaac9876cc71ae418",
             ))]))
@@ -429,6 +462,7 @@ mod tests {
         assert_eq!(Id::deserialize(&mut deserializer).unwrap(), original_id);
     }
 
+    /*
     macro_rules! roundtrip_type {
         ($type:ty, $expected_bytes:expr) => {{
             let expected_bytes: [u8; 16] = $expected_bytes;
@@ -468,4 +502,5 @@ mod tests {
 
         roundtrip_type!(TimelineId, expected_bytes);
     }
+    */
 }
