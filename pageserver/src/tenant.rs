@@ -1312,9 +1312,10 @@ impl Tenant {
                                 others += 1;
                             }
 
-                            // bootstrapped have the one image layer file, or one partial temp file
+                            // bootstrapped have the one image layer file, or one partial temp
+                            // file, branched have just the metadata
                             if !(metadata && layers + others <= 1) {
-                                anyhow::bail!("unexpected assumed fresh timeline: found metadata={}, layers={}, others={}", metadata, layers, others);
+                                anyhow::bail!("unexpected assumed unuploaded, never been active timeline: found metadata={}, layers={}, others={}", metadata, layers, others);
                             }
 
                             let tmp_path =
@@ -1327,7 +1328,7 @@ impl Tenant {
                     .await
                     .map_err(anyhow::Error::new)
                     .and_then(|x| x)
-                    .context("delete unuploaded fresh timeline")
+                    .context("delete assumed unuploaded fresh timeline")
                     .map_err(LoadLocalTimelineError::Load);
                 }
                 Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
