@@ -96,7 +96,7 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "proxy_compute_connection_latency_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        &["protocol", "cache_miss"],
+        &["protocol", "cache_miss", "pool_miss"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
@@ -105,6 +105,7 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 
 pub struct LatencyTimer {
     start: Instant,
+    pool_miss: bool,
     cache_miss: bool,
     protocol: &'static str,
 }
@@ -114,6 +115,8 @@ impl LatencyTimer {
         Self {
             start: Instant::now(),
             cache_miss: false,
+            // by default we don't do pooling
+            pool_miss: true,
             protocol,
         }
     }
@@ -121,13 +124,17 @@ impl LatencyTimer {
     pub fn cache_miss(&mut self) {
         self.cache_miss = true;
     }
+
+    pub fn pool_hit(&mut self) {
+        self.pool_miss = false;
+    }
 }
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
         let duration = self.start.elapsed().as_secs_f64();
         COMPUTE_CONNECTION_LATENCY
-            .with_label_values(&[self.protocol, bool_to_str(self.cache_miss)])
+            .with_label_values(&[self.protocol, bool_to_str(self.cache_miss), bool_to_str(self.pool_miss)])
             .observe(duration)
     }
 }

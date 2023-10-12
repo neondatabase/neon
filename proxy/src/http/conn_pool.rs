@@ -182,21 +182,15 @@ impl GlobalConnPool {
         // ok return cached connection if found and establish a new one otherwise
         let new_client = if let Some(client) = client {
             if client.inner.is_closed() {
-                latency_timer.cache_miss();
-
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
             } else {
+                latency_timer.pool_hit();
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
                 return Ok(client);
             }
         } else {
-            // only count cache miss if we wanted to use the conn pool
-            if !force_new {
-                latency_timer.cache_miss();
-            }
-
             info!("pool: opening a new connection '{conn_info}'");
             connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
         };
