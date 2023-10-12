@@ -32,7 +32,7 @@ impl Serialize for Id {
         if serializer.is_human_readable() {
             serializer.collect_str(self)
         } else {
-            self.0.serialize(serializer)
+            serializer.serialize_newtype_struct("Id", &self.0)
         }
     }
 }
