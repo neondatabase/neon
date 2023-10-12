@@ -130,6 +130,7 @@ pub mod storage_layer;
 pub mod config;
 pub mod delete;
 pub mod mgr;
+pub mod secondary;
 pub mod tasks;
 pub mod upload_queue;
 
