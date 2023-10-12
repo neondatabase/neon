@@ -311,8 +311,8 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         assert isinstance(failed, Exception)
         assert isinstance(succeeded, Dict)
 
-        # FIXME: there's probably multiple valid status codes:
-        # - Timeline 62505b9a9f6b1d29117b1b74eaf07b12/56cd19d3b2dbcc65e9d53ec6ca304f24 already exists
+        # there's multiple valid status codes:
+        # - Timeline x/y already exists
         # - whatever 409 response says, but that is a subclass of PageserverApiException
         assert isinstance(failed, PageserverApiException)
         assert succeeded["state"] == "Active"
@@ -320,7 +320,6 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         # we might still have the failpoint active
         env.pageserver.stop(immediate=True)
 
-        # pytest should nag if we leave threads unjoined
         for t in threads:
             t.join()
         create_root.join()
