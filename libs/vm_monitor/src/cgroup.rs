@@ -80,7 +80,7 @@ impl CgroupWatcher {
             ticker.tick().await;
 
             let now = Instant::now();
-            let mem = Self::memory_usage(&mem_controller);
+            let mem = Self::memory_usage(mem_controller);
 
             let i = t as usize % history_len;
             history_buf[i] = mem;
