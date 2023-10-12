@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 /// Users of a resource call `enter()` to acquire a GateGuard, and the owner of
 /// the resource calls `close()` when they want to ensure that all holders of guards
 /// have released them, and that no future guards will be issued.
+#[derive(Debug)]
 pub struct Gate {
     /// Each caller of enter() takes one unit from the semaphore. In close(), we
     /// take all the units to ensure all GateGuards are destroyed.
