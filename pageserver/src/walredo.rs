@@ -144,7 +144,10 @@ fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
 #[derive(Debug, thiserror::Error)]
 pub enum WalRedoError {
     #[error(transparent)]
-    IoError(#[from] std::io::Error),
+    ApplyWalRecords(anyhow::Error),
+
+    #[error("launch process: {0}")]
+    LaunchProcess(io::Error),
 
     #[error("cannot perform WAL redo now")]
     InvalidState,
@@ -271,7 +274,8 @@ impl PostgresRedoManager {
 
             // launch the WAL redo process on first use
             if proc.is_none() {
-                self.launch(&mut proc, pg_version)?;
+                self.launch(&mut proc, pg_version)
+                    .map_err(WalRedoError::LaunchProcess)?;
             }
             WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
 
@@ -279,7 +283,7 @@ impl PostgresRedoManager {
             let buf_tag = BufferTag { rel, blknum };
             let result = self
                 .apply_wal_records(proc, buf_tag, &base_img, records, wal_redo_timeout)
-                .map_err(WalRedoError::IoError);
+                .map_err(WalRedoError::ApplyWalRecords);
 
             let end_time = Instant::now();
             let duration = end_time.duration_since(lock_time);
@@ -310,14 +314,14 @@ impl PostgresRedoManager {
             if let Err(e) = result.as_ref() {
                 error!(
                     n_attempts,
-                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {:?}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
                     records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                     nbytes,
                     base_img_lsn,
                     lsn,
-                    utils::error::report_compact_sources(e),
+                    e,
                 );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
@@ -759,7 +763,7 @@ impl PostgresRedoManager {
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
+    ) -> anyhow::Result<Bytes> {
         // Serialize all the messages to send the WAL redo process first.
         //
         // This could be problematic if there are millions of records to replay,
@@ -782,10 +786,7 @@ impl PostgresRedoManager {
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "tried to pass neon wal record to postgres WAL redo",
-                ));
+                anyhow::bail!("tried to pass neon wal record to postgres WAL redo");
             }
         }
         build_get_page_msg(tag, &mut writebuf);
@@ -807,7 +808,7 @@ impl PostgresRedoManager {
         writebuf: &[u8],
         mut input: MutexGuard<Option<ProcessInput>>,
         wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
+    ) -> anyhow::Result<Bytes> {
         let proc = input.as_mut().unwrap();
         let mut nwrite = 0usize;
         let stdout_fd = proc.stdout_fd;
@@ -831,7 +832,7 @@ impl PostgresRedoManager {
             }?;
 
             if n == 0 {
-                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+                anyhow::bail!("WAL redo timed out");
             }
 
             // If we have some messages in stderr, forward them to the log.
@@ -855,10 +856,7 @@ impl PostgresRedoManager {
                     continue;
                 }
             } else if err_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stderr unexpectedly",
-                ));
+                anyhow::bail!("WAL redo process closed its stderr unexpectedly");
             }
 
             // If 'stdin' is writeable, do write.
@@ -867,10 +865,7 @@ impl PostgresRedoManager {
                 nwrite += proc.stdin.write(&writebuf[nwrite..])?;
             } else if in_revents.contains(PollFlags::POLLHUP) {
                 // We still have more data to write, but the process closed the pipe.
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stdin unexpectedly",
-                ));
+                anyhow::bail!("WAL redo process closed its stdin unexpectedly");
             }
         }
         let request_no = proc.n_requests;
@@ -901,10 +896,7 @@ impl PostgresRedoManager {
             //
             // Cross-read this with the comment in apply_batch_postgres if result.is_err().
             // That's where we kill the child process.
-            return Err(Error::new(
-                ErrorKind::BrokenPipe,
-                "WAL redo process closed its stdout unexpectedly",
-            ));
+            anyhow::bail!("WAL redo process closed its stdout unexpectedly");
         }
         let n_processed_responses = output.n_processed_responses;
         while n_processed_responses + output.pending_responses.len() <= request_no {
@@ -923,7 +915,7 @@ impl PostgresRedoManager {
                 }?;
 
                 if n == 0 {
-                    return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+                    anyhow::bail!("WAL redo timed out");
                 }
 
                 // If we have some messages in stderr, forward them to the log.
@@ -947,10 +939,7 @@ impl PostgresRedoManager {
                         continue;
                     }
                 } else if err_revents.contains(PollFlags::POLLHUP) {
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stderr unexpectedly",
-                    ));
+                    anyhow::bail!("WAL redo process closed its stderr unexpectedly");
                 }
 
                 // If we have some data in stdout, read it to the result buffer.
@@ -958,10 +947,7 @@ impl PostgresRedoManager {
                 if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                     nresult += output.stdout.read(&mut resultbuf[nresult..])?;
                 } else if out_revents.contains(PollFlags::POLLHUP) {
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stdout unexpectedly",
-                    ));
+                    anyhow::bail!("WAL redo process closed its stdout unexpectedly");
                 }
             }
             output
