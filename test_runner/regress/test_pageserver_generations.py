@@ -31,6 +31,7 @@ from fixtures.remote_storage import (
 )
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import print_gc_result, wait_until
+from fixtures.workload import Workload
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -560,3 +561,91 @@ def test_eviction_across_generations(neon_env_builder: NeonEnvBuilder):
     read_all(env, tenant_id, timeline_id)
     evict_all_layers(env, tenant_id, timeline_id)
     read_all(env, tenant_id, timeline_id)
+
+
+def test_multi_attach(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    neon_env_builder.enable_generations = True
+    neon_env_builder.num_pageservers = 3
+    neon_env_builder.enable_pageserver_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    pageservers = env.pageservers
+    http_clients = list([p.http_client() for p in pageservers])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # We will intentionally create situations where stale deletions happen from non-latest-generation
+    # nodes when the tenant is multiply-attached
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
+        )
+
+    # Initially, the tenant will be attached to the pageserver a (first is default in our test harness)
+    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
+    _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
+    with pytest.raises(PageserverApiException):
+        http_clients[1].timeline_detail(tenant_id, timeline_id)
+    with pytest.raises(PageserverApiException):
+        http_clients[2].timeline_detail(tenant_id, timeline_id)
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(pageservers[0].id)
+    workload.write_rows(1000, pageservers[0].id)
+
+    # Attach the tenant to the other two pageservers
+    pageservers[1].tenant_attach(env.initial_tenant)
+    pageservers[2].tenant_attach(env.initial_tenant)
+
+    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[1], tenant_id, "Active"))
+    wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
+
+    # Now they all have it attached
+    _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
+    _detail = http_clients[1].timeline_detail(tenant_id, timeline_id)
+    _detail = http_clients[2].timeline_detail(tenant_id, timeline_id)
+
+    # The endpoint can use any pageserver to service its reads
+    for pageserver in pageservers:
+        workload.validate(pageserver.id)
+
+    # If we write some more data, all the nodes can see it, including stale ones
+    wrote_lsn = workload.write_rows(1000, pageservers[0].id)
+    for ps_http in http_clients:
+        wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, wrote_lsn)
+
+    # ...and indeed endpoints can see it via any of the pageservers
+    for pageserver in pageservers:
+        workload.validate(pageserver.id)
+
+    # Prompt all the pageservers, including stale ones, to upload ingested layers to remote storage
+    for ps_http in http_clients:
+        ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        wait_for_upload(ps_http, tenant_id, timeline_id, wrote_lsn)
+
+    # Now, the contents of remote storage will be a set of layers from each pageserver, but with unique
+    # generation numbers
+    # TODO: validate remote storage contents
+
+    # Stop all pageservers
+    for ps in pageservers:
+        ps.stop()
+
+    # Returning to a normal healthy state: all pageservers will start, but only the one most
+    # recently attached via the control plane will re-attach on startup
+    for ps in pageservers:
+        ps.start()
+
+    with pytest.raises(PageserverApiException):
+        _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
+    with pytest.raises(PageserverApiException):
+        _detail = http_clients[1].timeline_detail(tenant_id, timeline_id)
+    _detail = http_clients[2].timeline_detail(tenant_id, timeline_id)
+
+    # All data we wrote while multi-attached remains readable
+    workload.validate(pageservers[2].id)
