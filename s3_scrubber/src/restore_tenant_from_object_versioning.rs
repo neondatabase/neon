@@ -4,7 +4,6 @@
 //!
 //! # Instructions
 //!
-//! - Create empty directory `./restore`
 //! - Run command
 //!   ```
 //!   SSO_ACCOUNT_ID=... REGION=... \
@@ -20,8 +19,10 @@
 //! - Use `cargo neon` to start a pageserver
 //!     - `rm -rf .neon`
 //!     - `cargo neon init`
-//!     - `sed -i 's/.*control_plane_api.*/#\1/` .neon/config
-//!     - configure the pageserver remote storage to point to the restore directory, using text editor
+//!     - `sed -i 's/\(.*control_plane_api.*\)/#\1/' .neon/config`
+//!     - `sed -i 's/\(.*control_plane_api.*\)/#\1/' .neon/pageserver_1/pageserver.toml`
+//!     - configure the pageserver remote storage config to point to the restore directory.
+//!       Use your text editor to edit the TOML file: `.neon/pageserver_1/pageserver.toml`.
 //!       ```
 //!       [remote_storage]
 //!       local_path = "/path/to/restore/pageserver/v1"
@@ -31,10 +32,23 @@
 //!      - `curl -X POST localhost:9898/v1/tenant/TENANT_TO_RESTORE/attach`
 //!      - check `curl -X GET localhost:9898/v1/tenant/TENANT_TO_RESTORE | jq`
 //!     - for each timeline $timeline_id to restore:
-//!         - `cargo neon mappings map --branch-name restore --tenant-id TENANT_TO_RESTORE --timeline-id $timeline_id`
-//!         - `cargo neon endpoint create --tenant-id TENANT_TO_RESTORE --timeline-id $timeline_id restore-$timeline_id`
-//!         - `cargo neon endpoint start --tenant-id TENANT_TO_RESTORE restore-$timeline_id`
-//!         - dump database to somewhere using like so: `./pg_install/v15/bin/pg_dump postgresql://cloud_admin@127.0.0.1:55432/neondb > $timeline_id.dump`
+//!         - `cargo neon mappings map --branch-name restore-$timeline_id --tenant-id TENANT_TO_RESTORE --timeline-id $timeline_id`
+//!         - `cargo neon endpoint create --tenant-id TENANT_TO_RESTORE --branch-name restore-$timeline_id ep-restore-$timeline_id`
+//!         - `cargo neon endpoint start --tenant-id TENANT_TO_RESTORE ep-restore-$timeline_id`
+//!             - it prints a connection string, looking like `postgresql://cloud_admin@127.0.0.1:PORT/DB`
+//!         - dump database contents using postgres tools
+//!             - determine PG version `$restore_pg_version` using
+//!               ```
+//!               curl -s -X GET localhost:9898/v1/tenant/TENANT_TO_RESTORE/timeline/$timeline_id | jq .pg_version
+//!               ```
+//!             - pg_dumpall
+//!               ```
+//!               ./pg_install/$restore_pg_version/bin/pg_dumpall -d THE_CONNECTION_STRING/postgres  > ./restore/pg_dumpall.out
+//!               ```
+//!            - pg_dump a specific database
+//!              ```
+//!              ./pg_install/v15/bin/pg_dump -d 'THE_CONNECTION_STRING/THEDBTODUMP' > ./restore/pg_dump_THEDBTODUMP.out
+//!              ```
 //!         - `cargo neon endpoint stop --tenant-id TENANT_TO_RESTORE restore-$timeline_id`
 //!
 //! - Use the pg_dump files to restore the database into a new Neon project.
