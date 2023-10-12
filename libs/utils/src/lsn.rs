@@ -75,19 +75,19 @@ impl<'de> Deserialize<'de> for Lsn {
 /// # use serde::{Serialize, Deserialize};
 /// use utils::lsn::Lsn;
 ///
-/// #[derive(Partialeq, Serialize, Deserialize)]
+/// #[derive(PartialEq, Serialize, Deserialize, Debug)]
 /// struct Foo {
-///   #[serde(with = "utils::lsn::as_u64")]
+///   #[serde(with = "utils::lsn::serde_as_u64")]
 ///   always_u64: Lsn,
 /// }
 ///
 /// let orig = Foo { always_u64: Lsn(1234) };
 ///
-/// let res = serde_json::to_string(&).unwrap();
-/// assert_eq!(res, r#"{"always_u64": 1234}"#);
+/// let res = serde_json::to_string(&orig).unwrap();
+/// assert_eq!(res, r#"{"always_u64":1234}"#);
 ///
 /// let foo = serde_json::from_str::<Foo>(&res).unwrap();
-/// assert_eq!(res, orig);
+/// assert_eq!(foo, orig);
 /// ```
 ///
 pub mod serde_as_u64 {
