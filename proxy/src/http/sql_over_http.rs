@@ -102,9 +102,9 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
         // convert to text with escaping
         Value::Bool(_) => serde_json::to_string(value).map(Some),
         Value::Number(_) => serde_json::to_string(value).map(Some),
-        Value::Object(_) => serde_json::to_string(value).map(Some),
 
         // here string needs to be escaped, as it is part of the array
+        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
         Value::String(_) => serde_json::to_string(value).map(Some),
 
         // recurse into array
@@ -613,7 +613,7 @@ fn _pg_array_parse(
                     }
                 }
             }
-            '}' => {
+            '}' if !quote => {
                 level -= 1;
                 if level == 0 {
                     push_checked(&mut entry, &mut entries, elem_type)?;
@@ -696,6 +696,14 @@ mod tests {
             vec![Some(
                 "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
             )]
+        );
+        // array of objects
+        let json = r#"[{"foo": 1},{"bar": 2}]"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        assert_eq!(
+            pg_params,
+            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
         );
     }
 
@@ -822,6 +830,25 @@ mod tests {
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
             json!([[[1, 2, 3], [4, 5, 6]]])
+        );
+    }
+    #[test]
+    fn test_pg_array_parse_json() {
+        fn pt(pg_arr: &str) -> Value {
+            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+        }
+        assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1, \"bar\": 2}"}"#),
+            json!([{"foo": 1, "bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1}", "{\"bar\": 2}"}"#),
+            json!([{"foo": 1}, {"bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{{"{\"foo\": 1}", "{\"bar\": 2}"}}"#),
+            json!([[{"foo": 1}, {"bar": 2}]])
         );
     }
 }
