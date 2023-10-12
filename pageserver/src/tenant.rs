@@ -1253,7 +1253,7 @@ impl Tenant {
                     )
                 }
                 Err(DownloadError::NotFound) => {
-                    info!("no index file was found on the remote, found_delete_mark: {found_delete_mark}");
+                    info!(found_delete_mark, "no index file was found on the remote, resuming deletion or cleaning unuploaded up");
 
                     if found_delete_mark {
                         // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
