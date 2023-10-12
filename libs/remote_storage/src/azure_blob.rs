@@ -5,10 +5,7 @@ use std::{borrow::Cow, io::Cursor};
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{Metadata, Range};
-use azure_storage_blobs::{
-    blob::operations::GetBlobBuilder,
-    prelude::{BlobClient, ContainerClient},
-};
+use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use futures_util::StreamExt;
 use http_types::StatusCode;
 use tokio::io::AsyncRead;
@@ -216,10 +213,23 @@ impl RemoteStorage for AzureBlobStorage {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        todo!()
+        let blob_client = self.client.blob_client(self.relative_path_to_name(path));
+
+        let builder = blob_client.delete();
+
+        match builder.into_future().await {
+            Ok(_response) => Ok(()),
+            Err(e) => Err(anyhow::Error::new(e)),
+        }
     }
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
-        todo!()
+        // TODO batch requests are also not supported by the SDK
+        // https://github.com/Azure/azure-sdk-for-rust/issues/1068
+        // https://github.com/Azure/azure-sdk-for-rust/issues/1249
+        for path in paths {
+            self.delete(path).await?;
+        }
+        Ok(())
     }
 }
