@@ -1285,7 +1285,6 @@ impl Tenant {
                     let span = tracing::Span::current();
 
                     return tokio::task::spawn_blocking({
-                        let path = path.clone();
                         move || {
                             let _e = span.entered();
                             let mut metadata = false;
