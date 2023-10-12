@@ -1286,6 +1286,9 @@ impl Tenant {
 
                     return tokio::task::spawn_blocking({
                         move || {
+                            use std::str::FromStr;
+                            use crate::tenant::storage_layer::LayerFileName;
+
                             let _e = span.entered();
                             let mut metadata = false;
                             let mut layers = 0;
@@ -1299,10 +1302,7 @@ impl Tenant {
                                     continue;
                                 }
 
-                                use std::str::FromStr;
-
-                                if crate::tenant::storage_layer::LayerFileName::from_str(file_name)
-                                    .is_ok()
+                                if LayerFileName::from_str(file_name).is_ok()
                                 {
                                     layers += 1;
                                     continue;
