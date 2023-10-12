@@ -4,8 +4,11 @@ use std::{borrow::Cow, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
-use azure_core::request_options::Metadata;
-use azure_storage_blobs::prelude::{BlobClient, ContainerClient};
+use azure_core::request_options::{Metadata, Range};
+use azure_storage_blobs::{
+    blob::operations::GetBlobBuilder,
+    prelude::{BlobClient, ContainerClient},
+};
 use futures_util::StreamExt;
 use http_types::StatusCode;
 use tokio::io::AsyncRead;
@@ -50,6 +53,51 @@ impl AzureBlobStorage {
                 .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
                 .collect(),
         )
+    }
+
+    async fn download_for_builder(
+        &self,
+        builder: GetBlobBuilder,
+    ) -> Result<Download, DownloadError> {
+        let mut response = builder.into_stream();
+
+        // TODO give proper streaming response instead of buffering into RAM
+        let mut buf = Vec::new();
+        while let Some(part) = response.next().await {
+            let part = match part {
+                Ok(l) => l,
+                Err(e) => {
+                    return Err(if let Some(htttp_err) = e.as_http_error() {
+                        match htttp_err.status() {
+                            StatusCode::NotFound => DownloadError::NotFound,
+                            StatusCode::BadRequest => {
+                                DownloadError::BadInput(anyhow::Error::new(e))
+                            }
+                            _ => DownloadError::Other(anyhow::Error::new(e)),
+                        }
+                    } else {
+                        DownloadError::Other(e.into())
+                    });
+                }
+            };
+            let data = part
+                .data
+                .collect()
+                .await
+                .map_err(|e| DownloadError::Other(e.into()))?;
+            buf.extend_from_slice(&data.slice(..));
+        }
+        Ok(Download {
+            download_stream: Box::pin(Cursor::new(buf)),
+            // TODO support obtaining metadata. From what I can see, the azure SDK
+            // gives no method to obtain the metadata from the get request we issued.
+            // This is in contrast to the REST API, which the SDK uses, that does
+            // expose the metadata via the response headers.
+            // We could fire a separate request to get the metadata only, but this
+            // is non-atomic and it also means overhead.
+            // https://learn.microsoft.com/en-us/rest/api/storageservices/get-blob
+            metadata: None,
+        })
     }
 }
 
@@ -141,43 +189,7 @@ impl RemoteStorage for AzureBlobStorage {
 
         let builder = blob_client.get();
 
-        let mut response = builder.into_stream();
-
-        // TODO give proper streaming response instead of buffering into RAM
-        let mut buf = Vec::new();
-        while let Some(part) = response.next().await {
-            let part = match part {
-                Ok(l) => l,
-                Err(e) => {
-                    return Err(if let Some(htttp_err) = e.as_http_error() {
-                        match htttp_err.status() {
-                            StatusCode::NotFound => DownloadError::NotFound,
-                            StatusCode::BadRequest => {
-                                DownloadError::BadInput(anyhow::Error::new(e))
-                            }
-                            _ => DownloadError::Other(anyhow::Error::new(e)),
-                        }
-                    } else {
-                        DownloadError::Other(e.into())
-                    });
-                }
-            };
-            let data = part
-                .data
-                .collect()
-                .await
-                .map_err(|e| DownloadError::Other(e.into()))?;
-            buf.extend_from_slice(&data.slice(..));
-        }
-        Ok(Download {
-            download_stream: Box::pin(Cursor::new(buf)),
-            // TODO support obtaining metadata. From what I can see, the azure SDK
-            // gives no method to obtain the metadata from the get request we issued.
-            // This is in contrast to the REST API, which the SDK uses, that does
-            // expose the metadata via the response headers.
-            // https://learn.microsoft.com/en-us/rest/api/storageservices/get-blob
-            metadata: None,
-        })
+        self.download_for_builder(builder).await
     }
 
     async fn download_byte_range(
@@ -186,7 +198,21 @@ impl RemoteStorage for AzureBlobStorage {
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError> {
-        todo!()
+        let blob_client = self.client.blob_client(self.relative_path_to_name(from));
+
+        let mut builder = blob_client.get();
+
+        if let Some(end_exclusive) = end_exclusive {
+            builder = builder.range(Range::new(start_inclusive, end_exclusive));
+        } else {
+            // TODO: what to do about open ranges??
+            // TODO: file upstream issue that the Range type doesn't support open ranges
+            // TODO also it should be documented if the end is exclusive or inclusive.
+            // https://learn.microsoft.com/en-us/rest/api/storageservices/specifying-the-range-header-for-blob-service-operations
+            panic!("open ranges are not supported!");
+        }
+
+        self.download_for_builder(builder).await
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
