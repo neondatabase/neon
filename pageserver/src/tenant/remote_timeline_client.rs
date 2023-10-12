@@ -501,14 +501,20 @@ impl RemoteTimelineClient {
 
     /// Download a (layer) file from `path`, into local filesystem.
     ///
-    /// 'layer_metadata' is the metadata from the remote index file.
-    ///
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
         layer_file_name: &LayerFileName,
-        layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
+        let layer_metadata = {
+            let q = self.upload_queue.lock().unwrap();
+            q.get_layer_metadata(layer_file_name)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Tried to download layer file that does not exist in remote metadata"
+                )
+            })?
+        };
+
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
                 &RemoteOpFileKind::Layer,
@@ -523,7 +529,7 @@ impl RemoteTimelineClient {
                 self.tenant_id,
                 self.timeline_id,
                 layer_file_name,
-                layer_metadata,
+                &layer_metadata,
             )
             .measure_remote_op(
                 self.tenant_id,
