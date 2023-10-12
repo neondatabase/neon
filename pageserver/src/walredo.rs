@@ -267,6 +267,7 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             let mut proc = self.stdin.lock().unwrap();
+            let stdin_fd = proc.as_mut().unwrap().stdin.as_raw_fd();
             let lock_time = Instant::now();
 
             // launch the WAL redo process on first use
@@ -333,7 +334,9 @@ impl PostgresRedoManager {
                 // and hence the current `apply_wal_records()` calls will observe
                 //  `output.stdout.as_raw_fd() != stdout_fd` .
                 if let Some(proc) = self.stdin.lock().unwrap().take() {
-                    proc.child.kill_and_wait();
+                    if stdin_fd == proc.stdin.as_raw_fd() {
+                        proc.child.kill_and_wait();
+                    }
                 }
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
