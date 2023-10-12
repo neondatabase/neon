@@ -326,7 +326,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         create_root.join()
 
 
-def test_non_uploaded_initial_timeline_availability_after_restart(neon_env_builder: NeonEnvBuilder):
+def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
     Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
 
@@ -370,7 +370,7 @@ def test_non_uploaded_initial_timeline_availability_after_restart(neon_env_build
         ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
 
 
-def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEnvBuilder):
+def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
     Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
 
