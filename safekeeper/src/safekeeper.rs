@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use hex::FromHex;
 use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -281,6 +282,7 @@ impl SafeKeeperState {
 
 /// Initial Proposer -> Acceptor message
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
 pub struct ProposerGreeting {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
@@ -292,6 +294,46 @@ pub struct ProposerGreeting {
     pub tenant_id: TenantId,
     pub tli: TimeLineID,
     pub wal_seg_size: u32,
+}
+
+static EXAMPLE_PROPOSER_GREETING: &[u8] =
+    b"\x02\0\0\0\0q\x02\0\x80\xca+\x0e\xe8\x9e{\x94:b\xab\xe4\0\x1exo\0\0\0\0\0\0\0\0\xfa!\xa3\xc3\xa5s\x8d\xcc^\xd4\x1f\x8cA\x81\xb2\x13\x99\xcf:z& t\x82y\xbf\xee\x8aX\xad\r\xe1\x01\0\0\0\0\0\0\x01";
+
+#[test]
+fn serde_proposergreeting() {
+    let pg = ProposerGreeting::des(EXAMPLE_PROPOSER_GREETING).unwrap();
+
+    assert_eq!(
+        pg,
+        ProposerGreeting {
+            protocol_version: 2,
+            pg_version: 160000,
+            proposer_id: [128, 202, 43, 14, 232, 158, 123, 148, 58, 98, 171, 228, 0, 30, 120, 111],
+            system_id: 0,
+            timeline_id: TimelineId::from_hex("fa21a3c3a5738dcc5ed41f8c4181b213").unwrap(),
+            tenant_id: TenantId::from_hex("99cf3a7a2620748279bfee8a58ad0de1").unwrap(),
+            tli: 1,
+            wal_seg_size: 16777216
+        }
+    );
+}
+
+#[test]
+fn ser_proposergreeting() {
+    let pg = ProposerGreeting {
+        protocol_version: 2,
+        pg_version: 160000,
+        proposer_id: [
+            128, 202, 43, 14, 232, 158, 123, 148, 58, 98, 171, 228, 0, 30, 120, 111,
+        ],
+        system_id: 0,
+        timeline_id: TimelineId::from_hex("fa21a3c3a5738dcc5ed41f8c4181b213").unwrap(),
+        tenant_id: TenantId::from_hex("99cf3a7a2620748279bfee8a58ad0de1").unwrap(),
+        tli: 1,
+        wal_seg_size: 16777216,
+    };
+
+    assert_eq!(&pg.ser().unwrap(), EXAMPLE_PROPOSER_GREETING);
 }
 
 /// Acceptor -> Proposer initial response: the highest term known to me
@@ -402,12 +444,14 @@ impl ProposerAcceptorMessage {
     /// Parse proposer message.
     pub fn parse(msg_bytes: Bytes) -> Result<ProposerAcceptorMessage> {
         // xxx using Reader is inefficient but easy to work with bincode
+        let raw = msg_bytes.clone();
         let mut stream = msg_bytes.reader();
         // u64 is here to avoid padding; it will be removed once we stop packing C structs into the wire as is
         let tag = stream.read_u64::<LittleEndian>()? as u8 as char;
         match tag {
             'g' => {
-                let msg = ProposerGreeting::des_from(&mut stream)?;
+                tracing::info!("greeting in {raw:?}");
+                let msg = dbg!(ProposerGreeting::des_from(&mut stream))?;
                 Ok(ProposerAcceptorMessage::Greeting(msg))
             }
             'v' => {
