@@ -342,8 +342,8 @@ impl GenericRemoteStorage {
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
-                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}', bucket endpoint: '{:?}'",
-                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container, azure_config.endpoint);
+                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config)?))
             }
         })
@@ -459,17 +459,10 @@ pub struct AzureConfig {
     pub container_name: String,
     /// The region where the bucket is located at.
     pub container_region: String,
-    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
+    /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
     pub prefix_in_container: Option<String>,
-    /// A base URL to send S3 requests to.
-    /// By default, the endpoint is derived from a region name, assuming it's
-    /// an AWS S3 region name, erroring on wrong region name.
-    /// Endpoint provides a way to support other S3 flavors and their regions.
-    ///
-    /// Example: `http://127.0.0.1:5000`
-    pub endpoint: Option<String>,
     /// Azure has various limits on its API calls, we need not to exceed those.
-    /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
+    /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
 }
@@ -577,7 +570,6 @@ impl RemoteStorageConfig {
                             parse_toml_string("prefix_in_container", prefix_in_container)
                         })
                         .transpose()?,
-                    endpoint,
                     concurrency_limit,
                     max_keys_per_list_response,
                 })

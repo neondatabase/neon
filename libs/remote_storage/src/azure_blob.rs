@@ -40,6 +40,8 @@ impl AzureBlobStorage {
 
         let builder = ClientBuilder::new(account, credentials);
 
+        // TODO do something about concurrency_limit and max_keys_per_list_response
+
         let client = builder.container_client(azure_config.container_name.to_owned());
         Ok(AzureBlobStorage {
             client,
