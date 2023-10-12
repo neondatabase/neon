@@ -24,7 +24,7 @@ use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io;
+use tokio::{io, sync::Semaphore};
 use toml_edit::Item;
 use tracing::info;
 
@@ -32,6 +32,7 @@ pub use self::{
     azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
     simulate_failures::UnreliableWrapper,
 };
+use s3_bucket::RequestKind;
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
 /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
@@ -616,6 +617,46 @@ fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
         .as_str()
         .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
+}
+
+struct ConcurrencyLimiter {
+    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
+    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
+    // The helps to ensure we don't exceed the thresholds.
+    write: Arc<Semaphore>,
+    read: Arc<Semaphore>,
+}
+
+impl ConcurrencyLimiter {
+    fn for_kind(&self, kind: RequestKind) -> &Arc<Semaphore> {
+        match kind {
+            RequestKind::Get => &self.read,
+            RequestKind::Put => &self.write,
+            RequestKind::List => &self.read,
+            RequestKind::Delete => &self.write,
+        }
+    }
+
+    async fn acquire(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
+        self.for_kind(kind).acquire().await
+    }
+
+    async fn acquire_owned(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        Arc::clone(self.for_kind(kind)).acquire_owned().await
+    }
+
+    fn new(limit: usize) -> ConcurrencyLimiter {
+        Self {
+            read: Arc::new(Semaphore::new(limit)),
+            write: Arc::new(Semaphore::new(limit)),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -17,11 +17,17 @@ use http_types::StatusCode;
 use tokio::io::AsyncRead;
 use tracing::debug;
 
-use crate::{AzureConfig, Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
+use crate::s3_bucket::RequestKind;
+use crate::{
+    AzureConfig, ConcurrencyLimiter, Download, DownloadError, RemotePath, RemoteStorage,
+    StorageMetadata,
+};
 
 pub struct AzureBlobStorage {
     client: ContainerClient,
     prefix_in_container: Option<String>,
+    max_keys_per_list_response: Option<i32>,
+    concurrency_limiter: ConcurrencyLimiter,
 }
 
 impl AzureBlobStorage {
@@ -40,12 +46,12 @@ impl AzureBlobStorage {
 
         let builder = ClientBuilder::new(account, credentials);
 
-        // TODO do something about concurrency_limit and max_keys_per_list_response
-
         let client = builder.container_client(azure_config.container_name.to_owned());
         Ok(AzureBlobStorage {
             client,
             prefix_in_container: azure_config.prefix_in_container.to_owned(),
+            max_keys_per_list_response: azure_config.max_keys_per_list_response,
+            concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
         })
     }
 
@@ -150,6 +156,16 @@ impl AzureBlobStorage {
             }
         }
     }
+
+    async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
+        let permit = self
+            .concurrency_limiter
+            .acquire(kind)
+            .await
+            .expect("semaphore is never closed");
+
+        permit
+    }
 }
 
 fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
@@ -198,12 +214,18 @@ impl RemoteStorage for AzureBlobStorage {
                     });
                 }
             };
-            res.extend(
-                entry
-                    .blobs
-                    .blobs()
-                    .map(|bl| self.name_to_relative_path(&bl.name)),
-            );
+            let name_iter = entry
+                .blobs
+                .blobs()
+                .map(|bl| self.name_to_relative_path(&bl.name));
+            if let Some(max_keys) = self.max_keys_per_list_response {
+                let remaining = max_keys
+                    .checked_sub(res.len() as i32)
+                    .expect("result len always smaller than max_keys");
+                res.extend(name_iter.take(remaining as usize));
+            } else {
+                res.extend(name_iter);
+            }
         }
         Ok(res)
     }
@@ -215,6 +237,7 @@ impl RemoteStorage for AzureBlobStorage {
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
+        let _permit = self.permit(RequestKind::Put).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
         // TODO FIX THIS UGLY HACK and don't buffer the entire object
@@ -236,6 +259,7 @@ impl RemoteStorage for AzureBlobStorage {
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let metadata = self.get_metadata(&blob_client).await?;
@@ -251,6 +275,7 @@ impl RemoteStorage for AzureBlobStorage {
         start_inclusive: u64,
         end_exclusive: Option<u64>,
     ) -> Result<Download, DownloadError> {
+        let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let metadata = self.get_metadata(&blob_client).await?;
@@ -271,6 +296,7 @@ impl RemoteStorage for AzureBlobStorage {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+        let _permit = self.permit(RequestKind::Delete).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(path));
 
         let builder = blob_client.delete();
@@ -282,6 +308,8 @@ impl RemoteStorage for AzureBlobStorage {
     }
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        // Permit is already obtained by inner delete function
+
         // TODO batch requests are also not supported by the SDK
         // https://github.com/Azure/azure-sdk-for-rust/issues/1068
         // https://github.com/Azure/azure-sdk-for-rust/issues/1249
