@@ -4,7 +4,7 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{borrow::Cow, sync::Arc};
+use std::borrow::Cow;
 
 use anyhow::Context;
 use aws_config::{
@@ -24,10 +24,7 @@ use aws_sdk_s3::{
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::Semaphore,
-};
+use tokio::io::{self, AsyncRead};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
