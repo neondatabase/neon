@@ -414,15 +414,15 @@ impl Endpoint {
             );
         }
 
-        // Also wait for the compute_ctl process to die. It might have some cleanup
-        // work to do after postgres stops, like syncing safekeepers, etc.
-        //
+        Ok(())
+    }
+
+    fn wait_for_compute_ctl_to_exit(&self) -> Result<()> {
         // TODO use background_process::stop_process instead
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         crate::background_process::wait_until_stopped("compute_ctl", pid)?;
-
         Ok(())
     }
 
@@ -621,6 +621,11 @@ impl Endpoint {
         }
     }
 
+    pub fn sighup(&self) -> Result<()> {
+        self.pg_ctl(&["reload"], &None)?;
+        Ok(())
+    }
+
     pub fn stop(&self, destroy: bool) -> Result<()> {
         // If we are going to destroy data directory,
         // use immediate shutdown mode, otherwise,
@@ -629,6 +634,7 @@ impl Endpoint {
         // Postgres is always started from scratch, so stop
         // without destroy only used for testing and debugging.
         //
+
         if destroy {
             self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
@@ -639,6 +645,10 @@ impl Endpoint {
         } else {
             self.pg_ctl(&["stop"], &None)?;
         }
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        self.wait_for_compute_ctl_to_exit()?;
         Ok(())
     }
 

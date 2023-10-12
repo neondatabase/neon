@@ -19,6 +19,7 @@
 #include "access/xlog.h"
 #include "access/xlogutils.h"
 #include "storage/buf_internals.h"
+#include "c.h"
 
 #include "libpq-fe.h"
 #include "libpq/pqformat.h"
@@ -63,6 +64,14 @@ int			max_reconnect_attempts = 60;
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 static bool pageserver_flush(void);
+
+static void
+pageserver_sighup_handler(SIGNAL_ARGS)
+{
+    neon_log(LOG, "Received SIGHUP, flushing existing pageserver");
+    pageserver_flush();
+    neon_log(LOG, "Flush complete");
+}
 
 static bool
 pageserver_connect(int elevel)
@@ -400,7 +409,7 @@ pg_init_libpagestore(void)
 							   NULL,
 							   &page_server_connstring,
 							   "",
-							   PGC_POSTMASTER,
+							   PGC_SIGHUP,
 							   0,	/* no flags required */
 							   NULL, NULL, NULL);
 
@@ -482,5 +491,8 @@ pg_init_libpagestore(void)
 		old_redo_read_buffer_filter = redo_read_buffer_filter;
 		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
+
+        pqsignal(SIGHUP, pageserver_sighup_handler);
+
 	lfc_init();
 }

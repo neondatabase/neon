@@ -1445,6 +1445,14 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
+    def endpoint_sighup(
+        self,
+        endpoint_id: str,
+        check_return_code=True,
+    ) -> "subprocess.CompletedProcess[str]":
+        args = ["endpoint", "sighup", endpoint_id]
+        return self.raw_cli(args, check_return_code=check_return_code)
+
     def endpoint_stop(
         self,
         endpoint_id: str,
@@ -2533,6 +2541,10 @@ class Endpoint(PgProtocol):
                 conf.write("\n")
 
         return self
+
+    def sighup(self):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_sighup(self.endpoint_id, self.tenant_id)
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""
