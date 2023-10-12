@@ -6,6 +6,8 @@ use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{Metadata, Range};
 use azure_core::Header;
+use azure_storage::StorageCredentials;
+use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{
     blob::operations::GetBlobBuilder,
     prelude::{BlobClient, ContainerClient},
@@ -13,8 +15,9 @@ use azure_storage_blobs::{
 use futures_util::StreamExt;
 use http_types::StatusCode;
 use tokio::io::AsyncRead;
+use tracing::debug;
 
-use crate::{Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
+use crate::{AzureConfig, Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
 
 pub struct AzureBlobStorage {
     client: ContainerClient,
@@ -22,8 +25,26 @@ pub struct AzureBlobStorage {
 }
 
 impl AzureBlobStorage {
-    pub fn new() -> Result<Self> {
-        todo!()
+    pub fn new(azure_config: &AzureConfig) -> Result<Self> {
+        debug!(
+            "Creating azure remote storage for azure container {}",
+            azure_config.container_name
+        );
+
+        let account =
+            std::env::var("AZURE_STORAGE_ACCOUNT").expect("missing AZURE_STORAGE_ACCOUNT");
+        let access_key =
+            std::env::var("AZURE_STORAGE_ACCESS_KEY").expect("missing AZURE_STORAGE_ACCESS_KEY");
+
+        let credentials = StorageCredentials::access_key(account.clone(), access_key);
+
+        let builder = ClientBuilder::new(account, credentials);
+
+        let client = builder.container_client(azure_config.container_name.to_owned());
+        Ok(AzureBlobStorage {
+            client,
+            prefix_in_container: azure_config.prefix_in_container.to_owned(),
+        })
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {

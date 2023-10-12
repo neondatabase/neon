@@ -336,6 +336,11 @@ impl GenericRemoteStorage {
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
+            RemoteStorageKind::AzureContainer(azure_config) => {
+                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}', bucket endpoint: '{:?}'",
+                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container, azure_config.endpoint);
+                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config)?))
+            }
         })
     }
 
@@ -400,6 +405,9 @@ pub enum RemoteStorageKind {
     /// AWS S3 based storage, storing all files in the S3 bucket
     /// specified by the config
     AwsS3(S3Config),
+    /// Azure Blob based storage, storing all files in the container
+    /// specified by the config
+    AzureContainer(AzureConfig),
 }
 
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
@@ -430,6 +438,43 @@ impl Debug for S3Config {
             .field("bucket_name", &self.bucket_name)
             .field("bucket_region", &self.bucket_region)
             .field("prefix_in_bucket", &self.prefix_in_bucket)
+            .field("concurrency_limit", &self.concurrency_limit)
+            .field(
+                "max_keys_per_list_response",
+                &self.max_keys_per_list_response,
+            )
+            .finish()
+    }
+}
+
+/// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
+#[derive(Clone, PartialEq, Eq)]
+pub struct AzureConfig {
+    /// Name of the container to connect to.
+    pub container_name: String,
+    /// The region where the bucket is located at.
+    pub container_region: String,
+    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
+    pub prefix_in_container: Option<String>,
+    /// A base URL to send S3 requests to.
+    /// By default, the endpoint is derived from a region name, assuming it's
+    /// an AWS S3 region name, erroring on wrong region name.
+    /// Endpoint provides a way to support other S3 flavors and their regions.
+    ///
+    /// Example: `http://127.0.0.1:5000`
+    pub endpoint: Option<String>,
+    /// AWS S3 has various limits on its API calls, we need not to exceed those.
+    /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
+    pub concurrency_limit: NonZeroUsize,
+    pub max_keys_per_list_response: Option<i32>,
+}
+
+impl Debug for AzureConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureConfig")
+            .field("bucket_name", &self.container_name)
+            .field("bucket_region", &self.container_region)
+            .field("prefix_in_bucket", &self.prefix_in_container)
             .field("concurrency_limit", &self.concurrency_limit)
             .field(
                 "max_keys_per_list_response",
