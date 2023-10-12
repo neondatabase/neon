@@ -634,21 +634,26 @@ impl Endpoint {
         // Postgres is always started from scratch, so stop
         // without destroy only used for testing and debugging.
         //
+        self.pg_ctl(
+            if destroy {
+                &["-m", "immediate", "stop"]
+            } else {
+                &["stop"]
+            },
+            &None,
+        )?;
 
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        self.wait_for_compute_ctl_to_exit()?;
         if destroy {
-            self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
-        } else {
-            self.pg_ctl(&["stop"], &None)?;
         }
-        // Also wait for the compute_ctl process to die. It might have some cleanup
-        // work to do after postgres stops, like syncing safekeepers, etc.
-        //
-        self.wait_for_compute_ctl_to_exit()?;
         Ok(())
     }
 
