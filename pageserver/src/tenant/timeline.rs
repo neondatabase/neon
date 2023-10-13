@@ -370,7 +370,7 @@ pub enum PageReconstructError {
 
     /// An error happened replaying WAL records
     #[error(transparent)]
-    WalRedo(#[from] crate::walredo::WalRedoError),
+    WalRedo(anyhow::Error),
 }
 
 impl std::fmt::Debug for PageReconstructError {
