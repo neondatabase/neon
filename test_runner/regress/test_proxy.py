@@ -389,7 +389,6 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
 # Beginning a transaction should not impact the next query,
 # which might come from a completely different client.
-@pytest.mark.xfail(reason="not implemented")
 def test_http_pool_begin(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
