@@ -80,7 +80,6 @@ use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
-use crate::walredo::WalRedoManager;
 use crate::TEMP_FILE_SUFFIX;
 pub use pageserver_api::models::TenantState;
 
@@ -222,7 +221,7 @@ pub struct Tenant {
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
     gc_cs: tokio::sync::Mutex<()>,
-    walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+    walredo_mgr: Arc<WalRedoManager>,
 
     // provides access to timeline data sitting in the remote storage
     pub(crate) remote_storage: Option<GenericRemoteStorage>,
@@ -237,6 +236,48 @@ pub struct Tenant {
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
+}
+
+pub(crate) enum WalRedoManager {
+    Prod(PostgresRedoManager),
+    #[cfg(test)]
+    Test(harness::TestRedoManager),
+}
+
+impl From<PostgresRedoManager> for WalRedoManager {
+    fn from(mgr: PostgresRedoManager) -> Self {
+        Self::Prod(mgr)
+    }
+}
+
+#[cfg(test)]
+impl From<harness::TestRedoManager> for WalRedoManager {
+    fn from(mgr: harness::TestRedoManager) -> Self {
+        Self::Test(mgr)
+    }
+}
+
+impl WalRedoManager {
+    pub async fn request_redo(
+        &self,
+        key: crate::repository::Key,
+        lsn: Lsn,
+        base_img: Option<(Lsn, bytes::Bytes)>,
+        records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
+        pg_version: u32,
+    ) -> anyhow::Result<bytes::Bytes> {
+        match self {
+            Self::Prod(mgr) => {
+                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                    .await
+            }
+            #[cfg(test)]
+            Self::Test(mgr) => {
+                mgr.request_redo(key, lsn, base_img, records, pg_version)
+                    .await
+            }
+        }
+    }
 }
 
 // We should not blindly overwrite local metadata with remote one.
@@ -563,7 +604,9 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            conf, tenant_id,
+        )));
 
         let TenantSharedResources {
             broker_client,
@@ -880,7 +923,9 @@ impl Tenant {
         tenant_id: TenantId,
         reason: String,
     ) -> Arc<Tenant> {
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            conf, tenant_id,
+        )));
         Arc::new(Tenant::new(
             TenantState::Broken {
                 reason,
@@ -919,7 +964,9 @@ impl Tenant {
         let broker_client = resources.broker_client;
         let remote_storage = resources.remote_storage;
 
-        let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            conf, tenant_id,
+        )));
         let tenant = Tenant::new(
             TenantState::Loading,
             conf,
@@ -2307,7 +2354,7 @@ impl Tenant {
         state: TenantState,
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
-        walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+        walredo_mgr: Arc<WalRedoManager>,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
         deletion_queue_client: DeletionQueueClient,
@@ -3438,7 +3485,7 @@ pub async fn dump_layerfile_from_path(
 }
 
 #[cfg(test)]
-pub mod harness {
+pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::OnceCell;
     use std::fs;
@@ -3449,7 +3496,6 @@ pub mod harness {
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::{
         config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
-        walredo::WalRedoManager,
     };
 
     use super::*;
@@ -3578,7 +3624,7 @@ pub mod harness {
         }
 
         pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-            let walredo_mgr = Arc::new(TestRedoManager);
+            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
             let tenant = Arc::new(Tenant::new(
                 TenantState::Loading,
@@ -3612,10 +3658,10 @@ pub mod harness {
     }
 
     // Mock WAL redo manager that doesn't do much
-    pub struct TestRedoManager;
+    pub(crate) struct TestRedoManager;
 
-    impl WalRedoManager for TestRedoManager {
-        fn request_redo(
+    impl TestRedoManager {
+        pub async fn request_redo(
             &self,
             key: Key,
             lsn: Lsn,
