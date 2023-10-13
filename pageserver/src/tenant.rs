@@ -2030,6 +2030,7 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
+        tracing::debug!("shutting down...");
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
@@ -2051,6 +2052,7 @@ impl Tenant {
                 js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
             })
         };
+        tracing::debug!("shutdown waiting for timelines...");
         while let Some(res) = js.join_next().await {
             match res {
                 Ok(()) => {}
@@ -2060,11 +2062,14 @@ impl Tenant {
             }
         }
 
+        tracing::debug!("shutdown waiting for tasks...");
         // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
         //
         // this will additionally shutdown and await all timeline tasks.
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        tracing::debug!("shutdown complete");
 
         Ok(())
     }
