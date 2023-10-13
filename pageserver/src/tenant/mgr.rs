@@ -766,7 +766,7 @@ pub(crate) async fn upsert_location(
                 barrier.wait().await;
             }
         }
-        existing_tenant = None
+        existing_tenant = None;
     }
 
     if let Some(tenant) = existing_tenant {
