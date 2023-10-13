@@ -707,7 +707,7 @@ pub async fn set_new_tenant_config(
     Ok(())
 }
 
-#[instrument(skip_all, fields(tenant_id, new_location_config))]
+#[instrument(skip_all, fields(%tenant_id, %new_location_config))]
 pub(crate) async fn upsert_location(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -717,7 +717,7 @@ pub(crate) async fn upsert_location(
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), anyhow::Error> {
-    info!(%tenant_id, "configuring tenant location {tenant_id} to state {new_location_config:?}");
+    info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
 
     let mut existing_tenant = match get_tenant(tenant_id, false).await {
         Ok(t) => Some(t),
