@@ -1773,6 +1773,16 @@ class NeonPageserver(PgProtocol):
         client = self.http_client()
         return client.tenant_attach(tenant_id, config, config_null, generation=generation)
 
+    def tenant_location_configure(self, tenant_id: TenantId, config: dict[str, Any]):
+        # This API is only for use when generations are enabled
+        assert self.env.attachment_service is not None
+
+        if config["mode"].startswith("Attached") and "generation" not in config:
+            config["generation"] = self.env.attachment_service.attach_hook(tenant_id, self.id)
+
+        client = self.http_client()
+        return client.tenant_location_conf(tenant_id, config)
+
 
 def append_pageserver_param_overrides(
     params_to_update: List[str],

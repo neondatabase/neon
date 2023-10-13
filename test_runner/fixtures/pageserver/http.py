@@ -247,6 +247,14 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
 
+    def tenant_location_conf(self, tenant_id: TenantId, location_conf=dict[str, Any]):
+        body = location_conf.copy()
+        body["tenant_id"] = str(tenant_id)
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config", json=body
+        )
+        self.verbose_error(res)
+
     def tenant_delete(self, tenant_id: TenantId):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
