@@ -296,14 +296,14 @@ impl PostgresRedoManager {
             // next request will launch a new one.
             if let Err(e) = result.as_ref() {
                 error!(
-                    n_attempts,
-                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {:?}",
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
                     records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                     nbytes,
                     base_img_lsn,
                     lsn,
+                    n_attempts,
                     e,
                 );
                 // self.stdin only holds stdin & stderr as_raw_fd().
