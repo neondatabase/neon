@@ -433,51 +433,43 @@ mod tests {
         assert_eq!(Id::deserialize(&mut deserializer).unwrap(), original_id);
     }
 
+    macro_rules! roundtrip_type {
+        ($type:ty, $expected_bytes:expr) => {{
+            let expected_bytes: [u8; 16] = $expected_bytes;
+            let original_id = <$type>::from(expected_bytes);
+
+            let ser_bytes = original_id.ser().unwrap();
+            assert_eq!(ser_bytes, expected_bytes);
+
+            let des_id = <$type>::des(&ser_bytes).unwrap();
+            assert_eq!(des_id, original_id);
+        }};
+    }
+
     #[test]
     fn test_id_bincode_serde() {
-        let id_arr = [
+        let expected_bytes = [
             173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
         ];
 
-        let original_id = Id(id_arr);
-        let expected_bytes = id_arr.to_vec();
-
-        let ser_bytes = original_id.ser().unwrap();
-        assert!(ser_bytes == expected_bytes);
-
-        let des_id = Id::des(&ser_bytes).unwrap();
-        assert!(des_id == original_id);
+        roundtrip_type!(Id, expected_bytes);
     }
 
     #[test]
     fn test_tenant_id_bincode_serde() {
-        let id_arr = [
+        let expected_bytes = [
             173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
         ];
 
-        let original_tenant_id = TenantId(Id(id_arr));
-        let expected_bytes = id_arr.to_vec();
-
-        let ser_bytes = original_tenant_id.ser().unwrap();
-        assert_eq!(ser_bytes, expected_bytes);
-
-        let des_tenant_id = TenantId::des(&ser_bytes).unwrap();
-        assert_eq!(des_tenant_id, original_tenant_id);
+        roundtrip_type!(TenantId, expected_bytes);
     }
 
     #[test]
     fn test_timeline_id_bincode_serde() {
-        let id_arr = [
+        let expected_bytes = [
             173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
         ];
 
-        let original_timeline_id = TimelineId(Id(id_arr));
-        let expected_bytes = id_arr.to_vec();
-
-        let ser_bytes = original_timeline_id.ser().unwrap();
-        assert_eq!(ser_bytes, expected_bytes);
-
-        let des_timeline_id = TimelineId::des(&expected_bytes).unwrap();
-        assert_eq!(des_timeline_id, original_timeline_id);
+        roundtrip_type!(TimelineId, expected_bytes);
     }
 }
