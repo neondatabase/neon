@@ -18,6 +18,7 @@
 //! any WAL records, so that even if an attacker hijacks the Postgres
 //! process, he cannot escape out of it.
 //!
+use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
@@ -89,7 +90,7 @@ pub trait WalRedoManager: Send + Sync {
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
-    ) -> Result<Bytes, WalRedoError>;
+    ) -> anyhow::Result<Bytes>;
 }
 
 struct ProcessInput {
@@ -140,20 +141,6 @@ fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
     }
 }
 
-/// An error happened in WAL redo
-#[derive(Debug, thiserror::Error)]
-pub enum WalRedoError {
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
-
-    #[error("cannot perform WAL redo now")]
-    InvalidState,
-    #[error("cannot perform WAL redo for this request")]
-    InvalidRequest,
-    #[error("cannot perform WAL redo for this record")]
-    InvalidRecord,
-}
-
 ///
 /// Public interface of WAL redo manager
 ///
@@ -171,10 +158,9 @@ impl WalRedoManager for PostgresRedoManager {
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
-    ) -> Result<Bytes, WalRedoError> {
+    ) -> anyhow::Result<Bytes> {
         if records.is_empty() {
-            error!("invalid WAL redo request with no records");
-            return Err(WalRedoError::InvalidRequest);
+            anyhow::bail!("invalid WAL redo request with no records");
         }
 
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
@@ -260,8 +246,8 @@ impl PostgresRedoManager {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
-    ) -> Result<Bytes, WalRedoError> {
-        let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
+    ) -> anyhow::Result<Bytes> {
+        let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let start_time = Instant::now();
         let mut n_attempts = 0u32;
@@ -271,7 +257,8 @@ impl PostgresRedoManager {
 
             // launch the WAL redo process on first use
             if proc.is_none() {
-                self.launch(&mut proc, pg_version)?;
+                self.launch(&mut proc, pg_version)
+                    .context("launch process")?;
             }
             WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
 
@@ -279,7 +266,7 @@ impl PostgresRedoManager {
             let buf_tag = BufferTag { rel, blknum };
             let result = self
                 .apply_wal_records(proc, buf_tag, &base_img, records, wal_redo_timeout)
-                .map_err(WalRedoError::IoError);
+                .context("apply_wal_records");
 
             let end_time = Instant::now();
             let duration = end_time.duration_since(lock_time);
@@ -309,15 +296,15 @@ impl PostgresRedoManager {
             // next request will launch a new one.
             if let Err(e) = result.as_ref() {
                 error!(
-                    n_attempts,
-                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {}: {}",
+                    "error applying {} WAL records {}..{} ({} bytes) to base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
                     records.len(),
                     records.first().map(|p| p.0).unwrap_or(Lsn(0)),
                     records.last().map(|p| p.0).unwrap_or(Lsn(0)),
                     nbytes,
                     base_img_lsn,
                     lsn,
-                    utils::error::report_compact_sources(e),
+                    n_attempts,
+                    e,
                 );
                 // self.stdin only holds stdin & stderr as_raw_fd().
                 // Dropping it as part of take() doesn't close them.
@@ -354,7 +341,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-    ) -> Result<Bytes, WalRedoError> {
+    ) -> anyhow::Result<Bytes> {
         let start_time = Instant::now();
 
         let mut page = BytesMut::new();
@@ -363,8 +350,7 @@ impl PostgresRedoManager {
             page.extend_from_slice(&fpi[..]);
         } else {
             // All the current WAL record types that we can handle require a base image.
-            error!("invalid neon WAL redo request with no base image");
-            return Err(WalRedoError::InvalidRequest);
+            anyhow::bail!("invalid neon WAL redo request with no base image");
         }
 
         // Apply all the WAL records in the batch
@@ -392,14 +378,13 @@ impl PostgresRedoManager {
         page: &mut BytesMut,
         _record_lsn: Lsn,
         record: &NeonWalRecord,
-    ) -> Result<(), WalRedoError> {
+    ) -> anyhow::Result<()> {
         match record {
             NeonWalRecord::Postgres {
                 will_init: _,
                 rec: _,
             } => {
-                error!("tried to pass postgres wal record to neon WAL redo");
-                return Err(WalRedoError::InvalidRequest);
+                anyhow::bail!("tried to pass postgres wal record to neon WAL redo");
             }
             NeonWalRecord::ClearVisibilityMapFlags {
                 new_heap_blkno,
@@ -407,7 +392,7 @@ impl PostgresRedoManager {
                 flags,
             } => {
                 // sanity check that this is modifying the correct relation
-                let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
                 assert!(
                     rel.forknum == VISIBILITYMAP_FORKNUM,
                     "ClearVisibilityMapFlags record on unexpected rel {}",
@@ -445,7 +430,7 @@ impl PostgresRedoManager {
             // same effects as the corresponding Postgres WAL redo function.
             NeonWalRecord::ClogSetCommitted { xids, timestamp } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -495,7 +480,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::ClogSetAborted { xids } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -526,7 +511,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::MultixactOffsetCreate { mid, moff } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactOffsets,
@@ -559,7 +544,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::MultixactMembersCreate { moff, members } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(key).or(Err(WalRedoError::InvalidRecord))?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactMembers,
@@ -759,7 +744,7 @@ impl PostgresRedoManager {
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
+    ) -> anyhow::Result<Bytes> {
         // Serialize all the messages to send the WAL redo process first.
         //
         // This could be problematic if there are millions of records to replay,
@@ -782,10 +767,7 @@ impl PostgresRedoManager {
             {
                 build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "tried to pass neon wal record to postgres WAL redo",
-                ));
+                anyhow::bail!("tried to pass neon wal record to postgres WAL redo");
             }
         }
         build_get_page_msg(tag, &mut writebuf);
@@ -807,7 +789,7 @@ impl PostgresRedoManager {
         writebuf: &[u8],
         mut input: MutexGuard<Option<ProcessInput>>,
         wal_redo_timeout: Duration,
-    ) -> Result<Bytes, std::io::Error> {
+    ) -> anyhow::Result<Bytes> {
         let proc = input.as_mut().unwrap();
         let mut nwrite = 0usize;
         let stdout_fd = proc.stdout_fd;
@@ -831,7 +813,7 @@ impl PostgresRedoManager {
             }?;
 
             if n == 0 {
-                return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+                anyhow::bail!("WAL redo timed out");
             }
 
             // If we have some messages in stderr, forward them to the log.
@@ -855,10 +837,7 @@ impl PostgresRedoManager {
                     continue;
                 }
             } else if err_revents.contains(PollFlags::POLLHUP) {
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stderr unexpectedly",
-                ));
+                anyhow::bail!("WAL redo process closed its stderr unexpectedly");
             }
 
             // If 'stdin' is writeable, do write.
@@ -867,10 +846,7 @@ impl PostgresRedoManager {
                 nwrite += proc.stdin.write(&writebuf[nwrite..])?;
             } else if in_revents.contains(PollFlags::POLLHUP) {
                 // We still have more data to write, but the process closed the pipe.
-                return Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "WAL redo process closed its stdin unexpectedly",
-                ));
+                anyhow::bail!("WAL redo process closed its stdin unexpectedly");
             }
         }
         let request_no = proc.n_requests;
@@ -901,10 +877,7 @@ impl PostgresRedoManager {
             //
             // Cross-read this with the comment in apply_batch_postgres if result.is_err().
             // That's where we kill the child process.
-            return Err(Error::new(
-                ErrorKind::BrokenPipe,
-                "WAL redo process closed its stdout unexpectedly",
-            ));
+            anyhow::bail!("WAL redo process closed its stdout unexpectedly");
         }
         let n_processed_responses = output.n_processed_responses;
         while n_processed_responses + output.pending_responses.len() <= request_no {
@@ -923,7 +896,7 @@ impl PostgresRedoManager {
                 }?;
 
                 if n == 0 {
-                    return Err(Error::new(ErrorKind::Other, "WAL redo timed out"));
+                    anyhow::bail!("WAL redo timed out");
                 }
 
                 // If we have some messages in stderr, forward them to the log.
@@ -947,10 +920,7 @@ impl PostgresRedoManager {
                         continue;
                     }
                 } else if err_revents.contains(PollFlags::POLLHUP) {
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stderr unexpectedly",
-                    ));
+                    anyhow::bail!("WAL redo process closed its stderr unexpectedly");
                 }
 
                 // If we have some data in stdout, read it to the result buffer.
@@ -958,10 +928,7 @@ impl PostgresRedoManager {
                 if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                     nresult += output.stdout.read(&mut resultbuf[nresult..])?;
                 } else if out_revents.contains(PollFlags::POLLHUP) {
-                    return Err(Error::new(
-                        ErrorKind::BrokenPipe,
-                        "WAL redo process closed its stdout unexpectedly",
-                    ));
+                    anyhow::bail!("WAL redo process closed its stdout unexpectedly");
                 }
             }
             output

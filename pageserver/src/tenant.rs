@@ -3448,11 +3448,8 @@ pub mod harness {
 
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::{
-        config::PageServerConf,
-        repository::Key,
-        tenant::Tenant,
-        walrecord::NeonWalRecord,
-        walredo::{WalRedoError, WalRedoManager},
+        config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
+        walredo::WalRedoManager,
     };
 
     use super::*;
@@ -3625,7 +3622,7 @@ pub mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
-        ) -> Result<Bytes, WalRedoError> {
+        ) -> anyhow::Result<Bytes> {
             let s = format!(
                 "redo for {} to get to {}, with {} and {} records",
                 key,

@@ -11,10 +11,7 @@ use std::sync::{Arc, Barrier};
 
 use bytes::{Buf, Bytes};
 use pageserver::{
-    config::PageServerConf,
-    repository::Key,
-    walrecord::NeonWalRecord,
-    walredo::{PostgresRedoManager, WalRedoError},
+    config::PageServerConf, repository::Key, walrecord::NeonWalRecord, walredo::PostgresRedoManager,
 };
 use utils::{id::TenantId, lsn::Lsn};
 
@@ -152,7 +149,7 @@ impl Drop for JoinOnDrop {
     }
 }
 
-fn execute_all<I>(input: I, manager: &PostgresRedoManager) -> Result<(), WalRedoError>
+fn execute_all<I>(input: I, manager: &PostgresRedoManager) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = Request>,
 {
@@ -160,7 +157,7 @@ where
     input.into_iter().try_for_each(|req| {
         let page = req.execute(manager)?;
         assert_eq!(page.remaining(), 8192);
-        Ok::<_, WalRedoError>(())
+        anyhow::Ok(())
     })
 }
 
@@ -473,7 +470,7 @@ struct Request {
 }
 
 impl Request {
-    fn execute(self, manager: &PostgresRedoManager) -> Result<Bytes, WalRedoError> {
+    fn execute(self, manager: &PostgresRedoManager) -> anyhow::Result<Bytes> {
         use pageserver::walredo::WalRedoManager;
 
         let Request {
