@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
@@ -34,6 +35,8 @@ use super::{
 pub struct RemoteLayer {
     pub desc: PersistentLayerDesc,
 
+    pub layer_metadata: LayerFileMetadata,
+
     access_stats: LayerAccessStats,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
@@ -56,6 +59,7 @@ impl std::fmt::Debug for RemoteLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteLayer")
             .field("file_name", &self.desc.filename())
+            .field("layer_metadata", &self.layer_metadata)
             .field("is_incremental", &self.desc.is_incremental())
             .finish()
     }
@@ -111,7 +115,7 @@ impl PersistentLayer for RemoteLayer {
         if self.desc.is_delta {
             HistoricLayerInfo::Delta {
                 layer_file_name,
-                layer_file_size: self.desc.file_size,
+                layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
@@ -120,7 +124,7 @@ impl PersistentLayer for RemoteLayer {
         } else {
             HistoricLayerInfo::Image {
                 layer_file_name,
-                layer_file_size: self.desc.file_size,
+                layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 remote: true,
                 access_stats: self.access_stats.as_api_model(reset),
@@ -138,7 +142,7 @@ impl RemoteLayer {
         tenantid: TenantId,
         timelineid: TimelineId,
         fname: &ImageFileName,
-        file_size: u64,
+        layer_metadata: &LayerFileMetadata,
         access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
@@ -147,8 +151,9 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn,
-                file_size,
+                layer_metadata.file_size(),
             ),
+            layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
             download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
@@ -159,7 +164,7 @@ impl RemoteLayer {
         tenantid: TenantId,
         timelineid: TimelineId,
         fname: &DeltaFileName,
-        file_size: u64,
+        layer_metadata: &LayerFileMetadata,
         access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
@@ -168,8 +173,9 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn_range.clone(),
-                file_size,
+                layer_metadata.file_size(),
             ),
+            layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
             download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,

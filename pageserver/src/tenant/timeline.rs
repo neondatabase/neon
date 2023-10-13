@@ -1294,12 +1294,14 @@ impl Timeline {
                 Ok(delta) => Some(delta),
             };
 
+        let layer_metadata = LayerFileMetadata::new(layer_file_size, self.generation);
+
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
                 self.tenant_id,
                 self.timeline_id,
                 &image_name,
-                layer_file_size,
+                &layer_metadata,
                 local_layer
                     .access_stats()
                     .clone_for_residence_change(LayerResidenceStatus::Evicted),
@@ -1308,7 +1310,7 @@ impl Timeline {
                 self.tenant_id,
                 self.timeline_id,
                 &delta_name,
-                layer_file_size,
+                &layer_metadata,
                 local_layer
                     .access_stats()
                     .clone_for_residence_change(LayerResidenceStatus::Evicted),
@@ -1829,24 +1831,12 @@ impl Timeline {
                                 stats,
                             ))
                         }
-                        (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => {
-                            Arc::new(RemoteLayer::new_delta(
-                                tenant_id,
-                                timeline_id,
-                                &d,
-                                remote.file_size(),
-                                stats,
-                            ))
-                        }
-                        (Image(i), Evicted(remote) | UseRemote { remote, .. }) => {
-                            Arc::new(RemoteLayer::new_img(
-                                tenant_id,
-                                timeline_id,
-                                &i,
-                                remote.file_size(),
-                                stats,
-                            ))
-                        }
+                        (Delta(d), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
+                            RemoteLayer::new_delta(tenant_id, timeline_id, &d, remote, stats),
+                        ),
+                        (Image(i), Evicted(remote) | UseRemote { remote, .. }) => Arc::new(
+                            RemoteLayer::new_img(tenant_id, timeline_id, &i, remote, stats),
+                        ),
                     };
 
                     if let NeedsUpload(m) = decision {
@@ -4430,7 +4420,7 @@ impl Timeline {
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.
                 let result = remote_client
-                    .download_layer_file(&remote_layer.filename())
+                    .download_layer_file(&remote_layer.filename(), &remote_layer.layer_metadata)
                     .await;
 
                 if let Ok(size) = &result {
