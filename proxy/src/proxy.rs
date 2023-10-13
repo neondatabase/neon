@@ -5,7 +5,7 @@ use crate::{
     auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
-    config::{ProxyConfig, TlsConfig},
+    config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     metrics::{Ids, USAGE_METRICS},
@@ -298,7 +298,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode))
+        .with_session(|session| client.connect_to_db(session, mode, &config.authentication_config))
         .await
 }
 
@@ -775,6 +775,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         self,
         session: cancellation::Session<'_>,
         mode: ClientMode,
+        config: &'static AuthenticationConfig,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -790,7 +791,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         };
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, mode.allow_cleartext())
+            .authenticate(&extra, &mut stream, mode.allow_cleartext(), config)
             .await
         {
             Ok(auth_result) => auth_result,

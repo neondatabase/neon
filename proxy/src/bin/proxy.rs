@@ -1,5 +1,6 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
@@ -83,6 +84,9 @@ struct ProxyCliArgs {
     /// timeout for http connections
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     sql_over_http_timeout: tokio::time::Duration,
+    /// timeout for scram authentication protocol
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    scram_protocol_timeout: tokio::time::Duration,
 }
 
 #[tokio::main]
@@ -227,12 +231,16 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let http_config = HttpConfig {
         sql_over_http_timeout: args.sql_over_http_timeout,
     };
+    let authentication_config = AuthenticationConfig {
+        scram_protocol_timeout: args.scram_protocol_timeout,
+    };
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
+        authentication_config,
     }));
 
     Ok(config)
