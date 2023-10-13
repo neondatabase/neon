@@ -827,6 +827,9 @@ pub(crate) async fn upsert_location(
                         },
                         AttachedTenantConf::try_from(new_location_config)?,
                         &TENANTS,
+                        // The LocationConf API does not use marker files, because we have Secondary
+                        // locations where the directory's existence is not a signal that it contains
+                        // all timelines.  See https://github.com/neondatabase/neon/issues/5550
                         AttachMarkerMode::Ignore,
                         ctx,
                     ) {
