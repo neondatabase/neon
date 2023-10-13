@@ -741,13 +741,6 @@ NeonProcessUtility(
 			break;
 		case T_DropdbStmt:
 			HandleDropDb(castNode(DropdbStmt, parseTree));
-			/*
-			 * We do this here to hack around the fact that Postgres performs the drop
-			 * INSIDE of standard_ProcessUtility, which means that if we try to
-			 * abort the drop normally it'll be too late. DROP DATABASE can't be inside
-			 * of a transaction block anyway, so this should be fine to do.
-			 */
-			NeonXactCallback(XACT_EVENT_PRE_COMMIT, NULL);
 			break;
 		case T_CreateRoleStmt:
 			HandleCreateRole(castNode(CreateRoleStmt, parseTree));
