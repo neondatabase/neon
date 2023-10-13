@@ -1164,8 +1164,8 @@ impl Tenant {
                         match e {
                             LoadLocalTimelineError::Load(source) => {
                                 // We tried to load deleted timeline, this is a bug.
-                                return Err(anyhow::anyhow!(source).context(
-                                    "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
+                                return Err(anyhow::anyhow!(source).with_context(
+                                    format!("This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}")
                                 ));
                             }
                             LoadLocalTimelineError::ResumeDeletion(source) => {
