@@ -28,7 +28,7 @@ const BASE_PREFIX: &str = "test";
 /// If real Azure tests are disabled, the test passes, skipping any real test run: currently, there's no way to mark the test ignored in runtime with the
 /// deafult test framework, see https://github.com/rust-lang/rust/issues/68007 for details.
 ///
-/// First, the test creates a set of Azure objects with keys `/${random_prefix_part}/${base_prefix_str}/sub_prefix_${i}/blob_${i}` in [`upload_Azure_data`]
+/// First, the test creates a set of Azure blobs with keys `/${random_prefix_part}/${base_prefix_str}/sub_prefix_${i}/blob_${i}` in [`upload_azure_data`]
 /// where
 /// * `random_prefix_part` is set for the entire Azure client during the Azure client creation in [`create_azure_client`], to avoid multiple test runs interference
 /// * `base_prefix_str` is a common prefix to use in the client requests: we would want to ensure that the client is able to list nested prefixes inside the bucket
@@ -38,9 +38,7 @@ const BASE_PREFIX: &str = "test";
 /// * with `${base_prefix_str}/` prefix, it lists every `sub_prefix_${i}`
 ///
 /// With the real Azure enabled and `#[cfg(test)]` Rust configuration used, the Azure client test adds a `max-keys` param to limit the response keys.
-/// This way, we are able to test the pagination implicitly, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to Azure,
-/// since current default AWS Azure pagination limit is 1000.
-/// (see https://docs.aws.amazon.com/AmazonAzure/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax)
+/// This way, we are able to test the pagination implicitly, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to Azure.
 ///
 /// Lastly, the test attempts to clean up and remove all uploaded Azure files.
 /// If any errors appear during the clean up, they get logged, but the test is not failed or stopped until clean up is finished.
@@ -97,7 +95,7 @@ async fn azure_pagination_should_work(
 /// Uses real Azure and requires [`ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME`] and related Azure cred env vars specified. Test will skip real code and pass if env vars not set.
 /// See `Azure_pagination_should_work` for more information.
 ///
-/// First, create a set of Azure objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_Azure_data`]
+/// First, create a set of Azure objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_azure_data`]
 /// Then performs the following queries:
 ///    1. `list_files(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
 ///    2. `list_files("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
