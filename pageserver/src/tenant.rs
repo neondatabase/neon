@@ -75,6 +75,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
+use crate::METADATA_FILE_NAME;
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
@@ -1297,7 +1298,7 @@ impl Tenant {
                                 let dentry = dentry?;
                                 let file_name = dentry.file_name();
 
-                                if file_name == "metadata" {
+                                if file_name == METADATA_FILE_NAME {
                                     metadata = true;
                                     continue;
                                 }
