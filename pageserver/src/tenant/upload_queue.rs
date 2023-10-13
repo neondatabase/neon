@@ -203,6 +203,18 @@ impl UploadQueue {
             UploadQueue::Stopped(stopped) => Ok(stopped),
         }
     }
+
+    pub(crate) fn get_layer_metadata(
+        &self,
+        name: &LayerFileName,
+    ) -> anyhow::Result<Option<LayerFileMetadata>> {
+        match self {
+            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
+                anyhow::bail!("queue is in state {}", self.as_str())
+            }
+            UploadQueue::Initialized(inner) => Ok(inner.latest_files.get(name).cloned()),
+        }
+    }
 }
 
 /// An in-progress upload or delete task.

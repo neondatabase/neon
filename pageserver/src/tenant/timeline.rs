@@ -1294,7 +1294,23 @@ impl Timeline {
                 Ok(delta) => Some(delta),
             };
 
-        let layer_metadata = LayerFileMetadata::new(layer_file_size, self.generation);
+        // RemoteTimelineClient holds the metadata on layers' remote generations, so
+        // query it to construct a RemoteLayer.
+        let layer_metadata = self
+            .remote_client
+            .as_ref()
+            .expect("Eviction is not called without remote storage")
+            .get_layer_metadata(&local_layer.filename())
+            .map_err(EvictionError::LayerNotFound)?
+            .ok_or_else(|| {
+                EvictionError::LayerNotFound(anyhow::anyhow!("Layer not in remote metadata"))
+            })?;
+        if layer_metadata.file_size() != layer_file_size {
+            return Err(EvictionError::MetadataInconsistency(format!(
+                "Layer size {layer_file_size} doesn't match remote metadata file size {}",
+                layer_metadata.file_size()
+            )));
+        }
 
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
@@ -1373,6 +1389,10 @@ pub(crate) enum EvictionError {
     /// different objects in memory.
     #[error("layer was no longer part of LayerMap")]
     LayerNotFound(#[source] anyhow::Error),
+
+    /// This should never happen
+    #[error("Metadata inconsistency")]
+    MetadataInconsistency(String),
 }
 
 /// Number of times we will compute partition within a checkpoint distance.
