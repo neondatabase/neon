@@ -1,10 +1,11 @@
 //! Azure Blob Storage wrapper
 
+use std::num::NonZeroU32;
 use std::{borrow::Cow, collections::HashMap, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
-use azure_core::request_options::{Metadata, Range};
+use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::Header;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -26,7 +27,7 @@ use crate::{
 pub struct AzureBlobStorage {
     client: ContainerClient,
     prefix_in_container: Option<String>,
-    max_keys_per_list_response: Option<i32>,
+    max_keys_per_list_response: Option<NonZeroU32>,
     concurrency_limiter: ConcurrencyLimiter,
 }
 
@@ -47,10 +48,21 @@ impl AzureBlobStorage {
         let builder = ClientBuilder::new(account, credentials);
 
         let client = builder.container_client(azure_config.container_name.to_owned());
+
+        let max_keys_per_list_response =
+            if let Some(limit) = azure_config.max_keys_per_list_response {
+                Some(
+                    NonZeroU32::new(limit as u32)
+                        .ok_or_else(|| anyhow::anyhow!("max_keys_per_list_response can't be 0"))?,
+                )
+            } else {
+                None
+            };
+
         Ok(AzureBlobStorage {
             client,
             prefix_in_container: azure_config.prefix_in_container.to_owned(),
-            max_keys_per_list_response: azure_config.max_keys_per_list_response,
+            max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
         })
     }
@@ -195,6 +207,10 @@ impl RemoteStorage for AzureBlobStorage {
             builder = builder.prefix(prefix);
         }
 
+        if let Some(limit) = self.max_keys_per_list_response {
+            builder = builder.max_results(MaxResults::new(limit));
+        }
+
         let mut response = builder.into_stream();
         let mut res = Vec::new();
         while let Some(l) = response.next().await {
@@ -218,14 +234,7 @@ impl RemoteStorage for AzureBlobStorage {
                 .blobs
                 .blobs()
                 .map(|bl| self.name_to_relative_path(&bl.name));
-            if let Some(max_keys) = self.max_keys_per_list_response {
-                let remaining = max_keys
-                    .checked_sub(res.len() as i32)
-                    .expect("result len always smaller than max_keys");
-                res.extend(name_iter.take(remaining as usize));
-            } else {
-                res.extend(name_iter);
-            }
+            res.extend(name_iter);
         }
         Ok(res)
     }
