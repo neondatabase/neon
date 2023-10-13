@@ -413,6 +413,12 @@ pub enum CreateTimelineError {
     Other(#[from] anyhow::Error),
 }
 
+/// spawn_attach argument for whether the caller is using attachment markers
+pub(super) enum AttachMarkerMode {
+    Expect,
+    Ignore,
+}
+
 struct TenantDirectoryScan {
     sorted_timelines_to_load: Vec<(TimelineId, TimelineMetadata)>,
     timelines_to_resume_deletion: Vec<(TimelineId, Option<TimelineMetadata>)>,
@@ -560,8 +566,8 @@ impl Tenant {
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        expect_marker: AttachMarkerMode,
         ctx: &RequestContext,
-        expect_marker: bool,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
@@ -670,19 +676,20 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         ctx: &RequestContext,
-        expect_marker: bool,
+        expect_marker: AttachMarkerMode,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        if expect_marker
-            && !tokio::fs::try_exists(&marker_file)
+        if let AttachMarkerMode::Expect = expect_marker {
+            if !tokio::fs::try_exists(&marker_file)
                 .await
                 .context("check for existence of marker file")?
-        {
-            anyhow::bail!(
-                "implementation error: marker file should exist at beginning of this function"
-            );
+            {
+                anyhow::bail!(
+                    "implementation error: marker file should exist at beginning of this function"
+                );
+            }
         }
 
         // Get list of remote timelines
@@ -804,7 +811,7 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
-        if expect_marker {
+        if let AttachMarkerMode::Expect = expect_marker {
             std::fs::remove_file(&marker_file)
                 .with_context(|| format!("unlink attach marker file {marker_file}"))?;
             crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))

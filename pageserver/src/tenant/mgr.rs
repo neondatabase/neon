@@ -27,7 +27,8 @@ use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
-    create_tenant_files, AttachedTenantConf, CreateTenantFilesMode, Tenant, TenantState,
+    create_tenant_files, AttachMarkerMode, AttachedTenantConf, CreateTenantFilesMode, Tenant,
+    TenantState,
 };
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
@@ -495,8 +496,8 @@ pub(crate) fn schedule_local_tenant_processing(
                 resources,
                 location_conf,
                 tenants,
+                AttachMarkerMode::Expect,
                 ctx,
-                true,
             ) {
                 Ok(tenant) => tenant,
                 Err(e) => {
@@ -819,8 +820,8 @@ pub(crate) async fn upsert_location(
                         },
                         AttachedTenantConf::try_from(new_location_config)?,
                         &TENANTS,
+                        AttachMarkerMode::Ignore,
                         ctx,
-                        false,
                     ) {
                         Ok(tenant) => tenant,
                         Err(e) => {
