@@ -349,7 +349,14 @@ impl RemoteStorage for AzureBlobStorage {
 
         match builder.into_future().await {
             Ok(_response) => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e)),
+            Err(e) => {
+                if let Some(htttp_err) = e.as_http_error() {
+                    if htttp_err.status() == StatusCode::NotFound {
+                        return Ok(());
+                    }
+                }
+                Err(anyhow::Error::new(e))
+            }
         }
     }
 
