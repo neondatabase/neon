@@ -34,14 +34,23 @@ impl<'de> Deserialize<'de> for Lsn {
     where
         D: serde::Deserializer<'de>,
     {
-        struct LsnVisitor;
+        struct LsnVisitor {
+            is_human_readable_deserializer: bool,
+        }
 
         impl<'de> Visitor<'de> for LsnVisitor {
             type Value = Lsn;
 
-            // TODO: improve the "expecting" description
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("u64 value in either bincode form(u64) or serde_json form({upper_u32_hex}/{lower_u32_hex})")
+                if self.is_human_readable_deserializer {
+                    formatter.write_str(
+                        "value in form of hex string({upper_u32_hex}/{lower_u32_hex}) representing u64 integer",
+                    )
+                } else {
+                    formatter.write_str(
+                        "value in form of integer(u64)",
+                    )
+                }
             }
 
             fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
@@ -60,9 +69,9 @@ impl<'de> Deserialize<'de> for Lsn {
         }
 
         if deserializer.is_human_readable() {
-            deserializer.deserialize_str(LsnVisitor)
+            deserializer.deserialize_str(LsnVisitor { is_human_readable_deserializer: true })
         } else {
-            deserializer.deserialize_u64(LsnVisitor)
+            deserializer.deserialize_u64(LsnVisitor { is_human_readable_deserializer: false })
         }
     }
 }

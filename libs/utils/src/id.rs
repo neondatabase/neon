@@ -39,16 +39,19 @@ impl<'de> Deserialize<'de> for Id {
     where
         D: serde::Deserializer<'de>,
     {
-        struct IdVisitor;
+        struct IdVisitor {
+            is_human_readable_deserializer: bool,
+        }
 
         impl<'de> Visitor<'de> for IdVisitor {
             type Value = Id;
 
-            // TODO: improve the "expecting" description
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str(
-                    "value in either sequence form([u8; 16]) or serde_json form(hex string)",
-                )
+                if self.is_human_readable_deserializer {
+                    formatter.write_str("value in form of hex string")
+                } else {
+                    formatter.write_str("value in form of integer array([u8; 16])")
+                }
             }
 
             fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
@@ -69,9 +72,16 @@ impl<'de> Deserialize<'de> for Id {
         }
 
         if deserializer.is_human_readable() {
-            deserializer.deserialize_str(IdVisitor)
+            deserializer.deserialize_str(IdVisitor {
+                is_human_readable_deserializer: true,
+            })
         } else {
-            deserializer.deserialize_tuple(16, IdVisitor)
+            deserializer.deserialize_tuple(
+                16,
+                IdVisitor {
+                    is_human_readable_deserializer: false,
+                },
+            )
         }
     }
 }
