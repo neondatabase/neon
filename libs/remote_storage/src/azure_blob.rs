@@ -241,8 +241,8 @@ impl RemoteStorage for AzureBlobStorage {
             };
             let name_iter = entry
                 .blobs
-                .blobs()
-                .map(|bl| self.name_to_relative_path(&bl.name));
+                .prefixes()
+                .map(|prefix| self.name_to_relative_path(&prefix.name));
             res.extend(name_iter);
         }
         Ok(res)
