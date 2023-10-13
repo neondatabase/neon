@@ -18,9 +18,6 @@ pub enum IdError {
 ///
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
-///
-/// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
-/// Check the `serde_with::serde_as` documentation for options for more complex types.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Id([u8; 16]);
 
