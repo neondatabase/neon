@@ -24,6 +24,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::io;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::ops::{Deref, DerefMut};
@@ -34,14 +35,13 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use std::time::Instant;
-use std::{fs, io};
 use tracing::*;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
 #[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::config::PageServerConf;
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
     WAL_REDO_WAIT_TIME,
@@ -50,7 +50,6 @@ use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
 use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::walrecord::NeonWalRecord;
-use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -634,26 +633,6 @@ impl PostgresRedoManager {
         input: &mut MutexGuard<Option<ProcessInput>>,
         pg_version: u32,
     ) -> Result<(), Error> {
-        // Previous versions of wal-redo required data directory and that directories
-        // occupied some space on disk. Remove it if we face it.
-        //
-        // This code could be dropped after one release cycle.
-        let legacy_datadir = path_with_suffix_extension(
-            self.conf
-                .tenant_path(&self.tenant_id)
-                .join("wal-redo-datadir"),
-            TEMP_FILE_SUFFIX,
-        );
-        if legacy_datadir.exists() {
-            info!("legacy wal-redo datadir {legacy_datadir:?} exists, removing");
-            fs::remove_dir_all(&legacy_datadir).map_err(|e| {
-                Error::new(
-                    e.kind(),
-                    format!("legacy wal-redo datadir {legacy_datadir:?} removal failure: {e}"),
-                )
-            })?;
-        }
-
         let pg_bin_dir_path = self
             .conf
             .pg_bin_dir(pg_version)
