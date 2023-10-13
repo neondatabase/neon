@@ -66,7 +66,7 @@ use postgres_ffi::BLCKSZ;
 /// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
 ///
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
-pub struct BufferTag {
+pub(crate) struct BufferTag {
     pub rel: RelTag,
     pub blknum: u32,
 }
@@ -221,15 +221,6 @@ impl PostgresRedoManager {
             stdout: Mutex::new(None),
             stderr: Mutex::new(None),
         }
-    }
-
-    /// Launch process pre-emptively. Should not be needed except for benchmarking.
-    pub fn launch_process(&self, pg_version: u32) -> anyhow::Result<()> {
-        let mut proc = self.stdin.lock().unwrap();
-        if proc.is_none() {
-            self.launch(&mut proc, pg_version)?;
-        }
-        Ok(())
     }
 
     ///
