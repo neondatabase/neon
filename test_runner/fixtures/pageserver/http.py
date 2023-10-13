@@ -247,11 +247,20 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
 
-    def tenant_location_conf(self, tenant_id: TenantId, location_conf=dict[str, Any]):
+    def tenant_location_conf(
+        self, tenant_id: TenantId, location_conf=dict[str, Any], flush_ms=None
+    ):
         body = location_conf.copy()
         body["tenant_id"] = str(tenant_id)
+
+        params = {}
+        if flush_ms is not None:
+            params["flush_ms"] = str(flush_ms)
+
         res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config", json=body
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config",
+            json=body,
+            params=params,
         )
         self.verbose_error(res)
 
@@ -656,6 +665,14 @@ class PageserverHttpClient(requests.Session):
 
     def tenant_break(self, tenant_id: TenantId):
         res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
+        self.verbose_error(res)
+
+    def secondary_tenant_upload(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/secondary/{tenant_id}/upload")
+        self.verbose_error(res)
+
+    def secondary_tenant_download(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/secondary/{tenant_id}/download")
         self.verbose_error(res)
 
     def post_tracing_event(self, level: str, message: str):
