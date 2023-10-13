@@ -10,7 +10,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use once_cell::sync::OnceCell;
 use remote_storage::{
-    AzureConfig, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    AzureConfig, Download, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
 };
 use test_context::{test_context, AsyncTestContext};
 use tokio::task::JoinSet;
@@ -205,6 +205,67 @@ async fn azure_delete_objects_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Resu
     assert_eq!(prefixes.len(), 1);
 
     ctx.client.delete_objects(&[path3]).await?;
+
+    Ok(())
+}
+
+#[test_context(MaybeEnabledAzure)]
+#[tokio::test]
+async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Result<()> {
+    let MaybeEnabledAzure::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let data = "remote blob data here".as_bytes();
+    let data_len = data.len() as u64;
+
+    ctx.client
+        .upload(std::io::Cursor::new(data), data.len(), &path, None)
+        .await?;
+
+    async fn download_and_compare(mut dl: Download) -> anyhow::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        tokio::io::copy(&mut dl.download_stream, &mut buf).await?;
+        Ok(buf)
+    }
+    // Normal download request
+    let dl = ctx.client.download(&path).await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data);
+
+    // Full range (end specified)
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 0, Some(data_len))
+        .await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data);
+
+    // partial range (end specified)
+    let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data[4..10]);
+
+    // partial range (end beyond real end)
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 8, Some(data_len * 100))
+        .await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data[8..]);
+
+    // Partial range (end unspecified)
+    let dl = ctx.client.download_byte_range(&path, 4, None).await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data[4..]);
+
+    // Full range (end unspecified)
+    let dl = ctx.client.download_byte_range(&path, 0, None).await?;
+    let buf = download_and_compare(dl).await?;
+    assert_eq!(buf, data);
 
     Ok(())
 }

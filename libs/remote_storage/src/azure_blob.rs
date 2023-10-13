@@ -334,11 +334,13 @@ impl RemoteStorage for AzureBlobStorage {
         if let Some(end_exclusive) = end_exclusive {
             builder = builder.range(Range::new(start_inclusive, end_exclusive));
         } else {
-            // TODO: what to do about open ranges??
-            // TODO: file upstream issue that the Range type doesn't support open ranges
-            // TODO also it should be documented if the end is exclusive or inclusive.
-            // https://learn.microsoft.com/en-us/rest/api/storageservices/specifying-the-range-header-for-blob-service-operations
-            panic!("open ranges are not supported!");
+            // Open ranges are not supported by the SDK so we work around
+            // by setting the upper limit extremely high (but high enough
+            // to still be representable by signed 64 bit integers).
+            // TODO remove workaround once the SDK adds open range support
+            // https://github.com/Azure/azure-sdk-for-rust/issues/1438
+            let end_exclusive = u64::MAX << 4;
+            builder = builder.range(Range::new(start_inclusive, end_exclusive));
         }
 
         self.download_for_builder(metadata, builder).await
