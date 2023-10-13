@@ -788,6 +788,8 @@ pub(crate) async fn upsert_location(
             let new_slot = match &new_location_config.mode {
                 LocationMode::Secondary(_) => {
                     let tenant_path = conf.tenant_path(&tenant_id);
+                    // Directory doesn't need to be fsync'd because if we crash it can
+                    // safely be recreated next time this tenant location is configured.
                     unsafe_create_dir_all(&tenant_path)
                         .await
                         .with_context(|| format!("Creating {tenant_path}"))?;
@@ -803,9 +805,14 @@ pub(crate) async fn upsert_location(
                     // we have the same problem in load_tenant/attach_tenant.  Probably
                     // need a lock in TenantSlot to fix this.
                     let timelines_path = conf.timelines_path(&tenant_id);
+
+                    // Directory doesn't need to be fsync'd because we do not depend on
+                    // it to exist after crashes: it may be recreated when tenant is
+                    // re-attached, see https://github.com/neondatabase/neon/issues/5550
                     unsafe_create_dir_all(&timelines_path)
                         .await
                         .with_context(|| format!("Creating {timelines_path}"))?;
+
                     Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
