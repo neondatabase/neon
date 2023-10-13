@@ -267,13 +267,13 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             let mut proc = self.stdin.lock().unwrap();
-            let stdin_fd = proc.as_mut().unwrap().stdin.as_raw_fd();
             let lock_time = Instant::now();
 
             // launch the WAL redo process on first use
             if proc.is_none() {
                 self.launch(&mut proc, pg_version)?;
             }
+            let stdin_fd = proc.as_mut().unwrap().stdin.as_raw_fd();
             WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
 
             // Relational WAL records are applied using wal-redo-postgres
