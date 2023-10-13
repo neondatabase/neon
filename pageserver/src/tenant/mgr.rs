@@ -151,6 +151,49 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
+/// Create a directory, including parents.  This does no fsyncs and makes
+/// no guarantees about the persistence of the resulting metadata: for
+/// use when creating dirs for use as cache.
+async fn unsafe_create_dir_all(path: &Utf8PathBuf) -> std::io::Result<()> {
+    let mut dirs_to_create = Vec::new();
+    let mut path: &Utf8Path = path.as_ref();
+
+    // Figure out which directories we need to create.
+    loop {
+        let meta = tokio::fs::metadata(path).await;
+        match meta {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("non-directory found in path: {path}"),
+                ));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+
+        dirs_to_create.push(path);
+
+        match path.parent() {
+            Some(parent) => path = parent,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("can't find parent of path '{path}'"),
+                ));
+            }
+        }
+    }
+
+    // Create directories from parent to child.
+    for &path in dirs_to_create.iter().rev() {
+        tokio::fs::create_dir(path).await?;
+    }
+
+    Ok(())
+}
+
 fn emergency_generations(
     tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
 ) -> HashMap<TenantId, Generation> {
@@ -446,7 +489,15 @@ pub(crate) fn schedule_local_tenant_processing(
                 "attaching mark file present but no remote storage configured".to_string(),
             )
         } else {
-            match Tenant::spawn_attach(conf, tenant_id, resources, location_conf, tenants, ctx) {
+            match Tenant::spawn_attach(
+                conf,
+                tenant_id,
+                resources,
+                location_conf,
+                tenants,
+                ctx,
+                true,
+            ) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -665,7 +716,7 @@ pub(crate) async fn upsert_location(
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), anyhow::Error> {
-    info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
+    info!(%tenant_id, "configuring tenant location {tenant_id} to state {new_location_config:?}");
 
     let mut existing_tenant = match get_tenant(tenant_id, false).await {
         Ok(t) => Some(t),
@@ -714,7 +765,7 @@ pub(crate) async fn upsert_location(
                 barrier.wait().await;
             }
         }
-        existing_tenant = None;
+        existing_tenant = None
     }
 
     if let Some(tenant) = existing_tenant {
@@ -734,36 +785,51 @@ pub(crate) async fn upsert_location(
             }
 
             let new_slot = match &new_location_config.mode {
-                LocationMode::Secondary(_) => TenantSlot::Secondary,
-                LocationMode::Attached(_attach_config) => {
-                    // Do a schedule_local_tenant_processing
-                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
-                    // we have the same problem in load_tenant/attach_tenant.  Probably
-                    // need a lock in TenantSlot to fix this.
+                LocationMode::Secondary(_) => {
+                    let tenant_path = conf.tenant_path(&tenant_id);
+                    unsafe_create_dir_all(&tenant_path)
+                        .await
+                        .with_context(|| format!("Creating {tenant_path}"))?;
+
                     Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
-                    let tenant_path = conf.tenant_path(&tenant_id);
-                    let resources = TenantSharedResources {
-                        broker_client,
-                        remote_storage,
-                        deletion_queue_client,
-                    };
-                    let new_tenant = schedule_local_tenant_processing(
+
+                    TenantSlot::Secondary
+                }
+                LocationMode::Attached(_attach_config) => {
+                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
+                    // we have the same problem in load_tenant/attach_tenant.  Probably
+                    // need a lock in TenantSlot to fix this.
+                    let timelines_path = conf.timelines_path(&tenant_id);
+                    unsafe_create_dir_all(&timelines_path)
+                        .await
+                        .with_context(|| format!("Creating {timelines_path}"))?;
+                    Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+                        .await
+                        .map_err(SetNewTenantConfigError::Persist)?;
+
+                    let tenant = match Tenant::spawn_attach(
                         conf,
                         tenant_id,
-                        &tenant_path,
+                        TenantSharedResources {
+                            broker_client,
+                            remote_storage,
+                            deletion_queue_client,
+                        },
                         AttachedTenantConf::try_from(new_location_config)?,
-                        resources,
-                        None,
                         &TENANTS,
                         ctx,
-                    )
-                    .with_context(|| {
-                        format!("Failed to schedule tenant processing in path {tenant_path:?}")
-                    })?;
+                        false,
+                    ) {
+                        Ok(tenant) => tenant,
+                        Err(e) => {
+                            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                        }
+                    };
 
-                    TenantSlot::Attached(new_tenant)
+                    TenantSlot::Attached(tenant)
                 }
             };
 
@@ -771,7 +837,6 @@ pub(crate) async fn upsert_location(
         })
         .await?;
     }
-
     Ok(())
 }
 

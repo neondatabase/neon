@@ -561,6 +561,7 @@ impl Tenant {
         attached_conf: AttachedTenantConf,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         ctx: &RequestContext,
+        expect_marker: bool,
     ) -> anyhow::Result<Arc<Tenant>> {
         // TODO dedup with spawn_load
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
@@ -641,7 +642,7 @@ impl Tenant {
                     }
                 }
 
-                match tenant_clone.attach(&ctx).await {
+                match tenant_clone.attach(&ctx, expect_marker).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
@@ -666,13 +667,18 @@ impl Tenant {
     ///
     /// No background tasks are started as part of this routine.
     ///
-    async fn attach(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn attach(
+        self: &Arc<Tenant>,
+        ctx: &RequestContext,
+        expect_marker: bool,
+    ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        if !tokio::fs::try_exists(&marker_file)
-            .await
-            .context("check for existence of marker file")?
+        if expect_marker
+            && !tokio::fs::try_exists(&marker_file)
+                .await
+                .context("check for existence of marker file")?
         {
             anyhow::bail!(
                 "implementation error: marker file should exist at beginning of this function"
@@ -798,10 +804,12 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
-        std::fs::remove_file(&marker_file)
-            .with_context(|| format!("unlink attach marker file {marker_file}"))?;
-        crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
-            .context("fsync tenant directory after unlinking attach marker file")?;
+        if expect_marker {
+            std::fs::remove_file(&marker_file)
+                .with_context(|| format!("unlink attach marker file {marker_file}"))?;
+            crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
+                .context("fsync tenant directory after unlinking attach marker file")?;
+        }
 
         crate::failpoint_support::sleep_millis_async!("attach-before-activate");
 
