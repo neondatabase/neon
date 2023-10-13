@@ -205,10 +205,37 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     ddl.wait()
     assert ddl.dbs == {"stork": "cork"}
 
+    cur.execute("DROP DATABASE stork")
+    ddl.wait()
+    assert ddl.dbs == {}
+
     with pytest.raises(psycopg2.InternalError):
         ddl.failures(True)
         cur.execute("CREATE DATABASE failure WITH OWNER=cork")
         ddl.wait()
 
     ddl.failures(False)
+    cur.execute("CREATE DATABASE failure WITH OWNER=cork")
+    ddl.wait()
+    with pytest.raises(psycopg2.InternalError):
+        ddl.failures(True)
+        cur.execute("DROP DATABASE failure")
+        ddl.wait()
+    assert ddl.dbs == {"failure": "cork"}
+    ddl.failures(False)
+
+    # Check that db is still in the Postgres after failure
+    cur.execute("SELECT datconnlimit FROM pg_database WHERE datname = 'failure'")
+    result = cur.fetchone()
+    if not result:
+        raise AssertionError("Database 'failure' not found")
+    # -2 means invalid database
+    # It should be invalid because cplane request failed
+    assert result[0] == -2, "Database 'failure' is not invalid"
+
+    # Check that repeated drop succeeds
+    cur.execute("DROP DATABASE failure")
+    ddl.wait()
+    assert ddl.dbs == {}
+
     conn.close()
