@@ -301,7 +301,7 @@ impl PostgresRedoManager {
                 match &*guard {
                     Some(current_field_value) => {
                         if Arc::ptr_eq(current_field_value, &proc) {
-                            // We're the first to observe an error from `prod`, it's our job to take it out of rotation.
+                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
                             *guard = None;
                         }
                     }
