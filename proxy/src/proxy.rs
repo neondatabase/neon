@@ -134,7 +134,11 @@ impl Drop for LatencyTimer {
     fn drop(&mut self) {
         let duration = self.start.elapsed().as_secs_f64();
         COMPUTE_CONNECTION_LATENCY
-            .with_label_values(&[self.protocol, bool_to_str(self.cache_miss), bool_to_str(self.pool_miss)])
+            .with_label_values(&[
+                self.protocol,
+                bool_to_str(self.cache_miss),
+                bool_to_str(self.pool_miss),
+            ])
             .observe(duration)
     }
 }
