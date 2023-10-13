@@ -707,7 +707,7 @@ pub async fn set_new_tenant_config(
     Ok(())
 }
 
-#[instrument(skip_all, fields(%tenant_id, %new_location_config))]
+#[instrument(skip_all, fields(%tenant_id))]
 pub(crate) async fn upsert_location(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
