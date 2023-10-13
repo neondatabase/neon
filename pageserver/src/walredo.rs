@@ -299,12 +299,14 @@ impl PostgresRedoManager {
                 // We can't prevent it from happening because we want to enable parallelism.
                 let mut guard = self.redo_process.lock().unwrap();
                 match &*guard {
-                    None => unreachable!("we never transition the field back to None"),
                     Some(current_field_value) => {
                         if Arc::ptr_eq(current_field_value, &proc) {
                             // We're the first to observe an error from `prod`, it's our job to take it out of rotation.
                             *guard = None;
                         }
+                    }
+                    None => {
+                        // Another thread was faster to observe the error, and already took the process out of rotation.
                     }
                 }
                 drop(guard);
@@ -718,7 +720,10 @@ impl WalRedoProcess {
     }
 
     fn id(&self) -> u32 {
-        self.child.as_ref().expect("must not call this during Drop").id()
+        self.child
+            .as_ref()
+            .expect("must not call this during Drop")
+            .id()
     }
 
     // Apply given WAL records ('records') over an old page image. Returns
