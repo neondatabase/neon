@@ -170,13 +170,10 @@ impl AzureBlobStorage {
     }
 
     async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
-        let permit = self
-            .concurrency_limiter
+        self.concurrency_limiter
             .acquire(kind)
             .await
-            .expect("semaphore is never closed");
-
-        permit
+            .expect("semaphore is never closed")
     }
 }
 
