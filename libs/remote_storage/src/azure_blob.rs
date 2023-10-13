@@ -74,7 +74,13 @@ impl AzureBlobStorage {
             .as_str()
             .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
         match &self.prefix_in_container {
-            Some(prefix) => prefix.clone() + "/" + path_string,
+            Some(prefix) => {
+                if prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    prefix.clone() + path_string
+                } else {
+                    format!("{prefix}{REMOTE_STORAGE_PREFIX_SEPARATOR}{path_string}")
+                }
+            }
             None => path_string.to_string(),
         }
     }
