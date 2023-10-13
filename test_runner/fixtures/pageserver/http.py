@@ -268,6 +268,23 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/reset", params=params)
         self.verbose_error(res)
 
+    def tenant_location_conf(
+        self, tenant_id: TenantId, location_conf=dict[str, Any], flush_ms=None
+    ):
+        body = location_conf.copy()
+        body["tenant_id"] = str(tenant_id)
+
+        params = {}
+        if flush_ms is not None:
+            params["flush_ms"] = str(flush_ms)
+
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config",
+            json=body,
+            params=params,
+        )
+        self.verbose_error(res)
+
     def tenant_delete(self, tenant_id: TenantId):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
