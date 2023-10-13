@@ -239,9 +239,7 @@ pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
 /// On disk data is prefixed by magic and format version and followed by checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeKeeperState {
-    #[serde(with = "hex")]
     pub tenant_id: TenantId,
-    #[serde(with = "hex")]
     pub timeline_id: TimelineId,
     /// persistent acceptor state
     pub acceptor_state: AcceptorState,
@@ -249,7 +247,6 @@ pub struct SafeKeeperState {
     pub server: ServerInfo,
     /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
-    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
     /// Since which LSN this timeline generally starts. Safekeeper might have
     /// joined later.
@@ -288,7 +285,6 @@ pub struct SafekeeperMemState {
     pub commit_lsn: Lsn,
     pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
-    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
 }
 
