@@ -285,6 +285,10 @@ impl Timeline {
                     warn!(layer = %l, "failed to evict layer: {e}");
                     stats.not_evictable += 1;
                 }
+                Some(Err(EvictionError::MetadataInconsistency(detail))) => {
+                    warn!(layer = %l, "failed to evict layer: {detail}");
+                    stats.not_evictable += 1;
+                }
             }
         }
         if stats.candidates == stats.not_evictable {
