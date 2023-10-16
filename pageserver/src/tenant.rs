@@ -23,6 +23,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
+use utils::completion::Completion;
 use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
@@ -1014,10 +1015,16 @@ impl Tenant {
                     }
                 }
 
+                let remote_load_completion = init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load_remote.take());
                 let background_jobs_can_start =
                     init_order.as_ref().map(|x| &x.background_jobs_can_start);
 
-                match tenant_clone.load(init_order.as_ref(), &ctx).await {
+                match tenant_clone
+                    .load(init_order.as_ref(), remote_load_completion, &ctx)
+                    .await
+                {
                     Ok(()) => {
                         debug!("load finished");
 
@@ -1235,13 +1242,12 @@ impl Tenant {
     async fn load(
         self: &Arc<Tenant>,
         init_order: Option<&InitializationOrder>,
+        remote_completion: Option<Completion>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
-
-        crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Load in-memory state to reflect the local files on disk
         //
@@ -1274,6 +1280,10 @@ impl Tenant {
         } else {
             HashMap::new()
         };
+
+        drop(remote_completion);
+
+        crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
@@ -3683,7 +3693,7 @@ pub mod harness {
                 self.deletion_queue.new_client(),
             ));
             tenant
-                .load(None, ctx)
+                .load(None, None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
 
