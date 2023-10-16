@@ -15,12 +15,11 @@ use crate::{
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use metrics::{
-    exponential_buckets, register_histogram, register_int_counter_vec, Histogram, IntCounterVec,
-};
+use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::{error::Error, io, ops::ControlFlow, sync::Arc};
+use prometheus::{register_histogram_vec, HistogramVec};
+use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -93,15 +92,56 @@ pub static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-static COMPUTE_CONNECTION_LATENCY: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "proxy_compute_connection_latency_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
+        &["protocol", "cache_miss", "pool_miss"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
     .unwrap()
 });
+
+pub struct LatencyTimer {
+    start: Instant,
+    pool_miss: bool,
+    cache_miss: bool,
+    protocol: &'static str,
+}
+
+impl LatencyTimer {
+    pub fn new(protocol: &'static str) -> Self {
+        Self {
+            start: Instant::now(),
+            cache_miss: false,
+            // by default we don't do pooling
+            pool_miss: true,
+            protocol,
+        }
+    }
+
+    pub fn cache_miss(&mut self) {
+        self.cache_miss = true;
+    }
+
+    pub fn pool_hit(&mut self) {
+        self.pool_miss = false;
+    }
+}
+
+impl Drop for LatencyTimer {
+    fn drop(&mut self) {
+        let duration = self.start.elapsed().as_secs_f64();
+        COMPUTE_CONNECTION_LATENCY
+            .with_label_values(&[
+                self.protocol,
+                bool_to_str(self.cache_miss),
+                bool_to_str(self.pool_miss),
+            ])
+            .observe(duration)
+    }
+}
 
 static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -495,13 +535,12 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+    mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
-    let _timer = COMPUTE_CONNECTION_LATENCY.start_timer();
-
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once
@@ -512,6 +551,8 @@ where
             (invalidate_cache(node_info), e)
         }
     };
+
+    latency_timer.cache_miss();
 
     let mut num_retries = 1;
 
@@ -789,6 +830,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
+        let latency_timer = LatencyTimer::new(mode.protocol_label());
+
         let auth_result = match creds
             .authenticate(&extra, &mut stream, mode.allow_cleartext())
             .await
@@ -812,9 +855,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(&TcpMechanism { params }, node_info, &extra, &creds)
-            .or_else(|e| stream.throw_error(e))
-            .await?;
+        let mut node = connect_to_compute(
+            &TcpMechanism { params },
+            node_info,
+            &extra,
+            &creds,
+            latency_timer,
+        )
+        .or_else(|e| stream.throw_error(e))
+        .await?;
 
         let proto = mode.protocol_label();
         NUM_DB_CONNECTIONS_OPENED_COUNTER
