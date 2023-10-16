@@ -116,8 +116,8 @@ impl AzureBlobStorage {
             let part = match part {
                 Ok(l) => l,
                 Err(e) => {
-                    return Err(if let Some(htttp_err) = e.as_http_error() {
-                        match htttp_err.status() {
+                    return Err(if let Some(http_err) = e.as_http_error() {
+                        match http_err.status() {
                             StatusCode::NotFound => DownloadError::NotFound,
                             StatusCode::BadRequest => {
                                 DownloadError::BadInput(anyhow::Error::new(e))
@@ -162,8 +162,8 @@ impl AzureBlobStorage {
                 Ok(StorageMetadata(map))
             }
             Err(e) => {
-                return Err(if let Some(htttp_err) = e.as_http_error() {
-                    match htttp_err.status() {
+                return Err(if let Some(http_err) = e.as_http_error() {
+                    match http_err.status() {
                         StatusCode::NotFound => DownloadError::NotFound,
                         StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(e)),
                         _ => DownloadError::Other(anyhow::Error::new(e)),
@@ -229,8 +229,8 @@ impl RemoteStorage for AzureBlobStorage {
             let entry = match l {
                 Ok(l) => l,
                 Err(e) => {
-                    return Err(if let Some(htttp_err) = e.as_http_error() {
-                        match htttp_err.status() {
+                    return Err(if let Some(http_err) = e.as_http_error() {
+                        match http_err.status() {
                             StatusCode::NotFound => DownloadError::NotFound,
                             StatusCode::BadRequest => {
                                 DownloadError::BadInput(anyhow::Error::new(e))
@@ -355,8 +355,8 @@ impl RemoteStorage for AzureBlobStorage {
         match builder.into_future().await {
             Ok(_response) => Ok(()),
             Err(e) => {
-                if let Some(htttp_err) = e.as_http_error() {
-                    if htttp_err.status() == StatusCode::NotFound {
+                if let Some(http_err) = e.as_http_error() {
+                    if http_err.status() == StatusCode::NotFound {
                         return Ok(());
                     }
                 }
