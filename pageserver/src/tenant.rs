@@ -1269,17 +1269,19 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         // Load remote content for timelines in this tenant
+        let all_timeline_ids = scan
+            .sorted_timelines_to_load
+            .iter()
+            .map(|i| i.0)
+            .chain(scan.timelines_to_resume_deletion.iter().map(|i| i.0))
+            .collect();
         let mut preload = if let Some(remote_storage) = &self.remote_storage {
-            self.load_timeline_metadata(
-                scan.sorted_timelines_to_load
-                    .iter()
-                    .map(|(t, _)| *t)
-                    .collect(),
-                remote_storage,
+            Some(
+                self.load_timeline_metadata(all_timeline_ids, remote_storage)
+                    .await?,
             )
-            .await?
         } else {
-            HashMap::new()
+            None
         };
 
         drop(remote_completion);
@@ -1288,7 +1290,7 @@ impl Tenant {
 
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
-            let timeline_preload = preload.remove(&timeline_id);
+            let timeline_preload = preload.as_mut().map(|p| p.remove(&timeline_id).unwrap());
             if let Err(e) = self
                 .load_local_timeline(
                     timeline_id,
@@ -1330,11 +1332,13 @@ impl Tenant {
                     }
                 }
                 Some(local_metadata) => {
+                    let timeline_preload =
+                        preload.as_mut().map(|p| p.remove(&timeline_id).unwrap());
                     if let Err(e) = self
                         .load_local_timeline(
                             timeline_id,
                             local_metadata,
-                            preload.remove(&timeline_id),
+                            timeline_preload,
                             init_order,
                             ctx,
                             true,
