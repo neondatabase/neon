@@ -1,12 +1,15 @@
 //! Azure Blob Storage wrapper
 
+use std::env;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::{borrow::Cow, collections::HashMap, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::Header;
+use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{
@@ -38,12 +41,16 @@ impl AzureBlobStorage {
             azure_config.container_name
         );
 
-        let account =
-            std::env::var("AZURE_STORAGE_ACCOUNT").expect("missing AZURE_STORAGE_ACCOUNT");
-        let access_key =
-            std::env::var("AZURE_STORAGE_ACCESS_KEY").expect("missing AZURE_STORAGE_ACCESS_KEY");
+        let account = env::var("AZURE_STORAGE_ACCOUNT").expect("missing AZURE_STORAGE_ACCOUNT");
 
-        let credentials = StorageCredentials::access_key(account.clone(), access_key);
+        // If the `AZURE_STORAGE_ACCESS_KEY` env var has an access key, use that,
+        // otherwise try the token based credentials.
+        let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
+            StorageCredentials::access_key(account.clone(), access_key)
+        } else {
+            let token_credential = DefaultAzureCredential::default();
+            StorageCredentials::token_credential(Arc::new(token_credential))
+        };
 
         let builder = ClientBuilder::new(account, credentials);
 
