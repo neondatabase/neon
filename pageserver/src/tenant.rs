@@ -969,6 +969,9 @@ impl Tenant {
                 let _completion = init_order
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load.take());
+                let remote_load_completion = init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load_remote.take());
 
                 // Dont block pageserver startup on figuring out deletion status
                 let pending_deletion = {
@@ -993,6 +996,7 @@ impl Tenant {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
+                    drop(remote_load_completion);
                     // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
                     let _ = init_order
                         .as_mut()
@@ -1015,9 +1019,6 @@ impl Tenant {
                     }
                 }
 
-                let remote_load_completion = init_order
-                    .as_mut()
-                    .and_then(|x| x.initial_tenant_load_remote.take());
                 let background_jobs_can_start =
                     init_order.as_ref().map(|x| &x.background_jobs_can_start);
 
