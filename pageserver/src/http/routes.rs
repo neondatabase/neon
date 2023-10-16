@@ -522,16 +522,21 @@ async fn get_time_range_of_lsn_handler(
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline.get_timestamp_range_for_lsn(lsn, &ctx).await?;
 
-    let result = match result {
+    match result {
         Some((min, max, median)) => {
-            let min = format_rfc3339(postgres_ffi::from_pg_timestamp(min));
-            let max = format_rfc3339(postgres_ffi::from_pg_timestamp(max));
-            let median = format_rfc3339(postgres_ffi::from_pg_timestamp(median));
-            serde_json::json!({ "min": format!("{min}"), "max": format!("{max}"), "median": format!("{median}") })
+            let min = format_rfc3339(postgres_ffi::from_pg_timestamp(min)).to_string();
+            let max = format_rfc3339(postgres_ffi::from_pg_timestamp(max)).to_string();
+            let median = format_rfc3339(postgres_ffi::from_pg_timestamp(median)).to_string();
+            #[derive(serde::Serialize)]
+            struct Result {
+                min: String,
+                max: String,
+                median: String,
+            }
+            json_response(StatusCode::OK, Result { min, max, median })
         }
-        None => serde_json::json!({ "empty": true }),
-    };
-    json_response(StatusCode::OK, result)
+        None => json_response(StatusCode::NOT_FOUND, ()),
+    }
 }
 
 async fn tenant_attach_handler(
