@@ -872,7 +872,7 @@ HandleElectedProposer(WalProposer *wp)
 	 * of their replication slots.
 	 */
 	f = fopen("restart.lsn", "rb");
-	if (f != NULL)
+	if (f != NULL && !wp->config->syncSafekeepers)
 	{
 		fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
 		fclose(f);
@@ -881,7 +881,7 @@ HandleElectedProposer(WalProposer *wp)
 			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
 			/* start from the beginning of the segment to fetch page headers verifed by XLogReader */
 			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
-			truncateLsn = Min(truncateLsn, lrRestartLsn);
+			wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
 		}
 	}
 
