@@ -327,9 +327,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
 
 def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
-    Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
-
-    This test likely duplicates some other test, but it's easier to write one than to make sure there will be a failing test when the rfc is implemented.
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
     """
 
     env = neon_env_builder.init_configs()
@@ -371,9 +369,7 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
 
 def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
-    Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
-
-    This test likely duplicates some other test, but it's easier to write one than to make sure there will be a failing test when the rfc is implemented.
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
     """
 
     env = neon_env_builder.init_configs()
