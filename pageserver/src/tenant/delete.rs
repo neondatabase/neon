@@ -432,7 +432,7 @@ impl DeleteTenantFlow {
         // Tenant may not be loadable if we fail late in cleanup_remaining_fs_traces (e g remove timelines dir)
         let timelines_path = tenant.conf.timelines_path(&tenant.tenant_id);
         if timelines_path.exists() {
-            tenant.load(init_order, ctx).await.context("load")?;
+            tenant.load(init_order, None, ctx).await.context("load")?;
         }
 
         Self::background(

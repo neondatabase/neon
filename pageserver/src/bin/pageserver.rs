@@ -355,6 +355,7 @@ fn start_pageserver(
     // consumer side) will be dropped once we can start the background jobs. Currently it is behind
     // completing all initial logical size calculations (init_logical_size_done_rx) and a timeout
     // (background_task_maximum_delay).
+    let (init_remote_done_tx, init_remote_done_rx) = utils::completion::channel();
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
@@ -362,7 +363,8 @@ fn start_pageserver(
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
 
     let order = pageserver::InitializationOrder {
-        initial_tenant_load: Some(init_done_tx),
+        initial_tenant_load_remote: Some(init_done_tx),
+        initial_tenant_load: Some(init_remote_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
         initial_logical_size_attempt: Some(init_logical_size_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
@@ -387,6 +389,9 @@ fn start_pageserver(
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
+
+            init_remote_done_rx.wait().await;
+            startup_checkpoint("initial_tenant_load_remote", "Remote part of initial load completed");
 
             init_done_rx.wait().await;
             startup_checkpoint("initial_tenant_load", "Initial load completed");
