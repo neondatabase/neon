@@ -21,7 +21,7 @@ aws-smithy-http = { version = "0.56", default-features = false, features = ["eve
 axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
 bytes = { version = "1", features = ["serde"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8" }
@@ -57,7 +57,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 smallvec = { version = "1", default-features = false, features = ["write"] }
 socket2 = { version = "0.4", default-features = false, features = ["all"] }
 standback = { version = "0.2", default-features = false, features = ["std"] }
-time = { version = "0.3", features = ["macros", "serde-well-known"] }
+time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
