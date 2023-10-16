@@ -502,10 +502,9 @@ impl Timeline {
     pub async fn list_aux_files(
         &self,
         lsn: Lsn,
-        db_id: Oid,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get(aux_files_key(db_id), lsn, ctx).await {
+        match self.get(AUX_FILES_KEY, lsn, ctx).await {
             Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
                 Ok(dir) => Ok(dir.files),
                 Err(e) => Err(PageReconstructError::from(e)),
@@ -634,13 +633,7 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-
-        let mut dbs: Vec<Oid> = dbdir.dbdirs.keys().map(|pair| pair.1).collect();
-        dbs.sort_unstable();
-        dbs.dedup();
-        for dbnode in dbs {
-            result.add_key(aux_files_key(dbnode));
-        }
+        result.add_key(AUX_FILES_KEY);
 
         Ok(result.to_keyspace())
     }
@@ -716,6 +709,12 @@ impl<'a> DatadirModification<'a> {
             dbdirs: HashMap::new(),
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+        // Create AuxFilesDirectory
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -821,6 +820,12 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create AuxFilesDirectory as well
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })?;
+            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         }
         if r.is_none() {
             // Create RelDirectory
@@ -831,12 +836,6 @@ impl<'a> DatadirModification<'a> {
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
             );
-            trace!("Create AuxFilesDirectory for database {}", dbnode);
-            // Create AuxFilesDirectory
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: HashMap::new(),
-            })?;
-            self.put(aux_files_key(dbnode), Value::Image(Bytes::from(buf)));
         }
 
         self.put(relmap_file_key(spcnode, dbnode), Value::Image(img));
@@ -905,9 +904,6 @@ impl<'a> DatadirModification<'a> {
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
-
-        // Delete aux files (replications slots, snapshots,...)
-        self.delete(aux_files_key_range(dbnode));
         Ok(())
     }
 
@@ -933,14 +929,6 @@ impl<'a> DatadirModification<'a> {
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
-
-            trace!("Create AuxFilesDirectory for database {}", rel.dbnode);
-            // Create AuxFilesDirectory
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: HashMap::new(),
-            })
-            .context("serialize aux files directory")?;
-            self.put(aux_files_key(rel.dbnode), Value::Image(Bytes::from(buf)));
 
             // and create the RelDirectory
             RelDirectory::default()
@@ -1164,13 +1152,11 @@ impl<'a> DatadirModification<'a> {
 
     pub async fn put_file(
         &mut self,
-        db_id: Oid,
         path: &str,
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let key = aux_files_key(db_id);
-        let mut dir = match self.get(key, ctx).await {
+        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
             Ok(buf) => AuxFilesDirectory::des(&buf)?,
             Err(e) => {
                 warn!("Failed to get info about AUX files: {}", e);
@@ -1186,7 +1172,7 @@ impl<'a> DatadirModification<'a> {
             dir.files.insert(path, Bytes::copy_from_slice(content));
         }
         self.put(
-            key,
+            AUX_FILES_KEY,
             Value::Image(Bytes::from(
                 AuxFilesDirectory::ser(&dir).context("serialize")?,
             )),
@@ -1427,7 +1413,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 03 00000000 00000000 00000000 00   00000001
 //
 // AuxFiles:
-// 04 00000000 DBNODE   00000000 00   00000000
+// 03 00000000 00000000 00000000 00   00000002
 //
 
 //-- Section 01: relation data and metadata
@@ -1634,35 +1620,6 @@ fn twophase_key_range(xid: TransactionId) -> Range<Key> {
     }
 }
 
-fn aux_files_key(db_id: Oid) -> Key {
-    Key {
-        field1: 0x04,
-        field2: 0,
-        field3: db_id,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }
-}
-
-fn aux_files_key_range(db_id: Oid) -> Range<Key> {
-    Key {
-        field1: 0x04,
-        field2: 0,
-        field3: db_id,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }..Key {
-        field1: 0x04,
-        field2: 0,
-        field3: db_id,
-        field4: 0,
-        field5: 0,
-        field6: 1,
-    }
-}
-
 //-- Section 03: Control file
 const CONTROLFILE_KEY: Key = Key {
     field1: 0x03,
@@ -1680,6 +1637,15 @@ const CHECKPOINT_KEY: Key = Key {
     field4: 0,
     field5: 0,
     field6: 1,
+};
+
+const AUX_FILES_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 2,
 };
 
 // Reverse mappings for a few Keys.

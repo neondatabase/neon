@@ -350,9 +350,7 @@ impl<'a> WalIngest<'a> {
                         "wal-ingest-logical-message-sleep"
                     );
                 } else if let Some(path) = prefix.strip_prefix("neon-file:") {
-                    modification
-                        .put_file(xlrec.db_id, path, message, ctx)
-                        .await?;
+                    modification.put_file(path, message, ctx).await?;
                 }
             }
         }

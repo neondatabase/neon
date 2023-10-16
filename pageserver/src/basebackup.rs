@@ -216,11 +216,7 @@ where
                 }
             }
 
-            for (path, content) in self
-                .timeline
-                .list_aux_files(self.lsn, dbnode, self.ctx)
-                .await?
-            {
+            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
                 if path.starts_with("pg_replslot") {
                     let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                     let restart_lsn = Lsn(u64::from_le_bytes(
