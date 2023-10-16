@@ -111,6 +111,7 @@ impl AzureBlobStorage {
         let mut response = builder.into_stream();
 
         // TODO give proper streaming response instead of buffering into RAM
+        // https://github.com/neondatabase/neon/issues/5563
         let mut buf = Vec::new();
         while let Some(part) = response.next().await {
             let part = match part {
@@ -292,6 +293,7 @@ impl RemoteStorage for AzureBlobStorage {
         // TODO FIX THIS UGLY HACK and don't buffer the entire object
         // into RAM here, but use the streaming interface. For that,
         // we'd have to change the interface though...
+        // https://github.com/neondatabase/neon/issues/5563
         let mut buf = Vec::with_capacity(data_size_bytes);
         tokio::io::copy(&mut from, &mut buf).await?;
         let body = azure_core::Body::Bytes(buf.into());
