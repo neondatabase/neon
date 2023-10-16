@@ -29,6 +29,7 @@ use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
@@ -184,6 +185,11 @@ impl AttachedTenantConf {
             }
         }
     }
+}
+struct TimelinePreload {
+    timeline_id: TimelineId,
+    client: RemoteTimelineClient,
+    index_part: Result<MaybeDeletedIndexPart, DownloadError>,
 }
 
 ///
@@ -1175,6 +1181,52 @@ impl Tenant {
         })
     }
 
+    async fn load_timeline_metadata(
+        self: &Arc<Tenant>,
+        timeline_ids: HashSet<TimelineId>,
+        remote_storage: &GenericRemoteStorage,
+    ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
+        let mut part_downloads = JoinSet::new();
+        for timeline_id in timeline_ids {
+            let client = RemoteTimelineClient::new(
+                remote_storage.clone(),
+                self.deletion_queue_client.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+                self.generation,
+            );
+            part_downloads.spawn(
+                async move {
+                    debug!("starting index part download");
+
+                    let index_part = client.download_index_file().await;
+
+                    debug!("finished index part download");
+
+                    Result::<_, anyhow::Error>::Ok(TimelinePreload {
+                        client,
+                        timeline_id,
+                        index_part,
+                    })
+                }
+                .map(move |res| {
+                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
+                })
+                .instrument(info_span!("download_index_part", %timeline_id)),
+            );
+        }
+
+        let mut timeline_preloads: HashMap<TimelineId, TimelinePreload> = HashMap::new();
+        while let Some(result) = part_downloads.join_next().await {
+            let preload_result = result.context("join preload task")?;
+            let preload = preload_result?;
+            timeline_preloads.insert(preload.timeline_id, preload);
+        }
+
+        Ok(timeline_preloads)
+    }
+
     ///
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
@@ -1209,10 +1261,32 @@ impl Tenant {
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
+        // Load remote content for timelines in this tenant
+        let mut preload = if let Some(remote_storage) = &self.remote_storage {
+            self.load_timeline_metadata(
+                scan.sorted_timelines_to_load
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect(),
+                remote_storage,
+            )
+            .await?
+        } else {
+            HashMap::new()
+        };
+
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
+            let timeline_preload = preload.remove(&timeline_id);
             if let Err(e) = self
-                .load_local_timeline(timeline_id, local_metadata, init_order, ctx, false)
+                .load_local_timeline(
+                    timeline_id,
+                    local_metadata,
+                    timeline_preload,
+                    init_order,
+                    ctx,
+                    false,
+                )
                 .await
             {
                 match e {
@@ -1246,7 +1320,14 @@ impl Tenant {
                 }
                 Some(local_metadata) => {
                     if let Err(e) = self
-                        .load_local_timeline(timeline_id, local_metadata, init_order, ctx, true)
+                        .load_local_timeline(
+                            timeline_id,
+                            local_metadata,
+                            preload.remove(&timeline_id),
+                            init_order,
+                            ctx,
+                            true,
+                        )
                         .await
                     {
                         match e {
@@ -1274,11 +1355,12 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, init_order, ctx))]
+    #[instrument(skip(self, local_metadata, init_order, preload, ctx))]
     async fn load_local_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        preload: Option<TimelinePreload>,
         init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
         found_delete_mark: bool,
@@ -1287,74 +1369,81 @@ impl Tenant {
 
         let mut resources = self.build_timeline_resources(timeline_id);
 
-        let (remote_startup_data, remote_client) = match resources.remote_client {
-            Some(remote_client) => match remote_client.download_index_file().await {
-                Ok(index_part) => {
-                    let index_part = match index_part {
-                        MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-                        MaybeDeletedIndexPart::Deleted(index_part) => {
-                            // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
-                            // Example:
-                            //  start deletion operation
-                            //  finishes upload of index part
-                            //  pageserver crashes
-                            //  remote storage gets de-configured
-                            //  pageserver starts
-                            //
-                            // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
-                            // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
-                            info!("is_deleted is set on remote, resuming removal of timeline data originally done by timeline deletion handler");
+        let (remote_startup_data, remote_client) = match preload {
+            Some(preload) => {
+                let TimelinePreload {
+                    index_part,
+                    client: remote_client,
+                    timeline_id: _timeline_id,
+                } = preload;
+                match index_part {
+                    Ok(index_part) => {
+                        let index_part = match index_part {
+                            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+                            MaybeDeletedIndexPart::Deleted(index_part) => {
+                                // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
+                                // Example:
+                                //  start deletion operation
+                                //  finishes upload of index part
+                                //  pageserver crashes
+                                //  remote storage gets de-configured
+                                //  pageserver starts
+                                //
+                                // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
+                                // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
+                                info!("is_deleted is set on remote, resuming removal of timeline data originally done by timeline deletion handler");
 
-                            remote_client
-                                .init_upload_queue_stopped_to_continue_deletion(&index_part)
-                                .context("init queue stopped")
+                                remote_client
+                                    .init_upload_queue_stopped_to_continue_deletion(&index_part)
+                                    .context("init queue stopped")
+                                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+
+                                DeleteTimelineFlow::resume_deletion(
+                                    Arc::clone(self),
+                                    timeline_id,
+                                    &local_metadata,
+                                    Some(remote_client),
+                                    self.deletion_queue_client.clone(),
+                                    init_order,
+                                )
+                                .await
+                                .context("resume deletion")
                                 .map_err(LoadLocalTimelineError::ResumeDeletion)?;
 
-                            DeleteTimelineFlow::resume_deletion(
-                                Arc::clone(self),
+                                return Ok(());
+                            }
+                        };
+
+                        let remote_metadata = index_part.metadata.clone();
+                        (
+                            Some(RemoteStartupData {
+                                index_part,
+                                remote_metadata,
+                            }),
+                            Some(remote_client),
+                        )
+                    }
+                    Err(DownloadError::NotFound) => {
+                        info!("no index file was found on the remote, found_delete_mark: {found_delete_mark}");
+
+                        if found_delete_mark {
+                            // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
+                            // Cleanup:
+                            return DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(
+                                self,
                                 timeline_id,
-                                &local_metadata,
-                                Some(remote_client),
-                                self.deletion_queue_client.clone(),
-                                init_order,
                             )
                             .await
-                            .context("resume deletion")
-                            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-
-                            return Ok(());
+                            .context("cleanup_remaining_timeline_fs_traces")
+                            .map_err(LoadLocalTimelineError::ResumeDeletion);
                         }
-                    };
 
-                    let remote_metadata = index_part.metadata.clone();
-                    (
-                        Some(RemoteStartupData {
-                            index_part,
-                            remote_metadata,
-                        }),
-                        Some(remote_client),
-                    )
-                }
-                Err(DownloadError::NotFound) => {
-                    info!("no index file was found on the remote, found_delete_mark: {found_delete_mark}");
-
-                    if found_delete_mark {
-                        // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
-                        // Cleanup:
-                        return DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(
-                            self,
-                            timeline_id,
-                        )
-                        .await
-                        .context("cleanup_remaining_timeline_fs_traces")
-                        .map_err(LoadLocalTimelineError::ResumeDeletion);
+                        // We're loading fresh timeline that didnt yet make it into remote.
+                        (None, Some(remote_client))
                     }
-
-                    // We're loading fresh timeline that didnt yet make it into remote.
-                    (None, Some(remote_client))
+                    Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
                 }
-                Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
-            },
+            }
             None => {
                 // No remote client
                 if found_delete_mark {
