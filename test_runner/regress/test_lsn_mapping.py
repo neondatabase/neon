@@ -157,9 +157,6 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            # Ensure that empty is not set or set to false
-            assert ("empty" not in result) or not (result["empty"])
-
             min = datetime.fromisoformat(result["min"]).replace(tzinfo=timezone.utc)
             max = datetime.fromisoformat(result["max"]).replace(tzinfo=timezone.utc)
             assert min <= max, "min smaller than max"

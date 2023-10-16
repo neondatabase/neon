@@ -355,6 +355,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found, or there is no timestamp information for the given lsn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
         "500":
           description: Generic operation error
           content:
@@ -1304,8 +1310,6 @@ components:
     TimeRangeByLsnResponse:
       type: object
       properties:
-        empty:
-          type: bool
         min:
           type: string
           format: date-time
