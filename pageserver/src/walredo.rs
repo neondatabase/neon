@@ -633,6 +633,7 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 }
 
 struct WalRedoProcess {
+    #[allow(dead_code)]
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     // Some() on construction, only becomes None on Drop.
