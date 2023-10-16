@@ -341,7 +341,7 @@ impl RemoteStorage for AzureBlobStorage {
             // to still be representable by signed 64 bit integers).
             // TODO remove workaround once the SDK adds open range support
             // https://github.com/Azure/azure-sdk-for-rust/issues/1438
-            let end_exclusive = u64::MAX << 4;
+            let end_exclusive = u64::MAX / 4;
             builder = builder.range(Range::new(start_inclusive, end_exclusive));
         }
 
