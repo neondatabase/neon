@@ -24,6 +24,9 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::config::HttpConfig;
+use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
+
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
 
@@ -99,9 +102,9 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
         // convert to text with escaping
         Value::Bool(_) => serde_json::to_string(value).map(Some),
         Value::Number(_) => serde_json::to_string(value).map(Some),
-        Value::Object(_) => serde_json::to_string(value).map(Some),
 
         // here string needs to be escaped, as it is part of the array
+        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
         Value::String(_) => serde_json::to_string(value).map(Some),
 
         // recurse into array
@@ -188,28 +191,46 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
-    let result = handle_inner(request, sni_hostname, conn_pool, session_id).await;
-
+    let result = tokio::time::timeout(
+        config.sql_over_http_timeout,
+        handle_inner(request, sni_hostname, conn_pool, session_id),
+    )
+    .await;
     let mut response = match result {
-        Ok(r) => r,
-        Err(e) => {
-            let message = format!("{:?}", e);
-            let code = match e.downcast_ref::<tokio_postgres::Error>() {
-                Some(e) => match e.code() {
-                    Some(e) => serde_json::to_value(e.code()).unwrap(),
+        Ok(r) => match r {
+            Ok(r) => r,
+            Err(e) => {
+                let message = format!("{:?}", e);
+                let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
+                    e.code()
+                        .map(|s| serde_json::to_value(s.code()).unwrap_or_default())
+                });
+                let code = match code {
+                    Some(c) => c,
                     None => Value::Null,
-                },
-                None => Value::Null,
-            };
-            error!(
-                ?code,
-                "sql-over-http per-client task finished with an error: {e:#}"
+                };
+                error!(
+                    ?code,
+                    "sql-over-http per-client task finished with an error: {e:#}"
+                );
+                // TODO: this shouldn't always be bad request.
+                json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "message": message, "code": code }),
+                )?
+            }
+        },
+        Err(_) => {
+            let message = format!(
+                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                config.sql_over_http_timeout.as_secs()
             );
-            // TODO: this shouldn't always be bad request.
+            error!(message);
             json_response(
-                StatusCode::BAD_REQUEST,
-                json!({ "message": message, "code": code }),
+                StatusCode::GATEWAY_TIMEOUT,
+                json!({ "message": message, "code": StatusCode::GATEWAY_TIMEOUT.as_u16() }),
             )?
         }
     };
@@ -227,6 +248,13 @@ async fn handle_inner(
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
 ) -> anyhow::Result<Response<Body>> {
+    NUM_CONNECTIONS_ACCEPTED_COUNTER
+        .with_label_values(&["http"])
+        .inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
+    }
+
     //
     // Determine the destination and connection params
     //
@@ -585,7 +613,7 @@ fn _pg_array_parse(
                     }
                 }
             }
-            '}' => {
+            '}' if !quote => {
                 level -= 1;
                 if level == 0 {
                     push_checked(&mut entry, &mut entries, elem_type)?;
@@ -668,6 +696,14 @@ mod tests {
             vec![Some(
                 "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
             )]
+        );
+        // array of objects
+        let json = r#"[{"foo": 1},{"bar": 2}]"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        assert_eq!(
+            pg_params,
+            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
         );
     }
 
@@ -794,6 +830,25 @@ mod tests {
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
             json!([[[1, 2, 3], [4, 5, 6]]])
+        );
+    }
+    #[test]
+    fn test_pg_array_parse_json() {
+        fn pt(pg_arr: &str) -> Value {
+            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+        }
+        assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1, \"bar\": 2}"}"#),
+            json!([{"foo": 1, "bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1}", "{\"bar\": 2}"}"#),
+            json!([{"foo": 1}, {"bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{{"{\"foo\": 1}", "{\"bar\": 2}"}}"#),
+            json!([[{"foo": 1}, {"bar": 2}]])
         );
     }
 }

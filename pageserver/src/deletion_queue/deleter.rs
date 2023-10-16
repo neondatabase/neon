@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
+use utils::backoff;
 
 use crate::metrics;
 
@@ -63,7 +64,19 @@ impl Deleter {
             Err(anyhow::anyhow!("failpoint hit"))
         });
 
-        self.remote_storage.delete_objects(&self.accumulator).await
+        // A backoff::retry is used here for two reasons:
+        // - To provide a backoff rather than busy-polling the API on errors
+        // - To absorb transient 429/503 conditions without hitting our error
+        //   logging path for issues deleting objects.
+        backoff::retry(
+            || async { self.remote_storage.delete_objects(&self.accumulator).await },
+            |_| false,
+            3,
+            10,
+            "executing deletion batch",
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Shutting down")),
+        )
+        .await
     }
 
     /// Block until everything in accumulator has been executed
@@ -88,7 +101,10 @@ impl Deleter {
                     self.accumulator.clear();
                 }
                 Err(e) => {
-                    warn!("DeleteObjects request failed: {e:#}, will retry");
+                    if self.cancel.is_cancelled() {
+                        return Err(DeletionQueueError::ShuttingDown);
+                    }
+                    warn!("DeleteObjects request failed: {e:#}, will continue trying");
                     metrics::DELETION_QUEUE
                         .remote_errors
                         .with_label_values(&["execute"])
