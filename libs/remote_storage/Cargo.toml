@@ -28,6 +28,7 @@ utils.workspace = true
 pin-project-lite.workspace = true
 workspace_hack.workspace = true
 azure_core.workspace = true
+azure_identity.workspace = true
 azure_storage.workspace = true
 azure_storage_blobs.workspace = true
 futures-util.workspace = true
