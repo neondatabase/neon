@@ -78,7 +78,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     steps:
@@ -111,7 +111,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     steps:
@@ -178,7 +178,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     strategy:
       fail-fast: false
@@ -393,7 +393,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -431,7 +431,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -465,7 +465,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     steps:
@@ -511,7 +511,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:6538001721
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     strategy:
       fail-fast: false
