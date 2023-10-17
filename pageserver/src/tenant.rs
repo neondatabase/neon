@@ -77,6 +77,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
+use crate::METADATA_FILE_NAME;
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
@@ -246,72 +247,6 @@ pub struct Tenant {
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 }
 
-// We should not blindly overwrite local metadata with remote one.
-// For example, consider the following case:
-//     Image layer is flushed to disk as a new delta layer, we update local metadata and start upload task but after that
-//     pageserver crashes. During startup we'll load new metadata, and then reset it
-//     to the state of remote one. But current layermap will have layers from the old
-//     metadata which is inconsistent.
-//     And with current logic it wont disgard them during load because during layermap
-//     load it sees local disk consistent lsn which is ahead of layer lsns.
-//     If we treat remote as source of truth we need to completely sync with it,
-//     i e delete local files which are missing on the remote. This will add extra work,
-//     wal for these layers needs to be reingested for example
-//
-// So the solution is to take remote metadata only when we're attaching.
-pub fn merge_local_remote_metadata<'a>(
-    local: Option<&'a TimelineMetadata>,
-    remote: Option<&'a TimelineMetadata>,
-) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
-    match (local, remote) {
-        (None, None) => anyhow::bail!("we should have either local metadata or remote"),
-        (Some(local), None) => Ok((local, true)),
-        // happens if we crash during attach, before writing out the metadata file
-        (None, Some(remote)) => Ok((remote, false)),
-        // This is the regular case where we crash/exit before finishing queued uploads.
-        // Also, it happens if we crash during attach after writing the metadata file
-        // but before removing the attaching marker file.
-        (Some(local), Some(remote)) => {
-            let consistent_lsn_cmp = local
-                .disk_consistent_lsn()
-                .cmp(&remote.disk_consistent_lsn());
-            let gc_cutoff_lsn_cmp = local
-                .latest_gc_cutoff_lsn()
-                .cmp(&remote.latest_gc_cutoff_lsn());
-            use std::cmp::Ordering::*;
-            match (consistent_lsn_cmp, gc_cutoff_lsn_cmp) {
-                // It wouldn't matter, but pick the local one so that we don't rewrite the metadata file.
-                (Equal, Equal) => Ok((local, true)),
-                // Local state is clearly ahead of the remote.
-                (Greater, Greater) => Ok((local, true)),
-                // We have local layer files that aren't on the remote, but GC horizon is on par.
-                (Greater, Equal) => Ok((local, true)),
-                // Local GC started running but we couldn't sync it to the remote.
-                (Equal, Greater) => Ok((local, true)),
-
-                // We always update the local value first, so something else must have
-                // updated the remote value, probably a different pageserver.
-                // The control plane is supposed to prevent this from happening.
-                // Bail out.
-                (Less, Less)
-                | (Less, Equal)
-                | (Equal, Less)
-                | (Less, Greater)
-                | (Greater, Less) => {
-                    anyhow::bail!(
-                        r#"remote metadata appears to be ahead of local metadata:
-local:
-  {local:#?}
-remote:
-  {remote:#?}
-"#
-                    );
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GetTimelineError {
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
@@ -373,11 +308,6 @@ impl Debug for SetStoppingError {
             Self::Broken => write!(f, "Broken"),
         }
     }
-}
-
-struct RemoteStartupData {
-    index_part: IndexPart,
-    remote_metadata: TimelineMetadata,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -452,24 +382,17 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        remote_startup_data: Option<RemoteStartupData>,
-        local_metadata: Option<TimelineMetadata>,
+        index_part: Option<IndexPart>,
+        metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         init_order: Option<&InitializationOrder>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
-        let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
-            local_metadata.as_ref(),
-            remote_startup_data.as_ref().map(|r| &r.remote_metadata),
-        )
-        .context("merge_local_remote_metadata")?
-        .to_owned();
-
         let timeline = self.create_timeline_struct(
             timeline_id,
-            up_to_date_metadata,
+            &metadata,
             ancestor.clone(),
             resources,
             init_order,
@@ -482,20 +405,11 @@ impl Tenant {
         );
         assert_eq!(
             disk_consistent_lsn,
-            up_to_date_metadata.disk_consistent_lsn(),
+            metadata.disk_consistent_lsn(),
             "these are used interchangeably"
         );
 
-        // Save the metadata file to local disk.
-        if !picked_local {
-            save_metadata(self.conf, &tenant_id, &timeline_id, up_to_date_metadata)
-                .await
-                .context("save_metadata")?;
-        }
-
-        let index_part = remote_startup_data.as_ref().map(|x| &x.index_part);
-
-        if let Some(index_part) = index_part {
+        if let Some(index_part) = index_part.as_ref() {
             timeline
                 .remote_client
                 .as_ref()
@@ -508,15 +422,12 @@ impl Tenant {
             // If control plane retries timeline creation in the meantime, the mgmt API handler
             // for timeline creation will coalesce on the upload we queue here.
             let rtc = timeline.remote_client.as_ref().unwrap();
-            rtc.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
-            rtc.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
+            rtc.init_upload_queue_for_empty_remote(&metadata)?;
+            rtc.schedule_index_upload_for_metadata_update(&metadata)?;
         }
 
         timeline
-            .load_layer_map(
-                disk_consistent_lsn,
-                remote_startup_data.map(|x| x.index_part),
-            )
+            .load_layer_map(disk_consistent_lsn, index_part)
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -876,21 +787,23 @@ impl Tenant {
             None
         };
 
-        // Even if there is local metadata it cannot be ahead of the remote one
-        // since we're attaching. Even if we resume interrupted attach remote one
-        // cannot be older than the local one
-        let local_metadata = None;
+        // we can load remote timelines during init, but they are assumed to be so rare that
+        // initialization order is not passed to here.
+        let init_order = None;
+
+        // timeline loading after attach expects to find metadata file for each metadata
+        save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
+            .await
+            .context("save_metadata")
+            .map_err(LoadLocalTimelineError::Load)?;
 
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            Some(RemoteStartupData {
-                index_part,
-                remote_metadata,
-            }),
-            local_metadata,
+            Some(index_part),
+            remote_metadata,
             ancestor,
-            None,
+            init_order,
             ctx,
         )
         .await
@@ -1364,8 +1277,8 @@ impl Tenant {
                             LoadLocalTimelineError::Load(source) => {
                                 // We tried to load deleted timeline, this is a bug.
                                 return Err(anyhow::anyhow!(source).context(
-                                "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
-                            ));
+                                    format!("This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}")
+                                ));
                             }
                             LoadLocalTimelineError::ResumeDeletion(source) => {
                                 // Make sure resumed deletion wont fail loading for entire tenant.
@@ -1398,6 +1311,11 @@ impl Tenant {
         span::debug_assert_current_span_has_tenant_id();
 
         let mut resources = self.build_timeline_resources(timeline_id);
+
+        struct RemoteStartupData {
+            index_part: IndexPart,
+            remote_metadata: TimelineMetadata,
+        }
 
         let (remote_startup_data, remote_client) = match preload {
             Some(preload) => {
@@ -1454,7 +1372,7 @@ impl Tenant {
                         )
                     }
                     Err(DownloadError::NotFound) => {
-                        info!("no index file was found on the remote, found_delete_mark: {found_delete_mark}");
+                        info!(found_delete_mark, "no index file was found on the remote, resuming deletion or cleaning unuploaded up");
 
                         if found_delete_mark {
                             // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
@@ -1468,14 +1386,73 @@ impl Tenant {
                             .map_err(LoadLocalTimelineError::ResumeDeletion);
                         }
 
-                        // We're loading fresh timeline that didnt yet make it into remote.
-                        (None, Some(remote_client))
+                        // as the remote index_part.json did not exist, this timeline is a
+                        // not-yet-uploaded one. it should be deleted now, because the branching might
+                        // not have been valid as it's ancestor may have been restored to earlier state
+                        // as well. in practice, control plane will keep retrying.
+                        //
+                        // first ensure that the un-uploaded timeline looks like it should, as in we
+                        // are not accidentially deleting a timeline which was ever active:
+                        // - root timelines have metadata and one possibly partial layer
+                        // - branched timelines have metadata
+                        //
+                        // if the timeline does not look like expected, fail loading of the tenant.
+                        // cleaning the timeline up manually and reloading the tenant is possible via
+                        // the above log message.
+                        let path = self.conf.timeline_path(&self.tenant_id, &timeline_id);
+
+                        let span = tracing::Span::current();
+
+                        return tokio::task::spawn_blocking({
+                        move || {
+                            use std::str::FromStr;
+                            use crate::tenant::storage_layer::LayerFileName;
+
+                            let _e = span.entered();
+                            let mut metadata = false;
+                            let mut layers = 0;
+                            let mut others = 0;
+                            for dentry in path.read_dir_utf8()? {
+                                let dentry = dentry?;
+                                let file_name = dentry.file_name();
+
+                                if file_name == METADATA_FILE_NAME {
+                                    metadata = true;
+                                    continue;
+                                }
+
+                                if LayerFileName::from_str(file_name).is_ok()
+                                {
+                                    layers += 1;
+                                    continue;
+                                }
+
+                                others += 1;
+                            }
+
+                            // bootstrapped have the one image layer file, or one partial temp
+                            // file, branched have just the metadata
+                            if !(metadata && layers + others <= 1) {
+                                anyhow::bail!("unexpected assumed unuploaded, never been active timeline: found metadata={}, layers={}, others={}", metadata, layers, others);
+                            }
+
+                            let tmp_path =
+                                path.with_file_name(format!("{timeline_id}{}", TEMP_FILE_SUFFIX));
+                            std::fs::rename(path, &tmp_path)?;
+                            std::fs::remove_dir_all(&tmp_path)?;
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .map_err(anyhow::Error::new)
+                    .and_then(|x| x)
+                    .context("delete assumed unuploaded fresh timeline")
+                    .map_err(LoadLocalTimelineError::Load);
                     }
                     Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
                 }
             }
             None => {
-                // No remote client
                 if found_delete_mark {
                     // There is no remote client, we found local metadata.
                     // Continue cleaning up local disk.
@@ -1507,11 +1484,27 @@ impl Tenant {
             None
         };
 
+        let (index_part, metadata) = match remote_startup_data {
+            Some(RemoteStartupData {
+                index_part,
+                remote_metadata,
+            }) => {
+                // always choose the remote metadata to be crash consistent (see RFC 27)
+                save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
+                    .await
+                    .context("save_metadata")
+                    .map_err(LoadLocalTimelineError::Load)?;
+
+                (Some(index_part), remote_metadata)
+            }
+            None => (None, local_metadata),
+        };
+
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            remote_startup_data,
-            Some(local_metadata),
+            index_part,
+            metadata,
             ancestor,
             init_order,
             ctx,

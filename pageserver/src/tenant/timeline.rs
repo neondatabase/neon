@@ -1719,7 +1719,7 @@ impl Timeline {
         disk_consistent_lsn: Lsn,
         index_part: Option<IndexPart>,
     ) -> anyhow::Result<()> {
-        use init::{Decision::*, Discovered, FutureLayer};
+        use init::{Decision::*, Discovered, DismissedLayer};
         use LayerFileName::*;
 
         let mut guard = self.layers.write().await;
@@ -1735,7 +1735,7 @@ impl Timeline {
         // Copy to move into the task we're about to spawn
         let generation = self.generation;
 
-        let (loaded_layers, to_sync, total_physical_size) = tokio::task::spawn_blocking({
+        let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
             move || {
                 let _g = span.entered();
                 let discovered = init::scan_timeline_dir(&timeline_path)?;
@@ -1784,7 +1784,6 @@ impl Timeline {
                 );
 
                 let mut loaded_layers = Vec::new();
-                let mut needs_upload = Vec::new();
                 let mut needs_cleanup = Vec::new();
                 let mut total_physical_size = 0;
 
@@ -1805,13 +1804,20 @@ impl Timeline {
                             }
                         }
                         Ok(decision) => decision,
-                        Err(FutureLayer { local }) => {
+                        Err(DismissedLayer::Future { local }) => {
                             if local.is_some() {
                                 path.push(name.file_name());
                                 init::cleanup_future_layer(&path, &name, disk_consistent_lsn)?;
                                 path.pop();
                             }
                             needs_cleanup.push(name);
+                            continue;
+                        }
+                        Err(DismissedLayer::LocalOnly(local)) => {
+                            path.push(name.file_name());
+                            init::cleanup_local_only_file(&path, &name, &local)?;
+                            path.pop();
+                            // this file never existed remotely, we will have to do rework
                             continue;
                         }
                     };
@@ -1822,14 +1828,16 @@ impl Timeline {
                     }
 
                     let status = match &decision {
-                        UseLocal(_) | NeedsUpload(_) => LayerResidenceStatus::Resident,
+                        UseLocal(_) => LayerResidenceStatus::Resident,
                         Evicted(_) | UseRemote { .. } => LayerResidenceStatus::Evicted,
                     };
+
+                    tracing::debug!(layer=%name, ?decision, ?status, "applied");
 
                     let stats = LayerAccessStats::for_loading_layer(status);
 
                     let layer: Arc<dyn PersistentLayer> = match (name, &decision) {
-                        (Delta(d), UseLocal(m) | NeedsUpload(m)) => {
+                        (Delta(d), UseLocal(m)) => {
                             total_physical_size += m.file_size();
                             Arc::new(DeltaLayer::new(
                                 conf,
@@ -1840,7 +1848,7 @@ impl Timeline {
                                 stats,
                             ))
                         }
-                        (Image(i), UseLocal(m) | NeedsUpload(m)) => {
+                        (Image(i), UseLocal(m)) => {
                             total_physical_size += m.file_size();
                             Arc::new(ImageLayer::new(
                                 conf,
@@ -1859,17 +1867,9 @@ impl Timeline {
                         ),
                     };
 
-                    if let NeedsUpload(m) = decision {
-                        needs_upload.push((layer.clone(), m));
-                    }
-
                     loaded_layers.push(layer);
                 }
-                Ok((
-                    loaded_layers,
-                    (needs_upload, needs_cleanup),
-                    total_physical_size,
-                ))
+                Ok((loaded_layers, needs_cleanup, total_physical_size))
             }
         })
         .await
@@ -1881,10 +1881,6 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
-            let (needs_upload, needs_cleanup) = to_sync;
-            for (layer, m) in needs_upload {
-                rtc.schedule_layer_file_upload(&layer.layer_desc().filename(), &m)?;
-            }
             rtc.schedule_layer_file_deletion(needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or

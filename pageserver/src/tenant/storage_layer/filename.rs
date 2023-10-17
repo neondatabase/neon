@@ -226,6 +226,14 @@ impl LayerFileName {
             _ => false,
         }
     }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        use LayerFileName::*;
+        match self {
+            Delta(_) => "delta",
+            Image(_) => "image",
+        }
+    }
 }
 
 impl fmt::Display for LayerFileName {
