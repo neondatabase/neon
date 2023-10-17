@@ -85,7 +85,7 @@ pub(super) struct ListWriter {
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
-    rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
 
     // Outbound requests to the backend to execute deletion lists we have composed.
     tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
@@ -111,7 +111,7 @@ impl ListWriter {
 
     pub(super) fn new(
         conf: &'static PageServerConf,
-        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
         cancel: CancellationToken,
     ) -> Self {
@@ -230,6 +230,7 @@ impl ListWriter {
         let list_name_pattern =
             Regex::new("(?<sequence>[a-zA-Z0-9]{16})-(?<version>[a-zA-Z0-9]{2}).list").unwrap();
 
+        let temp_extension = format!(".{TEMP_SUFFIX}");
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
         while let Some(dentry) = dir.next_entry().await? {
@@ -241,7 +242,7 @@ impl ListWriter {
                 continue;
             }
 
-            if dentry_str.ends_with(TEMP_SUFFIX) {
+            if dentry_str.ends_with(&temp_extension) {
                 info!("Cleaning up temporary file {dentry_str}");
                 let absolute_path =
                     deletion_directory.join(dentry.file_name().to_str().expect("non-Unicode path"));

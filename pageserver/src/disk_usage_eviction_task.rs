@@ -411,6 +411,11 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                                 evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }
+                            Some(Err(EvictionError::MetadataInconsistency(detail))) => {
+                                warn!(%layer, "failed to evict layer: {detail}");
+                                evictions_failed.file_sizes += file_size;
+                                evictions_failed.count += 1;
+                            }
                             None => {
                                 assert!(cancel.is_cancelled());
                                 return;

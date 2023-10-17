@@ -691,10 +691,9 @@ impl StorageIoTime {
         .expect("failed to define a metric");
         let metrics = std::array::from_fn(|i| {
             let op = StorageIoOperation::from_repr(i).unwrap();
-            let metric = storage_io_histogram_vec
+            storage_io_histogram_vec
                 .get_metric_with_label_values(&[op.as_str()])
-                .unwrap();
-            metric
+                .unwrap()
         });
         Self { metrics }
     }
@@ -1067,6 +1066,26 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .expect("Failed to register tenant_task_events metric")
 });
+
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT: Lazy<IntCounterVec> =
+    Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_background_loop_semaphore_wait_start_count",
+            "Counter for background loop concurrency-limiting semaphore acquire calls started",
+            &["task"],
+        )
+        .unwrap()
+    });
+
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT: Lazy<IntCounterVec> =
+    Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_background_loop_semaphore_wait_finish_count",
+            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+            &["task"],
+        )
+        .unwrap()
+    });
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(

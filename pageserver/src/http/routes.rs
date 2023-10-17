@@ -77,7 +77,7 @@ impl State {
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
+        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
@@ -136,9 +136,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
-            PageReconstructError::WalRedo(pre) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
-            }
+            PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
 }
@@ -164,9 +162,6 @@ impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
             TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            TenantStateError::NotActive(_) => {
-                ApiError::ResourceUnavailable("Tenant not yet active".into())
-            }
             TenantStateError::IsStopping(_) => {
                 ApiError::ResourceUnavailable("Tenant is stopping".into())
             }
@@ -396,6 +391,9 @@ async fn timeline_create_handler(
                     format!("{err:#}")
                 ))
             }
+            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
+            }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
@@ -572,9 +570,14 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", %tenant_id))
-        .await?;
+    mgr::detach_tenant(
+        conf,
+        tenant_id,
+        detach_ignored.unwrap_or(false),
+        &state.deletion_queue_client,
+    )
+    .instrument(info_span!("tenant_detach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1031,9 +1034,17 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        mgr::detach_tenant(conf, tenant_id, true)
+        if let Err(e) = mgr::detach_tenant(conf, tenant_id, true, &state.deletion_queue_client)
             .instrument(info_span!("tenant_detach", %tenant_id))
-            .await?;
+            .await
+        {
+            match e {
+                TenantStateError::NotFound(_) => {
+                    // This API is idempotent: a NotFound on a detach is fine.
+                }
+                _ => return Err(e.into()),
+            }
+        }
         return json_response(StatusCode::OK, ());
     }
 

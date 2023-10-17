@@ -31,6 +31,7 @@ pub(super) async fn upload_index_part<'a>(
     fail_point!("before-upload-index", |_| {
         bail!("failpoint before-upload-index")
     });
+    pausable_failpoint!("before-upload-index-pausable");
 
     let index_part_bytes =
         serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;

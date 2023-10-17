@@ -40,7 +40,6 @@ use validator::ValidatorQueueMessage;
 
 use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
 
-// TODO: adminstrative "panic button" config property to disable all deletions
 // TODO: configurable for how long to wait before executing deletions
 
 /// We aggregate object deletions from many tenants in one place, for several reasons:
@@ -154,7 +153,7 @@ impl FlushOp {
 
 #[derive(Clone, Debug)]
 pub struct DeletionQueueClient {
-    tx: tokio::sync::mpsc::Sender<ListWriterQueueMessage>,
+    tx: tokio::sync::mpsc::UnboundedSender<ListWriterQueueMessage>,
     executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
 
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
@@ -186,7 +185,7 @@ where
     V: Serialize,
     I: AsRef<[u8]>,
 {
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v.clone()));
+    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v));
 
     transformed
         .collect::<HashMap<String, &V>>()
@@ -213,7 +212,7 @@ where
 
 /// Files ending with this suffix will be ignored and erased
 /// during recovery as startup.
-const TEMP_SUFFIX: &str = ".tmp";
+const TEMP_SUFFIX: &str = "tmp";
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
@@ -325,10 +324,7 @@ impl DeletionList {
             return false;
         }
 
-        let timeline_entry = tenant_entry
-            .timelines
-            .entry(*timeline)
-            .or_insert_with(Vec::new);
+        let timeline_entry = tenant_entry.timelines.entry(*timeline).or_default();
 
         let timeline_remote_path = remote_timeline_path(tenant, timeline);
 
@@ -420,7 +416,7 @@ pub enum DeletionQueueError {
 impl DeletionQueueClient {
     pub(crate) fn broken() -> Self {
         // Channels whose receivers are immediately dropped.
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let (executor_tx, _executor_rx) = tokio::sync::mpsc::channel(1);
         Self {
             tx,
@@ -432,12 +428,12 @@ impl DeletionQueueClient {
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.
-    async fn do_push<T>(
+    fn do_push<T>(
         &self,
-        queue: &tokio::sync::mpsc::Sender<T>,
+        queue: &tokio::sync::mpsc::UnboundedSender<T>,
         msg: T,
     ) -> Result<(), DeletionQueueError> {
-        match queue.send(msg).await {
+        match queue.send(msg) {
             Ok(_) => Ok(()),
             Err(e) => {
                 // This shouldn't happen, we should shut down all tenants before
@@ -449,7 +445,7 @@ impl DeletionQueueClient {
         }
     }
 
-    pub(crate) async fn recover(
+    pub(crate) fn recover(
         &self,
         attached_tenants: HashMap<TenantId, Generation>,
     ) -> Result<(), DeletionQueueError> {
@@ -457,7 +453,6 @@ impl DeletionQueueClient {
             &self.tx,
             ListWriterQueueMessage::Recover(RecoverOp { attached_tenants }),
         )
-        .await
     }
 
     /// When a Timeline wishes to update the remote_consistent_lsn that it exposes to the outside
@@ -530,6 +525,21 @@ impl DeletionQueueClient {
             return self.flush_immediate().await;
         }
 
+        self.push_layers_sync(tenant_id, timeline_id, current_generation, layers)
+    }
+
+    /// When a Tenant has a generation, push_layers is always synchronous because
+    /// the ListValidator channel is an unbounded channel.
+    ///
+    /// This can be merged into push_layers when we remove the Generation-less mode
+    /// support (`<https://github.com/neondatabase/neon/issues/5395>`)
+    pub(crate) fn push_layers_sync(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        current_generation: Generation,
+        layers: Vec<(LayerFileName, Generation)>,
+    ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
             .inc_by(layers.len() as u64);
@@ -543,17 +553,16 @@ impl DeletionQueueClient {
                 objects: Vec::new(),
             }),
         )
-        .await
     }
 
     /// This is cancel-safe.  If you drop the future the flush may still happen in the background.
     async fn do_flush<T>(
         &self,
-        queue: &tokio::sync::mpsc::Sender<T>,
+        queue: &tokio::sync::mpsc::UnboundedSender<T>,
         msg: T,
         rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), DeletionQueueError> {
-        self.do_push(queue, msg).await?;
+        self.do_push(queue, msg)?;
         if rx.await.is_err() {
             // This shouldn't happen if tenants are shut down before deletion queue.  If we
             // encounter a bug like this, then a flusher will incorrectly believe it has flushed
@@ -574,6 +583,18 @@ impl DeletionQueueClient {
             .await
     }
 
+    /// Issue a flush without waiting for it to complete.  This is useful on advisory flushes where
+    /// the caller wants to avoid the risk of waiting for lots of enqueued work, such as on tenant
+    /// detach where flushing is nice but not necessary.
+    ///
+    /// This function provides no guarantees of work being done.
+    pub fn flush_advisory(&self) {
+        let (flush_op, _) = FlushOp::new();
+
+        // Transmit the flush message, ignoring any result (such as a closed channel during shutdown).
+        drop(self.tx.send(ListWriterQueueMessage::FlushExecute(flush_op)));
+    }
+
     // Wait until all previous deletions are executed
     pub(crate) async fn flush_execute(&self) -> Result<(), DeletionQueueError> {
         debug!("flush_execute: flushing to deletion lists...");
@@ -590,9 +611,7 @@ impl DeletionQueueClient {
         // Flush any immediate-mode deletions (the above backend flush will only flush
         // the executor if deletions had flowed through the backend)
         debug!("flush_execute: flushing execution...");
-        let (flush_op, rx) = FlushOp::new();
-        self.do_flush(&self.executor_tx, DeleterMessage::Flush(flush_op), rx)
-            .await?;
+        self.flush_immediate().await?;
         debug!("flush_execute: finished flushing execution...");
         Ok(())
     }
@@ -647,8 +666,10 @@ impl DeletionQueue {
     where
         C: ControlPlaneGenerationsApi + Send + Sync,
     {
-        // Deep channel: it consumes deletions from all timelines and we do not want to block them
-        let (tx, rx) = tokio::sync::mpsc::channel(16384);
+        // Unbounded channel: enables non-async functions to submit deletions.  The actual length is
+        // constrained by how promptly the ListWriter wakes up and drains it, which should be frequent
+        // enough to avoid this taking pathologically large amount of memory.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Shallow channel: it carries DeletionLists which each contain up to thousands of deletions
         let (backend_tx, backend_rx) = tokio::sync::mpsc::channel(16);
@@ -961,7 +982,7 @@ mod test {
         // Basic test that the deletion queue processes the deletions we pass into it
         let ctx = setup("deletion_queue_smoke").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
-        client.recover(HashMap::new()).await?;
+        client.recover(HashMap::new())?;
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let tenant_id = ctx.harness.tenant_id;
@@ -1029,7 +1050,7 @@ mod test {
     async fn deletion_queue_validation() -> anyhow::Result<()> {
         let ctx = setup("deletion_queue_validation").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
-        client.recover(HashMap::new()).await?;
+        client.recover(HashMap::new())?;
 
         // Generation that the control plane thinks is current
         let latest_generation = Generation::new(0xdeadbeef);
@@ -1086,7 +1107,7 @@ mod test {
         // Basic test that the deletion queue processes the deletions we pass into it
         let mut ctx = setup("deletion_queue_recovery").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
-        client.recover(HashMap::new()).await?;
+        client.recover(HashMap::new())?;
 
         let tenant_id = ctx.harness.tenant_id;
 
@@ -1149,9 +1170,7 @@ mod test {
         drop(client);
         ctx.restart().await;
         let client = ctx.deletion_queue.new_client();
-        client
-            .recover(HashMap::from([(tenant_id, now_generation)]))
-            .await?;
+        client.recover(HashMap::from([(tenant_id, now_generation)]))?;
 
         info!("Flush-executing");
         client.flush_execute().await?;
@@ -1177,7 +1196,7 @@ pub(crate) mod mock {
     };
 
     pub struct ConsumerState {
-        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
     }
 
@@ -1254,7 +1273,7 @@ pub(crate) mod mock {
     }
 
     pub struct MockDeletionQueue {
-        tx: tokio::sync::mpsc::Sender<ListWriterQueueMessage>,
+        tx: tokio::sync::mpsc::UnboundedSender<ListWriterQueueMessage>,
         executor_tx: tokio::sync::mpsc::Sender<DeleterMessage>,
         executed: Arc<AtomicUsize>,
         remote_storage: Option<GenericRemoteStorage>,
@@ -1264,7 +1283,7 @@ pub(crate) mod mock {
 
     impl MockDeletionQueue {
         pub fn new(remote_storage: Option<GenericRemoteStorage>) -> Self {
-            let (tx, rx) = tokio::sync::mpsc::channel(16384);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let (executor_tx, executor_rx) = tokio::sync::mpsc::channel(16384);
 
             let executed = Arc::new(AtomicUsize::new(0));

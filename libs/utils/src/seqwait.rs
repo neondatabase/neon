@@ -58,7 +58,7 @@ where
 // to get that.
 impl<T: Ord> PartialOrd for Waiter<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.wake_num.partial_cmp(&self.wake_num)
+        Some(self.cmp(other))
     }
 }
 

@@ -4,7 +4,7 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::sync::Arc;
+use std::borrow::Cow;
 
 use anyhow::Context;
 use aws_config::{
@@ -24,22 +24,20 @@ use aws_sdk_s3::{
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::Semaphore,
-};
+use tokio::io::{self, AsyncRead};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RemotePath, RemoteStorage, S3Config, MAX_KEYS_PER_DELETE,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, RemotePath, RemoteStorage, S3Config,
+    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
 
-use self::metrics::{AttemptOutcome, RequestKind};
+use self::metrics::AttemptOutcome;
+pub(super) use self::metrics::RequestKind;
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -48,46 +46,6 @@ pub struct S3Bucket {
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
     concurrency_limiter: ConcurrencyLimiter,
-}
-
-struct ConcurrencyLimiter {
-    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
-    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
-    // The helps to ensure we don't exceed the thresholds.
-    write: Arc<Semaphore>,
-    read: Arc<Semaphore>,
-}
-
-impl ConcurrencyLimiter {
-    fn for_kind(&self, kind: RequestKind) -> &Arc<Semaphore> {
-        match kind {
-            RequestKind::Get => &self.read,
-            RequestKind::Put => &self.write,
-            RequestKind::List => &self.read,
-            RequestKind::Delete => &self.write,
-        }
-    }
-
-    async fn acquire(
-        &self,
-        kind: RequestKind,
-    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
-        self.for_kind(kind).acquire().await
-    }
-
-    async fn acquire_owned(
-        &self,
-        kind: RequestKind,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
-        Arc::clone(self.for_kind(kind)).acquire_owned().await
-    }
-
-    fn new(limit: usize) -> ConcurrencyLimiter {
-        Self {
-            read: Arc::new(Semaphore::new(limit)),
-            write: Arc::new(Semaphore::new(limit)),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -556,6 +514,20 @@ impl RemoteStorage for S3Bucket {
                         .deleted_objects_total
                         .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
+                        // Log a bounded number of the errors within the response:
+                        // these requests can carry 1000 keys so logging each one
+                        // would be too verbose, especially as errors may lead us
+                        // to retry repeatedly.
+                        const LOG_UP_TO_N_ERRORS: usize = 10;
+                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                            tracing::warn!(
+                                "DeleteObjects key {} failed: {}: {}",
+                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                            );
+                        }
+
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()

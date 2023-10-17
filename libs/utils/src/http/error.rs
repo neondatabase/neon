@@ -119,6 +119,7 @@ pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
 
     match api_error {
         ApiError::ResourceUnavailable(_) => info!("Error processing HTTP request: {api_error:#}"),
+        ApiError::NotFound(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::InternalServerError(_) => error!("Error processing HTTP request: {api_error:?}"),
         _ => error!("Error processing HTTP request: {api_error:#}"),
     }

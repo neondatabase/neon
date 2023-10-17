@@ -721,7 +721,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 
 	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
 	req.buftag = tag;
-	
+  Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
 
 	if (entry != NULL)
@@ -858,7 +858,11 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
 	{
-		page_server->flush();
+		if (!page_server->flush())
+		{
+			/* Prefetch set is reset in case of error, so we should try to register our request once again */
+			goto Retry;
+		}
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
