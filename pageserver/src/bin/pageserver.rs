@@ -34,11 +34,12 @@ use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth, logging, project_git_version, sentry_init::init_sentry, signals::Signal,
+    auth::JwtAuth, logging, project_git_version, project_build_tag, sentry_init::init_sentry, signals::Signal,
     tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
@@ -262,7 +263,8 @@ fn start_pageserver(
         version(),
         launch_ts.to_string()
     );
-    set_build_info_metric(GIT_VERSION);
+    info!("build_tag: {BUILD_TAG}");
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
     pageserver::preinitialize_metrics();
 
