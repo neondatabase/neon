@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::fs_ext;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -767,7 +768,12 @@ impl Tenant {
         // Wait for all the download tasks to complete & collect results.
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
+        let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload {
+            // In this context a timeline "exists" if it has any content in remote storage: this will
+            // be our cue to not delete any corresponding local directory
+            existent_timelines.insert(timeline_id);
+
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("successfully downloaded index part for timeline {timeline_id}");
@@ -843,6 +849,56 @@ impl Tenant {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+        }
+
+        // Check for any local timeline directories that are temporary, or do not correspond to a
+        // timeline that still exists: this can happen if we crashed during a deletion/creation, or
+        // if a timeline was deleted while the tenant was attached to a different pageserver.
+        let timelines_dir = self.conf.timelines_path(&self.tenant_id);
+        for entry in timelines_dir
+            .read_dir_utf8()
+            .context("list timelines directory for tenant")?
+        {
+            let entry = entry.context("read timeline dir entry")?;
+            let entry_path = entry.path();
+
+            let purge = if crate::is_temporary(entry_path)
+                // TODO: uninit_mark isn't needed any more, since uninitialized timelines are already
+                // covered by the check that the timeline must exist in remote storage.
+                || is_uninit_mark(entry_path)
+                || crate::is_delete_mark(entry_path)
+            {
+                true
+            } else {
+                match TimelineId::try_from(entry_path.file_name()) {
+                    Ok(i) => {
+                        // Purge if the timeline ID does not exist in remote storage: remote storage is the authority.
+                        !existent_timelines.contains(&i)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Unparseable directory in timelines directory: {entry_path}, ignoring ({e})"
+                        );
+                        // Do not purge junk: if we don't recognize it, be cautious and leave it for a human.
+                        false
+                    }
+                }
+            };
+
+            if purge {
+                tracing::info!("Purging stale timeline dentry {entry_path}");
+                if let Err(e) = match entry.file_type() {
+                    Ok(t) => if t.is_dir() {
+                        std::fs::remove_dir_all(entry_path)
+                    } else {
+                        std::fs::remove_file(entry_path)
+                    }
+                    .or_else(fs_ext::ignore_not_found),
+                    Err(e) => Err(e),
+                } {
+                    tracing::warn!("Failed to purge stale timeline dentry {entry_path}: {e}");
+                }
+            }
         }
 
         crate::failpoint_support::sleep_millis_async!("attach-before-activate");
