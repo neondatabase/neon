@@ -3561,7 +3561,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3574,7 +3574,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3585,7 +3585,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3603,7 +3603,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -5407,7 +5407,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5422,7 +5422,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
- "socket2 0.4.9",
+ "socket2 0.5.3",
  "tokio",
  "tokio-util",
 ]
@@ -6497,7 +6497,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "socket2 0.4.9",
  "standback",
  "syn 1.0.109",
  "syn 2.0.28",
