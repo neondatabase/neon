@@ -98,10 +98,13 @@ impl Config {
         // out the file cache.
         let memory_remaining_for_cgroup = total_mem.saturating_sub(file_cache_disk_size);
 
-        // Guarantee at least some wiggle room, even if there is none from the file cache
-        let max_remaining = (total_mem as f64 * (1.0 - self.cgroup_min_overhead_fraction)) as u64;
+        // Even if we're not separately making room for the file cache (if it's in tmpfs), we still
+        // want our threshold to be met gracefully instead of letting postgres get OOM-killed.
+        // So we guarantee that there's at least `cgroup_min_overhead_fraction` of total memory
+        // remaining above the threshold.
+        let max_threshold = (total_mem as f64 * (1.0 - self.cgroup_min_overhead_fraction)) as u64;
 
-        memory_remaining_for_cgroup.min(max_remaining)
+        memory_remaining_for_cgroup.min(max_threshold)
     }
 }
 
