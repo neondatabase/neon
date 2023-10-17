@@ -6,7 +6,7 @@ use pageserver_api::models::TenantState;
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn, Instrument, Span};
+use tracing::{error, instrument, warn, Instrument, Span};
 
 use utils::{
     backoff, completion, crashsafe, fs_ext,
@@ -276,10 +276,9 @@ pub(crate) async fn remote_delete_mark_exists(
 /// 6. Remove remote mark
 /// 7. Cleanup remaining fs traces, tenant dir, config, timelines dir, local delete mark
 /// It is resumable from any step in case a crash/restart occurs.
-/// There are three entrypoints to the process:
+/// There are two entrypoints to the process:
 /// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume_from_load`] is called during restarts when local or remote deletion marks are still there.
-/// 3. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
+/// 2. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
 ///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
@@ -407,48 +406,11 @@ impl DeleteTenantFlow {
         }
     }
 
-    pub(crate) async fn resume_from_load(
-        guard: DeletionGuard,
-        tenant: &Arc<Tenant>,
-        init_order: Option<&InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        ctx: &RequestContext,
-    ) -> Result<(), DeleteTenantError> {
-        let (_, progress) = completion::channel();
-
-        tenant
-            .set_stopping(progress, true, false)
-            .await
-            .expect("cant be stopping or broken");
-
-        // Do not consume valuable resources during the load phase, continue deletion once init phase is complete.
-        let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
-        if let Some(background) = background_jobs_can_start {
-            info!("waiting for backgound jobs barrier");
-            background.clone().wait().await;
-            info!("ready for backgound jobs barrier");
-        }
-
-        // Tenant may not be loadable if we fail late in cleanup_remaining_fs_traces (e g remove timelines dir)
-        let timelines_path = tenant.conf.timelines_path(&tenant.tenant_id);
-        if timelines_path.exists() {
-            tenant.load(init_order, None, ctx).await.context("load")?;
-        }
-
-        Self::background(
-            guard,
-            tenant.conf,
-            tenant.remote_storage.clone(),
-            tenants,
-            tenant,
-        )
-        .await
-    }
-
     pub(crate) async fn resume_from_attach(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
@@ -458,10 +420,7 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant
-            .attach(ctx, super::AttachMarkerMode::Expect)
-            .await
-            .context("attach")?;
+        tenant.attach(init_order, ctx).await.context("attach")?;
 
         Self::background(
             guard,

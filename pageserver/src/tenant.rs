@@ -23,7 +23,6 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
-use utils::completion::Completion;
 use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
@@ -77,7 +76,6 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
-use crate::METADATA_FILE_NAME;
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
@@ -391,12 +389,6 @@ pub enum CreateTimelineError {
     Other(#[from] anyhow::Error),
 }
 
-/// spawn_attach argument for whether the caller is using attachment markers
-pub(super) enum AttachMarkerMode {
-    Expect,
-    Ignore,
-}
-
 struct TenantDirectoryScan {
     sorted_timelines_to_load: Vec<(TimelineId, TimelineMetadata)>,
     timelines_to_resume_deletion: Vec<(TimelineId, Option<TimelineMetadata>)>,
@@ -409,7 +401,6 @@ enum CreateTimelineCause {
 
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
     ///
     /// - Initializes the Timeline struct and inserts it into the tenant's hash map
     /// - Scans the local timeline directory for layer files and builds the layer map
@@ -509,6 +500,83 @@ impl Tenant {
         Ok(())
     }
 
+    /// Special case for starting a Tenant: immediately after tenant creation, a Tenant has no
+    /// timelines and `spawn_attach` will not work.
+    ///
+    /// This function can go away once we always create Tenants with an initial timeline
+    /// See: `<https://github.com/neondatabase/neon/issues/5456>`
+    pub(crate) fn spawn_create(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        resources: TenantSharedResources,
+        attached_conf: AttachedTenantConf,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Tenant>> {
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            conf, tenant_id,
+        )));
+
+        let TenantSharedResources {
+            broker_client,
+            remote_storage,
+            deletion_queue_client,
+        } = resources;
+
+        let tenant = Arc::new(Tenant::new(
+            TenantState::Attaching,
+            conf,
+            attached_conf,
+            wal_redo_manager,
+            tenant_id,
+            remote_storage.clone(),
+            deletion_queue_client,
+        ));
+
+        // Do all the hard work in the background
+        let tenant_clone = Arc::clone(&tenant);
+
+        let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
+        task_mgr::spawn(
+            &tokio::runtime::Handle::current(),
+            TaskKind::Attach,
+            Some(tenant_id),
+            None,
+            "create tenant",
+            false,
+            async move {
+                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                let make_broken = |t: &Tenant, err: anyhow::Error| {
+                    error!("creation failed, setting tenant state to Broken: {err:?}");
+                    t.state.send_modify(|state| {
+                        assert_eq!(
+                            *state,
+                            TenantState::Attaching,
+                            "the attach task owns the tenant state until activation is complete"
+                        );
+                        *state = TenantState::broken_from_reason(err.to_string());
+                    });
+                };
+
+                match tenant_clone.load_local(None, &ctx).await {
+                    Ok(()) => {
+                        info!("attach finished, activating");
+                        tenant_clone.activate(broker_client, None, &ctx);
+                    }
+                    Err(e) => {
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
+                    }
+                }
+                Ok(())
+            }
+            .instrument({
+                let span = tracing::info_span!(parent: None, "spawn_create", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
+        );
+        Ok(tenant)
+    }
+
     ///
     /// Attach a tenant that's available in cloud storage.
     ///
@@ -524,11 +592,10 @@ impl Tenant {
         tenant_id: TenantId,
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
+        init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        expect_marker: AttachMarkerMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // TODO dedup with spawn_load
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf, tenant_id,
         )));
@@ -574,6 +641,16 @@ impl Tenant {
                     });
                 };
 
+                let mut init_order = init_order;
+                // take the completion because initial tenant loading will complete when all of
+                // these tasks complete.
+                let _completion = init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load.take());
+                let remote_load_completion = init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load_remote.take());
+
                 let pending_deletion = {
                     match DeleteTenantFlow::should_resume_deletion(
                         conf,
@@ -593,10 +670,27 @@ impl Tenant {
                 info!("pending_deletion {}", pending_deletion.is_some());
 
                 if let Some(deletion) = pending_deletion {
+                    // as we are no longer loading, signal completion by dropping
+                    // the completion while we resume deletion
+                    drop(_completion);
+                    drop(remote_load_completion);
+                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
+                    let _ = init_order
+                        .as_mut()
+                        .and_then(|x| x.initial_logical_size_attempt.take());
+                    let background_jobs_can_start =
+                        init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                    if let Some(background) = background_jobs_can_start {
+                        info!("waiting for backgound jobs barrier");
+                        background.clone().wait().await;
+                        info!("ready for backgound jobs barrier");
+                    }
+
                     match DeleteTenantFlow::resume_from_attach(
                         deletion,
                         &tenant_clone,
                         tenants,
+                        init_order,
                         &ctx,
                     )
                     .await
@@ -609,7 +703,7 @@ impl Tenant {
                     }
                 }
 
-                match tenant_clone.attach(&ctx, expect_marker).await {
+                match tenant_clone.attach(init_order, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
@@ -636,8 +730,8 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
+        mut init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
-        expect_marker: AttachMarkerMode,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -653,72 +747,52 @@ impl Tenant {
             }
         }
 
+        let remote_storage = match &self.remote_storage {
+            Some(rs) => rs,
+            None => {
+                init_order
+                    .as_mut()
+                    .and_then(|x| x.initial_tenant_load_remote.take());
+
+                // Deprecated dev mode: load from local disk state instead of remote storage
+                return self.load_local(init_order, ctx).await;
+            }
+        };
+
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
-
-        let remote_storage = self
-            .remote_storage
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
-
         let remote_timeline_ids =
             remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
-
         info!("found {} timelines", remote_timeline_ids.len());
+        let preload = self
+            .load_timeline_metadata(remote_timeline_ids, remote_storage)
+            .await?;
 
-        // Download & parse index parts
-        let mut part_downloads = JoinSet::new();
-        for timeline_id in remote_timeline_ids {
-            let client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.deletion_queue_client.clone(),
-                self.conf,
-                self.tenant_id,
-                timeline_id,
-                self.generation,
-            );
-            part_downloads.spawn(
-                async move {
-                    debug!("starting index part download");
-
-                    let index_part = client
-                        .download_index_file()
-                        .await
-                        .context("download index file")?;
-
-                    debug!("finished index part download");
-
-                    Result::<_, anyhow::Error>::Ok((timeline_id, client, index_part))
-                }
-                .map(move |res| {
-                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
-                })
-                .instrument(info_span!("download_index_part", %timeline_id)),
-            );
-        }
+        // Signal that we have completed remote phase
+        init_order
+            .as_mut()
+            .and_then(|x| x.initial_tenant_load_remote.take());
 
         let mut timelines_to_resume_deletions = vec![];
 
         // Wait for all the download tasks to complete & collect results.
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
-        while let Some(result) = part_downloads.join_next().await {
-            // NB: we already added timeline_id as context to the error
-            let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
-            let (timeline_id, client, index_part) = result?;
+        for (timeline_id, preload) in preload {
+            let index_part = preload.index_part?;
             debug!("successfully downloaded index part for timeline {timeline_id}");
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
                     timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
-                    remote_index_and_client.insert(timeline_id, (index_part, client));
+                    remote_index_and_client.insert(timeline_id, (index_part, preload.client));
                 }
                 MaybeDeletedIndexPart::Deleted(index_part) => {
                     info!(
                         "timeline {} is deleted, picking to resume deletion",
                         timeline_id
                     );
-                    timelines_to_resume_deletions.push((timeline_id, index_part, client));
+                    timelines_to_resume_deletions.push((timeline_id, index_part, preload.client));
                 }
             }
         }
@@ -873,152 +947,6 @@ impl Tenant {
             None,
             DeletionQueueClient::broken(),
         ))
-    }
-
-    /// Load a tenant that's available on local disk
-    ///
-    /// This is used at pageserver startup, to rebuild the in-memory
-    /// structures from on-disk state. This is similar to attaching a tenant,
-    /// but the index files already exist on local disk, as well as some layer
-    /// files.
-    ///
-    /// If the loading fails for some reason, the Tenant will go into Broken
-    /// state.
-    #[instrument(skip_all, fields(tenant_id=%tenant_id))]
-    pub(crate) fn spawn_load(
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-        attached_conf: AttachedTenantConf,
-        resources: TenantSharedResources,
-        init_order: Option<InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
-        ctx: &RequestContext,
-    ) -> Arc<Tenant> {
-        span::debug_assert_current_span_has_tenant_id();
-
-        let broker_client = resources.broker_client;
-        let remote_storage = resources.remote_storage;
-
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf, tenant_id,
-        )));
-        let tenant = Tenant::new(
-            TenantState::Loading,
-            conf,
-            attached_conf,
-            wal_redo_manager,
-            tenant_id,
-            remote_storage.clone(),
-            resources.deletion_queue_client.clone(),
-        );
-        let tenant = Arc::new(tenant);
-
-        // Do all the hard work in a background task
-        let tenant_clone = Arc::clone(&tenant);
-
-        let ctx = ctx.detached_child(TaskKind::InitialLoad, DownloadBehavior::Warn);
-        let _ = task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            TaskKind::InitialLoad,
-            Some(tenant_id),
-            None,
-            "initial tenant load",
-            false,
-            async move {
-                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                let make_broken = |t: &Tenant, err: anyhow::Error| {
-                    error!("load failed, setting tenant state to Broken: {err:?}");
-                    t.state.send_modify(|state| {
-                        assert!(
-                            matches!(*state, TenantState::Loading | TenantState::Stopping { .. }),
-                            "the loading task owns the tenant state until activation is complete"
-                        );
-                        *state = TenantState::broken_from_reason(err.to_string());
-                    });
-                };
-
-                let mut init_order = init_order;
-
-                // take the completion because initial tenant loading will complete when all of
-                // these tasks complete.
-                let _completion = init_order
-                    .as_mut()
-                    .and_then(|x| x.initial_tenant_load.take());
-                let remote_load_completion = init_order
-                    .as_mut()
-                    .and_then(|x| x.initial_tenant_load_remote.take());
-
-                // Dont block pageserver startup on figuring out deletion status
-                let pending_deletion = {
-                    match DeleteTenantFlow::should_resume_deletion(
-                        conf,
-                        remote_storage.as_ref(),
-                        &tenant_clone,
-                    )
-                    .await
-                    {
-                        Ok(should_resume_deletion) => should_resume_deletion,
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                    }
-                };
-
-                info!("pending deletion {}", pending_deletion.is_some());
-
-                if let Some(deletion) = pending_deletion {
-                    // as we are no longer loading, signal completion by dropping
-                    // the completion while we resume deletion
-                    drop(_completion);
-                    drop(remote_load_completion);
-                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
-                    let _ = init_order
-                        .as_mut()
-                        .and_then(|x| x.initial_logical_size_attempt.take());
-
-                    match DeleteTenantFlow::resume_from_load(
-                        deletion,
-                        &tenant_clone,
-                        init_order.as_ref(),
-                        tenants,
-                        &ctx,
-                    )
-                    .await
-                    {
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                        Ok(()) => return Ok(()),
-                    }
-                }
-
-                let background_jobs_can_start =
-                    init_order.as_ref().map(|x| &x.background_jobs_can_start);
-
-                match tenant_clone
-                    .load(init_order.as_ref(), remote_load_completion, &ctx)
-                    .await
-                {
-                    Ok(()) => {
-                        debug!("load finished");
-
-                        tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
-                    }
-                    Err(err) => make_broken(&tenant_clone, err),
-                }
-
-                Ok(())
-            }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
-                span.follows_from(Span::current());
-                span
-            }),
-        );
-
-        tenant
     }
 
     fn scan_and_sort_timelines_dir(self: Arc<Tenant>) -> anyhow::Result<TenantDirectoryScan> {
@@ -1215,10 +1143,9 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load(
+    async fn load_local(
         self: &Arc<Tenant>,
-        init_order: Option<&InitializationOrder>,
-        remote_completion: Option<Completion>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
@@ -1243,38 +1170,12 @@ impl Tenant {
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
-        // Load remote content for timelines in this tenant
-        let all_timeline_ids = scan
-            .sorted_timelines_to_load
-            .iter()
-            .map(|i| i.0)
-            .chain(scan.timelines_to_resume_deletion.iter().map(|i| i.0))
-            .collect();
-        let mut preload = if let Some(remote_storage) = &self.remote_storage {
-            Some(
-                self.load_timeline_metadata(all_timeline_ids, remote_storage)
-                    .await?,
-            )
-        } else {
-            None
-        };
-
-        drop(remote_completion);
-
         crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
-            let timeline_preload = preload.as_mut().map(|p| p.remove(&timeline_id).unwrap());
             if let Err(e) = self
-                .load_local_timeline(
-                    timeline_id,
-                    local_metadata,
-                    timeline_preload,
-                    init_order,
-                    ctx,
-                    false,
-                )
+                .load_local_timeline(timeline_id, local_metadata, init_order.as_ref(), ctx, false)
                 .await
             {
                 match e {
@@ -1307,14 +1208,11 @@ impl Tenant {
                     }
                 }
                 Some(local_metadata) => {
-                    let timeline_preload =
-                        preload.as_mut().map(|p| p.remove(&timeline_id).unwrap());
                     if let Err(e) = self
                         .load_local_timeline(
                             timeline_id,
                             local_metadata,
-                            timeline_preload,
-                            init_order,
+                            init_order.as_ref(),
                             ctx,
                             true,
                         )
@@ -1345,182 +1243,35 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, init_order, preload, ctx))]
+    #[instrument(skip(self, local_metadata, init_order, ctx))]
     async fn load_local_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
-        preload: Option<TimelinePreload>,
         init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
         found_delete_mark: bool,
     ) -> Result<(), LoadLocalTimelineError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let mut resources = self.build_timeline_resources(timeline_id);
+        let resources = self.build_timeline_resources(timeline_id);
 
-        struct RemoteStartupData {
-            index_part: IndexPart,
-            remote_metadata: TimelineMetadata,
+        if found_delete_mark {
+            // There is no remote client, we found local metadata.
+            // Continue cleaning up local disk.
+            DeleteTimelineFlow::resume_deletion(
+                Arc::clone(self),
+                timeline_id,
+                &local_metadata,
+                None,
+                self.deletion_queue_client.clone(),
+                init_order,
+            )
+            .await
+            .context("resume deletion")
+            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+            return Ok(());
         }
-
-        let (remote_startup_data, remote_client) = match preload {
-            Some(preload) => {
-                let TimelinePreload {
-                    index_part,
-                    client: remote_client,
-                    timeline_id: _timeline_id,
-                } = preload;
-                match index_part {
-                    Ok(index_part) => {
-                        let index_part = match index_part {
-                            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-                            MaybeDeletedIndexPart::Deleted(index_part) => {
-                                // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
-                                // Example:
-                                //  start deletion operation
-                                //  finishes upload of index part
-                                //  pageserver crashes
-                                //  remote storage gets de-configured
-                                //  pageserver starts
-                                //
-                                // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
-                                // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
-                                info!("is_deleted is set on remote, resuming removal of timeline data originally done by timeline deletion handler");
-
-                                remote_client
-                                    .init_upload_queue_stopped_to_continue_deletion(&index_part)
-                                    .context("init queue stopped")
-                                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-
-                                DeleteTimelineFlow::resume_deletion(
-                                    Arc::clone(self),
-                                    timeline_id,
-                                    &local_metadata,
-                                    Some(remote_client),
-                                    self.deletion_queue_client.clone(),
-                                    init_order,
-                                )
-                                .await
-                                .context("resume deletion")
-                                .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-
-                                return Ok(());
-                            }
-                        };
-
-                        let remote_metadata = index_part.metadata.clone();
-                        (
-                            Some(RemoteStartupData {
-                                index_part,
-                                remote_metadata,
-                            }),
-                            Some(remote_client),
-                        )
-                    }
-                    Err(DownloadError::NotFound) => {
-                        info!(found_delete_mark, "no index file was found on the remote, resuming deletion or cleaning unuploaded up");
-
-                        if found_delete_mark {
-                            // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
-                            // Cleanup:
-                            return DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces(
-                                self,
-                                timeline_id,
-                            )
-                            .await
-                            .context("cleanup_remaining_timeline_fs_traces")
-                            .map_err(LoadLocalTimelineError::ResumeDeletion);
-                        }
-
-                        // as the remote index_part.json did not exist, this timeline is a
-                        // not-yet-uploaded one. it should be deleted now, because the branching might
-                        // not have been valid as it's ancestor may have been restored to earlier state
-                        // as well. in practice, control plane will keep retrying.
-                        //
-                        // first ensure that the un-uploaded timeline looks like it should, as in we
-                        // are not accidentially deleting a timeline which was ever active:
-                        // - root timelines have metadata and one possibly partial layer
-                        // - branched timelines have metadata
-                        //
-                        // if the timeline does not look like expected, fail loading of the tenant.
-                        // cleaning the timeline up manually and reloading the tenant is possible via
-                        // the above log message.
-                        let path = self.conf.timeline_path(&self.tenant_id, &timeline_id);
-
-                        let span = tracing::Span::current();
-
-                        return tokio::task::spawn_blocking({
-                        move || {
-                            use std::str::FromStr;
-                            use crate::tenant::storage_layer::LayerFileName;
-
-                            let _e = span.entered();
-                            let mut metadata = false;
-                            let mut layers = 0;
-                            let mut others = 0;
-                            for dentry in path.read_dir_utf8()? {
-                                let dentry = dentry?;
-                                let file_name = dentry.file_name();
-
-                                if file_name == METADATA_FILE_NAME {
-                                    metadata = true;
-                                    continue;
-                                }
-
-                                if LayerFileName::from_str(file_name).is_ok()
-                                {
-                                    layers += 1;
-                                    continue;
-                                }
-
-                                others += 1;
-                            }
-
-                            // bootstrapped have the one image layer file, or one partial temp
-                            // file, branched have just the metadata
-                            if !(metadata && layers + others <= 1) {
-                                anyhow::bail!("unexpected assumed unuploaded, never been active timeline: found metadata={}, layers={}, others={}", metadata, layers, others);
-                            }
-
-                            let tmp_path =
-                                path.with_file_name(format!("{timeline_id}{}", TEMP_FILE_SUFFIX));
-                            std::fs::rename(path, &tmp_path)?;
-                            std::fs::remove_dir_all(&tmp_path)?;
-                            Ok(())
-                        }
-                    })
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .and_then(|x| x)
-                    .context("delete assumed unuploaded fresh timeline")
-                    .map_err(LoadLocalTimelineError::Load);
-                    }
-                    Err(e) => return Err(LoadLocalTimelineError::Load(anyhow::Error::new(e))),
-                }
-            }
-            None => {
-                if found_delete_mark {
-                    // There is no remote client, we found local metadata.
-                    // Continue cleaning up local disk.
-                    DeleteTimelineFlow::resume_deletion(
-                        Arc::clone(self),
-                        timeline_id,
-                        &local_metadata,
-                        None,
-                        self.deletion_queue_client.clone(),
-                        init_order,
-                    )
-                    .await
-                    .context("resume deletion")
-                    .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-                    return Ok(());
-                }
-
-                (None, resources.remote_client)
-            }
-        };
-        resources.remote_client = remote_client;
 
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
             let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
@@ -1531,27 +1282,11 @@ impl Tenant {
             None
         };
 
-        let (index_part, metadata) = match remote_startup_data {
-            Some(RemoteStartupData {
-                index_part,
-                remote_metadata,
-            }) => {
-                // always choose the remote metadata to be crash consistent (see RFC 27)
-                save_metadata(self.conf, &self.tenant_id, &timeline_id, &remote_metadata)
-                    .await
-                    .context("save_metadata")
-                    .map_err(LoadLocalTimelineError::Load)?;
-
-                (Some(index_part), remote_metadata)
-            }
-            None => (None, local_metadata),
-        };
-
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            index_part,
-            metadata,
+            None,
+            local_metadata,
             ancestor,
             init_order,
             ctx,
@@ -3752,7 +3487,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
             ));
             tenant
-                .load(None, None, ctx)
+                .load_local(None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
 
