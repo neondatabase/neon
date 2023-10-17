@@ -26,10 +26,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{
-    create_tenant_files, AttachMarkerMode, AttachedTenantConf, CreateTenantFilesMode, Tenant,
-    TenantState,
-};
+use crate::tenant::{create_tenant_files, AttachedTenantConf, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -287,9 +284,7 @@ async fn init_load_tenant_configs(
                     continue;
                 }
 
-                // This case happens if we:
-                // * crash during attach before creating the attach marker file
-                // * crash during tenant delete before removing tenant directory
+                // This case happens if we crash during attachment before writing a config into the dir
                 let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
                     format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
                 })?;
@@ -638,7 +633,7 @@ pub(crate) async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+        super::create_tenant_files(conf, &location_conf, &tenant_id).await?;
 
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
@@ -1076,16 +1071,9 @@ pub(crate) async fn attach_tenant(
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
         let location_conf = LocationConf::attached_single(tenant_conf, generation);
-        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
+        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
-
-        // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
-        let marker_file_exists = conf
-            .tenant_attaching_mark_file_path(&tenant_id)
-            .try_exists()
-            .context("check for attach marker file existence")?;
-        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
         let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.

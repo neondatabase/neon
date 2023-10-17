@@ -151,8 +151,6 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
-pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
-
 pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 
 /// References to shared objects that are passed into each tenant, such
@@ -735,18 +733,6 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        if let AttachMarkerMode::Expect = expect_marker {
-            if !tokio::fs::try_exists(&marker_file)
-                .await
-                .context("check for existence of marker file")?
-            {
-                anyhow::bail!(
-                    "implementation error: marker file should exist at beginning of this function"
-                );
-            }
-        }
-
         let remote_storage = match &self.remote_storage {
             Some(rs) => rs,
             None => {
@@ -844,13 +830,6 @@ impl Tenant {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-
-        if let AttachMarkerMode::Expect = expect_marker {
-            std::fs::remove_file(&marker_file)
-                .with_context(|| format!("unlink attach marker file {marker_file}"))?;
-            crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
-                .context("fsync tenant directory after unlinking attach marker file")?;
         }
 
         crate::failpoint_support::sleep_millis_async!("attach-before-activate");
@@ -3094,16 +3073,10 @@ fn remove_timeline_and_uninit_mark(
     Ok(())
 }
 
-pub(crate) enum CreateTenantFilesMode {
-    Create,
-    Attach,
-}
-
 pub(crate) async fn create_tenant_files(
     conf: &'static PageServerConf,
     location_conf: &LocationConf,
     tenant_id: &TenantId,
-    mode: CreateTenantFilesMode,
 ) -> anyhow::Result<Utf8PathBuf> {
     let target_tenant_directory = conf.tenant_path(tenant_id);
     anyhow::ensure!(
@@ -3126,7 +3099,6 @@ pub(crate) async fn create_tenant_files(
         conf,
         location_conf,
         tenant_id,
-        mode,
         &temporary_tenant_dir,
         &target_tenant_directory,
     )
@@ -3152,28 +3124,9 @@ async fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     location_conf: &LocationConf,
     tenant_id: &TenantId,
-    mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Utf8Path,
     target_tenant_directory: &Utf8Path,
 ) -> Result<(), anyhow::Error> {
-    match mode {
-        CreateTenantFilesMode::Create => {} // needs no attach marker, writing tenant conf + atomic rename of dir is good enough
-        CreateTenantFilesMode::Attach => {
-            let attach_marker_path = temporary_tenant_dir.join(TENANT_ATTACHING_MARKER_FILENAME);
-            let file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&attach_marker_path)
-                .with_context(|| {
-                    format!("could not create attach marker file {attach_marker_path:?}")
-                })?;
-            file.sync_all().with_context(|| {
-                format!("could not sync attach marker file: {attach_marker_path:?}")
-            })?;
-            // fsync of the directory in which the file resides comes later in this function
-        }
-    }
-
     let temporary_tenant_timelines_dir = rebase_directory(
         &conf.timelines_path(tenant_id),
         target_tenant_directory,
