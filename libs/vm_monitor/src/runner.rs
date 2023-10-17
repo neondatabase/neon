@@ -69,8 +69,18 @@ pub struct Config {
     /// should be removed once we have a better solution there.
     sys_buffer_bytes: u64,
 
-    /// Minimum fraction of total system memory that the threshold for cgroup non-reclaimable
-    /// memory usage must be below
+    /// Minimum fraction of total system memory reserved *before* the the cgroup threshold; in
+    /// other words, providing a ceiling for the highest value of the threshold by enforcing that
+    /// there's at least `cgroup_min_overhead_fraction` of the total memory remaining beyond the
+    /// threshold.
+    ///
+    /// For example, a value of `0.1` means that 10% of total memory must remain after exceeding
+    /// the threshold, so the value of the cgroup threshold would always be capped at 90% of total
+    /// memory.
+    ///
+    /// The default value of `0.15` means that we *guarantee* sending upscale requests if the
+    /// cgroup is using more than 85% of total memory (even if we're *not* separately reserving
+    /// memory for the file cache).
     cgroup_min_overhead_fraction: f64,
 
     cgroup_downscale_threshold_buffer_bytes: u64,
