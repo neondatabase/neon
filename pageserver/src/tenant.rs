@@ -766,8 +766,19 @@ impl Tenant {
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         for (timeline_id, preload) in preload {
-            let index_part = preload.index_part?;
-            debug!("successfully downloaded index part for timeline {timeline_id}");
+            let index_part = match preload.index_part {
+                Ok(i) => {
+                    debug!("successfully downloaded index part for timeline {timeline_id}");
+                    i
+                }
+                Err(e) => {
+                    // Timeline creation is not atomic: we might upload a layer but no index_part.  We expect
+                    // that the creation will be retried by the control plane and eventually result in
+                    // a valid loadable state.
+                    warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
+                    continue;
+                }
+            };
             match index_part {
                 MaybeDeletedIndexPart::IndexPart(index_part) => {
                     timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
@@ -781,6 +792,10 @@ impl Tenant {
                     timelines_to_resume_deletions.push((timeline_id, index_part, preload.client));
                 }
             }
+        }
+
+        if timeline_ancestors.is_empty() {
+            anyhow::bail!("no valid timelines found on the remote storage")
         }
 
         // For every timeline, download the metadata file, scan the local directory,
