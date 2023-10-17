@@ -458,7 +458,10 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant.attach(ctx).await.context("attach")?;
+        tenant
+            .attach(ctx, super::AttachMarkerMode::Expect)
+            .await
+            .context("attach")?;
 
         Self::background(
             guard,
