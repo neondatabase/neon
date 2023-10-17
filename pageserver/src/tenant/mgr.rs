@@ -480,45 +480,23 @@ pub(crate) fn schedule_local_tenant_processing(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
-        info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
-        if resources.remote_storage.is_none() {
-            warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
-            Tenant::create_broken_tenant(
-                conf,
-                tenant_id,
-                "attaching mark file present but no remote storage configured".to_string(),
-            )
-        } else {
-            match Tenant::spawn_attach(
-                conf,
-                tenant_id,
-                resources,
-                location_conf,
-                tenants,
-                AttachMarkerMode::Expect,
-                ctx,
-            ) {
-                Ok(tenant) => tenant,
-                Err(e) => {
-                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                }
-            }
+    info!("Attaching tenant {tenant_id}");
+    let tenant = match Tenant::spawn_attach(
+        conf,
+        tenant_id,
+        resources,
+        location_conf,
+        init_order,
+        tenants,
+        ctx,
+    ) {
+        Ok(tenant) => tenant,
+        Err(e) => {
+            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
         }
-    } else {
-        info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
-        // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(
-            conf,
-            tenant_id,
-            location_conf,
-            resources,
-            init_order,
-            tenants,
-            ctx,
-        )
     };
+
     Ok(tenant)
 }
 
@@ -660,13 +638,13 @@ pub(crate) async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+        super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant =
-            schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
+        let created_tenant = Tenant::spawn_create(conf, tenant_id, resources,
+        AttachedTenantConf::try_from(location_conf)?, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -826,11 +804,8 @@ pub(crate) async fn upsert_location(
                             deletion_queue_client,
                         },
                         AttachedTenantConf::try_from(new_location_config)?,
+                        None,
                         &TENANTS,
-                        // The LocationConf API does not use marker files, because we have Secondary
-                        // locations where the directory's existence is not a signal that it contains
-                        // all timelines.  See https://github.com/neondatabase/neon/issues/5550
-                        AttachMarkerMode::Ignore,
                         ctx,
                     ) {
                         Ok(tenant) => tenant,
