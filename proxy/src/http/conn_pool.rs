@@ -20,7 +20,7 @@ use tokio_postgres::AsyncMessage;
 use crate::{
     auth, console,
     metrics::{Ids, MetricCounter, USAGE_METRICS},
-    proxy::{NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
+    proxy::{LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
 };
 use crate::{compute, config};
 
@@ -139,6 +139,7 @@ impl GlobalConnPool {
         session_id: uuid::Uuid,
     ) -> anyhow::Result<Client> {
         let mut client: Option<Client> = None;
+        let mut latency_timer = LatencyTimer::new("http");
 
         let mut hash_valid = false;
         if !force_new {
@@ -182,15 +183,16 @@ impl GlobalConnPool {
         let new_client = if let Some(client) = client {
             if client.inner.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info, session_id).await
+                connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
             } else {
+                latency_timer.pool_hit();
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
                 return Ok(client);
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info, session_id).await
+            connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
         };
 
         match &new_client {
@@ -347,6 +349,7 @@ async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
     session_id: uuid::Uuid,
+    latency_timer: LatencyTimer,
 ) -> anyhow::Result<Client> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -386,6 +389,7 @@ async fn connect_to_compute(
         node_info,
         &extra,
         &creds,
+        latency_timer,
     )
     .await
 }

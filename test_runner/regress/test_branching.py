@@ -311,8 +311,8 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         assert isinstance(failed, Exception)
         assert isinstance(succeeded, Dict)
 
-        # FIXME: there's probably multiple valid status codes:
-        # - Timeline 62505b9a9f6b1d29117b1b74eaf07b12/56cd19d3b2dbcc65e9d53ec6ca304f24 already exists
+        # there's multiple valid status codes:
+        # - Timeline x/y already exists
         # - whatever 409 response says, but that is a subclass of PageserverApiException
         assert isinstance(failed, PageserverApiException)
         assert succeeded["state"] == "Active"
@@ -320,17 +320,14 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         # we might still have the failpoint active
         env.pageserver.stop(immediate=True)
 
-        # pytest should nag if we leave threads unjoined
         for t in threads:
             t.join()
         create_root.join()
 
 
-def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEnvBuilder):
+def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
-    Currently before RFC#27 we keep and continue uploading branches which were not successfully uploaded before shutdown.
-
-    This test likely duplicates some other test, but it's easier to write one than to make sure there will be a failing test when the rfc is implemented.
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
     """
 
     env = neon_env_builder.init_configs()
@@ -366,9 +363,59 @@ def test_non_uploaded_branch_availability_after_restart(neon_env_builder: NeonEn
 
     wait_until_tenant_active(ps_http, env.initial_tenant)
 
-    # currently it lives on and will get eventually uploaded, but this will change
-    detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-    assert detail["state"] == "Active"
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+
+def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.append(
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    )
+    ps_http = env.pageserver.http_client()
+
+    ps_http.tenant_create(env.initial_tenant)
+    ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline)
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    branch_id = TimelineId.generate()
+
+    def start_creating_timeline():
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version,
+                env.initial_tenant,
+                branch_id,
+                ancestor_timeline_id=env.initial_timeline,
+                timeout=60,
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, branch_id)
 
 
 def wait_until_paused(env: NeonEnv, failpoint: str):

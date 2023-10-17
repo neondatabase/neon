@@ -200,6 +200,12 @@ pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
     pub options: GenericOptions,
+    // These are derived flags, not present in the spec file.
+    // They are never set by the control plane.
+    #[serde(skip_deserializing, default)]
+    pub restrict_conn: bool,
+    #[serde(skip_deserializing, default)]
+    pub invalid: bool,
 }
 
 /// Common type representing both SQL statement params with or without value,

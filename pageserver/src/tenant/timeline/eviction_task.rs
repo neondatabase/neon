@@ -30,6 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        tasks::{BackgroundLoopKind, RateLimitError},
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -129,7 +130,11 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::tenant::tasks::warn_when_period_overrun(
+                    elapsed,
+                    p.period,
+                    BackgroundLoopKind::Eviction,
+                );
                 crate::metrics::EVICTION_ITERATION_DURATION
                     .get_metric_with_label_values(&[
                         &format!("{}", p.period.as_secs()),
@@ -149,6 +154,17 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
+
+        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+            cancel,
+        )
+        .await
+        {
+            Ok(permit) => permit,
+            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        };
 
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.
@@ -283,6 +299,10 @@ impl Timeline {
                 )) => {
                     let e = utils::error::report_compact_sources(&e);
                     warn!(layer = %l, "failed to evict layer: {e}");
+                    stats.not_evictable += 1;
+                }
+                Some(Err(EvictionError::MetadataInconsistency(detail))) => {
+                    warn!(layer = %l, "failed to evict layer: {detail}");
                     stats.not_evictable += 1;
                 }
             }

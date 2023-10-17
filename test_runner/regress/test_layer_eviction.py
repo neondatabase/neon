@@ -1,6 +1,5 @@
 import time
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -14,12 +13,10 @@ from fixtures.utils import query_scalar
 
 # Crates a few layers, ensures that we can evict them (removing locally but keeping track of them anyway)
 # and then download them back.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_basic_eviction(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
