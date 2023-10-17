@@ -511,10 +511,9 @@ mod tests {
         let now = SystemTime::now();
         let round_trip = from_pg_timestamp(to_pg_timestamp(now));
 
-        assert_eq!(
-            now.elapsed().unwrap().as_micros(),
-            round_trip.elapsed().unwrap().as_micros()
-        );
+        let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
 
         let now_pg = get_current_timestamp();
         let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
