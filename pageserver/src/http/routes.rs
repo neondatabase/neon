@@ -136,9 +136,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
-            PageReconstructError::WalRedo(pre) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
-            }
+            PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
 }
@@ -164,9 +162,6 @@ impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
             TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            TenantStateError::NotActive(_) => {
-                ApiError::ResourceUnavailable("Tenant not yet active".into())
-            }
             TenantStateError::IsStopping(_) => {
                 ApiError::ResourceUnavailable("Tenant is stopping".into())
             }
