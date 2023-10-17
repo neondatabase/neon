@@ -492,7 +492,7 @@ def evict_all_layers(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId)
     )
     client = env.pageserver.http_client()
     for layer in initial_local_layers:
-        if "ephemeral" in layer.name:
+        if "ephemeral" in layer.name or "temp" in layer.name:
             continue
         log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
         client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
