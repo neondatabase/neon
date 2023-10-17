@@ -2,6 +2,7 @@
 //! and push them to a HTTP endpoint.
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::{mgr, LogicalSizeCalculationCause};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
@@ -143,7 +144,7 @@ pub async fn collect_metrics(
         crate::tenant::tasks::warn_when_period_overrun(
             tick_at.elapsed(),
             metric_collection_interval,
-            "consumption_metrics_collect_metrics",
+            BackgroundLoopKind::ConsumptionMetricsCollectMetrics,
         );
     }
 }
@@ -268,6 +269,11 @@ async fn calculate_synthetic_size_worker(
             }
 
             if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await {
+                // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
+                // We can put in some prioritization for consumption metrics.
+                // Same for the loop that fetches computed metrics.
+                // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
+                // which turns out is really handy to understand the system.
                 if let Err(e) = tenant.calculate_synthetic_size(cause, ctx).await {
                     error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
@@ -277,7 +283,7 @@ async fn calculate_synthetic_size_worker(
         crate::tenant::tasks::warn_when_period_overrun(
             tick_at.elapsed(),
             synthetic_size_calculation_interval,
-            "consumption_metrics_synthetic_size_worker",
+            BackgroundLoopKind::ConsumptionMetricsSyntheticSizeWorker,
         );
     }
 }
