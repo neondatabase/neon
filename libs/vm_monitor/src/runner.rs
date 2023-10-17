@@ -195,9 +195,12 @@ impl Runner {
                 cgroup.watch(hist_tx).await
             });
 
+            let threshold = state.config.cgroup_threshold(mem, file_cache_disk_size);
+            info!(threshold, "set initial cgroup threshold",);
+
             state.cgroup = Some(CgroupState {
                 watcher: hist_rx,
-                threshold: state.config.cgroup_threshold(mem, file_cache_disk_size),
+                threshold,
             });
         }
 
