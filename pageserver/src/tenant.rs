@@ -3344,6 +3344,11 @@ pub(crate) mod harness {
         }
     }
 
+    enum LoadMode {
+        Local,
+        Remote,
+    }
+
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
@@ -3423,7 +3428,36 @@ pub(crate) mod harness {
             )
         }
 
-        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+        fn remote_empty(&self) -> bool {
+            let tenant_path = self.conf.tenant_path(&self.tenant_id);
+            let remote_tenant_dir = self
+                .remote_fs_dir
+                .join(tenant_path.strip_prefix(&self.conf.workdir).unwrap());
+            if std::fs::metadata(&remote_tenant_dir).is_err() {
+                return true;
+            }
+
+            match std::fs::read_dir(remote_tenant_dir)
+                .unwrap()
+                .flatten()
+                .next()
+            {
+                Some(entry) => {
+                    tracing::debug!(
+                        "remote_empty: not empty, found file {}",
+                        entry.file_name().to_string_lossy(),
+                    );
+                    false
+                }
+                None => true,
+            }
+        }
+
+        async fn do_try_load(
+            &self,
+            ctx: &RequestContext,
+            mode: LoadMode,
+        ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
             let tenant = Arc::new(Tenant::new(
@@ -3439,17 +3473,48 @@ pub(crate) mod harness {
                 Some(self.remote_storage.clone()),
                 self.deletion_queue.new_client(),
             ));
-            tenant
-                .load_local(None, ctx)
-                .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
-                .await?;
 
-            // TODO reuse Tenant::activate (needs broker)
+            match mode {
+                LoadMode::Local => {
+                    tenant
+                        .load_local(None, ctx)
+                        .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
+                        .await?;
+                }
+                LoadMode::Remote => {
+                    tenant
+                        .attach(None, ctx)
+                        .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
+                        .await?;
+                }
+            }
+
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
                 timeline.set_state(TimelineState::Active);
             }
             Ok(tenant)
+        }
+
+        /// For tests that specifically want to exercise the local load path, which does
+        /// not use remote storage.
+        pub async fn try_load_local(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+            self.do_try_load(ctx, LoadMode::Local).await
+        }
+
+        /// The 'load' in this function is either a local load or a normal attachment,
+        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+            // If we have nothing in remote storage, must use load_local instead of attach: attach
+            // will error out if there are no timelines.
+            //
+            // See https://github.com/neondatabase/neon/issues/5456 for how we will eliminate
+            // this weird state of a Tenant which exists but doesn't have any timelines.
+            let mode = match self.remote_empty() {
+                true => LoadMode::Local,
+                false => LoadMode::Remote,
+            };
+
+            self.do_try_load(ctx, mode).await
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
@@ -4017,7 +4082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_metadata() -> anyhow::Result<()> {
+    async fn corrupt_local_metadata() -> anyhow::Result<()> {
         const TEST_NAME: &str = "corrupt_metadata";
         let harness = TenantHarness::create(TEST_NAME)?;
         let (tenant, ctx) = harness.load().await;
@@ -4035,16 +4100,19 @@ mod tests {
             .unwrap();
         drop(tenant);
 
+        // Corrupt local metadata
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
-
         assert!(metadata_path.is_file());
-
         let mut metadata_bytes = std::fs::read(&metadata_path)?;
         assert_eq!(metadata_bytes.len(), 512);
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness.try_load(&ctx).await.err().expect("should fail");
+        let err = harness
+            .try_load_local(&ctx)
+            .await
+            .err()
+            .expect("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
         let expected = "failed to load metadata";
