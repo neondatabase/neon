@@ -135,7 +135,7 @@ impl WalReceiver {
         .await;
     }
 
-    pub(super) fn status(&self) -> Option<ConnectionManagerStatus> {
+    pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
         self.manager_status.read().unwrap().clone()
     }
 }

@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - ci-run/pr-*
   pull_request:
 
 defaults:
@@ -39,7 +38,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install macOS postgres dependencies
-        run: brew install flex bison openssl protobuf
+        run: brew install flex bison openssl protobuf icu4c pkg-config
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -48,6 +47,10 @@ jobs:
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
+
+      - name: Set pg 16 revision for caching
+        id: pg_v16_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -62,6 +65,13 @@ jobs:
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v16 build
+        id: cache_pg_16
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Set extra env for macOS
         run: |
@@ -85,6 +95,10 @@ jobs:
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: make postgres-v15 -j$(nproc)
+
+      - name: Build postgres v16
+        if: steps.cache_pg_16.outputs.cache-hit != 'true'
+        run: make postgres-v16 -j$(nproc)
 
       - name: Build neon extensions
         run: make neon-pg-ext -j$(nproc)

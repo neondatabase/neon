@@ -30,6 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
+        tasks::{BackgroundLoopKind, RateLimitError},
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -129,7 +130,11 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::tenant::tasks::warn_when_period_overrun(
+                    elapsed,
+                    p.period,
+                    BackgroundLoopKind::Eviction,
+                );
                 crate::metrics::EVICTION_ITERATION_DURATION
                     .get_metric_with_label_values(&[
                         &format!("{}", p.period.as_secs()),
@@ -149,6 +154,17 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
+
+        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+            cancel,
+        )
+        .await
+        {
+            Ok(permit) => permit,
+            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        };
 
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.
@@ -285,6 +301,10 @@ impl Timeline {
                     warn!(layer = %l, "failed to evict layer: {e}");
                     stats.not_evictable += 1;
                 }
+                Some(Err(EvictionError::MetadataInconsistency(detail))) => {
+                    warn!(layer = %l, "failed to evict layer: {detail}");
+                    stats.not_evictable += 1;
+                }
             }
         }
         if stats.candidates == stats.not_evictable {
@@ -328,9 +348,24 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let Ok(tenant) = crate::tenant::mgr::get_tenant(self.tenant_id, true).await else {
-            // likely, we're shutting down
-            return ControlFlow::Break(());
+        //
+        // It is critical we are responsive to cancellation here. Otherwise, we deadlock with
+        // tenant deletion (holds TENANTS in read mode) any other task that attempts to
+        // acquire TENANTS in write mode before we here call get_tenant.
+        // See https://github.com/neondatabase/neon/issues/5284.
+        let res = tokio::select! {
+            _ = cancel.cancelled() => {
+                return ControlFlow::Break(());
+            }
+            res = crate::tenant::mgr::get_tenant(self.tenant_id, true) => {
+                res
+            }
+        };
+        let tenant = match res {
+            Ok(t) => t,
+            Err(_) => {
+                return ControlFlow::Break(());
+            }
         };
         let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {

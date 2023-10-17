@@ -87,7 +87,7 @@ impl LayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
     /// called within `get_layer_for_write`.
-    pub(crate) fn get_layer_for_write(
+    pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
         last_record_lsn: Lsn,
@@ -129,7 +129,7 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
@@ -263,7 +263,7 @@ impl LayerManager {
         let desc = layer.layer_desc();
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            metrics.resident_physical_size_gauge.sub(desc.file_size);
+            metrics.resident_physical_size_sub(desc.file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.

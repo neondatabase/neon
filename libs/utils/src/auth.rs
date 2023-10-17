@@ -2,9 +2,9 @@
 
 use serde;
 use std::fs;
-use std::path::Path;
 
 use anyhow::Result;
+use camino::Utf8Path;
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
@@ -65,7 +65,7 @@ impl JwtAuth {
         }
     }
 
-    pub fn from_key_path(key_path: &Path) -> Result<Self> {
+    pub fn from_key_path(key_path: &Utf8Path) -> Result<Self> {
         let public_key = fs::read(key_path)?;
         Ok(Self::new(DecodingKey::from_ed_pem(&public_key)?))
     }

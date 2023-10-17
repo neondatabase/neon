@@ -1,0 +1,5 @@
+disallowed-methods = [
+    "tokio::task::block_in_place",
+    # Allow this for now, to deny it later once we stop using Handle::block_on completely
+    # "tokio::runtime::Handle::block_on",
+]

@@ -10,6 +10,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use strum_macros;
 use utils::{
     completion,
+    generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
@@ -194,8 +195,20 @@ pub struct TimelineCreateRequest {
 pub struct TenantCreateRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub new_tenant_id: TenantId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[serde_as]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLoadRequest {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
 }
 
 impl std::ops::Deref for TenantCreateRequest {
@@ -206,6 +219,8 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
+/// An alternative representation of `pageserver::tenant::TenantConf` with
+/// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
@@ -231,6 +246,39 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
 }
 
+/// A flattened analog of a `pagesever::tenant::LocationMode`, which
+/// lists out all possible states (and the virtual "Detached" state)
+/// in a flat form rather than using rust-style enums.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LocationConfigMode {
+    AttachedSingle,
+    AttachedMulti,
+    AttachedStale,
+    Secondary,
+    Detached,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfigSecondary {
+    pub warm: bool,
+}
+
+/// An alternative representation of `pageserver::tenant::LocationConf`,
+/// for use in external-facing APIs.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfig {
+    pub mode: LocationConfigMode,
+    /// If attaching, in what generation?
+    #[serde(default)]
+    pub generation: Option<Generation>,
+    #[serde(default)]
+    pub secondary_conf: Option<LocationConfigSecondary>,
+
+    // If requesting mode `Secondary`, configuration for that.
+    // Custom storage configuration for the tenant, if any
+    pub tenant_conf: TenantConfig,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
@@ -241,13 +289,14 @@ pub struct StatusResponse {
     pub id: NodeId,
 }
 
-impl TenantCreateRequest {
-    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
-        TenantCreateRequest {
-            new_tenant_id,
-            config: TenantConfig::default(),
-        }
-    }
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigRequest {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 #[serde_as]
@@ -293,9 +342,11 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TenantAttachRequest {
     pub config: TenantAttachConfig,
+    #[serde(default)]
+    pub generation: Option<u32>,
 }
 
 /// Newtype to enforce deny_unknown_fields on TenantConfig for
@@ -358,8 +409,15 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
+
+    /// The LSN that we have succesfully uploaded to remote storage
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+
+    /// The LSN that we are advertizing to safekeepers
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn_visible: Lsn,
+
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
@@ -376,6 +434,8 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
+
+    pub walreceiver_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

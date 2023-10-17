@@ -3,10 +3,12 @@ use std::sync::Arc;
 use anyhow::bail;
 use futures::pin_mut;
 use futures::StreamExt;
-use hashbrown::HashMap;
 use hyper::body::HttpBody;
+use hyper::header;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
+use hyper::Response;
+use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
@@ -16,7 +18,14 @@ use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::Row;
+use tracing::error;
+use tracing::instrument;
 use url::Url;
+use utils::http::error::ApiError;
+use utils::http::json::json_response;
+
+use crate::config::HttpConfig;
+use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -39,8 +48,8 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
+const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -93,9 +102,9 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
         // convert to text with escaping
         Value::Bool(_) => serde_json::to_string(value).map(Some),
         Value::Number(_) => serde_json::to_string(value).map(Some),
-        Value::Object(_) => serde_json::to_string(value).map(Some),
 
         // here string needs to be escaped, as it is part of the array
+        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
         Value::String(_) => serde_json::to_string(value).map(Some),
 
         // recurse into array
@@ -182,7 +191,70 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
-) -> anyhow::Result<(Value, HashMap<HeaderName, HeaderValue>)> {
+    config: &'static HttpConfig,
+) -> Result<Response<Body>, ApiError> {
+    let result = tokio::time::timeout(
+        config.sql_over_http_timeout,
+        handle_inner(request, sni_hostname, conn_pool, session_id),
+    )
+    .await;
+    let mut response = match result {
+        Ok(r) => match r {
+            Ok(r) => r,
+            Err(e) => {
+                let message = format!("{:?}", e);
+                let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
+                    e.code()
+                        .map(|s| serde_json::to_value(s.code()).unwrap_or_default())
+                });
+                let code = match code {
+                    Some(c) => c,
+                    None => Value::Null,
+                };
+                error!(
+                    ?code,
+                    "sql-over-http per-client task finished with an error: {e:#}"
+                );
+                // TODO: this shouldn't always be bad request.
+                json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "message": message, "code": code }),
+                )?
+            }
+        },
+        Err(_) => {
+            let message = format!(
+                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                config.sql_over_http_timeout.as_secs()
+            );
+            error!(message);
+            json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                json!({ "message": message, "code": StatusCode::GATEWAY_TIMEOUT.as_u16() }),
+            )?
+        }
+    };
+    response.headers_mut().insert(
+        "Access-Control-Allow-Origin",
+        hyper::http::HeaderValue::from_static("*"),
+    );
+    Ok(response)
+}
+
+#[instrument(name = "sql-over-http", skip_all)]
+async fn handle_inner(
+    request: Request<Body>,
+    sni_hostname: Option<String>,
+    conn_pool: Arc<GlobalConnPool>,
+    session_id: uuid::Uuid,
+) -> anyhow::Result<Response<Body>> {
+    NUM_CONNECTIONS_ACCEPTED_COUNTER
+        .with_label_values(&["http"])
+        .inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
+    }
+
     //
     // Determine the destination and connection params
     //
@@ -219,6 +291,8 @@ pub async fn handle(
         None => MAX_REQUEST_SIZE + 1,
     };
 
+    // we don't have a streaming request support yet so this is to prevent OOM
+    // from a malicious user sending an extremely large request body
     if request_content_length > MAX_REQUEST_SIZE {
         return Err(anyhow::anyhow!(
             "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
@@ -233,13 +307,18 @@ pub async fn handle(
 
     let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
 
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json");
+
     //
     // Now execute the query and return the result
     //
+    let mut size = 0;
     let result = match payload {
-        Payload::Single(query) => query_to_json(&client.inner, query, raw_output, array_mode)
-            .await
-            .map(|x| (x, HashMap::default())),
+        Payload::Single(query) => {
+            query_to_json(&client.inner, query, &mut size, raw_output, array_mode).await
+        }
         Payload::Batch(batch_query) => {
             let mut results = Vec::new();
             let mut builder = client.inner.build_transaction();
@@ -254,7 +333,8 @@ pub async fn handle(
             }
             let transaction = builder.start().await?;
             for query in batch_query.queries {
-                let result = query_to_json(&transaction, query, raw_output, array_mode).await;
+                let result =
+                    query_to_json(&transaction, query, &mut size, raw_output, array_mode).await;
                 match result {
                     Ok(r) => results.push(r),
                     Err(e) => {
@@ -264,25 +344,26 @@ pub async fn handle(
                 }
             }
             transaction.commit().await?;
-            let mut headers = HashMap::default();
             if txn_read_only {
-                headers.insert(
+                response = response.header(
                     TXN_READ_ONLY.clone(),
                     HeaderValue::try_from(txn_read_only.to_string())?,
                 );
             }
             if txn_deferrable {
-                headers.insert(
+                response = response.header(
                     TXN_DEFERRABLE.clone(),
                     HeaderValue::try_from(txn_deferrable.to_string())?,
                 );
             }
             if let Some(txn_isolation_level) = txn_isolation_level_raw {
-                headers.insert(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
+                response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
             }
-            Ok((json!({ "results": results }), headers))
+            Ok(json!({ "results": results }))
         }
     };
+
+    let metrics = client.metrics();
 
     if allow_pool {
         let current_span = tracing::Span::current();
@@ -293,12 +374,30 @@ pub async fn handle(
         });
     }
 
-    result
+    match result {
+        Ok(value) => {
+            // how could this possibly fail
+            let body = serde_json::to_string(&value).expect("json serialization should not fail");
+            let len = body.len();
+            let response = response
+                .body(Body::from(body))
+                // only fails if invalid status code or invalid header/values are given.
+                // these are not user configurable so it cannot fail dynamically
+                .expect("building response payload should not fail");
+
+            // count the egress bytes - we miss the TLS and header overhead but oh well...
+            // moving this later in the stack is going to be a lot of effort and ehhhh
+            metrics.record_egress(len as u64);
+            Ok(response)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn query_to_json<T: GenericClient>(
     client: &T,
     data: QueryData,
+    current_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
 ) -> anyhow::Result<Value> {
@@ -312,12 +411,13 @@ async fn query_to_json<T: GenericClient>(
     // big.
     pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
-    let mut current_size = 0;
     while let Some(row) = row_stream.next().await {
         let row = row?;
-        current_size += row.body_len();
+        *current_size += row.body_len();
         rows.push(row);
-        if current_size > MAX_RESPONSE_SIZE {
+        // we don't have a streaming response support yet so this is to prevent OOM
+        // from a malicious query (eg a cross join)
+        if *current_size > MAX_RESPONSE_SIZE {
             return Err(anyhow::anyhow!(
                 "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
             ));
@@ -513,7 +613,7 @@ fn _pg_array_parse(
                     }
                 }
             }
-            '}' => {
+            '}' if !quote => {
                 level -= 1;
                 if level == 0 {
                     push_checked(&mut entry, &mut entries, elem_type)?;
@@ -596,6 +696,14 @@ mod tests {
             vec![Some(
                 "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
             )]
+        );
+        // array of objects
+        let json = r#"[{"foo": 1},{"bar": 2}]"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        assert_eq!(
+            pg_params,
+            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
         );
     }
 
@@ -722,6 +830,25 @@ mod tests {
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
             json!([[[1, 2, 3], [4, 5, 6]]])
+        );
+    }
+    #[test]
+    fn test_pg_array_parse_json() {
+        fn pt(pg_arr: &str) -> Value {
+            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+        }
+        assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1, \"bar\": 2}"}"#),
+            json!([{"foo": 1, "bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1}", "{\"bar\": 2}"}"#),
+            json!([{"foo": 1}, {"bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{{"{\"foo\": 1}", "{\"bar\": 2}"}}"#),
+            json!([[{"foo": 1}, {"bar": 2}]])
         );
     }
 }

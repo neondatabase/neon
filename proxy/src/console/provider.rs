@@ -64,7 +64,7 @@ pub mod errors {
                     }
                     http::StatusCode::LOCKED => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contract our support")
+                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
@@ -89,7 +89,10 @@ pub mod errors {
                 Self::Console {
                     status: http::StatusCode::LOCKED,
                     ref text,
-                } => !text.contains("quota"),
+                } => {
+                    !text.contains("written data quota exceeded")
+                        && !text.contains("the limit for current plan reached")
+                }
                 // retry server errors
                 Self::Console { status, .. } if status.is_server_error() => true,
                 _ => false,

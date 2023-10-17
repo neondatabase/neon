@@ -187,6 +187,7 @@ task_local! {
     Debug,
     // NB: enumset::EnumSetType derives PartialEq, Eq, Clone, Copy
     enumset::EnumSetType,
+    enum_map::Enum,
     serde::Serialize,
     serde::Deserialize,
     strum_macros::IntoStaticStr,
@@ -455,7 +456,7 @@ async fn task_finish(
     }
 
     if shutdown_process {
-        shutdown_pageserver(1).await;
+        shutdown_pageserver(None, 1).await;
     }
 }
 

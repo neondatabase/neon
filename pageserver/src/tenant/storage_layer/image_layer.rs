@@ -24,10 +24,10 @@
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
-use crate::tenant::blob_io::{BlobWriter, WriteBlobWriter};
+use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
@@ -37,16 +37,15 @@ use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Write;
-use std::io::{Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
-use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -155,7 +154,7 @@ pub struct ImageLayerInner {
     lsn: Lsn,
 
     /// Reader object for reading blocks from the file.
-    file: FileBlockReader<VirtualFile>,
+    file: FileBlockReader,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -196,7 +195,7 @@ impl AsLayerDesc for ImageLayer {
 }
 
 impl PersistentLayer for ImageLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<Utf8PathBuf> {
         self.local_path()
     }
 
@@ -238,10 +237,15 @@ impl ImageLayer {
         tree_reader.dump().await?;
 
         tree_reader
-            .visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-                println!("key: {} offset {}", hex::encode(key), value);
-                true
-            })
+            .visit(
+                &[0u8; KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, value| {
+                    println!("key: {} offset {}", hex::encode(key), value);
+                    true
+                },
+                ctx,
+            )
             .await?;
 
         Ok(())
@@ -262,13 +266,13 @@ impl ImageLayer {
             .load(LayerAccessKind::GetValueReconstructData, ctx)
             .await?;
         inner
-            .get_value_reconstruct_data(key, reconstruct_state)
+            .get_value_reconstruct_data(key, reconstruct_state, ctx)
             .await
             // FIXME: makes no sense to dump paths
-            .with_context(|| format!("read {}", self.path().display()))
+            .with_context(|| format!("read {}", self.path()))
     }
 
-    pub(crate) fn local_path(&self) -> Option<PathBuf> {
+    pub(crate) fn local_path(&self) -> Option<Utf8PathBuf> {
         Some(self.path())
     }
 
@@ -300,7 +304,7 @@ impl ImageLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         fname: &ImageFileName,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         match path_or_conf {
             PathOrConf::Path(path) => path.to_path_buf(),
             PathOrConf::Conf(conf) => conf
@@ -314,7 +318,7 @@ impl ImageLayer {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         fname: &ImageFileName,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(8)
@@ -336,12 +340,12 @@ impl ImageLayer {
     ) -> Result<&ImageLayerInner> {
         self.access_stats.record_access(access_kind, ctx);
         self.inner
-            .get_or_try_init(|| self.load_inner())
+            .get_or_try_init(|| self.load_inner(ctx))
             .await
-            .with_context(|| format!("Failed to load image layer {}", self.path().display()))
+            .with_context(|| format!("Failed to load image layer {}", self.path()))
     }
 
-    async fn load_inner(&self) -> Result<ImageLayerInner> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
         let expected_summary = match &self.path_or_conf {
@@ -350,11 +354,12 @@ impl ImageLayer {
         };
 
         let loaded =
-            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary).await?;
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary, ctx)
+                .await?;
 
         if let PathOrConf::Path(ref path) = self.path_or_conf {
             // not production code
-            let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let actual_filename = path.file_name().unwrap().to_owned();
             let expected_filename = self.filename().file_name();
 
             if actual_filename != expected_filename {
@@ -394,9 +399,8 @@ impl ImageLayer {
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
     /// This variant is only used for debugging purposes, by the 'pagectl' binary.
-    pub fn new_for_path(path: &Path, file: File) -> Result<ImageLayer> {
-        let mut summary_buf = Vec::new();
-        summary_buf.resize(PAGE_SZ, 0);
+    pub fn new_for_path(path: &Utf8Path, file: File) -> Result<ImageLayer> {
+        let mut summary_buf = vec![0; PAGE_SZ];
         file.read_exact_at(&mut summary_buf, 0)?;
         let summary = Summary::des_prefix(&summary_buf)?;
         let metadata = file
@@ -422,7 +426,7 @@ impl ImageLayer {
     }
 
     /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
+    pub fn path(&self) -> Utf8PathBuf {
         Self::path_for(
             &self.path_or_conf,
             self.desc.timeline_id,
@@ -434,14 +438,16 @@ impl ImageLayer {
 
 impl ImageLayerInner {
     pub(super) async fn load(
-        path: &std::path::Path,
+        path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         let file = VirtualFile::open(path)
-            .with_context(|| format!("Failed to open file '{}'", path.display()))?;
+            .await
+            .with_context(|| format!("Failed to open file '{}'", path))?;
         let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0).await?;
+        let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
 
         if let Some(mut expected_summary) = summary {
@@ -470,16 +476,30 @@ impl ImageLayerInner {
         &self,
         key: Key,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader.get(&keybuf).await? {
+        if let Some(offset) = tree_reader
+            .get(
+                &keybuf,
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+                    .build(),
+            )
+            .await?
+        {
             let blob = file
                 .block_cursor()
-                .read_blob(offset)
+                .read_blob(
+                    offset,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::ImageLayerValue)
+                        .build(),
+                )
                 .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
             let value = Bytes::from(blob);
@@ -505,13 +525,13 @@ impl ImageLayerInner {
 ///
 struct ImageLayerWriterInner {
     conf: &'static PageServerConf,
-    path: PathBuf,
+    path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
 
-    blob_writer: WriteBlobWriter<VirtualFile>,
+    blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
 
@@ -519,7 +539,7 @@ impl ImageLayerWriterInner {
     ///
     /// Start building a new image layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -537,14 +557,15 @@ impl ImageLayerWriterInner {
                 lsn,
             },
         );
-        info!("new image layer {}", path.display());
+        info!("new image layer {path}");
         let mut file = VirtualFile::open_with_options(
             &path,
             std::fs::OpenOptions::new().write(true).create_new(true),
-        )?;
+        )
+        .await?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
-        let blob_writer = WriteBlobWriter::new(file, PAGE_SZ as u64);
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -569,9 +590,9 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img)?;
+        let off = self.blob_writer.write_blob(img).await?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -583,17 +604,18 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    fn finish(self) -> anyhow::Result<ImageLayer> {
+    async fn finish(self) -> anyhow::Result<ImageLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner();
 
         // Write out the index
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref())?;
+            file.write_all(buf.as_ref()).await?;
         }
 
         // Fill in the summary on blk 0
@@ -607,11 +629,22 @@ impl ImageLayerWriterInner {
             index_start_blk,
             index_root_blk,
         };
-        file.seek(SeekFrom::Start(0))?;
-        Summary::ser_into(&summary, &mut file)?;
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()
+            .await
             .context("get metadata to determine file size")?;
 
         let desc = PersistentLayerDesc::new_img(
@@ -634,7 +667,7 @@ impl ImageLayerWriterInner {
         };
 
         // fsync the file
-        file.sync_all()?;
+        file.sync_all().await?;
 
         // Rename the file to its final name
         //
@@ -651,7 +684,7 @@ impl ImageLayerWriterInner {
         );
         std::fs::rename(self.path, final_path)?;
 
-        trace!("created image layer {}", layer.path().display());
+        trace!("created image layer {}", layer.path());
 
         Ok(layer)
     }
@@ -687,7 +720,7 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -695,13 +728,9 @@ impl ImageLayerWriter {
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
-            inner: Some(ImageLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_range,
-                lsn,
-            )?),
+            inner: Some(
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_id, key_range, lsn).await?,
+            ),
         })
     }
 
@@ -710,15 +739,15 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img)
+    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img).await
     }
 
     ///
     /// Finish writing the image layer.
     ///
-    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish()
+    pub async fn finish(mut self) -> anyhow::Result<ImageLayer> {
+        self.inner.take().unwrap().finish().await
     }
 }
 

@@ -4,8 +4,9 @@
 //! This is the "Monitor" part of the monitor binary and is the main entrypoint for
 //! all functionality.
 
+use std::fmt::Debug;
 use std::sync::Arc;
-use std::{fmt::Debug, mem};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
@@ -15,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::cgroup::{CgroupWatcher, MemoryLimits, Sequenced};
+use crate::cgroup::{CgroupWatcher, Sequenced};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
@@ -35,6 +36,8 @@ pub struct Runner {
     /// **Note**: This counter is always odd, so that we avoid collisions between the IDs generated
     /// by us vs the autoscaler-agent.
     counter: usize,
+
+    last_upscale_request_at: Option<Instant>,
 
     /// A signal to kill the main thread produced by `self.run()`. This is triggered
     /// when the server receives a new connection. When the thread receives the
@@ -99,8 +102,46 @@ impl Runner {
             cgroup: None,
             dispatcher,
             counter: 1, // NB: must be odd, see the comment about the field for more.
+            last_upscale_request_at: None,
             kill,
         };
+
+        // If we have both the cgroup and file cache integrations enabled, it's possible for
+        // temporary failures to result in cgroup throttling (from memory.high), that in turn makes
+        // it near-impossible to connect to the file cache (because it times out). Unfortunately,
+        // we *do* still want to determine the file cache size before setting the cgroup's
+        // memory.high, so it's not as simple as just swapping the order.
+        //
+        // Instead, the resolution here is that on vm-monitor startup (note: happens on each
+        // connection from autoscaler-agent, possibly multiple times per compute_ctl lifecycle), we
+        // temporarily unset memory.high, to allow any existing throttling to dissipate. It's a bit
+        // of a hacky solution, but helps with reliability.
+        if let Some(name) = &args.cgroup {
+            // Best not to set up cgroup stuff more than once, so we'll initialize cgroup state
+            // now, and then set limits later.
+            info!("initializing cgroup");
+
+            let (cgroup, cgroup_event_stream) = CgroupWatcher::new(name.clone(), requesting_send)
+                .context("failed to create cgroup manager")?;
+
+            info!("temporarily unsetting memory.high");
+
+            // Temporarily un-set cgroup memory.high; see above.
+            cgroup
+                .unset_memory_high()
+                .context("failed to unset memory.high")?;
+
+            let cgroup = Arc::new(cgroup);
+
+            let cgroup_clone = Arc::clone(&cgroup);
+            spawn_with_cancel(
+                token.clone(),
+                |_| error!("cgroup watcher terminated"),
+                async move { cgroup_clone.watch(notified_recv, cgroup_event_stream).await },
+            );
+
+            state.cgroup = Some(cgroup);
+        }
 
         let mut file_cache_reserved_bytes = 0;
         let mem = get_total_system_memory();
@@ -115,7 +156,7 @@ impl Runner {
                 false => FileCacheConfig::default_in_memory(),
             };
 
-            let mut file_cache = FileCacheState::new(connstr, config, token.clone())
+            let mut file_cache = FileCacheState::new(connstr, config, token)
                 .await
                 .context("failed to create file cache")?;
 
@@ -148,35 +189,15 @@ impl Runner {
             state.filecache = Some(file_cache);
         }
 
-        if let Some(name) = &args.cgroup {
-            let (mut cgroup, cgroup_event_stream) =
-                CgroupWatcher::new(name.clone(), requesting_send)
-                    .context("failed to create cgroup manager")?;
-
+        if let Some(cgroup) = &state.cgroup {
             let available = mem - file_cache_reserved_bytes;
+            let value = cgroup.config.calculate_memory_high_value(available);
+
+            info!(value, "setting memory.high");
 
             cgroup
-                .set_memory_limits(available)
-                .context("failed to set cgroup memory limits")?;
-
-            let cgroup = Arc::new(cgroup);
-
-            // Some might call this . . . cgroup v2
-            let cgroup_clone = Arc::clone(&cgroup);
-
-            spawn_with_cancel(token, |_| error!("cgroup watcher terminated"), async move {
-                cgroup_clone.watch(notified_recv, cgroup_event_stream).await
-            });
-
-            state.cgroup = Some(cgroup);
-        } else {
-            // *NOTE*: We need to forget the sender so that its drop impl does not get ran.
-            // This allows us to poll it in `Monitor::run` regardless of whether we
-            // are managing a cgroup or not. If we don't forget it, all receives will
-            // immediately return an error because the sender is droped and it will
-            // claim all select! statements, effectively turning `Monitor::run` into
-            // `loop { fail to receive }`.
-            mem::forget(requesting_send);
+                .set_memory_high_bytes(value)
+                .context("failed to set cgroup memory.high")?;
         }
 
         Ok(state)
@@ -253,15 +274,11 @@ impl Runner {
                 new_cgroup_mem_high = cgroup.config.calculate_memory_high_value(available_memory);
             }
 
-            let limits = MemoryLimits::new(
-                // new_cgroup_mem_high is initialized to 0 but it is guarancontextd to not be here
-                // since it is properly initialized in the previous cgroup if let block
-                new_cgroup_mem_high,
-                available_memory,
-            );
+            // new_cgroup_mem_high is initialized to 0 but it is guaranteed to not be here
+            // since it is properly initialized in the previous cgroup if let block
             cgroup
-                .set_limits(&limits)
-                .context("failed to set cgroup memory limits")?;
+                .set_memory_high_bytes(new_cgroup_mem_high)
+                .context("failed to set cgroup memory.high")?;
 
             let message = format!(
                 "set cgroup memory.high to {} MiB, of new max {} MiB",
@@ -324,10 +341,9 @@ impl Runner {
                 name = cgroup.path(),
                 "updating cgroup memory.high",
             );
-            let limits = MemoryLimits::new(new_cgroup_mem_high, available_memory);
             cgroup
-                .set_limits(&limits)
-                .context("failed to set file cache size")?;
+                .set_memory_high_bytes(new_cgroup_mem_high)
+                .context("failed to set cgroup memory.high")?;
         }
 
         Ok(())
@@ -393,10 +409,24 @@ impl Runner {
                     }
                 }
                 // we need to propagate an upscale request
-                request = self.dispatcher.request_upscale_events.recv() => {
+                request = self.dispatcher.request_upscale_events.recv(), if self.cgroup.is_some() => {
                     if request.is_none() {
                         bail!("failed to listen for upscale event from cgroup")
                     }
+
+                    // If it's been less than 1 second since the last time we requested upscaling,
+                    // ignore the event, to avoid spamming the agent (otherwise, this can happen
+                    // ~1k times per second).
+                    if let Some(t) = self.last_upscale_request_at {
+                        let elapsed = t.elapsed();
+                        if elapsed < Duration::from_secs(1) {
+                            info!(elapsed_millis = elapsed.as_millis(), "cgroup asked for upscale but too soon to forward the request, ignoring");
+                            continue;
+                        }
+                    }
+
+                    self.last_upscale_request_at = Some(Instant::now());
+
                     info!("cgroup asking for upscale; forwarding request");
                     self.counter += 2; // Increment, preserving parity (i.e. keep the
                                        // counter odd). See the field comment for more.

@@ -17,10 +17,12 @@ use std::{
 use tokio::time;
 use tokio_postgres::AsyncMessage;
 
-use crate::{auth, console};
+use crate::{
+    auth, console,
+    metrics::{Ids, MetricCounter, USAGE_METRICS},
+    proxy::{LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
+};
 use crate::{compute, config};
-
-use super::sql_over_http::MAX_RESPONSE_SIZE;
 
 use crate::proxy::ConnectMechanism;
 
@@ -137,6 +139,7 @@ impl GlobalConnPool {
         session_id: uuid::Uuid,
     ) -> anyhow::Result<Client> {
         let mut client: Option<Client> = None;
+        let mut latency_timer = LatencyTimer::new("http");
 
         let mut hash_valid = false;
         if !force_new {
@@ -180,15 +183,16 @@ impl GlobalConnPool {
         let new_client = if let Some(client) = client {
             if client.inner.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info, session_id).await
+                connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
             } else {
+                latency_timer.pool_hit();
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
                 return Ok(client);
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info, session_id).await
+            connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
         };
 
         match &new_client {
@@ -345,6 +349,7 @@ async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
     session_id: uuid::Uuid,
+    latency_timer: LatencyTimer,
 ) -> anyhow::Result<Client> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -384,6 +389,7 @@ async fn connect_to_compute(
         node_info,
         &extra,
         &creds,
+        latency_timer,
     )
     .await
 }
@@ -400,7 +406,6 @@ async fn connect_to_compute_once(
         .user(&conn_info.username)
         .password(&conn_info.password)
         .dbname(&conn_info.dbname)
-        .max_backend_message_size(MAX_RESPONSE_SIZE)
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
@@ -412,48 +417,66 @@ async fn connect_to_compute_once(
     span.in_scope(|| {
         info!(%conn_info, %session, "new connection");
     });
+    let ids = Ids {
+        endpoint_id: node_info.aux.endpoint_id.to_string(),
+        branch_id: node_info.aux.branch_id.to_string(),
+    };
 
     tokio::spawn(
-        poll_fn(move |cx| {
-            if matches!(rx.has_changed(), Ok(true)) {
-                session = *rx.borrow_and_update();
-                info!(%session, "changed session");
+        async move {
+            NUM_DB_CONNECTIONS_OPENED_COUNTER.with_label_values(&["http"]).inc();
+            scopeguard::defer! {
+                NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
             }
+            poll_fn(move |cx| {
+                if matches!(rx.has_changed(), Ok(true)) {
+                    session = *rx.borrow_and_update();
+                    info!(%session, "changed session");
+                }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
+                loop {
+                    let message = ready!(connection.poll_message(cx));
 
-                match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session, "notice: {}", notice);
-                    }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session, "unknown message");
-                    }
-                    Some(Err(e)) => {
-                        error!(%session, "connection error: {}", e);
-                        return Poll::Ready(())
-                    }
-                    None => {
-                        info!("connection closed");
-                        return Poll::Ready(())
+                    match message {
+                        Some(Ok(AsyncMessage::Notice(notice))) => {
+                            info!(%session, "notice: {}", notice);
+                        }
+                        Some(Ok(AsyncMessage::Notification(notif))) => {
+                            warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                        }
+                        Some(Ok(_)) => {
+                            warn!(%session, "unknown message");
+                        }
+                        Some(Err(e)) => {
+                            error!(%session, "connection error: {}", e);
+                            return Poll::Ready(())
+                        }
+                        None => {
+                            info!("connection closed");
+                            return Poll::Ready(())
+                        }
                     }
                 }
-            }
-        })
+            }).await
+        }
         .instrument(span)
     );
 
     Ok(Client {
         inner: client,
         session: tx,
+        ids,
     })
 }
 
 pub struct Client {
     pub inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
+    ids: Ids,
+}
+
+impl Client {
+    pub fn metrics(&self) -> Arc<MetricCounter> {
+        USAGE_METRICS.register(self.ids.clone())
+    }
 }

@@ -2,12 +2,14 @@
 
 use std::env::{var, VarError};
 use std::sync::Arc;
-use std::{env, ops::ControlFlow, path::Path, str::FromStr};
+use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
+use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
@@ -20,6 +22,7 @@ use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
     context::{DownloadBehavior, RequestContext},
+    deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
     task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
@@ -63,21 +66,17 @@ fn main() -> anyhow::Result<()> {
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new(".neon"));
+        .map(Utf8Path::new)
+        .unwrap_or_else(|| Utf8Path::new(".neon"));
     let workdir = workdir
-        .canonicalize()
-        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+        .canonicalize_utf8()
+        .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir).with_context(|| {
-        format!(
-            "Failed to set application's current dir to '{}'",
-            workdir.display()
-        )
-    })?;
+    env::set_current_dir(&workdir)
+        .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -113,12 +112,8 @@ fn main() -> anyhow::Result<()> {
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
-            format!(
-                "Failed to create tenants root dir at '{}'",
-                tenants_path.display()
-            )
-        })?;
+        utils::crashsafe::create_dir_all(conf.tenants_path())
+            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'"))?;
     }
 
     // Initialize up failpoints support
@@ -135,9 +130,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
-    cfg_file_path: &Path,
+    cfg_file_path: &Utf8Path,
     arg_matches: clap::ArgMatches,
-    workdir: &Path,
+    workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
     let update_config = init || arg_matches.get_flag("update-config");
@@ -145,33 +140,22 @@ fn initialize_config(
     let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
         if init {
             anyhow::bail!(
-                "Config file '{}' already exists, cannot init it, use --update-config to update it",
-                cfg_file_path.display()
+                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
             );
         }
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
-            format!(
-                "Failed to read pageserver config at '{}'",
-                cfg_file_path.display()
-            )
-        })?;
+        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
+            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
         (
             cfg_file_contents
                 .parse::<toml_edit::Document>()
                 .with_context(|| {
-                    format!(
-                        "Failed to parse '{}' as pageserver config",
-                        cfg_file_path.display()
-                    )
+                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
                 })?,
             true,
         )
     } else if cfg_file_path.exists() {
-        anyhow::bail!(
-            "Config file '{}' exists but is not a regular file",
-            cfg_file_path.display()
-        );
+        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
     } else {
         // We're initializing the tenant, so there's no config file yet
         (
@@ -190,7 +174,7 @@ fn initialize_config(
 
             for (key, item) in doc.iter() {
                 if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.display());
+                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
                 }
                 toml.insert(key, item.clone());
             }
@@ -202,18 +186,11 @@ fn initialize_config(
         .context("Failed to parse pageserver configuration")?;
 
     if update_config {
-        info!("Writing pageserver config to '{}'", cfg_file_path.display());
+        info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
-            format!(
-                "Failed to write pageserver config to '{}'",
-                cfg_file_path.display()
-            )
-        })?;
-        info!(
-            "Config successfully written to '{}'",
-            cfg_file_path.display()
-        )
+        std::fs::write(cfg_file_path, toml.to_string())
+            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
+        info!("Config successfully written to '{cfg_file_path}'")
     }
 
     Ok(if init {
@@ -346,8 +323,21 @@ fn start_pageserver(
         }
     };
 
+    // Top-level cancellation token for the process
+    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
+
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
+
+    // Set up deletion queue
+    let (deletion_queue, deletion_workers) = DeletionQueue::new(
+        remote_storage.clone(),
+        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        conf,
+    );
+    if let Some(deletion_workers) = deletion_workers {
+        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
+    }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
@@ -365,6 +355,7 @@ fn start_pageserver(
     // consumer side) will be dropped once we can start the background jobs. Currently it is behind
     // completing all initial logical size calculations (init_logical_size_done_rx) and a timeout
     // (background_task_maximum_delay).
+    let (init_remote_done_tx, init_remote_done_rx) = utils::completion::channel();
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
@@ -372,22 +363,24 @@ fn start_pageserver(
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
 
     let order = pageserver::InitializationOrder {
-        initial_tenant_load: Some(init_done_tx),
+        initial_tenant_load_remote: Some(init_done_tx),
+        initial_tenant_load: Some(init_remote_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
         initial_logical_size_attempt: Some(init_logical_size_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
-
+    let deletion_queue_client = deletion_queue.new_client();
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
+            deletion_queue_client,
         },
         order,
+        shutdown_pageserver.clone(),
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
@@ -396,6 +389,9 @@ fn start_pageserver(
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
+
+            init_remote_done_rx.wait().await;
+            startup_checkpoint("initial_tenant_load_remote", "Remote part of initial load completed");
 
             init_done_rx.wait().await;
             startup_checkpoint("initial_tenant_load", "Initial load completed");
@@ -476,16 +472,20 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(
-            conf,
-            launch_ts,
-            http_auth,
-            broker_client.clone(),
-            remote_storage,
-            disk_usage_eviction_state,
-        )?
-        .build()
-        .map_err(|err| anyhow!(err))?;
+        let router_state = Arc::new(
+            http::routes::State::new(
+                conf,
+                http_auth.clone(),
+                remote_storage.clone(),
+                broker_client.clone(),
+                disk_usage_eviction_state,
+                deletion_queue.new_client(),
+            )
+            .context("Failed to initialize router state")?,
+        );
+        let router = http::make_router(router_state, launch_ts, http_auth.clone())?
+            .build()
+            .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
@@ -514,6 +514,9 @@ fn start_pageserver(
             // creates a child context with the right DownloadBehavior.
             DownloadBehavior::Error,
         );
+
+        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
+
         task_mgr::spawn(
             crate::BACKGROUND_RUNTIME.handle(),
             TaskKind::MetricsCollection,
@@ -540,6 +543,7 @@ fn start_pageserver(
                     conf.cached_metric_collection_interval,
                     conf.synthetic_size_calculation_interval,
                     conf.id,
+                    local_disk_storage,
                     metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))
@@ -603,7 +607,12 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+            let bg_remote_storage = remote_storage.clone();
+            let bg_deletion_queue = deletion_queue.clone();
+            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                bg_remote_storage.map(|_| bg_deletion_queue),
+                0,
+            ));
             unreachable!()
         }
     })
@@ -615,7 +624,7 @@ fn create_remote_storage_client(
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        // No remote storage configured.
+        tracing::warn!("no remote storage configured, this is a deprecated configuration");
         return Ok(None);
     };
 

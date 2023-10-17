@@ -74,11 +74,13 @@ class EvictionEnv:
     pgbench_init_lsns: Dict[TenantId, Lsn]
 
     def timelines_du(self) -> Tuple[int, int, int]:
-        return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid in self.timelines])
+        return poor_mans_du(
+            self.neon_env, [(tid, tlid) for tid, tlid in self.timelines], verbose=False
+        )
 
     def du_by_timeline(self) -> Dict[Tuple[TenantId, TimelineId], int]:
         return {
-            (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)])[0]
+            (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)], verbose=True)[0]
             for tid, tlid in self.timelines
         }
 
@@ -89,7 +91,21 @@ class EvictionEnv:
         """
         lsn = self.pgbench_init_lsns[tenant_id]
         with self.neon_env.endpoints.create_start("main", tenant_id=tenant_id, lsn=lsn) as endpoint:
-            self.pg_bin.run(["pgbench", "-S", endpoint.connstr()])
+            # instead of using pgbench --select-only which does point selects,
+            # run full table scans for all tables
+            with endpoint.connect() as conn:
+                cur = conn.cursor()
+
+                tables_cols = {
+                    "pgbench_accounts": "abalance",
+                    "pgbench_tellers": "tbalance",
+                    "pgbench_branches": "bbalance",
+                    "pgbench_history": "delta",
+                }
+
+                for table, column in tables_cols.items():
+                    cur.execute(f"select avg({column}) from {table}")
+                    _avg = cur.fetchone()
 
     def pageserver_start_with_disk_usage_eviction(
         self, period, max_usage_pct, min_avail_bytes, mock_behavior
@@ -127,6 +143,19 @@ class EvictionEnv:
         self.neon_env.pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
 
 
+def human_bytes(amt: float) -> str:
+    suffixes = ["", "Ki", "Mi", "Gi"]
+
+    last = suffixes[-1]
+
+    for name in suffixes:
+        if amt < 1024 or name == last:
+            return f"{int(round(amt))} {name}B"
+        amt = amt / 1024
+
+    raise RuntimeError("unreachable")
+
+
 @pytest.fixture
 def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
     """
@@ -135,7 +164,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     log.info(f"setting up eviction_env for test {request.node.name}")
 
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # initial tenant will not be present on this pageserver
     env = neon_env_builder.init_configs()
@@ -215,8 +244,12 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
 
     healthy_tenant_id, healthy_timeline_id = env.timelines[1]
 
-    broken_size_pre, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
-    healthy_size_pre, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+    broken_size_pre, _, _ = poor_mans_du(
+        env.neon_env, [(broken_tenant_id, broken_timeline_id)], verbose=True
+    )
+    healthy_size_pre, _, _ = poor_mans_du(
+        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], verbose=True
+    )
 
     # try to evict everything, then validate that broken tenant wasn't touched
     target = broken_size_pre + healthy_size_pre
@@ -224,8 +257,12 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     response = env.pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
-    broken_size_post, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
-    healthy_size_post, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+    broken_size_post, _, _ = poor_mans_du(
+        env.neon_env, [(broken_tenant_id, broken_timeline_id)], verbose=True
+    )
+    healthy_size_post, _, _ = poor_mans_du(
+        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], verbose=True
+    )
 
     assert broken_size_pre == broken_size_post, "broken tenant should not be touched"
     assert healthy_size_post < healthy_size_pre
@@ -366,18 +403,16 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     du_by_timeline = env.du_by_timeline()
 
     # pick any tenant
-    [our_tenant, other_tenant] = list(du_by_timeline.keys())
-    (tenant_id, timeline_id) = our_tenant
+    [warm, cold] = list(du_by_timeline.keys())
+    (tenant_id, timeline_id) = warm
 
-    # make our tenant more recently used than the other one
+    # make picked tenant more recently used than the other one
     env.warm_up_tenant(tenant_id)
 
     # Build up enough pressure to require evictions from both tenants,
     # but not enough to fall into global LRU.
-    # So, set target to all occipied space, except 2*env.layer_size per tenant
-    target = (
-        du_by_timeline[other_tenant] + (du_by_timeline[our_tenant] // 2) - 2 * 2 * env.layer_size
-    )
+    # So, set target to all occupied space, except 2*env.layer_size per tenant
+    target = du_by_timeline[cold] + (du_by_timeline[warm] // 2) - 2 * 2 * env.layer_size
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
@@ -392,22 +427,33 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
             later_tenant_usage < du_by_timeline[tenant]
         ), "all tenants should have lost some layers"
 
+    warm_size = later_du_by_timeline[warm]
+
+    # bounds for warmed_size
+    warm_lower = 0.5 * du_by_timeline[warm]
+
+    # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
+    # So, check for up to 3 here.
+    warm_upper = warm_lower + 3 * env.layer_size
+
+    cold_size = later_du_by_timeline[cold]
+    cold_upper = 2 * env.layer_size
+
+    log.info(
+        f"expecting for warm tenant: {human_bytes(warm_lower)} < {human_bytes(warm_size)} < {human_bytes(warm_upper)}"
+    )
+    log.info(f"expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}")
+
+    assert warm_size > warm_lower, "warmed up tenant should be at about half size (lower)"
+    assert warm_size < warm_upper, "warmed up tenant should be at about half size (upper)"
+
     assert (
-        later_du_by_timeline[our_tenant] > 0.5 * du_by_timeline[our_tenant]
-    ), "our warmed up tenant should be at about half capacity, part 1"
-    assert (
-        # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
-        # So, check for up to 3 here.
-        later_du_by_timeline[our_tenant]
-        < 0.5 * du_by_timeline[our_tenant] + 3 * env.layer_size
-    ), "our warmed up tenant should be at about half capacity, part 2"
-    assert (
-        later_du_by_timeline[other_tenant] < 2 * env.layer_size
-    ), "the other tenant should be evicted to is min_resident_size, i.e., max layer file size"
+        cold_size < cold_upper
+    ), "the cold tenant should be evicted to its min_resident_size, i.e., max layer file size"
 
 
 def poor_mans_du(
-    env: NeonEnv, timelines: list[Tuple[TenantId, TimelineId]]
+    env: NeonEnv, timelines: list[Tuple[TenantId, TimelineId]], verbose: bool = False
 ) -> Tuple[int, int, int]:
     """
     Disk usage, largest, smallest layer for layer files over the given (tenant, timeline) tuples;
@@ -417,7 +463,7 @@ def poor_mans_du(
     largest_layer = 0
     smallest_layer = None
     for tenant_id, timeline_id in timelines:
-        timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+        timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
         assert timeline_dir.exists(), f"timeline dir does not exist: {timeline_dir}"
         total = 0
         for file in timeline_dir.iterdir():
@@ -430,9 +476,11 @@ def poor_mans_du(
                 smallest_layer = min(smallest_layer, size)
             else:
                 smallest_layer = size
-            log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
+            if verbose:
+                log.info(f"{tenant_id}/{timeline_id} => {file.name} {size} ({human_bytes(size)})")
 
-        log.info(f"{tenant_id}/{timeline_id}: sum {total}")
+        if verbose:
+            log.info(f"{tenant_id}/{timeline_id}: sum {total} ({human_bytes(total)})")
         total_on_disk += total
 
     assert smallest_layer is not None or total_on_disk == 0 and largest_layer == 0

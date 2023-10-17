@@ -66,8 +66,7 @@
 //! inserted to the mapping, but you must hold the write-lock on the slot until
 //! the contents are valid. If you need to release the lock without initializing
 //! the contents, you must remove the mapping first. We make that easy for the
-//! callers with PageWriteGuard: when lock_for_write() returns an uninitialized
-//! page, the caller must explicitly call guard.mark_valid() after it has
+//! callers with PageWriteGuard: the caller must explicitly call guard.mark_valid() after it has
 //! initialized it. If the guard is dropped without calling mark_valid(), the
 //! mapping is automatically removed and the slot is marked free.
 //!
@@ -75,7 +74,11 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     convert::TryInto,
-    sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -85,7 +88,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{metrics::PageCacheSizeMetrics, repository::Key};
+use crate::{context::RequestContext, metrics::PageCacheSizeMetrics, repository::Key};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -165,6 +168,8 @@ struct Slot {
 
 struct SlotInner {
     key: Option<CacheKey>,
+    // for `coalesce_readers_permit`
+    permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
     buf: &'static mut [u8; PAGE_SZ],
 }
 
@@ -207,6 +212,22 @@ impl Slot {
     }
 }
 
+impl SlotInner {
+    /// If there is aready a reader, drop our permit and share its permit, just like we share read access.
+    fn coalesce_readers_permit(&self, permit: PinnedSlotsPermit) -> Arc<PinnedSlotsPermit> {
+        let mut guard = self.permit.lock().unwrap();
+        if let Some(existing_permit) = guard.upgrade() {
+            drop(guard);
+            drop(permit);
+            existing_permit
+        } else {
+            let permit = Arc::new(permit);
+            *guard = Arc::downgrade(&permit);
+            permit
+        }
+    }
+}
+
 pub struct PageCache {
     /// This contains the mapping from the cache key to buffer slot that currently
     /// contains the page, if any.
@@ -224,6 +245,8 @@ pub struct PageCache {
     /// The actual buffers with their metadata.
     slots: Box<[Slot]>,
 
+    pinned_slots: Arc<tokio::sync::Semaphore>,
+
     /// Index of the next candidate to evict, for the Clock replacement algorithm.
     /// This is interpreted modulo the page cache size.
     next_evict_slot: AtomicUsize,
@@ -231,23 +254,28 @@ pub struct PageCache {
     size_metrics: &'static PageCacheSizeMetrics,
 }
 
+struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
+
 ///
 /// PageReadGuard is a "lease" on a buffer, for reading. The page is kept locked
 /// until the guard is dropped.
 ///
-pub struct PageReadGuard<'i>(tokio::sync::RwLockReadGuard<'i, SlotInner>);
+pub struct PageReadGuard<'i> {
+    _permit: Arc<PinnedSlotsPermit>,
+    slot_guard: tokio::sync::RwLockReadGuard<'i, SlotInner>,
+}
 
 impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.0.buf
+        self.slot_guard.buf
     }
 }
 
 impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
     fn as_ref(&self) -> &[u8; PAGE_SZ] {
-        self.0.buf
+        self.slot_guard.buf
     }
 }
 
@@ -257,21 +285,25 @@ impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
 ///
 /// Counterintuitively, this is used even for a read, if the requested page is not
 /// currently found in the page cache. In that case, the caller of lock_for_read()
-/// is expected to fill in the page contents and call mark_valid(). Similarly
-/// lock_for_write() can return an invalid buffer that the caller is expected to
-/// to initialize.
-///
+/// is expected to fill in the page contents and call mark_valid().
 pub struct PageWriteGuard<'i> {
-    inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
+    state: PageWriteGuardState<'i>,
+}
 
-    // Are the page contents currently valid?
-    // Used to mark pages as invalid that are assigned but not yet filled with data.
-    valid: bool,
+enum PageWriteGuardState<'i> {
+    Invalid {
+        inner: tokio::sync::RwLockWriteGuard<'i, SlotInner>,
+        _permit: PinnedSlotsPermit,
+    },
+    Downgraded,
 }
 
 impl std::ops::DerefMut for PageWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.buf
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
@@ -279,25 +311,37 @@ impl std::ops::Deref for PageWriteGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.inner.buf
+        match &self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
 impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
     fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
-        self.inner.buf
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
-impl PageWriteGuard<'_> {
+impl<'a> PageWriteGuard<'a> {
     /// Mark that the buffer contents are now valid.
-    pub fn mark_valid(&mut self) {
-        assert!(self.inner.key.is_some());
-        assert!(
-            !self.valid,
-            "mark_valid called on a buffer that was already valid"
-        );
-        self.valid = true;
+    #[must_use]
+    pub fn mark_valid(mut self) -> PageReadGuard<'a> {
+        let prev = std::mem::replace(&mut self.state, PageWriteGuardState::Downgraded);
+        match prev {
+            PageWriteGuardState::Invalid { inner, _permit } => {
+                assert!(inner.key.is_some());
+                PageReadGuard {
+                    _permit: Arc::new(_permit),
+                    slot_guard: inner.downgrade(),
+                }
+            }
+            PageWriteGuardState::Downgraded => unreachable!(),
+        }
     }
 }
 
@@ -308,11 +352,14 @@ impl Drop for PageWriteGuard<'_> {
     /// initializing it, remove the mapping from the page cache.
     ///
     fn drop(&mut self) {
-        assert!(self.inner.key.is_some());
-        if !self.valid {
-            let self_key = self.inner.key.as_ref().unwrap();
-            PAGE_CACHE.get().unwrap().remove_mapping(self_key);
-            self.inner.key = None;
+        match &mut self.state {
+            PageWriteGuardState::Invalid { inner, _permit } => {
+                assert!(inner.key.is_some());
+                let self_key = inner.key.as_ref().unwrap();
+                PAGE_CACHE.get().unwrap().remove_mapping(self_key);
+                inner.key = None;
+            }
+            PageWriteGuardState::Downgraded => {}
         }
     }
 }
@@ -320,12 +367,6 @@ impl Drop for PageWriteGuard<'_> {
 /// lock_for_read() return value
 pub enum ReadBufResult<'a> {
     Found(PageReadGuard<'a>),
-    NotFound(PageWriteGuard<'a>),
-}
-
-/// lock_for_write() return value
-pub enum WriteBufResult<'a> {
-    Found(PageWriteGuard<'a>),
     NotFound(PageWriteGuard<'a>),
 }
 
@@ -346,8 +387,14 @@ impl PageCache {
         timeline_id: TimelineId,
         key: &Key,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Option<(Lsn, PageReadGuard)> {
+        let Ok(permit) = self.try_get_pinned_slot_permit().await else {
+            return None;
+        };
+
         crate::metrics::PAGE_CACHE
+            .for_ctx(ctx)
             .read_accesses_materialized_page
             .inc();
 
@@ -360,7 +407,10 @@ impl PageCache {
             lsn,
         };
 
-        if let Some(guard) = self.try_lock_for_read(&mut cache_key).await {
+        if let Some(guard) = self
+            .try_lock_for_read(&mut cache_key, &mut Some(permit))
+            .await
+        {
             if let CacheKey::MaterializedPage {
                 hash_key: _,
                 lsn: available_lsn,
@@ -368,10 +418,12 @@ impl PageCache {
             {
                 if available_lsn == lsn {
                     crate::metrics::PAGE_CACHE
+                        .for_ctx(ctx)
                         .read_hits_materialized_page_exact
                         .inc();
                 } else {
                     crate::metrics::PAGE_CACHE
+                        .for_ctx(ctx)
                         .read_hits_materialized_page_older_lsn
                         .inc();
                 }
@@ -404,20 +456,77 @@ impl PageCache {
             lsn,
         };
 
-        match self.lock_for_write(&cache_key).await? {
-            WriteBufResult::Found(write_guard) => {
-                // We already had it in cache. Another thread must've put it there
-                // concurrently. Check that it had the same contents that we
-                // replayed.
-                assert!(*write_guard == img);
+        let mut permit = Some(self.try_get_pinned_slot_permit().await?);
+        loop {
+            // First check if the key already exists in the cache.
+            if let Some(slot_idx) = self.search_mapping_exact(&cache_key) {
+                // The page was found in the mapping. Lock the slot, and re-check
+                // that it's still what we expected (because we don't released the mapping
+                // lock already, another thread could have evicted the page)
+                let slot = &self.slots[slot_idx];
+                let inner = slot.inner.write().await;
+                if inner.key.as_ref() == Some(&cache_key) {
+                    slot.inc_usage_count();
+                    debug_assert!(
+                        {
+                            let guard = inner.permit.lock().unwrap();
+                            guard.upgrade().is_none()
+                        },
+                        "we hold a write lock, so, no one else should have a permit"
+                    );
+                    debug_assert_eq!(inner.buf.len(), img.len());
+                    // We already had it in cache. Another thread must've put it there
+                    // concurrently. Check that it had the same contents that we
+                    // replayed.
+                    assert!(inner.buf == img);
+                    return Ok(());
+                }
             }
-            WriteBufResult::NotFound(mut write_guard) => {
-                write_guard.copy_from_slice(img);
-                write_guard.mark_valid();
-            }
-        }
+            debug_assert!(permit.is_some());
 
-        Ok(())
+            // Not found. Find a victim buffer
+            let (slot_idx, mut inner) = self
+                .find_victim(permit.as_ref().unwrap())
+                .await
+                .context("Failed to find evict victim")?;
+
+            // Insert mapping for this. At this point, we may find that another
+            // thread did the same thing concurrently. In that case, we evicted
+            // our victim buffer unnecessarily. Put it into the free list and
+            // continue with the slot that the other thread chose.
+            if let Some(_existing_slot_idx) = self.try_insert_mapping(&cache_key, slot_idx) {
+                // TODO: put to free list
+
+                // We now just loop back to start from beginning. This is not
+                // optimal, we'll perform the lookup in the mapping again, which
+                // is not really necessary because we already got
+                // 'existing_slot_idx'.  But this shouldn't happen often enough
+                // to matter much.
+                continue;
+            }
+
+            // Make the slot ready
+            let slot = &self.slots[slot_idx];
+            inner.key = Some(cache_key.clone());
+            slot.set_usage_count(1);
+            // Create a write guard for the slot so we go through the expected motions.
+            debug_assert!(
+                {
+                    let guard = inner.permit.lock().unwrap();
+                    guard.upgrade().is_none()
+                },
+                "we hold a write lock, so, no one else should have a permit"
+            );
+            let mut write_guard = PageWriteGuard {
+                state: PageWriteGuardState::Invalid {
+                    _permit: permit.take().unwrap(),
+                    inner,
+                },
+            };
+            write_guard.copy_from_slice(img);
+            let _ = write_guard.mark_valid();
+            return Ok(());
+        }
     }
 
     // Section 1.2: Public interface functions for working with immutable file pages.
@@ -426,10 +535,11 @@ impl PageCache {
         &self,
         file_id: FileId,
         blkno: u32,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
 
-        self.lock_for_read(&mut cache_key).await
+        self.lock_for_read(&mut cache_key, ctx).await
     }
 
     //
@@ -440,6 +550,29 @@ impl PageCache {
     // "mappings" after this section. But the routines in this section should
     // not require changes.
 
+    async fn try_get_pinned_slot_permit(&self) -> anyhow::Result<PinnedSlotsPermit> {
+        let timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
+        match tokio::time::timeout(
+            // Choose small timeout, neon_smgr does its own retries.
+            // https://neondb.slack.com/archives/C04DGM6SMTM/p1694786876476869
+            Duration::from_secs(10),
+            Arc::clone(&self.pinned_slots).acquire_owned(),
+        )
+        .await
+        {
+            Ok(res) => Ok(PinnedSlotsPermit(
+                res.expect("this semaphore is never closed"),
+            )),
+            Err(_timeout) => {
+                timer.stop_and_discard();
+                crate::metrics::page_cache_errors_inc(
+                    crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,
+                );
+                anyhow::bail!("timeout: there were page guards alive for all page cache slots")
+            }
+        }
+    }
+
     /// Look up a page in the cache.
     ///
     /// If the search criteria is not exact, *cache_key is updated with the key
@@ -449,7 +582,11 @@ impl PageCache {
     ///
     /// If no page is found, returns None and *cache_key is left unmodified.
     ///
-    async fn try_lock_for_read(&self, cache_key: &mut CacheKey) -> Option<PageReadGuard> {
+    async fn try_lock_for_read(
+        &self,
+        cache_key: &mut CacheKey,
+        permit: &mut Option<PinnedSlotsPermit>,
+    ) -> Option<PageReadGuard> {
         let cache_key_orig = cache_key.clone();
         if let Some(slot_idx) = self.search_mapping(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
@@ -459,7 +596,10 @@ impl PageCache {
             let inner = slot.inner.read().await;
             if inner.key.as_ref() == Some(cache_key) {
                 slot.inc_usage_count();
-                return Some(PageReadGuard(inner));
+                return Some(PageReadGuard {
+                    _permit: inner.coalesce_readers_permit(permit.take().unwrap()),
+                    slot_guard: inner,
+                });
             } else {
                 // search_mapping might have modified the search key; restore it.
                 *cache_key = cache_key_orig;
@@ -497,14 +637,22 @@ impl PageCache {
     /// }
     /// ```
     ///
-    async fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
+    async fn lock_for_read(
+        &self,
+        cache_key: &mut CacheKey,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ReadBufResult> {
+        let mut permit = Some(self.try_get_pinned_slot_permit().await?);
+
         let (read_access, hit) = match cache_key {
             CacheKey::MaterializedPage { .. } => {
                 unreachable!("Materialized pages use lookup_materialized_page")
             }
             CacheKey::ImmutableFilePage { .. } => (
-                &crate::metrics::PAGE_CACHE.read_accesses_immutable,
-                &crate::metrics::PAGE_CACHE.read_hits_immutable,
+                &crate::metrics::PAGE_CACHE
+                    .for_ctx(ctx)
+                    .read_accesses_immutable,
+                &crate::metrics::PAGE_CACHE.for_ctx(ctx).read_hits_immutable,
             ),
         };
         read_access.inc();
@@ -512,17 +660,21 @@ impl PageCache {
         let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
-            if let Some(read_guard) = self.try_lock_for_read(cache_key).await {
+            if let Some(read_guard) = self.try_lock_for_read(cache_key, &mut permit).await {
+                debug_assert!(permit.is_none());
                 if is_first_iteration {
                     hit.inc();
                 }
                 return Ok(ReadBufResult::Found(read_guard));
             }
+            debug_assert!(permit.is_some());
             is_first_iteration = false;
 
             // Not found. Find a victim buffer
-            let (slot_idx, mut inner) =
-                self.find_victim().context("Failed to find evict victim")?;
+            let (slot_idx, mut inner) = self
+                .find_victim(permit.as_ref().unwrap())
+                .await
+                .context("Failed to find evict victim")?;
 
             // Insert mapping for this. At this point, we may find that another
             // thread did the same thing concurrently. In that case, we evicted
@@ -543,71 +695,20 @@ impl PageCache {
             let slot = &self.slots[slot_idx];
             inner.key = Some(cache_key.clone());
             slot.set_usage_count(1);
+
+            debug_assert!(
+                {
+                    let guard = inner.permit.lock().unwrap();
+                    guard.upgrade().is_none()
+                },
+                "we hold a write lock, so, no one else should have a permit"
+            );
 
             return Ok(ReadBufResult::NotFound(PageWriteGuard {
-                inner,
-                valid: false,
-            }));
-        }
-    }
-
-    /// Look up a page in the cache and lock it in write mode. If it's not
-    /// found, returns None.
-    ///
-    /// When locking a page for writing, the search criteria is always "exact".
-    async fn try_lock_for_write(&self, cache_key: &CacheKey) -> Option<PageWriteGuard> {
-        if let Some(slot_idx) = self.search_mapping_for_write(cache_key) {
-            // The page was found in the mapping. Lock the slot, and re-check
-            // that it's still what we expected (because we don't released the mapping
-            // lock already, another thread could have evicted the page)
-            let slot = &self.slots[slot_idx];
-            let inner = slot.inner.write().await;
-            if inner.key.as_ref() == Some(cache_key) {
-                slot.inc_usage_count();
-                return Some(PageWriteGuard { inner, valid: true });
-            }
-        }
-        None
-    }
-
-    /// Return a write-locked buffer for given block.
-    ///
-    /// Similar to lock_for_read(), but the returned buffer is write-locked and
-    /// may be modified by the caller even if it's already found in the cache.
-    async fn lock_for_write(&self, cache_key: &CacheKey) -> anyhow::Result<WriteBufResult> {
-        loop {
-            // First check if the key already exists in the cache.
-            if let Some(write_guard) = self.try_lock_for_write(cache_key).await {
-                return Ok(WriteBufResult::Found(write_guard));
-            }
-
-            // Not found. Find a victim buffer
-            let (slot_idx, mut inner) =
-                self.find_victim().context("Failed to find evict victim")?;
-
-            // Insert mapping for this. At this point, we may find that another
-            // thread did the same thing concurrently. In that case, we evicted
-            // our victim buffer unnecessarily. Put it into the free list and
-            // continue with the slot that the other thread chose.
-            if let Some(_existing_slot_idx) = self.try_insert_mapping(cache_key, slot_idx) {
-                // TODO: put to free list
-
-                // We now just loop back to start from beginning. This is not
-                // optimal, we'll perform the lookup in the mapping again, which
-                // is not really necessary because we already got
-                // 'existing_slot_idx'.  But this shouldn't happen often enough
-                // to matter much.
-                continue;
-            }
-
-            // Make the slot ready
-            let slot = &self.slots[slot_idx];
-            inner.key = Some(cache_key.clone());
-            slot.set_usage_count(1);
-
-            return Ok(WriteBufResult::NotFound(PageWriteGuard {
-                inner,
-                valid: false,
+                state: PageWriteGuardState::Invalid {
+                    _permit: permit.take().unwrap(),
+                    inner,
+                },
             }));
         }
     }
@@ -652,7 +753,7 @@ impl PageCache {
     ///
     /// Like 'search_mapping, but performs an "exact" search. Used for
     /// allocating a new buffer.
-    fn search_mapping_for_write(&self, key: &CacheKey) -> Option<usize> {
+    fn search_mapping_exact(&self, key: &CacheKey) -> Option<usize> {
         match key {
             CacheKey::MaterializedPage { hash_key, lsn } => {
                 let map = self.materialized_page_map.read().unwrap();
@@ -758,7 +859,10 @@ impl PageCache {
     /// Find a slot to evict.
     ///
     /// On return, the slot is empty and write-locked.
-    fn find_victim(&self) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
+    async fn find_victim(
+        &self,
+        _permit_witness: &PinnedSlotsPermit,
+    ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {
@@ -771,13 +875,40 @@ impl PageCache {
                 let mut inner = match slot.inner.try_write() {
                     Ok(inner) => inner,
                     Err(_err) => {
-                        // If we have looped through the whole buffer pool 10 times
-                        // and still haven't found a victim buffer, something's wrong.
-                        // Maybe all the buffers were in locked. That could happen in
-                        // theory, if you have more threads holding buffers locked than
-                        // there are buffers in the pool. In practice, with a reasonably
-                        // large buffer pool it really shouldn't happen.
                         if iters > iter_limit {
+                            // NB: Even with the permits, there's no hard guarantee that we will find a slot with
+                            // any particular number of iterations: other threads might race ahead and acquire and
+                            // release pins just as we're scanning the array.
+                            //
+                            // Imagine that nslots is 2, and as starting point, usage_count==1 on all
+                            // slots. There are two threads running concurrently, A and B. A has just
+                            // acquired the permit from the semaphore.
+                            //
+                            //   A: Look at slot 1. Its usage_count == 1, so decrement it to zero, and continue the search
+                            //   B: Acquire permit.
+                            //   B: Look at slot 2, decrement its usage_count to zero and continue the search
+                            //   B: Look at slot 1. Its usage_count is zero, so pin it and bump up its usage_count to 1.
+                            //   B: Release pin and permit again
+                            //   B: Acquire permit.
+                            //   B: Look at slot 2. Its usage_count is zero, so pin it and bump up its usage_count to 1.
+                            //   B: Release pin and permit again
+                            //
+                            // Now we're back in the starting situation that both slots have
+                            // usage_count 1, but A has now been through one iteration of the
+                            // find_victim() loop. This can repeat indefinitely and on each
+                            // iteration, A's iteration count increases by one.
+                            //
+                            // So, even though the semaphore for the permits is fair, the victim search
+                            // itself happens in parallel and is not fair.
+                            // Hence even with a permit, a task can theoretically be starved.
+                            // To avoid this, we'd need tokio to give priority to tasks that are holding
+                            // permits for longer.
+                            // Note that just yielding to tokio during iteration without such
+                            // priority boosting is likely counter-productive. We'd just give more opportunities
+                            // for B to bump usage count, further starving A.
+                            crate::metrics::page_cache_errors_inc(
+                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
+                            );
                             anyhow::bail!("exceeded evict iter limit");
                         }
                         continue;
@@ -788,6 +919,7 @@ impl PageCache {
                     self.remove_mapping(old_key);
                     inner.key = None;
                 }
+                crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
                 return Ok((slot_idx, inner));
             }
         }
@@ -799,8 +931,9 @@ impl PageCache {
     fn new(num_pages: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
-        // We use Box::leak here and into_boxed_slice to avoid leaking uninitialized
-        // memory that Vec's might contain.
+        // We could use Vec::leak here, but that potentially also leaks
+        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
+        // this is avoided.
         let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
@@ -814,7 +947,11 @@ impl PageCache {
                 let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
 
                 Slot {
-                    inner: tokio::sync::RwLock::new(SlotInner { key: None, buf }),
+                    inner: tokio::sync::RwLock::new(SlotInner {
+                        key: None,
+                        buf,
+                        permit: std::sync::Mutex::new(Weak::new()),
+                    }),
                     usage_count: AtomicU8::new(0),
                 }
             })
@@ -826,6 +963,7 @@ impl PageCache {
             slots,
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
+            pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
         }
     }
 }

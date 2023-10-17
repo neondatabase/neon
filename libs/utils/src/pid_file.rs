@@ -49,9 +49,10 @@
 //! At this point, `B` and `C` are running, which is hazardous.
 //! Morale of the story: don't unlink pidfiles, ever.
 
-use std::{ops::Deref, path::Path};
+use std::ops::Deref;
 
 use anyhow::Context;
+use camino::Utf8Path;
 use nix::unistd::Pid;
 
 use crate::lock_file::{self, LockFileRead};
@@ -84,7 +85,7 @@ impl Deref for PidFileGuard {
 /// The claim ends as soon as the returned guard object is dropped.
 /// To maintain the claim for the remaining lifetime of the current process,
 /// use [`std::mem::forget`] or similar.
-pub fn claim_for_current_process(path: &Path) -> anyhow::Result<PidFileGuard> {
+pub fn claim_for_current_process(path: &Utf8Path) -> anyhow::Result<PidFileGuard> {
     let unwritten_lock_file = lock_file::create_exclusive(path).context("lock file")?;
     // if any of the next steps fail, we drop the file descriptor and thereby release the lock
     let guard = unwritten_lock_file
@@ -132,7 +133,7 @@ pub enum PidFileRead {
 ///
 /// On success, this function returns a [`PidFileRead`].
 /// Check its docs for a description of the meaning of its different variants.
-pub fn read(pidfile: &Path) -> anyhow::Result<PidFileRead> {
+pub fn read(pidfile: &Utf8Path) -> anyhow::Result<PidFileRead> {
     let res = lock_file::read_and_hold_lock_file(pidfile).context("read and hold pid file")?;
     let ret = match res {
         LockFileRead::NotExist => PidFileRead::NotExist,

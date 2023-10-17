@@ -6,10 +6,10 @@ use crate::safekeeper::ServerInfo;
 use crate::timeline::{Timeline, TimelineError};
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
@@ -89,7 +89,7 @@ impl GlobalTimelines {
         };
         let mut tenant_count = 0;
         for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
-            .with_context(|| format!("failed to list tenants dir {}", tenants_dir.display()))?
+            .with_context(|| format!("failed to list tenants dir {}", tenants_dir))?
         {
             match &tenants_dir_entry {
                 Ok(tenants_dir_entry) => {
@@ -102,9 +102,7 @@ impl GlobalTimelines {
                 }
                 Err(e) => error!(
                     "failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
-                    tenants_dir_entry,
-                    tenants_dir.display(),
-                    e
+                    tenants_dir_entry, tenants_dir, e
                 ),
             }
         }
@@ -136,7 +134,7 @@ impl GlobalTimelines {
 
         let timelines_dir = conf.tenant_dir(&tenant_id);
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
-            .with_context(|| format!("failed to list timelines dir {}", timelines_dir.display()))?
+            .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
         {
             match &timelines_dir_entry {
                 Ok(timeline_dir_entry) => {
@@ -168,9 +166,7 @@ impl GlobalTimelines {
                 }
                 Err(e) => error!(
                     "failed to list timelines dir entry {:?} in directory {}, reason: {:?}",
-                    timelines_dir_entry,
-                    timelines_dir.display(),
-                    e
+                    timelines_dir_entry, timelines_dir, e
                 ),
             }
         }
@@ -421,7 +417,7 @@ pub struct TimelineDeleteForceResult {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-fn delete_dir(path: PathBuf) -> Result<bool> {
+fn delete_dir(path: Utf8PathBuf) -> Result<bool> {
     match std::fs::remove_dir_all(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

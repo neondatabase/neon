@@ -167,11 +167,11 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     tokio::fs::create_dir_all(&temp_base).await?;
 
-    let tli_dir = tempfile::Builder::new()
+    let tli_dir = camino_tempfile::Builder::new()
         .suffix("_temptli")
         .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
         .tempdir_in(temp_base)?;
-    let tli_dir_path = tli_dir.path().to_owned();
+    let tli_dir_path = tli_dir.path().to_path_buf();
 
     // Note: some time happens between fetching list of files and fetching files themselves.
     //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.
@@ -220,9 +220,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     info!(
         "Moving timeline {} from {} to {}",
-        ttid,
-        tli_dir_path.display(),
-        timeline_path.display()
+        ttid, tli_dir_path, timeline_path
     );
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
     tokio::fs::rename(tli_dir_path, &timeline_path).await?;

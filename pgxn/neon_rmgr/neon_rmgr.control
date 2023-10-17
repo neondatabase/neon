@@ -1,0 +1,4 @@
+# neon_rmgr extension
+comment = 'Neon WAL Resource Manager - custom WAL records used to make Neon work (since PG 16)'
+default_version = '1.0'
+module_pathname = '$libdir/neon_rmgr'

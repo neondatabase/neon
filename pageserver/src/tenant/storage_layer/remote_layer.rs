@@ -8,9 +8,9 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::layer_manager::LayerManager;
 use anyhow::{bail, Result};
+use camino::Utf8PathBuf;
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use utils::{
@@ -25,7 +25,7 @@ use super::{
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
-/// [`DeltaLayer`](super::DeltaLayer).
+/// [`DeltaLayer`].
 ///
 /// RemoteLayer might be downloaded on-demand during operations which are
 /// allowed download remote layers and during which, it gets replaced with a
@@ -74,7 +74,7 @@ impl Layer for RemoteLayer {
         _reconstruct_state: &mut ValueReconstructState,
         _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
-        bail!("layer {self} needs to be downloaded");
+        Err(anyhow::anyhow!("layer {self} needs to be downloaded"))
     }
 }
 
@@ -92,7 +92,7 @@ impl AsLayerDesc for RemoteLayer {
 }
 
 impl PersistentLayer for RemoteLayer {
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<Utf8PathBuf> {
         None
     }
 

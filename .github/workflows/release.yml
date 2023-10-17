@@ -2,16 +2,19 @@ name: Create Release Branch
 
 on:
   schedule:
-    - cron: '0 10 * * 2'
+    - cron: '0 7 * * 2'
   workflow_dispatch:
 
 jobs:
   create_release_branch:
-    runs-on: [ubuntu-latest]
+    runs-on: [ ubuntu-latest ]
+
+    permissions:
+      contents: write # for `git push`
 
     steps:
     - name: Check out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         ref: main
 
@@ -26,9 +29,16 @@ jobs:
       run: git push origin releases/${{ steps.date.outputs.date }}
 
     - name: Create pull request into release
-      uses: thomaseizinger/create-pull-request@e3972219c86a56550fb70708d96800d8e24ba862 # 1.3.0
-      with:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        head: releases/${{ steps.date.outputs.date }}
-        base: release
-        title: Release ${{ steps.date.outputs.date }}
+      env:
+        GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+      run: |
+        cat << EOF > body.md
+          ## Release ${{ steps.date.outputs.date }}
+
+          **Please merge this PR using 'Create a merge commit'!**
+        EOF
+
+        gh pr create --title "Release ${{ steps.date.outputs.date }}" \
+                     --body-file "body.md" \
+                     --head "releases/${{ steps.date.outputs.date }}" \
+                     --base "release"

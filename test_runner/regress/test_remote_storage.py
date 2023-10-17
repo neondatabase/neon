@@ -6,7 +6,6 @@ import queue
 import shutil
 import threading
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pytest
@@ -52,18 +51,17 @@ from requests import ReadTimeout
 #
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+@pytest.mark.parametrize("generations", [True, False])
 def test_remote_storage_backup_and_restore(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind, generations: bool
 ):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    neon_env_builder.enable_generations = generations
 
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
@@ -138,7 +136,7 @@ def test_remote_storage_backup_and_restore(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -155,7 +153,7 @@ def test_remote_storage_backup_and_restore(
     # background task to load the tenant. In that background task,
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
     assert tenant_info["attachment_status"] == {
@@ -165,7 +163,7 @@ def test_remote_storage_backup_and_restore(
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
-        client.tenant_attach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
@@ -183,7 +181,7 @@ def test_remote_storage_backup_and_restore(
     # Ensure that the pageserver remembers that the tenant was attaching, by
     # trying to attach it again. It should fail.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
-        client.tenant_attach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
     wait_until_tenant_active(
@@ -218,15 +216,10 @@ def test_remote_storage_backup_and_restore(
 # - Disable failpoints
 # - Wait for all uploads to finish
 # - Verify that remote is consistent and up-to-date (=all retries were done and succeeded)
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_upload_queue_retries",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -357,14 +350,14 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 
@@ -374,15 +367,10 @@ def test_remote_storage_upload_queue_retries(
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_timeline_client_metrics",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # thinking about using a shared environment? the test assumes that global
     # metrics are for single tenant.
@@ -495,14 +483,14 @@ def test_remote_timeline_client_calls_started_metric(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 
@@ -517,15 +505,10 @@ def test_remote_timeline_client_calls_started_metric(
 
 
 # Test that we correctly handle timeline with layers stuck in upload queue
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_timeline_deletion_with_files_stuck_in_upload_queue(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -543,7 +526,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
 
     client = env.pageserver.http_client()
 
@@ -614,8 +597,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     assert not timeline_path.exists()
 
     # to please mypy
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    remote_timeline_path = env.remote_storage.timeline_path(tenant_id, timeline_id)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
     assert not list(remote_timeline_path.iterdir())
 
@@ -635,15 +618,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
 # Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
 # Ensures that such branch is still persisted on the remote storage, and can be restored during tenant (re)attach.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_empty_branch_remote_storage_upload(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload",
-    )
+def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -679,11 +655,7 @@ def test_empty_branch_remote_storage_upload(
     ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_empty_branch_remote_storage_upload_on_restart(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
+def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnvBuilder):
     """
     Branches off a root branch, but does not write anything to the new branch, so
     it has a metadata file only.
@@ -692,10 +664,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
     — the upload should be scheduled by load, and create_timeline should await
     for it even though it gets 409 Conflict.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload_on_restart",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -720,12 +689,14 @@ def test_empty_branch_remote_storage_upload_on_restart(
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    local_metadata = env.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
+    local_metadata = (
+        env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
+    )
     assert local_metadata.is_file()
 
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    new_branch_on_remote_storage = env.remote_storage.timeline_path(
+    new_branch_on_remote_storage = env.pageserver_remote_storage.timeline_path(
         env.initial_tenant, new_branch_timeline_id
     )
     assert (
@@ -746,6 +717,10 @@ def test_empty_branch_remote_storage_upload_on_restart(
     def create_in_background():
         barrier.wait()
         try:
+            # retrying this kind of query makes no sense in real life as we do
+            # not lock in the lsn. with the immediate stop, we could in real
+            # life revert back the ancestor in startup, but most likely the lsn
+            # would still be branchable.
             client.timeline_create(
                 tenant_id=env.initial_tenant,
                 ancestor_timeline_id=env.initial_timeline,
@@ -766,13 +741,13 @@ def test_empty_branch_remote_storage_upload_on_restart(
         assert not new_branch_on_remote_storage.exists(), "failpoint should had stopped uploading"
 
         client.configure_failpoints(("before-upload-index", "off"))
-        conflict = q.get()
+        exception = q.get()
 
-        assert conflict, "create_timeline should not have succeeded"
         assert (
-            conflict.status_code == 409
-        ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+            exception is None
+        ), "create_timeline should have succeeded, because we deleted unuploaded local state"
 
+        # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
         assert (
@@ -782,18 +757,13 @@ def test_empty_branch_remote_storage_upload_on_restart(
         create_thread.join()
 
 
-# Regression test for a race condition where files are compactified before the upload,
+# Regression test for a race condition where L0 layers are compacted before the upload,
 # resulting in the uploading complaining about the file not being found
 # https://github.com/neondatabase/neon/issues/4526
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_compaction_delete_before_upload(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_delete_before_upload",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={

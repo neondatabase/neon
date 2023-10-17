@@ -43,12 +43,12 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
+use camino::Utf8Path;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -122,7 +122,7 @@ async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: GenericRemoteStorage,
-    tenants_dir: &Path,
+    tenants_dir: &Utf8Path,
     cancel: CancellationToken,
 ) {
     scopeguard::defer! {
@@ -184,7 +184,7 @@ async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Path,
+    tenants_dir: &Utf8Path,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
@@ -411,6 +411,11 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                                 evictions_failed.file_sizes += file_size;
                                 evictions_failed.count += 1;
                             }
+                            Some(Err(EvictionError::MetadataInconsistency(detail))) => {
+                                warn!(%layer, "failed to evict layer: {detail}");
+                                evictions_failed.file_sizes += file_size;
+                                evictions_failed.count += 1;
+                            }
                             None => {
                                 assert!(cancel.is_cancelled());
                                 return;
@@ -620,9 +625,8 @@ impl std::ops::Deref for TimelineKey {
 }
 
 mod filesystem_level_usage {
-    use std::path::Path;
-
     use anyhow::Context;
+    use camino::Utf8Path;
 
     use crate::statvfs::Statvfs;
 
@@ -664,7 +668,7 @@ mod filesystem_level_usage {
     }
 
     pub fn get<'a>(
-        tenants_dir: &Path,
+        tenants_dir: &Utf8Path,
         config: &'a DiskUsageEvictionTaskConfig,
     ) -> anyhow::Result<Usage<'a>> {
         let mock_config = {
