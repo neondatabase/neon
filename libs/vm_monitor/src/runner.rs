@@ -46,6 +46,7 @@ pub struct Runner {
 #[derive(Debug)]
 struct CgroupState {
     watcher: watch::Receiver<(Instant, cgroup::MemoryHistory)>,
+    /// If [`CgroupState::avg_non_reclaimable`] exceeds `threshold`, we send upscale requests.
     threshold: u64,
 }
 
