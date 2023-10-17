@@ -89,10 +89,13 @@ impl Default for Config {
 impl Config {
     fn cgroup_threshold(&self, total_mem: u64, file_cache_disk_size: u64) -> u64 {
         // If the file cache is in tmpfs, then it will count towards shmem usage of the cgroup,
-        // and thus be non-reclaimable, so we should allow for additional memory usage. Otherwise
-        // (i.e. if the file cache is on disk), the cgroup's non-reclaimable memory usage will not
-        // include the file cache, and so non-reclaimable memory usage from the cgroup *plus*
-        // memory reserved for the file cache should try to be less than total memory.
+        // and thus be non-reclaimable, so we should allow for additional memory usage.
+        //
+        // If the file cache sits on disk, our desired stable system state is for it to be fully
+        // page cached (its contents should only be paged to/from disk in situations where we can't
+        // upscale fast enough). Page-cached memory is reclaimable, so we need to lower the
+        // threshold for non-reclaimable memory so we scale up *before* the kernel starts paging
+        // out the file cache.
         let memory_remaining_for_cgroup = total_mem.saturating_sub(file_cache_disk_size);
 
         // Guarantee at least some wiggle room, even if there is none from the file cache
