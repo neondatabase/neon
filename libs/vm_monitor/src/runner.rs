@@ -86,7 +86,7 @@ impl Default for Config {
 
 impl Config {
     fn cgroup_threshold(&self, total_mem: u64, file_cache_disk_size: u64) -> u64 {
-        // If the file cache is in memory, then it will count towards shmem usage of the cgroup,
+        // If the file cache is in tmpfs, then it will count towards shmem usage of the cgroup,
         // and thus be non-reclaimable, so we should allow for additional memory usage. Otherwise
         // (i.e. if the file cache is on disk), the cgroup's non-reclaimable memory usage will not
         // include the file cache, and so non-reclaimable memory usage from the cgroup *plus*
