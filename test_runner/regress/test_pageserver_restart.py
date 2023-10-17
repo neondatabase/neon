@@ -65,11 +65,11 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
         extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"}
     )
 
-    # Check that it's in Loading state
+    # Check that it's in Attaching state
     client = env.pageserver.http_client()
     tenant_status = client.tenant_status(env.initial_tenant)
     log.info("Tenant status : %s", tenant_status)
-    assert tenant_status["state"]["slug"] == "Loading"
+    assert tenant_status["state"]["slug"] == "Attaching"
 
     # Try to read. This waits until the loading finishes, and then return normally.
     cur.execute("SELECT count(*) FROM foo")
