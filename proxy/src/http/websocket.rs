@@ -205,7 +205,14 @@ async fn ws_handler(
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        sql_over_http::handle(request, sni_hostname, conn_pool, session_id).await
+        sql_over_http::handle(
+            request,
+            sni_hostname,
+            conn_pool,
+            session_id,
+            &config.http_config,
+        )
+        .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")

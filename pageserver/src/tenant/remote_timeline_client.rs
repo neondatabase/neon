@@ -1419,6 +1419,13 @@ impl RemoteTimelineClient {
             }
         }
     }
+
+    pub(crate) fn get_layer_metadata(
+        &self,
+        name: &LayerFileName,
+    ) -> anyhow::Result<Option<LayerFileMetadata>> {
+        self.upload_queue.lock().unwrap().get_layer_metadata(name)
+    }
 }
 
 pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {

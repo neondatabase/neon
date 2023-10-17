@@ -44,6 +44,7 @@ use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     DeltaLayerWriter, ImageLayerWriter, InMemoryLayer, LayerAccessStats, LayerFileName, RemoteLayer,
 };
+use crate::tenant::tasks::{BackgroundLoopKind, RateLimitError};
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -370,7 +371,7 @@ pub enum PageReconstructError {
 
     /// An error happened replaying WAL records
     #[error(transparent)]
-    WalRedo(#[from] crate::walredo::WalRedoError),
+    WalRedo(anyhow::Error),
 }
 
 impl std::fmt::Debug for PageReconstructError {
@@ -684,37 +685,17 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
-        static CONCURRENT_COMPACTIONS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
-            once_cell::sync::Lazy::new(|| {
-                let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
-                let permits = usize::max(
-                    1,
-                    // while a lot of the work is done on spawn_blocking, we still do
-                    // repartitioning in the async context. this should give leave us some workers
-                    // unblocked to be blocked on other work, hopefully easing any outside visible
-                    // effects of restarts.
-                    //
-                    // 6/8 is a guess; previously we ran with unlimited 8 and more from
-                    // spawn_blocking.
-                    (total_threads * 3).checked_div(4).unwrap_or(0),
-                );
-                assert_ne!(permits, 0, "we will not be adding in permits later");
-                assert!(
-                    permits < total_threads,
-                    "need threads avail for shorter work"
-                );
-                tokio::sync::Semaphore::new(permits)
-            });
-
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
-        let _permit = tokio::select! {
-            permit = CONCURRENT_COMPACTIONS.acquire() => {
-                permit
-            },
-            _ = cancel.cancelled() => {
-                return Ok(());
-            }
+        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Compaction,
+            ctx,
+            cancel,
+        )
+        .await
+        {
+            Ok(permit) => permit,
+            Err(RateLimitError::Cancelled) => return Ok(()),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1294,7 +1275,23 @@ impl Timeline {
                 Ok(delta) => Some(delta),
             };
 
-        let layer_metadata = LayerFileMetadata::new(layer_file_size, self.generation);
+        // RemoteTimelineClient holds the metadata on layers' remote generations, so
+        // query it to construct a RemoteLayer.
+        let layer_metadata = self
+            .remote_client
+            .as_ref()
+            .expect("Eviction is not called without remote storage")
+            .get_layer_metadata(&local_layer.filename())
+            .map_err(EvictionError::LayerNotFound)?
+            .ok_or_else(|| {
+                EvictionError::LayerNotFound(anyhow::anyhow!("Layer not in remote metadata"))
+            })?;
+        if layer_metadata.file_size() != layer_file_size {
+            return Err(EvictionError::MetadataInconsistency(format!(
+                "Layer size {layer_file_size} doesn't match remote metadata file size {}",
+                layer_metadata.file_size()
+            )));
+        }
 
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
@@ -1373,6 +1370,10 @@ pub(crate) enum EvictionError {
     /// different objects in memory.
     #[error("layer was no longer part of LayerMap")]
     LayerNotFound(#[source] anyhow::Error),
+
+    /// This should never happen
+    #[error("Metadata inconsistency")]
+    MetadataInconsistency(String),
 }
 
 /// Number of times we will compute partition within a checkpoint distance.

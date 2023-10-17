@@ -188,7 +188,7 @@ def test_sql_over_http(static_proxy: NeonProxy):
             headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         return response.json()
 
     rows = q("select 42 as answer")["rows"]
@@ -205,6 +205,12 @@ def test_sql_over_http(static_proxy: NeonProxy):
 
     rows = q("select $1::json->'a' as answer", [{"a": {"b": 42}}])["rows"]
     assert rows == [{"answer": {"b": 42}}]
+
+    rows = q("select $1::jsonb[] as answer", [[{}]])["rows"]
+    assert rows == [{"answer": [{}]}]
+
+    rows = q("select $1::jsonb[] as answer", [[{"foo": 1}, {"bar": 2}]])["rows"]
+    assert rows == [{"answer": [{"foo": 1}, {"bar": 2}]}]
 
     rows = q("select * from pg_class limit 1")["rows"]
     assert len(rows) == 1

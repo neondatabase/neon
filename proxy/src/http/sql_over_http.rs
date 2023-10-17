@@ -24,6 +24,7 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::config::HttpConfig;
 use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
 
 use super::conn_pool::ConnInfo;
@@ -49,7 +50,6 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-const HTTP_CONNECTION_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -102,9 +102,9 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
         // convert to text with escaping
         Value::Bool(_) => serde_json::to_string(value).map(Some),
         Value::Number(_) => serde_json::to_string(value).map(Some),
-        Value::Object(_) => serde_json::to_string(value).map(Some),
 
         // here string needs to be escaped, as it is part of the array
+        Value::Object(_) => json_array_to_pg_array(&Value::String(serde_json::to_string(value)?)),
         Value::String(_) => serde_json::to_string(value).map(Some),
 
         // recurse into array
@@ -191,9 +191,10 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        HTTP_CONNECTION_TIMEOUT,
+        config.sql_over_http_timeout,
         handle_inner(request, sni_hostname, conn_pool, session_id),
     )
     .await;
@@ -224,7 +225,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                HTTP_CONNECTION_TIMEOUT.as_secs()
+                config.sql_over_http_timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -612,7 +613,7 @@ fn _pg_array_parse(
                     }
                 }
             }
-            '}' => {
+            '}' if !quote => {
                 level -= 1;
                 if level == 0 {
                     push_checked(&mut entry, &mut entries, elem_type)?;
@@ -695,6 +696,14 @@ mod tests {
             vec![Some(
                 "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
             )]
+        );
+        // array of objects
+        let json = r#"[{"foo": 1},{"bar": 2}]"#;
+        let json: Value = serde_json::from_str(json).unwrap();
+        let pg_params = json_to_pg_text(vec![json]).unwrap();
+        assert_eq!(
+            pg_params,
+            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
         );
     }
 
@@ -821,6 +830,25 @@ mod tests {
         assert_eq!(
             p(r#"[1:1][-2:-1][3:5]={{{1,2,3},{4,5,6}}}"#),
             json!([[[1, 2, 3], [4, 5, 6]]])
+        );
+    }
+    #[test]
+    fn test_pg_array_parse_json() {
+        fn pt(pg_arr: &str) -> Value {
+            pg_array_parse(pg_arr, &Type::JSONB).unwrap()
+        }
+        assert_eq!(pt(r#"{"{}"}"#), json!([{}]));
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1, \"bar\": 2}"}"#),
+            json!([{"foo": 1, "bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{"{\"foo\": 1}", "{\"bar\": 2}"}"#),
+            json!([{"foo": 1}, {"bar": 2}])
+        );
+        assert_eq!(
+            pt(r#"{{"{\"foo\": 1}", "{\"bar\": 2}"}}"#),
+            json!([[{"foo": 1}, {"bar": 2}]])
         );
     }
 }

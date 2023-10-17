@@ -173,6 +173,9 @@ fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
 /// delaying is needed.
 #[derive(Clone)]
 pub struct InitializationOrder {
+    /// Each initial tenant load task carries this until it is done loading timelines from remote storage
+    pub initial_tenant_load_remote: Option<utils::completion::Completion>,
+
     /// Each initial tenant load task carries this until completion.
     pub initial_tenant_load: Option<utils::completion::Completion>,
 
