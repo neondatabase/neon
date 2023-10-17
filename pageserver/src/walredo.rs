@@ -31,7 +31,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::prelude::CommandExt;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
@@ -93,7 +93,7 @@ struct ProcessOutput {
 pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
-    redo_process: Mutex<Option<Arc<WalRedoProcess>>>,
+    redo_process: RwLock<Option<Arc<WalRedoProcess>>>,
 }
 
 /// Can this request be served by neon redo functions
@@ -186,7 +186,7 @@ impl PostgresRedoManager {
         PostgresRedoManager {
             tenant_id,
             conf,
-            redo_process: Mutex::new(None),
+            redo_process: RwLock::new(None),
         }
     }
 
@@ -213,16 +213,23 @@ impl PostgresRedoManager {
 
             // launch the WAL redo process on first use
             let proc: Arc<WalRedoProcess> = {
-                let mut proc_guard = self.redo_process.lock().unwrap();
-
-                match &mut *proc_guard {
+                let proc_guard = self.redo_process.read().unwrap();
+                match &*proc_guard {
                     None => {
-                        let proc = Arc::new(
-                            WalRedoProcess::launch(self.conf, self.tenant_id, pg_version)
-                                .context("launch walredo process")?,
-                        );
-                        *proc_guard = Some(Arc::clone(&proc));
-                        proc
+                        // "upgrade" to write lock to launch the process
+                        drop(proc_guard);
+                        let mut proc_guard = self.redo_process.write().unwrap();
+                        match &*proc_guard {
+                            None => {
+                                let proc = Arc::new(
+                                    WalRedoProcess::launch(self.conf, self.tenant_id, pg_version)
+                                        .context("launch walredo process")?,
+                                );
+                                *proc_guard = Some(Arc::clone(&proc));
+                                proc
+                            }
+                            Some(proc) => Arc::clone(proc),
+                        }
                     }
                     Some(proc) => Arc::clone(proc),
                 }
@@ -276,11 +283,11 @@ impl PostgresRedoManager {
                 );
                 // Avoid concurrent callers hitting the same issue.
                 // We can't prevent it from happening because we want to enable parallelism.
-                let mut guard = self.redo_process.lock().unwrap();
+                let mut guard = self.redo_process.write().unwrap();
                 match &*guard {
                     Some(current_field_value) => {
                         if Arc::ptr_eq(current_field_value, &proc) {
-                            // We're the first to observe an error from `prod`, it's our job to take it out of rotation.
+                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
                             *guard = None;
                         }
                     }
@@ -605,6 +612,7 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 }
 
 struct WalRedoProcess {
+    #[allow(dead_code)]
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     // Some() on construction, only becomes None on Drop.

@@ -2,7 +2,6 @@ import asyncio
 import concurrent.futures
 import random
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -95,13 +94,12 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 
 
 #
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_gc_index_upload(neon_env_builder: NeonEnvBuilder):
     # Disable time-based pitr, we will use LSN-based thresholds in the manual GC calls
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     num_index_uploads = 0
 
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
