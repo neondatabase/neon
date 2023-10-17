@@ -794,10 +794,6 @@ impl Tenant {
             }
         }
 
-        if timeline_ancestors.is_empty() {
-            anyhow::bail!("no valid timelines found on the remote storage")
-        }
-
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
