@@ -8,6 +8,7 @@ use crate::{
         NUM_CLIENT_CONNECTION_OPENED_COUNTER,
     },
 };
+use anyhow::bail;
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
 use hyper::{
@@ -22,7 +23,6 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
-    convert::Infallible,
     future::ready,
     pin::Pin,
     sync::Arc,
@@ -280,12 +280,18 @@ pub async fn task_main(
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
             let (io, tls) = stream.get_ref();
-            let peer_addr = io.client_addr().unwrap_or(io.inner.remote_addr());
+            let client_addr = io.client_addr();
+            let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
 
             async move {
-                Ok::<_, Infallible>(MetricService::new(hyper::service::service_fn(
+                let peer_addr = match client_addr {
+                    Some(addr) => addr,
+                    None if config.require_client_ip => bail!("missing required client ip"),
+                    None => remote_addr,
+                };
+                Ok(MetricService::new(hyper::service::service_fn(
                     move |req: Request<Body>| {
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
