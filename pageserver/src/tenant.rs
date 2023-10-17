@@ -733,6 +733,8 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
+        crate::failpoint_support::sleep_millis_async!("before-attaching-tenant");
+
         let remote_storage = match &self.remote_storage {
             Some(rs) => rs,
             None => {
@@ -1159,8 +1161,6 @@ impl Tenant {
 
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
-
-        crate::failpoint_support::sleep_millis_async!("before-loading-tenant");
 
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
