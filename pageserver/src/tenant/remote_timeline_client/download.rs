@@ -183,10 +183,6 @@ pub async fn list_remote_timelines(
     )
     .await?;
 
-    if timelines.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage")
-    }
-
     let mut timeline_ids = HashSet::new();
 
     for timeline_remote_storage_key in timelines {
