@@ -778,7 +778,8 @@ def test_ignore_while_attaching(
         tenants_before_ignore
     ), "Only ignored tenant should be missing"
 
-    # But can load it from local files, that will restore attach.
+    # Calling load will bring the tenant back online
+    pageserver_http.configure_failpoints([("attach-before-activate", "off")])
     pageserver_http.tenant_load(tenant_id)
 
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
