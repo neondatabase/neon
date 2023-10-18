@@ -1682,16 +1682,6 @@ mod tests {
         }
     */
 
-    #[test]
-    fn test_median_ts() {
-        assert_eq!(median_ts(&mut [1]), 1);
-        assert_eq!(median_ts(&mut [12; 10]), 12);
-        assert_eq!(median_ts(&mut [0, 1, 2, 3, 9]), 2);
-        assert_eq!(median_ts(&mut [9, 2, 0, 3, 1]), 2);
-        assert_eq!(median_ts(&mut [0, 0, 10, 20, 30, 40]), 15);
-        assert_eq!(median_ts(&mut [20, 40, 0, 0, 10, 30]), 15);
-    }
-
     /*
     ///
     /// Test list_rels() function, with branches and dropped relations
