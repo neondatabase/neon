@@ -579,6 +579,7 @@ fn start_pageserver(
                     pageserver_listener,
                     conf.pg_auth_type,
                     libpq_ctx,
+                    task_mgr::shutdown_token(),
                 )
                 .await
             },
