@@ -1670,7 +1670,7 @@ fn is_slru_block_key(key: Key) -> bool {
 #[cfg(test)]
 mod tests {
     //use super::repo_harness::*;
-    use super::*;
+    //use super::*;
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {
