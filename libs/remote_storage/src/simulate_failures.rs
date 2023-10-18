@@ -5,7 +5,9 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::{Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
+use crate::{
+    Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+};
 
 pub struct UnreliableWrapper {
     inner: crate::GenericRemoteStorage,
@@ -93,6 +95,15 @@ impl RemoteStorage for UnreliableWrapper {
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))?;
         self.inner.list_files(folder).await
+    }
+
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
+        self.inner.list(prefix, mode).await
     }
 
     async fn upload(
