@@ -157,7 +157,11 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            timestamp = datetime.fromisoformat(result).replace(tzinfo=timezone.utc)
+            # TODO use fromisoformat once we have Python 3.11+
+            # which has https://github.com/python/cpython/pull/92177
+            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+                tzinfo=timezone.utc
+            )
             assert timestamp < after_timestamp, "after_timestamp after timestamp"
             if i > 1:
                 before_timestamp = tbl[i - step_size][1]
