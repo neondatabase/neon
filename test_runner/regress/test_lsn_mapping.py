@@ -159,7 +159,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
             # TODO use fromisoformat once we have Python 3.11+
             # which has https://github.com/python/cpython/pull/92177
-            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            timestamp = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S.%f000Z").replace(
                 tzinfo=timezone.utc
             )
             assert timestamp < after_timestamp, "after_timestamp after timestamp"
