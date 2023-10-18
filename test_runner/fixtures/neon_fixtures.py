@@ -1632,6 +1632,9 @@ class NeonPageserver(PgProtocol):
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
             '.*registered custom resource manager "neon".*',
+            # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
+            # and it is not a failure of our code when it happens.
+            ".*DeleteObjects.*We encountered an internal error. Please try again.*",
         ]
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
