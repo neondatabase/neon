@@ -18,7 +18,10 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_until_tenant_state,
 )
-from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    available_remote_storages,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample
@@ -585,11 +588,8 @@ def test_ignored_tenant_reattach(neon_env_builder: NeonEnvBuilder):
 # * `load` the same tenant
 # * ensure that it's status is `Active`
 # * check that timeline data is restored
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ignored_tenant_download_missing_layers(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
@@ -648,11 +648,8 @@ def test_ignored_tenant_download_missing_layers(
 # * removes its `metadata` file locally
 # * `load` the same tenant
 # * ensure that it's status is `Broken`
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ignored_tenant_stays_broken_without_metadata(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+def test_ignored_tenant_stays_broken_without_metadata(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
     env.endpoints.create_start("main")
@@ -689,11 +686,8 @@ def test_ignored_tenant_stays_broken_without_metadata(
 
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_load_attach_negatives(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
     env.endpoints.create_start("main")
@@ -730,12 +724,10 @@ def test_load_attach_negatives(
         pageserver_http.tenant_attach(tenant_id)
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_ignore_while_attaching(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -752,9 +744,6 @@ def test_ignore_while_attaching(
     env.pageserver.allowed_errors.append(
         f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
-    # An endpoint is starting up concurrently with our detach, it can
-    # experience RPC failure due to shutdown.
-    env.pageserver.allowed_errors.append(".*query handler.*failed.*Shutting down")
 
     data_id = 1
     data_secret = "very secret secret"
@@ -834,12 +823,10 @@ def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
         ), "Should have timeline data back"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_metrics_while_ignoring_broken_tenant_and_reloading(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 

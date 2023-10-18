@@ -541,6 +541,23 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
+    pub async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        match self.get(AUX_FILES_KEY, lsn, ctx).await {
+            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                Ok(dir) => Ok(dir.files),
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                Ok(HashMap::new())
+            }
+        }
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -658,6 +675,7 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
+        result.add_key(AUX_FILES_KEY);
 
         Ok(result.to_keyspace())
     }
@@ -733,6 +751,12 @@ impl<'a> DatadirModification<'a> {
             dbdirs: HashMap::new(),
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+        // Create AuxFilesDirectory
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -838,6 +862,12 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create AuxFilesDirectory as well
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })?;
+            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         }
         if r.is_none() {
             // Create RelDirectory
@@ -1162,6 +1192,36 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub async fn put_file(
+        &mut self,
+        path: &str,
+        content: &[u8],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
+            Ok(buf) => AuxFilesDirectory::des(&buf)?,
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                AuxFilesDirectory {
+                    files: HashMap::new(),
+                }
+            }
+        };
+        let path = path.to_string();
+        if content.is_empty() {
+            dir.files.remove(&path);
+        } else {
+            dir.files.insert(path, Bytes::copy_from_slice(content));
+        }
+        self.put(
+            AUX_FILES_KEY,
+            Value::Image(Bytes::from(
+                AuxFilesDirectory::ser(&dir).context("serialize")?,
+            )),
+        );
+        Ok(())
+    }
+
     ///
     /// Flush changes accumulated so far to the underlying repository.
     ///
@@ -1297,6 +1357,11 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AuxFilesDirectory {
+    files: HashMap<String, Bytes>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelSizeEntry {
     nblocks: u32,
@@ -1345,9 +1410,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 02 pg_twophase
 //
 // 03 misc
-//    controlfile
+//    Controlfile
 //    checkpoint
 //    pg_version
+//
+// 04 aux files
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1386,6 +1453,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
+//
+// AuxFiles:
+// 03 00000000 00000000 00000000 00   00000002
+//
+
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1607,6 +1679,15 @@ const CHECKPOINT_KEY: Key = Key {
     field4: 0,
     field5: 0,
     field6: 1,
+};
+
+const AUX_FILES_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 2,
 };
 
 // Reverse mappings for a few Keys.

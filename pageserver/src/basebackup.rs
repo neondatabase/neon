@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
 use tokio::io;
@@ -180,6 +181,7 @@ where
             }
         }
 
+        let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
@@ -213,6 +215,34 @@ where
                     self.add_rel(rel, rel).await?;
                 }
             }
+
+            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
+                if path.starts_with("pg_replslot") {
+                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                    let restart_lsn = Lsn(u64::from_le_bytes(
+                        content[offs..offs + 8].try_into().unwrap(),
+                    ));
+                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                }
+                let header = new_tar_header(&path, content.len() as u64)?;
+                self.ar
+                    .append(&header, &*content)
+                    .await
+                    .context("could not add aux file to basebackup tarball")?;
+            }
+        }
+        if min_restart_lsn != Lsn::MAX {
+            info!(
+                "Min restart LSN for logical replication is {}",
+                min_restart_lsn
+            );
+            let data = min_restart_lsn.0.to_le_bytes();
+            let header = new_tar_header("restart.lsn", data.len() as u64)?;
+            self.ar
+                .append(&header, &data[..])
+                .await
+                .context("could not add restart.lsn file to basebackup tarball")?;
         }
         for xid in self
             .timeline
