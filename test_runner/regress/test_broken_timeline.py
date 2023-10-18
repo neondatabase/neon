@@ -80,6 +80,8 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     # Second timeline will fail during basebackup, because the local layer file is corrupt.
     # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
+    #
+    # This will change when we implement checksums for layers
     with pytest.raises(Exception, match="Failed to load delta layer") as err:
         pg2.start()
     log.info(
@@ -126,8 +128,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
 
     # Restart the page server
-    env.pageserver.stop(immediate=True)
-    env.pageserver.start()
+    env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
