@@ -15,7 +15,7 @@ use tokio::{
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{Download, DownloadError, RemotePath};
+use crate::{Download, DownloadError, Listing, ListingMode, RemotePath};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -75,7 +75,7 @@ impl LocalFs {
     }
 
     #[cfg(test)]
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_all(&self) -> anyhow::Result<Vec<RemotePath>> {
         Ok(get_all_files(&self.storage_root, true)
             .await?
             .into_iter()
@@ -89,52 +89,10 @@ impl LocalFs {
             })
             .collect())
     }
-}
-
-#[async_trait::async_trait]
-impl RemoteStorage for LocalFs {
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
-            None => Cow::Borrowed(&self.storage_root),
-        };
-
-        let prefixes_to_filter = get_all_files(path.as_ref(), false)
-            .await
-            .map_err(DownloadError::Other)?;
-
-        let mut prefixes = Vec::with_capacity(prefixes_to_filter.len());
-
-        // filter out empty directories to mirror s3 behavior.
-        for prefix in prefixes_to_filter {
-            if prefix.is_dir()
-                && is_directory_empty(&prefix)
-                    .await
-                    .map_err(DownloadError::Other)?
-            {
-                continue;
-            }
-
-            prefixes.push(
-                prefix
-                    .strip_prefix(&self.storage_root)
-                    .context("Failed to strip prefix")
-                    .and_then(RemotePath::new)
-                    .expect(
-                        "We list files for storage root, hence should be able to remote the prefix",
-                    ),
-            )
-        }
-
-        Ok(prefixes)
-    }
 
     // recursively lists all files in a directory,
     // mirroring the `list_files` for `s3_bucket`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_recursive(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
@@ -185,6 +143,61 @@ impl RemoteStorage for LocalFs {
         }
 
         Ok(files)
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteStorage for LocalFs {
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
+        let mut result = Listing::default();
+
+        if let ListingMode::NoDelimiter = mode {
+            result.keys = self
+                .list_recursive(prefix)
+                .await
+                .map_err(DownloadError::Other)?;
+            return Ok(result);
+        }
+
+        let path = match prefix {
+            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
+            None => Cow::Borrowed(&self.storage_root),
+        };
+
+        let prefixes_to_filter = get_all_files(path.as_ref(), false)
+            .await
+            .map_err(DownloadError::Other)?;
+
+        // filter out empty directories to mirror s3 behavior.
+        for prefix in prefixes_to_filter {
+            if prefix.is_dir()
+                && is_directory_empty(&prefix)
+                    .await
+                    .map_err(DownloadError::Other)?
+            {
+                continue;
+            }
+
+            let stripped = prefix
+                .strip_prefix(&self.storage_root)
+                .context("Failed to strip prefix")
+                .and_then(RemotePath::new)
+                .expect(
+                    "We list files for storage root, hence should be able to remote the prefix",
+                );
+
+            if prefix.is_dir() {
+                result.prefixes.push(stripped);
+            } else {
+                result.keys.push(stripped)
+            }
+        }
+
+        Ok(result)
     }
 
     async fn upload(
@@ -479,7 +492,7 @@ mod fs_tests {
 
         let target_path_1 = upload_dummy_file(&storage, "upload_1", None).await?;
         assert_eq!(
-            storage.list().await?,
+            storage.list_all().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
@@ -667,7 +680,7 @@ mod fs_tests {
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         storage.delete(&upload_target).await?;
-        assert!(storage.list().await?.is_empty());
+        assert!(storage.list_all().await?.is_empty());
 
         storage
             .delete(&upload_target)
@@ -777,7 +790,7 @@ mod fs_tests {
     }
 
     async fn list_files_sorted(storage: &LocalFs) -> anyhow::Result<Vec<RemotePath>> {
-        let mut files = storage.list().await?;
+        let mut files = storage.list_all().await?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
     }

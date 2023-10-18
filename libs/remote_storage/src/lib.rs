@@ -129,6 +129,22 @@ impl RemotePath {
     }
 }
 
+/// We don't need callers to be able to pass arbitrary delimiters: just control
+/// whether listings will use a '/' separator or not.
+///
+/// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
+/// NoDelimiter mode will only populate `keys`.
+pub enum ListingMode {
+    WithDelimiter,
+    NoDelimiter,
+}
+
+#[derive(Default)]
+pub struct Listing {
+    pub prefixes: Vec<RemotePath>,
+    pub keys: Vec<RemotePath>,
+}
+
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
@@ -141,8 +157,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError>;
-
+    ) -> Result<Vec<RemotePath>, DownloadError> {
+        let result = self
+            .list(prefix, ListingMode::WithDelimiter)
+            .await?
+            .prefixes;
+        Ok(result)
+    }
     /// Lists all files in directory "recursively"
     /// (not really recursively, because AWS has a flat namespace)
     /// Note: This is subtely different than list_prefixes,
@@ -154,7 +175,21 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
     /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
+    async fn list_files(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let result = self.list(prefix, ListingMode::NoDelimiter).await?.keys;
+        Ok(result)
+    }
+
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        _mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError>; /* {
+                                                     // XXX Placeholder impl.
+                                                     let mut result = Listing::default();
+                                                     result.prefixes = self.list_prefixes(prefix).await?;
+                                                     Ok(result)
+                                                 }*/
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -234,6 +269,19 @@ pub enum GenericRemoteStorage {
 }
 
 impl GenericRemoteStorage {
+    pub async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.list(prefix, mode).await,
+            Self::AwsS3(s) => s.list(prefix, mode).await,
+            Self::AzureBlob(s) => s.list(prefix, mode).await,
+            Self::Unreliable(s) => s.list(prefix, mode).await,
+        }
+    }
+
     // A function for listing all the files in a "directory"
     // Example:
     // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
