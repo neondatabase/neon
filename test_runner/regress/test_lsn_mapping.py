@@ -72,7 +72,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
             endpoint_here.stop_and_destroy()
 
 
-# Test pageserver get_time_of_lsn API
+# Test pageserver get_timestamp_of_lsn API
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
@@ -109,7 +109,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     with env.pageserver.http_client() as client:
         # Check edge cases: lsn larger than the last flush lsn
         probe_lsn = Lsn(int(last_flush_lsn) * 20 + 80_000)
-        result = client.timeline_get_time_of_lsn(
+        result = client.timeline_get_timestamp_of_lsn(
             env.initial_tenant,
             new_timeline_id,
             probe_lsn,
@@ -118,7 +118,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         # lsn of zero
         try:
             probe_lsn = Lsn(0)
-            result = client.timeline_get_time_of_lsn(
+            result = client.timeline_get_timestamp_of_lsn(
                 env.initial_tenant,
                 new_timeline_id,
                 probe_lsn,
@@ -133,7 +133,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         # small lsn before initdb_lsn
         try:
             probe_lsn = Lsn(64)
-            result = client.timeline_get_time_of_lsn(
+            result = client.timeline_get_timestamp_of_lsn(
                 env.initial_tenant,
                 new_timeline_id,
                 probe_lsn,
@@ -150,7 +150,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         for i in range(1, len(tbl), step_size):
             after_timestamp = tbl[i][1]
             after_lsn = tbl[i][2]
-            result = client.timeline_get_time_of_lsn(
+            result = client.timeline_get_timestamp_of_lsn(
                 env.initial_tenant,
                 new_timeline_id,
                 after_lsn,

@@ -306,7 +306,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_of_lsn:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn:
     parameters:
       - name: tenant_id
         in: path

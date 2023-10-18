@@ -504,7 +504,7 @@ async fn get_lsn_by_timestamp_handler(
     json_response(StatusCode::OK, result)
 }
 
-async fn get_time_of_lsn_handler(
+async fn get_timestamp_of_lsn_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -1702,8 +1702,8 @@ pub fn make_router(
             |r| api_handler(r, get_lsn_by_timestamp_handler),
         )
         .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_time_of_lsn",
-            |r| api_handler(r, get_time_of_lsn_handler),
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_timestamp_of_lsn",
+            |r| api_handler(r, get_timestamp_of_lsn_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             api_handler(r, timeline_gc_handler)
