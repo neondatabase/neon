@@ -157,10 +157,8 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             )
             log.info("result: %s, after_ts: %s", result, after_timestamp)
 
-            min = datetime.fromisoformat(result["min"]).replace(tzinfo=timezone.utc)
-            max = datetime.fromisoformat(result["max"]).replace(tzinfo=timezone.utc)
-            assert min <= max, "min smaller than max"
-            assert max < after_timestamp, "after_timestamp after max"
+            timestamp = datetime.fromisoformat(result).replace(tzinfo=timezone.utc)
+            assert timestamp < after_timestamp, "after_timestamp after timestamp"
             if i > 1:
                 before_timestamp = tbl[i - step_size][1]
-                assert min >= before_timestamp, "before_timestamp before min"
+                assert timestamp >= before_timestamp, "before_timestamp before timestamp"
