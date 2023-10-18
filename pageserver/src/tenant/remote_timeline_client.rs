@@ -446,7 +446,10 @@ impl RemoteTimelineClient {
     //
 
     /// Download index file
-    pub async fn download_index_file(&self) -> Result<MaybeDeletedIndexPart, DownloadError> {
+    pub async fn download_index_file(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
             &RemoteOpKind::Download,
@@ -460,6 +463,7 @@ impl RemoteTimelineClient {
             &self.tenant_id,
             &self.timeline_id,
             self.generation,
+            cancel,
         )
         .measure_remote_op(
             self.tenant_id,
@@ -1633,7 +1637,11 @@ mod tests {
         let client = timeline.remote_client.as_ref().unwrap();
 
         // Download back the index.json, and check that the list of files is correct
-        let initial_index_part = match client.download_index_file().await.unwrap() {
+        let initial_index_part = match client
+            .download_index_file(CancellationToken::new())
+            .await
+            .unwrap()
+        {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
@@ -1725,7 +1733,11 @@ mod tests {
         }
 
         // Download back the index.json, and check that the list of files is correct
-        let index_part = match client.download_index_file().await.unwrap() {
+        let index_part = match client
+            .download_index_file(CancellationToken::new())
+            .await
+            .unwrap()
+        {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
@@ -1916,7 +1928,7 @@ mod tests {
         let client = test_state.build_client(get_generation);
 
         let download_r = client
-            .download_index_file()
+            .download_index_file(CancellationToken::new())
             .await
             .expect("download should always succeed");
         assert!(matches!(download_r, MaybeDeletedIndexPart::IndexPart(_)));
