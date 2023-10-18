@@ -85,7 +85,6 @@
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
 #include "commands/async.h"
-#include "common/logging.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -204,10 +203,10 @@ WalRedoMain(int argc, char *argv[])
 	am_wal_redo_postgres = true;
 	/*
 	 * Pageserver treats any output to stderr as an ERROR, so we must
-	 * set the log level as early as possible to only log ERROR and 
-	 * above during WAL redo.
-	 */
-	pg_logging_set_level(PG_LOG_ERROR);
+	 * log only configuration issues during startup. I.e. log WARNINGS
+	 * and above during process startup.
+ 	 */
+	log_min_messages = PGWARNING;
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
@@ -320,6 +319,13 @@ WalRedoMain(int argc, char *argv[])
 #if PG_MAJORVERSION_NUM >= 16
 	MyBackendType = B_BACKEND;
 #endif
+
+	/*
+	 * Pageserver treats any output to stderr as an ERROR, so we must
+	 * set the log level as early as possible to only log ERROR and 
+	 * above during WAL redo.
+	 */
+	log_min_messages = PGERROR;
 
 	for (;;)
 	{
