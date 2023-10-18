@@ -321,14 +321,14 @@ paths:
           type: string
           format: hex
     get:
-      description: Get time stamp for a given LSN
+      description: Get timestamp for a given LSN
       parameters:
         - name: lsn
           in: query
           required: true
           schema:
             type: integer
-          description: A timestamp to get the LSN
+          description: A LSN to get the timestamp
       responses:
         "200":
           description: OK
