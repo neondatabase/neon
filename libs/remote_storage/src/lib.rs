@@ -240,6 +240,9 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// A cancellation token aborted the download, typically during
+    /// tenant detach or process shutdown.
+    Cancelled,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -250,6 +253,7 @@ impl std::fmt::Display for DownloadError {
             DownloadError::BadInput(e) => {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
+            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
