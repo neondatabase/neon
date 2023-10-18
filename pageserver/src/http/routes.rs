@@ -504,7 +504,7 @@ async fn get_lsn_by_timestamp_handler(
     json_response(StatusCode::OK, result)
 }
 
-async fn get_time_range_of_lsn_handler(
+async fn get_time_of_lsn_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -520,20 +520,12 @@ async fn get_time_range_of_lsn_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let result = timeline.get_timestamp_range_for_lsn(lsn, &ctx).await?;
+    let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
-        Some((min, max, median)) => {
-            let min = format_rfc3339(postgres_ffi::from_pg_timestamp(min)).to_string();
-            let max = format_rfc3339(postgres_ffi::from_pg_timestamp(max)).to_string();
-            let median = format_rfc3339(postgres_ffi::from_pg_timestamp(median)).to_string();
-            #[derive(serde::Serialize)]
-            struct Result {
-                min: String,
-                max: String,
-                median: String,
-            }
-            json_response(StatusCode::OK, Result { min, max, median })
+        Some(time) => {
+            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            json_response(StatusCode::OK, time)
         }
         None => json_response(StatusCode::NOT_FOUND, ()),
     }
@@ -1710,8 +1702,8 @@ pub fn make_router(
             |r| api_handler(r, get_lsn_by_timestamp_handler),
         )
         .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_time_range_of_lsn",
-            |r| api_handler(r, get_time_range_of_lsn_handler),
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_time_of_lsn",
+            |r| api_handler(r, get_time_of_lsn_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             api_handler(r, timeline_gc_handler)

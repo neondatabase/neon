@@ -306,7 +306,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_range_of_lsn:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_of_lsn:
     parameters:
       - name: tenant_id
         in: path
@@ -321,7 +321,7 @@ paths:
           type: string
           format: hex
     get:
-      description: Get time range for a given LSN
+      description: Get time stamp for a given LSN
       parameters:
         - name: lsn
           in: query
@@ -335,8 +335,8 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TimeRangeByLsnResponse"
                 type: string
+                format: date-time
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:
@@ -1306,19 +1306,6 @@ components:
         latest_gc_cutoff_lsn:
           type: string
           format: hex
-
-    TimeRangeByLsnResponse:
-      type: object
-      properties:
-        min:
-          type: string
-          format: date-time
-        max:
-          type: string
-          format: date-time
-        median:
-          type: string
-          format: date-time
 
     SyntheticSizeResponse:
       type: object

@@ -453,12 +453,10 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         return res_json
 
-    def timeline_get_time_range_of_lsn(
-        self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn
-    ):
+    def timeline_get_time_of_lsn(self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
         log.info(f"Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_range_of_lsn?lsn={lsn}",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_time_of_lsn?lsn={lsn}",
         )
         self.verbose_error(res)
         res_json = res.json()

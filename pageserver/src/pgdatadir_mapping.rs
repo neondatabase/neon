@@ -400,26 +400,23 @@ impl Timeline {
     /// Obtain the possible timestamp range for the given lsn.
     ///
     /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
-    pub async fn get_timestamp_range_for_lsn(
+    pub async fn get_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<Option<(TimestampTz, TimestampTz, TimestampTz)>, PageReconstructError> {
-        let mut timestamps = Vec::new();
+    ) -> Result<Option<TimestampTz>, PageReconstructError> {
+        let mut max: Option<TimestampTz> = None;
         self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
-            timestamps.push(timestamp);
+            if let Some(max_prev) = max {
+                max = Some(max_prev.max(timestamp));
+            } else {
+                max = Some(timestamp);
+            }
             ControlFlow::Continue(())
         })
         .await?;
 
-        let min = timestamps.iter().copied().min();
-        let max = timestamps.iter().copied().max();
-        if let (Some(min), Some(max)) = (min, max) {
-            let median = median_ts(&mut timestamps);
-            Ok(Some((min, max, median)))
-        } else {
-            Ok(None)
-        }
+        Ok(max)
     }
 
     /// Runs the given function on all the timestamps for a given lsn
@@ -1667,21 +1664,6 @@ fn is_slru_block_key(key: Key) -> bool {
     key.field1 == 0x01                // SLRU-related
         && key.field3 == 0x00000001   // but not SlruDir
         && key.field6 != 0xffffffff // and not SlruSegSize
-}
-
-/// Returns the median, if there is an odd number of timestamps, and the average if there is an even number
-fn median_ts(timestamps: &mut [TimestampTz]) -> TimestampTz {
-    if let [single] = timestamps {
-        return *single;
-    }
-    let tl = timestamps.len();
-    let val_at_half = *timestamps.select_nth_unstable(tl / 2).1;
-    if tl % 2 == 1 {
-        val_at_half
-    } else {
-        let val_before = timestamps[tl / 2 - 1];
-        val_before + (val_at_half - val_before) / 2
-    }
 }
 
 #[allow(clippy::bool_assert_comparison)]
