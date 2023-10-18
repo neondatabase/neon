@@ -201,6 +201,12 @@ WalRedoMain(int argc, char *argv[])
 #endif
 
 	am_wal_redo_postgres = true;
+	/*
+	 * Pageserver treats any output to stderr as an ERROR, so we must
+	 * set the log level as early as possible to only log ERROR and 
+	 * above during WAL redo.
+	 */
+	pg_logging_set_level(PG_LOG_ERROR);
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
