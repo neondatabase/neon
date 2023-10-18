@@ -337,6 +337,8 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
         [
             ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
             ".*Failed to load index_part from remote storage.*",
+            # On a fast restart, there may be an initdb still running in a basebackup...__temp directory
+            ".*Failed to purge.*Directory not empty.*",
         ]
     )
     ps_http = env.pageserver.http_client()
