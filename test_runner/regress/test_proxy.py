@@ -2,10 +2,15 @@ import json
 import subprocess
 from typing import Any, List, Optional, Tuple
 
+import asyncio
+
+import asyncpg
 import psycopg2
 import pytest
 import requests
-from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
+import websocket_tunnel
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import PSQL, NeonProxy, PortDistributor, VanillaPostgres
 
 GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
 
@@ -422,3 +427,46 @@ def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
     query(200, "BEGIN")
     pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
     assert pid1 != pid2
+
+
+@pytest.mark.asyncio
+async def test_websockets(static_proxy: NeonProxy, port_distributor: PortDistributor):
+    # Launch a tunnel service so that we can speak the websockets protocol to
+    # the proxy
+    tunnel_port = port_distributor.get_port()
+    tunnel_server = await websocket_tunnel.start_server(
+        "127.0.0.1",
+        tunnel_port,
+        f"wss://ep-static-test.neon.localtest.me:{static_proxy.external_http_port}",
+        "127.0.0.1",
+        static_proxy.external_http_port,
+    )
+    log.info(f"websockets tunnel listening for connections on port {tunnel_port}")
+
+    async with tunnel_server:
+
+        async def run_tunnel():
+            try:
+                async with tunnel_server:
+                    await tunnel_server.serve_forever()
+            except Exception as e:
+                log.error(f"Error in tunnel task: {e}")
+
+        tunnel_task = asyncio.create_task(run_tunnel())
+
+        # Ok, the tunnel is now running. Check that we can connect to the proxy's
+        # websocket interface, through the tunnel
+        tunnel_connstring = f"postgres://proxy:password@127.0.0.1:{tunnel_port}/postgres"
+
+        log.info(f"connecting to {tunnel_connstring}")
+        conn = await asyncpg.connect(tunnel_connstring)
+        res = await conn.fetchval("SELECT 123")
+        assert res == 123
+        await conn.close()
+        log.info("Ran a query successfully through the tunnel")
+
+    tunnel_server.close()
+    try:
+        await tunnel_task
+    except asyncio.CancelledError:
+        pass

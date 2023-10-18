@@ -38,6 +38,7 @@ pytest-rerunfailures = "^11.1.2"
 types-pytest-lazy-fixture = "^0.6.3.3"
 pytest-split = "^0.8.1"
 zstandard = "^0.21.0"
+websockets = "^10.4"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.3.0"
