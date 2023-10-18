@@ -66,10 +66,6 @@ def test_tenant_reattach(
     env.pageserver.allowed_errors.append(
         f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
-    # Thats because of UnreliableWrapper's injected failures
-    env.pageserver.allowed_errors.append(
-        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
-    )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -116,7 +112,7 @@ def test_tenant_reattach(
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
-        assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*list timelines.*failed, will retry.*")
         assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 

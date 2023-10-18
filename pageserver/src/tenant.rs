@@ -190,6 +190,11 @@ struct TimelinePreload {
     index_part: Result<MaybeDeletedIndexPart, DownloadError>,
 }
 
+pub(crate) struct TenantPreload {
+    deleting: bool,
+    timelines: HashMap<TimelineId, TimelinePreload>,
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -653,10 +658,31 @@ impl Tenant {
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
+                let preload = match &remote_storage {
+                    Some(remote_storage) => Some(
+                        match tenant_clone
+                            .preload(remote_storage)
+                            .instrument(
+                                tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_id),
+                            )
+                            .await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    make_broken(&tenant_clone, anyhow::anyhow!(e));
+                                        return Ok(());
+                                }
+                            },
+                    ),
+                    None => None,
+                };
+
+                // Remote preload is complete.
+                drop(remote_load_completion);
+
                 let pending_deletion = {
                     match DeleteTenantFlow::should_resume_deletion(
                         conf,
-                        remote_storage.as_ref(),
+                        preload.as_ref().map(|p| p.deleting).unwrap_or(false),
                         &tenant_clone,
                     )
                     .await
@@ -675,7 +701,6 @@ impl Tenant {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
-                    drop(remote_load_completion);
                     // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
                     let _ = init_order
                         .as_mut()
@@ -691,6 +716,7 @@ impl Tenant {
                     match DeleteTenantFlow::resume_from_attach(
                         deletion,
                         &tenant_clone,
+                        preload,
                         tenants,
                         init_order,
                         &ctx,
@@ -705,7 +731,7 @@ impl Tenant {
                     }
                 }
 
-                match tenant_clone.attach(init_order, &ctx).await {
+                match tenant_clone.attach(init_order, preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
@@ -725,6 +751,30 @@ impl Tenant {
         Ok(tenant)
     }
 
+    pub(crate) async fn preload(
+        self: &Arc<Tenant>,
+        remote_storage: &GenericRemoteStorage,
+    ) -> anyhow::Result<TenantPreload> {
+        // Get list of remote timelines
+        // download index files for every tenant timeline
+        info!("listing remote timelines");
+        let (remote_timeline_ids, other_keys) =
+            remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
+        info!("found {} timelines", remote_timeline_ids.len());
+
+        let deleting = other_keys.contains(TENANT_DELETED_MARKER_FILE_NAME);
+        for k in other_keys {
+            info!("found non timeline key {k}");
+        }
+
+        Ok(TenantPreload {
+            deleting,
+            timelines: self
+                .load_timeline_metadata(remote_timeline_ids, remote_storage)
+                .await?,
+        })
+    }
+
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
@@ -733,33 +783,20 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         mut init_order: Option<InitializationOrder>,
+        preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         crate::failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let remote_storage = match &self.remote_storage {
-            Some(rs) => rs,
+        let preload = match preload {
+            Some(p) => p,
             None => {
-                init_order
-                    .as_mut()
-                    .and_then(|x| x.initial_tenant_load_remote.take());
-
                 // Deprecated dev mode: load from local disk state instead of remote storage
                 return self.load_local(init_order, ctx).await;
             }
         };
-
-        // Get list of remote timelines
-        // download index files for every tenant timeline
-        info!("listing remote timelines");
-        let remote_timeline_ids =
-            remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
-        info!("found {} timelines", remote_timeline_ids.len());
-        let preload = self
-            .load_timeline_metadata(remote_timeline_ids, remote_storage)
-            .await?;
 
         // Signal that we have completed remote phase
         init_order
@@ -772,7 +809,7 @@ impl Tenant {
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
-        for (timeline_id, preload) in preload {
+        for (timeline_id, preload) in preload.timelines {
             // In this context a timeline "exists" if it has any content in remote storage: this will
             // be our cue to not delete any corresponding local directory
             existent_timelines.insert(timeline_id);
@@ -3567,8 +3604,12 @@ pub(crate) mod harness {
                         .await?;
                 }
                 LoadMode::Remote => {
+                    let preload = tenant
+                        .preload(&self.remote_storage)
+                        .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_id))
+                        .await?;
                     tenant
-                        .attach(None, ctx)
+                        .attach(None, Some(preload), ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                         .await?;
                 }

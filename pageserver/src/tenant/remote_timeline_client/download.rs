@@ -19,7 +19,7 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
@@ -170,43 +170,50 @@ pub fn is_temp_download_file(path: &Utf8Path) -> bool {
 pub async fn list_remote_timelines(
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
-) -> anyhow::Result<HashSet<TimelineId>> {
+) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
     let remote_path = remote_timelines_path(&tenant_id);
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
-    let timelines = download_retry(
-        || storage.list_prefixes(Some(&remote_path)),
-        &format!("list prefixes for {tenant_id}"),
+    let listing = download_retry(
+        || storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+        &format!("list timelines for {tenant_id}"),
     )
     .await?;
 
     let mut timeline_ids = HashSet::new();
+    let mut other_prefixes = HashSet::new();
 
-    for timeline_remote_storage_key in timelines {
+    tracing::info!("list_remote_timelines prefixes:");
+    for p in &listing.prefixes {
+        tracing::info!("  '{p}'");
+    }
+    tracing::info!("list_remote_timelines keys:");
+    for p in &listing.keys {
+        tracing::info!("  '{p}'");
+    }
+
+    for timeline_remote_storage_key in listing.prefixes {
         let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
-        let timeline_id: TimelineId = object_name
-            .parse()
-            .with_context(|| format!("parse object name into timeline id '{object_name}'"))?;
-
-        // list_prefixes is assumed to return unique names. Ensure this here.
-        // NB: it's safer to bail out than warn-log this because the pageserver
-        //     needs to absolutely know about _all_ timelines that exist, so that
-        //     GC knows all the branchpoints. If we skipped over a timeline instead,
-        //     GC could delete a layer that's still needed by that timeline.
-        anyhow::ensure!(
-            !timeline_ids.contains(&timeline_id),
-            "list_prefixes contains duplicate timeline id {timeline_id}"
-        );
-        timeline_ids.insert(timeline_id);
+        match object_name.parse::<TimelineId>() {
+            Ok(t) => timeline_ids.insert(t),
+            Err(_) => other_prefixes.insert(object_name.to_string()),
+        };
     }
 
-    Ok(timeline_ids)
+    for key in listing.keys {
+        let object_name = key
+            .object_name()
+            .ok_or_else(|| anyhow::anyhow!("object name for key {key}"))?;
+        other_prefixes.insert(object_name.to_string());
+    }
+
+    Ok((timeline_ids, other_prefixes))
 }
 
 async fn do_download_index_part(

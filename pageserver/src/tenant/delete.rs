@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::TenantState;
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, warn, Instrument, Span};
@@ -25,10 +25,8 @@ use super::{
     remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
     span,
     timeline::delete::DeleteTimelineFlow,
-    tree_sort_timelines, DeleteTimelineError, Tenant,
+    tree_sort_timelines, DeleteTimelineError, Tenant, TenantPreload,
 };
-
-const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DeleteTenantError {
@@ -60,7 +58,7 @@ fn remote_tenant_delete_mark_path(
         .context("Failed to strip workdir prefix")
         .and_then(RemotePath::new)
         .context("tenant path")?;
-    Ok(tenant_remote_path.join(Utf8Path::new("deleted")))
+    Ok(tenant_remote_path.join(Utf8Path::new("timelines/deleted")))
 }
 
 async fn create_remote_delete_mark(
@@ -239,32 +237,6 @@ async fn cleanup_remaining_fs_traces(
     Ok(())
 }
 
-pub(crate) async fn remote_delete_mark_exists(
-    conf: &PageServerConf,
-    tenant_id: &TenantId,
-    remote_storage: &GenericRemoteStorage,
-) -> anyhow::Result<bool> {
-    // If remote storage is there we rely on it
-    let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id).context("path")?;
-
-    let result = backoff::retry(
-        || async { remote_storage.download(&remote_mark_path).await },
-        |e| matches!(e, DownloadError::NotFound),
-        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-        SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS,
-        "fetch_tenant_deletion_mark",
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
-    )
-    .await;
-
-    match result {
-        Ok(_) => Ok(true),
-        Err(DownloadError::NotFound) => Ok(false),
-        Err(e) => Err(anyhow::anyhow!(e)).context("remote_delete_mark_exists")?,
-    }
-}
-
 /// Orchestrates tenant shut down of all tasks, removes its in-memory structures,
 /// and deletes its data from both disk and s3.
 /// The sequence of steps:
@@ -377,7 +349,7 @@ impl DeleteTenantFlow {
 
     pub(crate) async fn should_resume_deletion(
         conf: &'static PageServerConf,
-        remote_storage: Option<&GenericRemoteStorage>,
+        remote_mark_exists: bool,
         tenant: &Tenant,
     ) -> Result<Option<DeletionGuard>, DeleteTenantError> {
         let acquire = |t: &Tenant| {
@@ -388,18 +360,13 @@ impl DeleteTenantFlow {
             )
         };
 
-        let tenant_id = tenant.tenant_id;
-        // Check local mark first, if its there there is no need to go to s3 to check whether remote one exists.
-        if conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
+        if remote_mark_exists {
             return Ok(acquire(tenant));
         }
 
-        let remote_storage = match remote_storage {
-            Some(remote_storage) => remote_storage,
-            None => return Ok(None),
-        };
-
-        if remote_delete_mark_exists(conf, &tenant_id, remote_storage).await? {
+        let tenant_id = tenant.tenant_id;
+        // Check local mark first, if its there there is no need to go to s3 to check whether remote one exists.
+        if conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
             Ok(acquire(tenant))
         } else {
             Ok(None)
@@ -409,6 +376,7 @@ impl DeleteTenantFlow {
     pub(crate) async fn resume_from_attach(
         guard: DeletionGuard,
         tenant: &Arc<Tenant>,
+        preload: Option<TenantPreload>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
         init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
@@ -420,7 +388,10 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant.attach(init_order, ctx).await.context("attach")?;
+        tenant
+            .attach(init_order, preload, ctx)
+            .await
+            .context("attach")?;
 
         Self::background(
             guard,
