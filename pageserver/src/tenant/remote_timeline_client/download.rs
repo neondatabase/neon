@@ -170,6 +170,7 @@ pub fn is_temp_download_file(path: &Utf8Path) -> bool {
 pub async fn list_remote_timelines(
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
+    cancel: CancellationToken,
 ) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
     let remote_path = remote_timelines_path(&tenant_id);
 
@@ -177,9 +178,10 @@ pub async fn list_remote_timelines(
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
-    let listing = download_retry(
+    let listing = download_retry_forever(
         || storage.list(Some(&remote_path), ListingMode::WithDelimiter),
         &format!("list timelines for {tenant_id}"),
+        cancel,
     )
     .await?;
 
@@ -370,6 +372,26 @@ where
         backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
             unreachable!()
         }),
+    )
+    .await
+}
+
+async fn download_retry_forever<T, O, F>(
+    op: O,
+    description: &str,
+    cancel: CancellationToken,
+) -> Result<T, DownloadError>
+where
+    O: FnMut() -> F,
+    F: Future<Output = Result<T, DownloadError>>,
+{
+    backoff::retry(
+        op,
+        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        FAILED_DOWNLOAD_WARN_THRESHOLD,
+        u32::MAX,
+        description,
+        backoff::Cancel::new(cancel, || DownloadError::Cancelled),
     )
     .await
 }

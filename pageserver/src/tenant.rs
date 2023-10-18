@@ -661,7 +661,7 @@ impl Tenant {
                 let preload = match &remote_storage {
                     Some(remote_storage) => Some(
                         match tenant_clone
-                            .preload(remote_storage)
+                            .preload(remote_storage, task_mgr::shutdown_token())
                             .instrument(
                                 tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_id),
                             )
@@ -754,12 +754,17 @@ impl Tenant {
     pub(crate) async fn preload(
         self: &Arc<Tenant>,
         remote_storage: &GenericRemoteStorage,
+        cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
-        let (remote_timeline_ids, other_keys) =
-            remote_timeline_client::list_remote_timelines(remote_storage, self.tenant_id).await?;
+        let (remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
+            remote_storage,
+            self.tenant_id,
+            cancel.clone(),
+        )
+        .await?;
         info!("found {} timelines", remote_timeline_ids.len());
 
         let deleting = other_keys.contains(TENANT_DELETED_MARKER_FILE_NAME);
@@ -770,7 +775,7 @@ impl Tenant {
         Ok(TenantPreload {
             deleting,
             timelines: self
-                .load_timeline_metadata(remote_timeline_ids, remote_storage)
+                .load_timeline_metadata(remote_timeline_ids, remote_storage, cancel)
                 .await?,
         })
     }
@@ -1199,6 +1204,7 @@ impl Tenant {
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
+        cancel: CancellationToken,
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
@@ -1232,10 +1238,25 @@ impl Tenant {
         }
 
         let mut timeline_preloads: HashMap<TimelineId, TimelinePreload> = HashMap::new();
-        while let Some(result) = part_downloads.join_next().await {
-            let preload_result = result.context("join preload task")?;
-            let preload = preload_result?;
-            timeline_preloads.insert(preload.timeline_id, preload);
+
+        loop {
+            tokio::select!(
+                next = part_downloads.join_next() => {
+                    match next {
+                        Some(result) => {
+                            let preload_result = result.context("join preload task")?;
+                            let preload = preload_result?;
+                            timeline_preloads.insert(preload.timeline_id, preload);
+                        },
+                        None => {
+                            break;
+                        }
+                    }
+                },
+                _ = cancel.cancelled() => {
+                    anyhow::bail!("Cancelled while waiting for remote index download")
+                }
+            )
         }
 
         Ok(timeline_preloads)
@@ -3605,7 +3626,7 @@ pub(crate) mod harness {
                 }
                 LoadMode::Remote => {
                     let preload = tenant
-                        .preload(&self.remote_storage)
+                        .preload(&self.remote_storage, CancellationToken::new())
                         .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_id))
                         .await?;
                     tenant
