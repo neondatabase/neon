@@ -628,17 +628,20 @@ impl Tenant {
             false,
             async move {
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                let make_broken = |t: &Tenant, err: anyhow::Error| {
-                    error!("attach failed, setting tenant state to Broken: {err:?}");
-                    t.state.send_modify(|state| {
-                        assert_eq!(
-                            *state,
-                            TenantState::Attaching,
+                let make_broken =
+                    |t: &Tenant, err: anyhow::Error| {
+                        error!("attach failed, setting tenant state to Broken: {err:?}");
+                        t.state.send_modify(|state| {
+                            // The Stopping case is for when we have passed control on to DeleteTenantFlow:
+                            // if it errors, we will call make_broken when tenant is already in Stopping.
+                            assert!(
+                            matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
                             "the attach task owns the tenant state until activation is complete"
                         );
-                        *state = TenantState::broken_from_reason(err.to_string());
-                    });
-                };
+
+                            *state = TenantState::broken_from_reason(err.to_string());
+                        });
+                    };
 
                 let mut init_order = init_order;
                 // take the completion because initial tenant loading will complete when all of
@@ -851,14 +854,33 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
-        // Check for any local timeline directories that are temporary, or do not correspond to a
-        // timeline that still exists: this can happen if we crashed during a deletion/creation, or
-        // if a timeline was deleted while the tenant was attached to a different pageserver.
+        self.clean_up_timelines(&existent_timelines)?;
+
+        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
+
+        info!("Done");
+
+        Ok(())
+    }
+
+    /// Check for any local timeline directories that are temporary, or do not correspond to a
+    /// timeline that still exists: this can happen if we crashed during a deletion/creation, or
+    /// if a timeline was deleted while the tenant was attached to a different pageserver.
+    fn clean_up_timelines(&self, existent_timelines: &HashSet<TimelineId>) -> anyhow::Result<()> {
         let timelines_dir = self.conf.timelines_path(&self.tenant_id);
-        for entry in timelines_dir
-            .read_dir_utf8()
-            .context("list timelines directory for tenant")?
-        {
+
+        let entries = match timelines_dir.read_dir_utf8() {
+            Ok(d) => d,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(());
+                } else {
+                    return Err(e).context("list timelines directory for tenant");
+                }
+            }
+        };
+
+        for entry in entries {
             let entry = entry.context("read timeline dir entry")?;
             let entry_path = entry.path();
 
@@ -900,10 +922,6 @@ impl Tenant {
                 }
             }
         }
-
-        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
-
-        info!("Done");
 
         Ok(())
     }
