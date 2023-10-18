@@ -12,12 +12,10 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::cgroup::Sequenced;
 use crate::protocol::{
-    OutboundMsg, ProtocolRange, ProtocolResponse, ProtocolVersion, Resources, PROTOCOL_MAX_VERSION,
+    OutboundMsg, ProtocolRange, ProtocolResponse, ProtocolVersion, PROTOCOL_MAX_VERSION,
     PROTOCOL_MIN_VERSION,
 };
 
@@ -35,13 +33,6 @@ pub struct Dispatcher {
 
     /// We send messages to the agent through `sink`
     sink: SplitSink<WebSocket, Message>,
-
-    /// Used to notify the cgroup when we are upscaled.
-    pub(crate) notify_upscale_events: mpsc::Sender<Sequenced<Resources>>,
-
-    /// When the cgroup requests upscale it will send on this channel. In response
-    /// we send an `UpscaleRequst` to the agent.
-    pub(crate) request_upscale_events: mpsc::Receiver<()>,
 
     /// The protocol version we have agreed to use with the agent. This is negotiated
     /// during the creation of the dispatcher, and should be the highest shared protocol
@@ -61,11 +52,7 @@ impl Dispatcher {
     /// 1. Wait for the agent to sent the range of protocols it supports.
     /// 2. Send a protocol version that works for us as well, or an error if there
     ///    is no compatible version.
-    pub async fn new(
-        stream: WebSocket,
-        notify_upscale_events: mpsc::Sender<Sequenced<Resources>>,
-        request_upscale_events: mpsc::Receiver<()>,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(stream: WebSocket) -> anyhow::Result<Self> {
         let (mut sink, mut source) = stream.split();
 
         // Figure out the highest protocol version we both support
@@ -119,20 +106,8 @@ impl Dispatcher {
         Ok(Self {
             sink,
             source,
-            notify_upscale_events,
-            request_upscale_events,
             proto_version: highest_shared_version,
         })
-    }
-
-    /// Notify the cgroup manager that we have received upscale and wait for
-    /// the acknowledgement.
-    #[tracing::instrument(skip_all, fields(?resources))]
-    pub async fn notify_upscale(&self, resources: Sequenced<Resources>) -> anyhow::Result<()> {
-        self.notify_upscale_events
-            .send(resources)
-            .await
-            .context("failed to send resources and oneshot sender across channel")
     }
 
     /// Send a message to the agent.

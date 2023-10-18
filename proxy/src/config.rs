@@ -14,6 +14,7 @@ pub struct ProxyConfig {
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
+    pub require_client_ip: bool,
 }
 
 #[derive(Debug)]
