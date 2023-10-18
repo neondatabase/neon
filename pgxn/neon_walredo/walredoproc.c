@@ -85,6 +85,7 @@
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
 #include "commands/async.h"
+#include "common/logging.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
