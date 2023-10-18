@@ -1216,11 +1216,12 @@ impl Tenant {
                 timeline_id,
                 self.generation,
             );
+            let cancel_clone = cancel.clone();
             part_downloads.spawn(
                 async move {
                     debug!("starting index part download");
 
-                    let index_part = client.download_index_file().await;
+                    let index_part = client.download_index_file(cancel_clone).await;
 
                     debug!("finished index part download");
 
