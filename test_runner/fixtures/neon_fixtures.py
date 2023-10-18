@@ -3119,6 +3119,22 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
+def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+    """Wait logical replication subscriber to sync with publisher."""
+    publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    while True:
+        res = subscriber.safe_psql("select latest_end_lsn from pg_catalog.pg_stat_subscription")[0][
+            0
+        ]
+        if res:
+            log.info(f"subscriber_lsn={res}")
+            subscriber_lsn = Lsn(res)
+            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
+            if subscriber_lsn >= publisher_lsn:
+                return subscriber_lsn
+        time.sleep(0.5)
+
+
 def wait_for_last_flush_lsn(
     env: NeonEnv,
     endpoint: Endpoint,
