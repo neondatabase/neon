@@ -81,7 +81,6 @@ use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::walredo::WalRedoManager;
 use crate::ZERO_PAGE;
 
 use self::delete::DeleteTimelineFlow;
@@ -201,7 +200,7 @@ pub struct Timeline {
     last_freeze_ts: RwLock<Instant>,
 
     // WAL redo manager
-    walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
+    walredo_mgr: Arc<super::WalRedoManager>,
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
@@ -1471,7 +1470,7 @@ impl Timeline {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         generation: Generation,
-        walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
+        walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
         pg_version: u32,
         initial_logical_size_can_start: Option<completion::Barrier>,
@@ -4324,6 +4323,7 @@ impl Timeline {
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
+                    .await
                     .context("Failed to reconstruct a page image:")
                 {
                     Ok(img) => img,

@@ -70,27 +70,6 @@ pub(crate) struct BufferTag {
     pub blknum: u32,
 }
 
-///
-/// WAL Redo Manager is responsible for replaying WAL records.
-///
-/// Callers use the WAL redo manager through this abstract interface,
-/// which makes it easy to mock it in tests.
-pub trait WalRedoManager: Send + Sync {
-    /// Apply some WAL records.
-    ///
-    /// The caller passes an old page image, and WAL records that should be
-    /// applied over it. The return value is a new page image, after applying
-    /// the reords.
-    fn request_redo(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        base_img: Option<(Lsn, Bytes)>,
-        records: Vec<(Lsn, NeonWalRecord)>,
-        pg_version: u32,
-    ) -> anyhow::Result<Bytes>;
-}
-
 struct ProcessInput {
     stdin: ChildStdin,
     stderr_fd: RawFd,
@@ -135,14 +114,14 @@ fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
 ///
 /// Public interface of WAL redo manager
 ///
-impl WalRedoManager for PostgresRedoManager {
+impl PostgresRedoManager {
     ///
     /// Request the WAL redo manager to apply some WAL records
     ///
     /// The WAL redo is handled by a separate thread, so this just sends a request
     /// to the thread and waits for response.
     ///
-    fn request_redo(
+    pub async fn request_redo(
         &self,
         key: Key,
         lsn: Lsn,
@@ -1156,15 +1135,15 @@ fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PostgresRedoManager, WalRedoManager};
+    use super::PostgresRedoManager;
     use crate::repository::Key;
     use crate::{config::PageServerConf, walrecord::NeonWalRecord};
     use bytes::Bytes;
     use std::str::FromStr;
     use utils::{id::TenantId, lsn::Lsn};
 
-    #[test]
-    fn short_v14_redo() {
+    #[tokio::test]
+    async fn short_v14_redo() {
         let expected = std::fs::read("fixtures/short_v14_redo.page").unwrap();
 
         let h = RedoHarness::new().unwrap();
@@ -1185,13 +1164,14 @@ mod tests {
                 short_records(),
                 14,
             )
+            .await
             .unwrap();
 
         assert_eq!(&expected, &*page);
     }
 
-    #[test]
-    fn short_v14_fails_for_wrong_key_but_returns_zero_page() {
+    #[tokio::test]
+    async fn short_v14_fails_for_wrong_key_but_returns_zero_page() {
         let h = RedoHarness::new().unwrap();
 
         let page = h
@@ -1211,6 +1191,7 @@ mod tests {
                 short_records(),
                 14,
             )
+            .await
             .unwrap();
 
         // TODO: there will be some stderr printout, which is forwarded to tracing that could
