@@ -1632,6 +1632,7 @@ class NeonPageserver(PgProtocol):
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
             '.*registered custom resource manager "neon".*',
+            '.*registered custom resource manager \\"neon\\".*',
         ]
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
