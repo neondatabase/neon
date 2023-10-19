@@ -19,6 +19,7 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::ops::Range;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -370,7 +371,6 @@ impl Timeline {
         }
     }
 
-    ///
     /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
     /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
     ///
@@ -385,6 +385,50 @@ impl Timeline {
         found_larger: &mut bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if timestamp >= search_timestamp {
+                *found_larger = true;
+                return ControlFlow::Break(true);
+            } else {
+                *found_smaller = true;
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+    }
+
+    /// Obtain the possible timestamp range for the given lsn.
+    ///
+    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
+    pub async fn get_timestamp_for_lsn(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<TimestampTz>, PageReconstructError> {
+        let mut max: Option<TimestampTz> = None;
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if let Some(max_prev) = max {
+                max = Some(max_prev.max(timestamp));
+            } else {
+                max = Some(timestamp);
+            }
+            ControlFlow::Continue(())
+        })
+        .await?;
+
+        Ok(max)
+    }
+
+    /// Runs the given function on all the timestamps for a given lsn
+    ///
+    /// The return value is either given by the closure, or set to the `Default`
+    /// impl's output.
+    async fn map_all_timestamps<T: Default>(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+        mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
+    ) -> Result<T, PageReconstructError> {
         for segno in self
             .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
             .await?
@@ -402,16 +446,14 @@ impl Timeline {
                     timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
                     let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
 
-                    if timestamp >= search_timestamp {
-                        *found_larger = true;
-                        return Ok(true);
-                    } else {
-                        *found_smaller = true;
+                    match f(timestamp) {
+                        ControlFlow::Break(b) => return Ok(b),
+                        ControlFlow::Continue(()) => (),
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(Default::default())
     }
 
     /// Get a list of SLRU segments
