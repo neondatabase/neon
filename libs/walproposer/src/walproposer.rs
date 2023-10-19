@@ -141,6 +141,10 @@ pub trait ApiImpl {
     fn log_internal(&self, _wp: &mut WalProposer, _level: Level, _msg: &str) {
         todo!()
     }
+
+    fn after_election(&self, _wp: &mut WalProposer) {
+        todo!()
+    }
 }
 
 pub enum WaitResult {
@@ -405,6 +409,10 @@ mod tests {
 
         fn log_internal(&self, _wp: &mut crate::bindings::WalProposer, level: Level, msg: &str) {
             println!("walprop_log[{}] {}", level, msg);
+        }
+
+        fn after_election(&self, _wp: &mut crate::bindings::WalProposer) {
+            println!("after_election");
         }
     }
 

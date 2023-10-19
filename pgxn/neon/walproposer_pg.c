@@ -1665,6 +1665,36 @@ walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
 	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
 }
 
+static void
+walprop_pg_after_election(WalProposer *wp)
+{
+	FILE* f;
+	XLogRecPtr lrRestartLsn;
+
+	/* We don't need to do anything in syncSafekeepers mode.*/
+	if (wp->config->syncSafekeepers)
+		return;
+
+	/*
+	 * If there are active logical replication subscription we need
+	 * to provide enough WAL for their WAL senders based on th position
+	 * of their replication slots.
+	 */
+	f = fopen("restart.lsn", "rb");
+	if (f != NULL && !wp->config->syncSafekeepers)
+	{
+		fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+		fclose(f);
+		if (lrRestartLsn != InvalidXLogRecPtr)
+		{
+			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
+			/* start from the beginning of the segment to fetch page headers verifed by XLogReader */
+			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
+			wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
+		}
+	}
+}
+
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
 	.start_streaming = walprop_pg_start_streaming,
@@ -1695,4 +1725,5 @@ static const walproposer_api walprop_pg = {
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
 	.log_internal = walprop_pg_log_internal,
+	.after_election = walprop_pg_after_election,
 };

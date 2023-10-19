@@ -568,6 +568,14 @@ typedef struct walproposer_api
 	 * handled by elog().
 	 */
 	void		(*log_internal) (WalProposer *wp, int level, const char *line);
+
+	/*
+	 * Called right after the proposer was elected, but before it started
+	 * recovery and sent ProposerElected message to the safekeepers.
+	 * 
+	 * Used by logical replication to update truncateLsn.
+	 */
+	void		(*after_election) (WalProposer *wp);
 } walproposer_api;
 
 /*

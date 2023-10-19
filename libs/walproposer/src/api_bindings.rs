@@ -136,7 +136,7 @@ extern "C" fn conn_async_read(
         // This function has guarantee that returned buf will be valid until
         // the next call. So we can store a Vec in each Safekeeper and reuse
         // it on the next call.
-        let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or(Vec::new());
+        let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or_default();
 
         inbuf.clear();
         inbuf.extend_from_slice(res);
@@ -331,6 +331,14 @@ extern "C" fn log_internal(
     }
 }
 
+extern "C" fn after_election(wp: *mut WalProposer) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).after_election(&mut (*wp))
+    }
+}
+
 #[derive(Debug)]
 pub enum Level {
     Debug5,
@@ -402,6 +410,7 @@ pub(crate) fn create_api() -> walproposer_api {
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         confirm_wal_streamed: Some(confirm_wal_streamed),
         log_internal: Some(log_internal),
+        after_election: Some(after_election),
     }
 }
 
