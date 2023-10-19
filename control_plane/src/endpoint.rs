@@ -426,6 +426,24 @@ impl Endpoint {
         Ok(())
     }
 
+    fn read_postgresql_conf(&self) -> Result<String> {
+        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
+        // memory. We will include it in the spec file that we pass to
+        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
+        // in the data directory.
+        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
+        match std::fs::read(&postgresql_conf_path) {
+            Ok(content) => Ok(String::from_utf8(content)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("".to_string()),
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "failed to read config file in {}",
+                    postgresql_conf_path.to_str().unwrap()
+                )))
+            }
+        }
+    }
+
     pub fn start(
         &self,
         auth_token: &Option<String>,
@@ -436,21 +454,7 @@ impl Endpoint {
             anyhow::bail!("The endpoint is already running");
         }
 
-        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
-        // memory. We will include it in the spec file that we pass to
-        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
-        // in the data directory.
-        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
-        let postgresql_conf = match std::fs::read(&postgresql_conf_path) {
-            Ok(content) => String::from_utf8(content)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "".to_string(),
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!(
-                    "failed to read config file in {}",
-                    postgresql_conf_path.to_str().unwrap()
-                )))
-            }
-        };
+        let postgresql_conf = self.read_postgresql_conf()?;
 
         // We always start the compute node from scratch, so if the Postgres
         // data dir exists from a previous launch, remove it first.
@@ -621,9 +625,38 @@ impl Endpoint {
         }
     }
 
-    pub fn sighup(&self) -> Result<()> {
-        self.pg_ctl(&["reload"], &None)?;
-        Ok(())
+    pub fn reconfigure(&self) -> Result<()> {
+        let spec_path = self.endpoint_path().join("spec.json");
+        let file = std::fs::File::open(spec_path)?;
+        let mut spec: ComputeSpec = serde_json::from_reader(file)?;
+
+        let postgresql_conf = self.read_postgresql_conf()?;
+        spec.cluster.postgresql_conf = Some(postgresql_conf);
+
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/configure",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .body(format!(
+                "{{\"spec\":{}}}",
+                serde_json::to_string_pretty(&spec)?
+            ))
+            .send()?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text() {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
     }
 
     pub fn stop(&self, destroy: bool) -> Result<()> {

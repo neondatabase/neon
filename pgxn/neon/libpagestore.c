@@ -65,12 +65,18 @@ bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = 
 
 static bool pageserver_flush(void);
 
+static pqsigfunc	 prev_signal_handler;
+
 static void
 pageserver_sighup_handler(SIGNAL_ARGS)
 {
-    neon_log(LOG, "Received SIGHUP, flushing existing pageserver");
-    pageserver_flush();
-    neon_log(LOG, "Flush complete");
+	if (prev_signal_handler)
+	{
+        	prev_signal_handler(postgres_signal_arg);
+	}
+	neon_log(LOG, "Received SIGHUP, flushing existing pageserver. New pageserver connstring is %s", page_server_connstring);
+	pageserver_flush();
+	neon_log(LOG, "Flush complete");
 }
 
 static bool
@@ -492,7 +498,7 @@ pg_init_libpagestore(void)
 		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 
-        pqsignal(SIGHUP, pageserver_sighup_handler);
+        prev_signal_handler = pqsignal(SIGHUP, pageserver_sighup_handler);
 
 	lfc_init();
 }

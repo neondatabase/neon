@@ -798,7 +798,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 ep.start(&auth_token, safekeepers, remote_ext_config)?;
             }
         }
-        "sighup" => {
+        "reconfigure" => {
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID provided to sighup"))?;
@@ -806,7 +806,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.sighup()?;
+            endpoint.reconfigure()?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1379,8 +1379,8 @@ fn cli() -> Command {
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
                 )
-                .subcommand(Command::new("sighup")
-                            .about("Send SIGHUP to the endpoint's postmaster")
+                .subcommand(Command::new("reconfigure")
+                            .about("Reconfigure the endpoint")
                             .arg(endpoint_id_arg.clone())
                             .arg(tenant_id_arg.clone())
                 )

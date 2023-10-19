@@ -1,15 +1,20 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.remote_storage import RemoteStorageKind
 
 
 def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+    )
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")
-    env.pageservers[0].http_client()
-    new_pageserver_http = env.pageservers[1].http_client()
+
+    env.pageservers[1].tenant_attach(env.initial_tenant)
+    new_pageserver_pg_port = env.pageservers[1].service_port.pg
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -42,8 +47,13 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
-    endpoint.config([f"neon.pageserver_connstring = {new_pageserver_http}"])
-    endpoint.sighup()
+    endpoint.config(
+        [f"neon.pageserver_connstring='postgresql://no_user:@localhost:{new_pageserver_pg_port}'"]
+    )
+    endpoint.reconfigure()
+    env.pageservers[
+        0
+    ].stop()  # Stop the old pageserver just to make sure we're reading from the new one
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
