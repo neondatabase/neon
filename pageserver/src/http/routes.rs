@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
 use humantime::format_rfc3339;
-use hyper::header::CONTENT_TYPE;
+use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -767,6 +767,10 @@ async fn tenant_size_handler(
         .map_err(ApiError::InternalServerError)?;
 
     let mut sizes = None;
+    let accepts_html = headers
+        .get(header::ACCEPT)
+        .map(|v| v == "text/html")
+        .unwrap_or_default();
     if !inputs_only.unwrap_or(false) {
         let storage_model = inputs
             .calculate_model()
@@ -774,11 +778,11 @@ async fn tenant_size_handler(
         let size = storage_model.calculate();
 
         // If request header expects html, return html
-        if headers["Accept"] == "text/html" {
+        if accepts_html {
             return synthetic_size_html_response(inputs, storage_model, size);
         }
         sizes = Some(size);
-    } else if headers["Accept"] == "text/html" {
+    } else if accepts_html {
         return Err(ApiError::BadRequest(anyhow!(
             "inputs_only parameter is incompatible with html output request"
         )));
@@ -929,7 +933,7 @@ fn synthetic_size_html_response(
 pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>, ApiError> {
     let response = Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .header(header::CONTENT_TYPE, "text/html")
         .body(Body::from(data.as_bytes().to_vec()))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
@@ -1310,7 +1314,7 @@ async fn getpage_at_lsn_handler(
         Result::<_, ApiError>::Ok(
             Response::builder()
                 .status(StatusCode::OK)
-                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
                 .body(hyper::Body::from(page))
                 .unwrap(),
         )
