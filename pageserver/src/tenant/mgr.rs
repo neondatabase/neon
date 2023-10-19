@@ -26,7 +26,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{create_tenant_files, AttachedTenantConf, Tenant, TenantState};
+use crate::tenant::{create_tenant_files, AttachedTenantConf, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -476,18 +476,19 @@ pub(crate) fn schedule_local_tenant_processing(
     );
 
     info!("Attaching tenant {tenant_id}");
-    let tenant = match Tenant::spawn_attach(
+    let tenant = match Tenant::spawn(
         conf,
         tenant_id,
         resources,
         location_conf,
         init_order,
         tenants,
+        SpawnMode::Normal,
         ctx,
     ) {
         Ok(tenant) => tenant,
         Err(e) => {
-            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+            error!("Failed to spawn tenant {tenant_id}, reason: {e:#}");
             Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
         }
     };
@@ -638,8 +639,8 @@ pub(crate) async fn create_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant = Tenant::spawn_create(conf, tenant_id, resources,
-        AttachedTenantConf::try_from(location_conf)?, ctx)?;
+        let created_tenant = Tenant::spawn(conf, tenant_id, resources,
+        AttachedTenantConf::try_from(location_conf)?, None, &TENANTS, SpawnMode::Create, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -790,7 +791,7 @@ pub(crate) async fn upsert_location(
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
 
-                    let tenant = match Tenant::spawn_attach(
+                    let tenant = match Tenant::spawn(
                         conf,
                         tenant_id,
                         TenantSharedResources {
@@ -801,11 +802,12 @@ pub(crate) async fn upsert_location(
                         AttachedTenantConf::try_from(new_location_config)?,
                         None,
                         &TENANTS,
+                        SpawnMode::Normal,
                         ctx,
                     ) {
                         Ok(tenant) => tenant,
                         Err(e) => {
-                            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                            error!("Failed to spawn tenant {tenant_id}, reason: {e:#}");
                             Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
                         }
                     };
