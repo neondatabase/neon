@@ -363,6 +363,10 @@ fn start_pageserver(
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
     let (tenants_can_start, tenants_can_start_barrier) = utils::completion::channel();
 
+    tracing::info!("init_remote_done_tx:");
+    let c = init_remote_done_tx.clone();
+    drop(c);
+
     let order = pageserver::InitializationOrder {
         initial_tenant_load_remote: Some(init_done_tx),
         initial_tenant_load: Some(init_remote_done_tx),
