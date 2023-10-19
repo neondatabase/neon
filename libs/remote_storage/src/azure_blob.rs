@@ -121,22 +121,7 @@ impl AzureBlobStorage {
         // https://github.com/neondatabase/neon/issues/5563
         let mut buf = Vec::new();
         while let Some(part) = response.next().await {
-            let part = match part {
-                Ok(l) => l,
-                Err(e) => {
-                    return Err(if let Some(http_err) = e.as_http_error() {
-                        match http_err.status() {
-                            StatusCode::NotFound => DownloadError::NotFound,
-                            StatusCode::BadRequest => {
-                                DownloadError::BadInput(anyhow::Error::new(e))
-                            }
-                            _ => DownloadError::Other(anyhow::Error::new(e)),
-                        }
-                    } else {
-                        DownloadError::Other(e.into())
-                    });
-                }
-            };
+            let part = part.map_err(to_download_error)?;
             let data = part
                 .data
                 .collect()
@@ -157,30 +142,16 @@ impl AzureBlobStorage {
     ) -> Result<StorageMetadata, DownloadError> {
         let builder = blob_client.get_metadata();
 
-        match builder.into_future().await {
-            Ok(r) => {
-                let mut map = HashMap::new();
+        let response = builder.into_future().await.map_err(to_download_error)?;
+        let mut map = HashMap::new();
 
-                for md in r.metadata.iter() {
-                    map.insert(
-                        md.name().as_str().to_string(),
-                        md.value().as_str().to_string(),
-                    );
-                }
-                Ok(StorageMetadata(map))
-            }
-            Err(e) => {
-                return Err(if let Some(http_err) = e.as_http_error() {
-                    match http_err.status() {
-                        StatusCode::NotFound => DownloadError::NotFound,
-                        StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(e)),
-                        _ => DownloadError::Other(anyhow::Error::new(e)),
-                    }
-                } else {
-                    DownloadError::Other(e.into())
-                });
-            }
+        for md in response.metadata.iter() {
+            map.insert(
+                md.name().as_str().to_string(),
+                md.value().as_str().to_string(),
+            );
         }
+        Ok(StorageMetadata(map))
     }
 
     async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
@@ -197,6 +168,18 @@ fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
         res.insert(k, v);
     }
     res
+}
+
+fn to_download_error(error: azure_core::Error) -> DownloadError {
+    if let Some(http_err) = error.as_http_error() {
+        match http_err.status() {
+            StatusCode::NotFound => DownloadError::NotFound,
+            StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(error)),
+            _ => DownloadError::Other(anyhow::Error::new(error)),
+        }
+    } else {
+        DownloadError::Other(error.into())
+    }
 }
 
 #[async_trait::async_trait]
@@ -233,23 +216,8 @@ impl RemoteStorage for AzureBlobStorage {
 
         let mut response = builder.into_stream();
         let mut res = Vec::new();
-        while let Some(l) = response.next().await {
-            let entry = match l {
-                Ok(l) => l,
-                Err(e) => {
-                    return Err(if let Some(http_err) = e.as_http_error() {
-                        match http_err.status() {
-                            StatusCode::NotFound => DownloadError::NotFound,
-                            StatusCode::BadRequest => {
-                                DownloadError::BadInput(anyhow::Error::new(e))
-                            }
-                            _ => DownloadError::Other(anyhow::Error::new(e)),
-                        }
-                    } else {
-                        DownloadError::Other(e.into())
-                    });
-                }
-            };
+        while let Some(entry) = response.next().await {
+            let entry = entry.map_err(to_download_error)?;
             let name_iter = entry
                 .blobs
                 .prefixes()

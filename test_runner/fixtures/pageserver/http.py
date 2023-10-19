@@ -453,6 +453,15 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         return res_json
 
+    def timeline_get_timestamp_of_lsn(self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
+        log.info(f"Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn?lsn={lsn}",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
         self.is_testing_enabled_or_skip()
 

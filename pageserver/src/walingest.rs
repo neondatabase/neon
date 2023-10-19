@@ -338,11 +338,20 @@ impl<'a> WalIngest<'a> {
         } else if decoded.xl_rmid == pg_constants::RM_LOGICALMSG_ID {
             let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-                // This is a convenient way to make the WAL ingestion pause at
-                // particular point in the WAL. For more fine-grained control,
-                // we could peek into the message and only pause if it contains
-                // a particular string, for example, but this is enough for now.
-                crate::failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
+                let xlrec = XlLogicalMessage::decode(&mut buf);
+                let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
+                let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
+                if prefix == "neon-test" {
+                    // This is a convenient way to make the WAL ingestion pause at
+                    // particular point in the WAL. For more fine-grained control,
+                    // we could peek into the message and only pause if it contains
+                    // a particular string, for example, but this is enough for now.
+                    crate::failpoint_support::sleep_millis_async!(
+                        "wal-ingest-logical-message-sleep"
+                    );
+                } else if let Some(path) = prefix.strip_prefix("neon-file:") {
+                    modification.put_file(path, message, ctx).await?;
+                }
             }
         }
 
@@ -459,7 +468,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v14::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
@@ -527,7 +535,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v15::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
@@ -595,7 +602,6 @@ impl<'a> WalIngest<'a> {
                         }
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v16::XlHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
@@ -771,7 +777,6 @@ impl<'a> WalIngest<'a> {
                     }
                     pg_constants::XLOG_NEON_HEAP_DELETE => {
                         let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
-                        assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }

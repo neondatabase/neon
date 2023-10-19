@@ -63,7 +63,6 @@
 #include "storage/md.h"
 #include "pgstat.h"
 
-
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
@@ -1394,12 +1393,6 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 
 		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
-	}
-	else if (am_walsender)
-	{
-		*latest = true;
-		lsn = InvalidXLogRecPtr;
-		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
 	}
 	else
 	{

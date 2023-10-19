@@ -334,22 +334,9 @@ typedef struct Safekeeper
 	char		conninfo[MAXCONNINFO];
 
 	/*
-	 * postgres protocol connection to the WAL acceptor
-	 *
-	 * Equals NULL only when state = SS_OFFLINE. Nonblocking is set once we
-	 * reach SS_ACTIVE; not before.
-	 */
-	WalProposerConn *conn;
-
-	/*
 	 * Temporary buffer for the message being sent to the safekeeper.
 	 */
 	StringInfoData outbuf;
-
-	/*
-	 * WAL reader, allocated for each safekeeper.
-	 */
-	XLogReaderState *xlogreader;
 
 	/*
 	 * Streaming will start here; must be record boundary.
@@ -361,13 +348,43 @@ typedef struct Safekeeper
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
-	int			eventPos;		/* position in wait event set. Equal to -1 if*
-								 * no event */
 	SafekeeperState state;		/* safekeeper state machine state */
 	TimestampTz latestMsgReceivedAt;	/* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
 	AppendResponse appendResponse;	/* feedback for master */
+
+
+	/* postgres-specific fields */
+	#ifndef WALPROPOSER_LIB
+	/*
+	 * postgres protocol connection to the WAL acceptor
+	 *
+	 * Equals NULL only when state = SS_OFFLINE. Nonblocking is set once we
+	 * reach SS_ACTIVE; not before.
+	 */
+	WalProposerConn *conn;
+
+	/*
+	 * WAL reader, allocated for each safekeeper.
+	 */
+	XLogReaderState *xlogreader;
+
+	/*
+	 * Position in wait event set. Equal to -1 if no event
+	 */
+	int			eventPos;
+	#endif
+
+
+	/* WalProposer library specifics */
+	#ifdef WALPROPOSER_LIB
+	/*
+	 * Buffer for incoming messages. Usually Rust vector is stored here.
+	 * Caller is responsible for freeing the buffer.
+	 */
+	StringInfoData inbuf;
+	#endif
 } Safekeeper;
 
 /* Re-exported PostgresPollingStatusType */
@@ -433,7 +450,7 @@ typedef struct walproposer_api
 	 * Get WalproposerShmemState. This is used to store information about last
 	 * elected term.
 	 */
-	WalproposerShmemState *(*get_shmem_state) (void);
+	WalproposerShmemState *(*get_shmem_state) (WalProposer *wp);
 
 	/*
 	 * Start receiving notifications about new WAL. This is an infinite loop
@@ -443,61 +460,63 @@ typedef struct walproposer_api
 	void		(*start_streaming) (WalProposer *wp, XLogRecPtr startpos);
 
 	/* Get pointer to the latest available WAL. */
-	XLogRecPtr	(*get_flush_rec_ptr) (void);
+	XLogRecPtr	(*get_flush_rec_ptr) (WalProposer *wp);
 
 	/* Get current time. */
-	TimestampTz (*get_current_timestamp) (void);
-
-	/* Get postgres timeline. */
-	TimeLineID	(*get_timeline_id) (void);
+	TimestampTz (*get_current_timestamp) (WalProposer *wp);
 
 	/* Current error message, aka PQerrorMessage. */
-	char	   *(*conn_error_message) (WalProposerConn *conn);
+	char	   *(*conn_error_message) (Safekeeper *sk);
 
 	/* Connection status, aka PQstatus. */
-	WalProposerConnStatusType (*conn_status) (WalProposerConn *conn);
+	WalProposerConnStatusType (*conn_status) (Safekeeper *sk);
 
 	/* Start the connection, aka PQconnectStart. */
-	WalProposerConn *(*conn_connect_start) (char *conninfo);
+	void (*conn_connect_start) (Safekeeper *sk);
 
 	/* Poll an asynchronous connection, aka PQconnectPoll. */
-	WalProposerConnectPollStatusType (*conn_connect_poll) (WalProposerConn *conn);
+	WalProposerConnectPollStatusType (*conn_connect_poll) (Safekeeper *sk);
 
 	/* Send a blocking SQL query, aka PQsendQuery. */
-	bool		(*conn_send_query) (WalProposerConn *conn, char *query);
+	bool		(*conn_send_query) (Safekeeper *sk, char *query);
 
 	/* Read the query result, aka PQgetResult. */
-	WalProposerExecStatusType (*conn_get_query_result) (WalProposerConn *conn);
+	WalProposerExecStatusType (*conn_get_query_result) (Safekeeper *sk);
 
 	/* Flush buffer to the network, aka PQflush. */
-	int			(*conn_flush) (WalProposerConn *conn);
+	int			(*conn_flush) (Safekeeper *sk);
 
 	/* Close the connection, aka PQfinish. */
-	void		(*conn_finish) (WalProposerConn *conn);
+	void		(*conn_finish) (Safekeeper *sk);
 
-	/* Try to read CopyData message, aka PQgetCopyData. */
-	PGAsyncReadResult (*conn_async_read) (WalProposerConn *conn, char **buf, int *amount);
+	/*
+	 * Try to read CopyData message from the safekeeper, aka PQgetCopyData. 
+	 *
+	 * On success, the data is placed in *buf. It is valid until the next call
+	 * to this function.
+	 */
+	PGAsyncReadResult (*conn_async_read) (Safekeeper *sk, char **buf, int *amount);
 
 	/* Try to write CopyData message, aka PQputCopyData. */
-	PGAsyncWriteResult (*conn_async_write) (WalProposerConn *conn, void const *buf, size_t size);
+	PGAsyncWriteResult (*conn_async_write) (Safekeeper *sk, void const *buf, size_t size);
 
 	/* Blocking CopyData write, aka PQputCopyData + PQflush. */
-	bool		(*conn_blocking_write) (WalProposerConn *conn, void const *buf, size_t size);
+	bool		(*conn_blocking_write) (Safekeeper *sk, void const *buf, size_t size);
 
 	/* Download WAL from startpos to endpos and make it available locally. */
 	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
 	/* Read WAL from disk to buf. */
-	void		(*wal_read) (XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count);
+	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
 
 	/* Allocate WAL reader. */
-	XLogReaderState *(*wal_reader_allocate) (void);
+	void (*wal_reader_allocate) (Safekeeper *sk);
 
 	/* Deallocate event set. */
-	void		(*free_event_set) (void);
+	void		(*free_event_set) (WalProposer *wp);
 
 	/* Initialize event set. */
-	void		(*init_event_set) (int n_safekeepers);
+	void		(*init_event_set) (WalProposer *wp);
 
 	/* Update events for an existing safekeeper connection. */
 	void		(*update_event_set) (Safekeeper *sk, uint32 events);
@@ -513,22 +532,22 @@ typedef struct walproposer_api
 	 * events mask to indicate events and sets sk to the safekeeper which has
 	 * an event.
 	 */
-	int			(*wait_event_set) (long timeout, Safekeeper **sk, uint32 *events);
+	int			(*wait_event_set) (WalProposer *wp, long timeout, Safekeeper **sk, uint32 *events);
 
 	/* Read random bytes. */
-	bool		(*strong_random) (void *buf, size_t len);
+	bool		(*strong_random) (WalProposer *wp, void *buf, size_t len);
 
 	/*
 	 * Get a basebackup LSN. Used to cross-validate with the latest available
 	 * LSN on the safekeepers.
 	 */
-	XLogRecPtr	(*get_redo_start_lsn) (void);
+	XLogRecPtr	(*get_redo_start_lsn) (WalProposer *wp);
 
 	/*
 	 * Finish sync safekeepers with the given LSN. This function should not
 	 * return and should exit the program.
 	 */
-	void		(*finish_sync_safekeepers) (XLogRecPtr lsn);
+	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
 
 	/*
 	 * Called after every new message from the safekeeper. Used to propagate
@@ -541,7 +560,22 @@ typedef struct walproposer_api
 	 * Called on peer_horizon_lsn updates. Used to advance replication slot
 	 * and to free up disk space by deleting unnecessary WAL.
 	 */
-	void		(*confirm_wal_streamed) (XLogRecPtr lsn);
+	void		(*confirm_wal_streamed) (WalProposer *wp, XLogRecPtr lsn);
+
+	/*
+	 * Write a log message to the internal log processor. This is used only
+	 * when walproposer is compiled as a library. Otherwise, all logging is
+	 * handled by elog().
+	 */
+	void		(*log_internal) (WalProposer *wp, int level, const char *line);
+
+	/*
+	 * Called right after the proposer was elected, but before it started
+	 * recovery and sent ProposerElected message to the safekeepers.
+	 * 
+	 * Used by logical replication to update truncateLsn.
+	 */
+	void		(*after_election) (WalProposer *wp);
 } walproposer_api;
 
 /*
@@ -590,6 +624,13 @@ typedef struct WalProposerConfig
 
 	/* Will be passed to safekeepers in greet request. */
 	uint64		systemId;
+
+	/* Will be passed to safekeepers in greet request. */
+	TimeLineID  pgTimeline;
+
+#ifdef WALPROPOSER_LIB
+	void *callback_data;
+#endif
 } WalProposerConfig;
 
 
@@ -666,7 +707,16 @@ extern WalProposer *WalProposerCreate(WalProposerConfig *config, walproposer_api
 extern void WalProposerStart(WalProposer *wp);
 extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(WalProposer *wp);
-extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
-										   PageserverFeedback *rf);
+extern void WalProposerFree(WalProposer *wp);
+
+
+#define WPEVENT		1337	/* special log level for walproposer internal events */
+
+#ifdef WALPROPOSER_LIB
+void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt, ...);
+#define walprop_log(elevel, ...) WalProposerLibLog(wp, elevel, __VA_ARGS__)
+#else
+#define walprop_log(elevel, ...) elog(elevel, __VA_ARGS__)
+#endif
 
 #endif							/* __NEON_WALPROPOSER_H__ */
