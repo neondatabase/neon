@@ -101,10 +101,10 @@ jobs:
         run: make postgres-v16 -j$(sysctl -n hw.ncpu)
 
       - name: Build neon extensions
-        run: make neon-pg-ext -j$(nproc)
+        run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
 
       - name: Build walproposer-lib
-        run: make walproposer-lib -j$(nproc)
+        run: make walproposer-lib -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build
         run: cargo build --all --release
@@ -136,7 +136,10 @@ jobs:
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
-        run: make postgres-headers -j$(sysctl -n hw.ncpu)
+        run: make postgres-headers -j$(nproc)
+
+      - name: Build walproposer-lib
+        run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
         run: cargo build --all --release --timings
