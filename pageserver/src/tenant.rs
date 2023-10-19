@@ -667,6 +667,14 @@ impl Tenant {
                     }
                 }
 
+                let can_start =
+                    init_order.as_ref().map(|x| &x.tenants_can_start);
+                if let Some(b) = can_start {
+                    info!("Waiting for can_start...");
+                    b.clone().wait().await;
+                    info!("Ready for can_start.");
+                }
+
                 match tenant_clone.attach(init_order, preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");

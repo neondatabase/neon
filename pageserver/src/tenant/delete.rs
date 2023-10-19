@@ -366,10 +366,9 @@ impl DeleteTenantFlow {
 
         let tenant_id = tenant.tenant_id;
         // Check local mark first, if its there there is no need to go to s3 to check whether remote one exists.
-        if conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
-            Ok(acquire(tenant))
-        } else {
-            Ok(None)
+        match tokio::fs::metadata(conf.tenant_deleted_mark_file_path(&tenant_id)).await {
+            Ok(_) => Ok(acquire(tenant)),
+            Err(_) => Ok(None),
         }
     }
 

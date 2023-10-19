@@ -361,12 +361,14 @@ fn start_pageserver(
     let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
 
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
+    let (tenants_can_start, tenants_can_start_barrier) = utils::completion::channel();
 
     let order = pageserver::InitializationOrder {
         initial_tenant_load_remote: Some(init_done_tx),
         initial_tenant_load: Some(init_remote_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
         initial_logical_size_attempt: Some(init_logical_size_done_tx),
+        tenants_can_start: tenants_can_start_barrier.clone(),
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
@@ -392,6 +394,8 @@ fn start_pageserver(
 
             init_remote_done_rx.wait().await;
             startup_checkpoint("initial_tenant_load_remote", "Remote part of initial load completed");
+
+            drop(tenants_can_start);
 
             init_done_rx.wait().await;
             startup_checkpoint("initial_tenant_load", "Initial load completed");
