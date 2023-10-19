@@ -101,7 +101,7 @@ impl JwtAuth {
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
         let mut res = None;
         for decoding_key in &self.decoding_keys {
-            res = Some(decode(token, &decoding_key, &self.validation));
+            res = Some(decode(token, decoding_key, &self.validation));
             if let Some(Ok(res)) = res {
                 return Ok(res);
             }
