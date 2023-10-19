@@ -727,7 +727,7 @@ impl WalRedoProcess {
                                     // The message might not be split correctly into lines here. But this is
                                     // good enough, the important thing is to get the message to the log.
                                     error!(
-                                        output=?String::from_utf8_lossy(&errbuf[0..n]),
+                                        output=String::from_utf8_lossy(&errbuf[0..n]),
                                         "received output",
                                     );
                                 },
