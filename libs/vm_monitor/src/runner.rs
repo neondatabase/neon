@@ -505,11 +505,14 @@ impl Runner {
                                     Ok(Some(out)) => out,
                                     Ok(None) => continue,
                                     Err(e) => {
-                                        let error = e.to_string();
-                                        warn!(?error, "error handling message");
+                                        // use {:#} for our logging because the display impl only
+                                        // gives the outermost cause, and the debug impl
+                                        // pretty-prints the error, whereas {:#} contains all the
+                                        // causes, but is compact (no newlines).
+                                        warn!(error = format!("{e:#}"), "error handling message");
                                         OutboundMsg::new(
                                             OutboundMsgKind::InternalError {
-                                                error
+                                                error: e.to_string(),
                                             },
                                             message.id
                                         )
