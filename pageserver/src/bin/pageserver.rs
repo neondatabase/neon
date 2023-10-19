@@ -228,7 +228,9 @@ where
     };
 
     WaitForPhaseResult {
-        timeout_remaining: timeout - Instant::now().duration_since(initial_t),
+        timeout_remaining: timeout
+            .checked_sub(Instant::now().duration_since(initial_t))
+            .unwrap_or(Duration::ZERO),
         skipped,
     }
 }
