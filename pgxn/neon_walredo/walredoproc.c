@@ -207,6 +207,7 @@ WalRedoMain(int argc, char *argv[])
 	 * and above during process startup.
  	 */
 	log_min_messages = PGWARNING;
+	client_min_messages = PGWARNING;
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
@@ -321,11 +322,11 @@ WalRedoMain(int argc, char *argv[])
 #endif
 
 	/*
-	 * Pageserver treats any output to stderr as an ERROR, so we must
-	 * set the log level as early as possible to only log ERROR and 
-	 * above during WAL redo.
+	 * Pageserver treats any output to stderr as an ERROR, so to prevent issues
+	 * during wal redo we limit the output to ERROR and up exclusively.
 	 */
 	log_min_messages = PGERROR;
+	client_min_messages = PGERROR;
 
 	for (;;)
 	{
