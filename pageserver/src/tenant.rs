@@ -18,6 +18,7 @@ use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -2614,6 +2615,7 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         let legacy_config_path = conf.tenant_config_path(tenant_id);
         let config_path = conf.tenant_location_config_path(tenant_id);
+
         Self::persist_tenant_config_at(tenant_id, &config_path, &legacy_config_path, location_conf)
             .await
     }
@@ -2652,12 +2654,20 @@ impl Tenant {
         // Convert the config to a toml file.
         conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
 
-        let conf_content = conf_content.as_bytes();
-
         let temp_path = path_with_suffix_extension(config_path, TEMP_FILE_SUFFIX);
-        VirtualFile::crashsafe_overwrite(config_path, &temp_path, conf_content)
-            .await
-            .with_context(|| format!("write tenant {tenant_id} config to {config_path}"))?;
+
+        let tenant_id = *tenant_id;
+        let config_path = config_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                let conf_content = conf_content.as_bytes();
+                VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
+                    .await
+                    .with_context(|| format!("write tenant {tenant_id} config to {config_path}"))
+            })
+        })
+        .await??;
+
         Ok(())
     }
 
@@ -2679,12 +2689,21 @@ impl Tenant {
         // Convert the config to a toml file.
         conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
 
-        let conf_content = conf_content.as_bytes();
-
         let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
-        VirtualFile::crashsafe_overwrite(target_config_path, &temp_path, conf_content)
-            .await
-            .with_context(|| format!("write tenant {tenant_id} config to {target_config_path}"))?;
+
+        let tenant_id = *tenant_id;
+        let target_config_path = target_config_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                let conf_content = conf_content.as_bytes();
+                VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
+                    .await
+                    .with_context(|| {
+                        format!("write tenant {tenant_id} config to {target_config_path}")
+                    })
+            })
+        })
+        .await??;
         Ok(())
     }
 
