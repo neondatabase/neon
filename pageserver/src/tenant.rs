@@ -195,6 +195,13 @@ pub(crate) struct TenantPreload {
     timelines: HashMap<TimelineId, TimelinePreload>,
 }
 
+/// When we spawn a tenant, there is a special mode for tenant creation that
+/// avoids trying to read anything from remote storage.
+pub(crate) enum SpawnMode {
+    Normal,
+    Create,
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -504,84 +511,6 @@ impl Tenant {
         Ok(())
     }
 
-    /// Special case for starting a Tenant: immediately after tenant creation, a Tenant has no
-    /// timelines and `spawn_attach` will not work.
-    ///
-    /// This function can go away once we always create Tenants with an initial timeline
-    /// See: `<https://github.com/neondatabase/neon/issues/5456>`
-    pub(crate) fn spawn_create(
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-        resources: TenantSharedResources,
-        attached_conf: AttachedTenantConf,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Tenant>> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf, tenant_id,
-        )));
-
-        let TenantSharedResources {
-            broker_client,
-            remote_storage,
-            deletion_queue_client,
-        } = resources;
-
-        let tenant = Arc::new(Tenant::new(
-            TenantState::Attaching,
-            conf,
-            attached_conf,
-            wal_redo_manager,
-            tenant_id,
-            remote_storage.clone(),
-            deletion_queue_client,
-        ));
-
-        // Do all the hard work in the background
-        let tenant_clone = Arc::clone(&tenant);
-
-        let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
-        task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            TaskKind::Attach,
-            Some(tenant_id),
-            None,
-            "create tenant",
-            false,
-            async move {
-                // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
-                let make_broken = |t: &Tenant, err: anyhow::Error| {
-                    error!("creation failed, setting tenant state to Broken: {err:?}");
-                    t.state.send_modify(|state| {
-                        assert_eq!(
-                            *state,
-                            TenantState::Attaching,
-                            "the attach task owns the tenant state until activation is complete"
-                        );
-                        *state = TenantState::broken_from_reason(err.to_string());
-                    });
-                };
-
-                match tenant_clone.load_local(None, &ctx).await {
-                    Ok(()) => {
-                        info!("attach finished, activating");
-                        tenant_clone.activate(broker_client, None, &ctx);
-                    }
-                    Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e));
-                    }
-                }
-                Ok(())
-            }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "spawn_create", tenant_id=%tenant_id);
-                span.follows_from(Span::current());
-                span
-            }),
-        );
-        Ok(tenant)
-    }
-
-    ///
     /// Attach a tenant that's available in cloud storage.
     ///
     /// This returns quickly, after just creating the in-memory object
@@ -591,13 +520,15 @@ impl Tenant {
     /// finishes. You can use wait_until_active() to wait for the task to
     /// complete.
     ///
-    pub(crate) fn spawn_attach(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         init_order: Option<InitializationOrder>,
         tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
@@ -658,22 +589,27 @@ impl Tenant {
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
-                let preload = match &remote_storage {
-                    Some(remote_storage) => Some(
-                        match tenant_clone
-                            .preload(remote_storage, task_mgr::shutdown_token())
-                            .instrument(
-                                tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_id),
-                            )
-                            .await {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    make_broken(&tenant_clone, anyhow::anyhow!(e));
-                                        return Ok(());
-                                }
-                            },
-                    ),
-                    None => None,
+                let preload = match mode {
+                    SpawnMode::Create => {None},
+                    SpawnMode::Normal => {
+                        match &remote_storage {
+                            Some(remote_storage) => Some(
+                                match tenant_clone
+                                    .preload(remote_storage, task_mgr::shutdown_token())
+                                    .instrument(
+                                        tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_id),
+                                    )
+                                    .await {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            make_broken(&tenant_clone, anyhow::anyhow!(e));
+                                                return Ok(());
+                                        }
+                                    },
+                            ),
+                            None => None,
+                        }
+                    }
                 };
 
                 // Remote preload is complete.
