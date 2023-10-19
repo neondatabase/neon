@@ -435,12 +435,10 @@ impl Endpoint {
         match std::fs::read(&postgresql_conf_path) {
             Ok(content) => Ok(String::from_utf8(content)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("".to_string()),
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!(
-                    "failed to read config file in {}",
-                    postgresql_conf_path.to_str().unwrap()
-                )))
-            }
+            Err(e) => Err(anyhow::Error::new(e).context(format!(
+                "failed to read config file in {}",
+                postgresql_conf_path.to_str().unwrap()
+            ))),
         }
     }
 
