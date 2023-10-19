@@ -103,6 +103,9 @@ jobs:
       - name: Build neon extensions
         run: make neon-pg-ext -j$(nproc)
 
+      - name: Build walproposer-lib
+        run: make walproposer-lib -j$(nproc)
+
       - name: Run cargo build
         run: cargo build --all --release
 

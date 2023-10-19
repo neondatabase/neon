@@ -6093,6 +6093,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "walproposer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "postgres_ffi",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "want"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
