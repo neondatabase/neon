@@ -42,7 +42,7 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSha
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
-    auth::JwtAuth,
+    auth::SwappableJwtAuth,
     generation::Generation,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
@@ -60,7 +60,7 @@ use super::models::ConfigureFailpointsRequest;
 
 pub struct State {
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
     broker_client: storage_broker::BrokerClientChannel,
@@ -71,7 +71,7 @@ pub struct State {
 impl State {
     pub fn new(
         conf: &'static PageServerConf,
-        auth: Option<Arc<JwtAuth>>,
+        auth: Option<Arc<SwappableJwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
@@ -1608,7 +1608,7 @@ where
 pub fn make_router(
     state: Arc<State>,
     launch_ts: &'static LaunchTimestamp,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");

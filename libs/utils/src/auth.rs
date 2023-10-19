@@ -1,7 +1,8 @@
 // For details about authentication see docs/authentication.md
 
+use arc_swap::ArcSwap;
 use serde;
-use std::fs;
+use std::{fs, sync::Arc};
 
 use anyhow::Result;
 use camino::Utf8Path;
@@ -44,6 +45,17 @@ pub struct Claims {
 impl Claims {
     pub fn new(tenant_id: Option<TenantId>, scope: Scope) -> Self {
         Self { tenant_id, scope }
+    }
+}
+
+pub struct SwappableJwtAuth(ArcSwap<JwtAuth>);
+
+impl SwappableJwtAuth {
+    pub fn new(jwt_auth: JwtAuth) -> Self {
+        SwappableJwtAuth(ArcSwap::new(Arc::new(jwt_auth)))
+    }
+    pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
+        self.0.load().decode(token)
     }
 }
 
