@@ -54,6 +54,9 @@ impl SwappableJwtAuth {
     pub fn new(jwt_auth: JwtAuth) -> Self {
         SwappableJwtAuth(ArcSwap::new(Arc::new(jwt_auth)))
     }
+    pub fn swap(&self, jwt_auth: JwtAuth) {
+        self.0.swap(Arc::new(jwt_auth));
+    }
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
         self.0.load().decode(token)
     }
