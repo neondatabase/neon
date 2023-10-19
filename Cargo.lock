@@ -285,7 +285,7 @@ dependencies = [
  "log",
  "parking",
  "polling",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "slab",
  "socket2 0.4.9",
  "waker-fn",
@@ -2582,7 +2582,7 @@ checksum = "adcf93614601c8129ddf72e2d5633df827ba6551541c6d8c59520a371475be1f"
 dependencies = [
  "hermit-abi",
  "io-lifetimes",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.48.0",
 ]
 
@@ -4331,9 +4331,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.37.19"
+version = "0.37.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acf8729d8542766f1b2cf77eb034d52f40d375bb8b615d0b147089946e16613d"
+checksum = "d4eb579851244c2c03e7c24f501c3432bed80b8f720af1d6e5b0e0f01555a035"
 dependencies = [
  "bitflags",
  "errno",
@@ -5174,7 +5174,7 @@ dependencies = [
  "cfg-if",
  "fastrand 1.9.0",
  "redox_syscall 0.3.5",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.45.0",
 ]
 
