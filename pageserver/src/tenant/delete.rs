@@ -31,7 +31,7 @@ use super::{
 const SHOULD_RESUME_DELETION_FETCH_MARK_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeleteTenantError {
+pub(crate) enum DeleteTenantError {
     #[error("GetTenant {0}")]
     Get(#[from] GetTenantError),
 
@@ -376,7 +376,7 @@ impl DeleteTenantFlow {
         Ok(())
     }
 
-    pub async fn should_resume_deletion(
+    pub(crate) async fn should_resume_deletion(
         conf: &'static PageServerConf,
         remote_storage: Option<&GenericRemoteStorage>,
         tenant: &Tenant,
@@ -432,7 +432,7 @@ impl DeleteTenantFlow {
         // Tenant may not be loadable if we fail late in cleanup_remaining_fs_traces (e g remove timelines dir)
         let timelines_path = tenant.conf.timelines_path(&tenant.tenant_id);
         if timelines_path.exists() {
-            tenant.load(init_order, ctx).await.context("load")?;
+            tenant.load(init_order, None, ctx).await.context("load")?;
         }
 
         Self::background(
@@ -458,7 +458,10 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant.attach(ctx).await.context("attach")?;
+        tenant
+            .attach(ctx, super::AttachMarkerMode::Expect)
+            .await
+            .context("attach")?;
 
         Self::background(
             guard,

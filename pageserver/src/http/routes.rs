@@ -2,10 +2,12 @@
 //! Management HTTP API
 //!
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
+use humantime::format_rfc3339;
 use hyper::header::CONTENT_TYPE;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
@@ -80,7 +82,7 @@ impl State {
         deletion_queue_client: DeletionQueueClient,
         tenants_loaded: Barrier,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
+        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
@@ -140,9 +142,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
-            PageReconstructError::WalRedo(pre) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
-            }
+            PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
 }
@@ -168,9 +168,6 @@ impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
             TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            TenantStateError::NotActive(_) => {
-                ApiError::ResourceUnavailable("Tenant not yet active".into())
-            }
             TenantStateError::IsStopping(_) => {
                 ApiError::ResourceUnavailable("Tenant is stopping".into())
             }
@@ -522,6 +519,33 @@ async fn get_lsn_by_timestamp_handler(
     json_response(StatusCode::OK, result)
 }
 
+async fn get_timestamp_of_lsn_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let lsn_str = must_get_query_param(&request, "lsn")?;
+    let lsn = Lsn::from_str(&lsn_str)
+        .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
+        .map_err(ApiError::BadRequest)?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
+
+    match result {
+        Some(time) => {
+            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            json_response(StatusCode::OK, time)
+        }
+        None => json_response(StatusCode::NOT_FOUND, ()),
+    }
+}
+
 async fn tenant_attach_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -590,9 +614,14 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", %tenant_id))
-        .await?;
+    mgr::detach_tenant(
+        conf,
+        tenant_id,
+        detach_ignored.unwrap_or(false),
+        &state.deletion_queue_client,
+    )
+    .instrument(info_span!("tenant_detach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1049,9 +1078,17 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        mgr::detach_tenant(conf, tenant_id, true)
+        if let Err(e) = mgr::detach_tenant(conf, tenant_id, true, &state.deletion_queue_client)
             .instrument(info_span!("tenant_detach", %tenant_id))
-            .await?;
+            .await
+        {
+            match e {
+                TenantStateError::NotFound(_) => {
+                    // This API is idempotent: a NotFound on a detach is fine.
+                }
+                _ => return Err(e.into()),
+            }
+        }
         return json_response(StatusCode::OK, ());
     }
 
@@ -1693,6 +1730,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
             |r| api_handler(r, get_lsn_by_timestamp_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_timestamp_of_lsn",
+            |r| api_handler(r, get_timestamp_of_lsn_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             api_handler(r, timeline_gc_handler)

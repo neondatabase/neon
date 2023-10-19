@@ -4,7 +4,10 @@
 //! [`RemoteStorage`] trait a CRUD-like generic abstraction to use for adapting external storages with a few implementations:
 //!   * [`local_fs`] allows to use local file system as an external storage
 //!   * [`s3_bucket`] uses AWS S3 bucket as an external storage
+//!   * [`azure_blob`] allows to use Azure Blob storage as an external storage
 //!
+
+mod azure_blob;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
@@ -21,11 +24,15 @@ use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io;
+use tokio::{io, sync::Semaphore};
 use toml_edit::Item;
 use tracing::info;
 
-pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
+pub use self::{
+    azure_blob::AzureBlobStorage, local_fs::LocalFs, s3_bucket::S3Bucket,
+    simulate_failures::UnreliableWrapper,
+};
+use s3_bucket::RequestKind;
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
 /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
@@ -39,6 +46,11 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// <https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/>
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
+/// We set this a little bit low as we currently buffer the entire file into RAM
+///
+/// Here, a limit of max 20k concurrent connections was noted.
+/// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
+pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 30;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
@@ -217,6 +229,7 @@ impl std::error::Error for DownloadError {}
 pub enum GenericRemoteStorage {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
+    AzureBlob(Arc<AzureBlobStorage>),
     Unreliable(Arc<UnreliableWrapper>),
 }
 
@@ -228,6 +241,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.list_files(folder).await,
             Self::AwsS3(s) => s.list_files(folder).await,
+            Self::AzureBlob(s) => s.list_files(folder).await,
             Self::Unreliable(s) => s.list_files(folder).await,
         }
     }
@@ -242,6 +256,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.list_prefixes(prefix).await,
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
+            Self::AzureBlob(s) => s.list_prefixes(prefix).await,
             Self::Unreliable(s) => s.list_prefixes(prefix).await,
         }
     }
@@ -256,6 +271,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
         }
     }
@@ -264,6 +280,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.download(from).await,
             Self::AwsS3(s) => s.download(from).await,
+            Self::AzureBlob(s) => s.download(from).await,
             Self::Unreliable(s) => s.download(from).await,
         }
     }
@@ -283,6 +300,10 @@ impl GenericRemoteStorage {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
             }
+            Self::AzureBlob(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
             Self::Unreliable(s) => {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
@@ -294,6 +315,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.delete(path).await,
             Self::AwsS3(s) => s.delete(path).await,
+            Self::AzureBlob(s) => s.delete(path).await,
             Self::Unreliable(s) => s.delete(path).await,
         }
     }
@@ -302,6 +324,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.delete_objects(paths).await,
             Self::AwsS3(s) => s.delete_objects(paths).await,
+            Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
         }
     }
@@ -318,6 +341,11 @@ impl GenericRemoteStorage {
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
+            }
+            RemoteStorageKind::AzureContainer(azure_config) => {
+                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                      azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
+                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config)?))
             }
         })
     }
@@ -383,6 +411,9 @@ pub enum RemoteStorageKind {
     /// AWS S3 based storage, storing all files in the S3 bucket
     /// specified by the config
     AwsS3(S3Config),
+    /// Azure Blob based storage, storing all files in the container
+    /// specified by the config
+    AzureContainer(AzureConfig),
 }
 
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
@@ -422,11 +453,45 @@ impl Debug for S3Config {
     }
 }
 
+/// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
+#[derive(Clone, PartialEq, Eq)]
+pub struct AzureConfig {
+    /// Name of the container to connect to.
+    pub container_name: String,
+    /// The region where the bucket is located at.
+    pub container_region: String,
+    /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
+    pub prefix_in_container: Option<String>,
+    /// Azure has various limits on its API calls, we need not to exceed those.
+    /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
+    pub concurrency_limit: NonZeroUsize,
+    pub max_keys_per_list_response: Option<i32>,
+}
+
+impl Debug for AzureConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureConfig")
+            .field("bucket_name", &self.container_name)
+            .field("bucket_region", &self.container_region)
+            .field("prefix_in_bucket", &self.prefix_in_container)
+            .field("concurrency_limit", &self.concurrency_limit)
+            .field(
+                "max_keys_per_list_response",
+                &self.max_keys_per_list_response,
+            )
+            .finish()
+    }
+}
+
 impl RemoteStorageConfig {
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
         let local_path = toml.get("local_path");
         let bucket_name = toml.get("bucket_name");
         let bucket_region = toml.get("bucket_region");
+        let container_name = toml.get("container_name");
+        let container_region = toml.get("container_region");
+
+        let use_azure = container_name.is_some() && container_region.is_some();
 
         let max_concurrent_syncs = NonZeroUsize::new(
             parse_optional_integer("max_concurrent_syncs", toml)?
@@ -440,9 +505,13 @@ impl RemoteStorageConfig {
         )
         .context("Failed to parse 'max_sync_errors' as a positive integer")?;
 
+        let default_concurrency_limit = if use_azure {
+            DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
+        } else {
+            DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+        };
         let concurrency_limit = NonZeroUsize::new(
-            parse_optional_integer("concurrency_limit", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT),
+            parse_optional_integer("concurrency_limit", toml)?.unwrap_or(default_concurrency_limit),
         )
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
@@ -451,33 +520,70 @@ impl RemoteStorageConfig {
                 .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
                 .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
 
-        let storage = match (local_path, bucket_name, bucket_region) {
+        let endpoint = toml
+            .get("endpoint")
+            .map(|endpoint| parse_toml_string("endpoint", endpoint))
+            .transpose()?;
+
+        let storage = match (
+            local_path,
+            bucket_name,
+            bucket_region,
+            container_name,
+            container_region,
+        ) {
             // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
-            (None, None, None) => return Ok(None),
-            (_, Some(_), None) => {
+            (None, None, None, None, None) => return Ok(None),
+            (_, Some(_), None, ..) => {
                 bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
             }
-            (_, None, Some(_)) => {
+            (_, None, Some(_), ..) => {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
-            (None, Some(bucket_name), Some(bucket_region)) => RemoteStorageKind::AwsS3(S3Config {
-                bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                prefix_in_bucket: toml
-                    .get("prefix_in_bucket")
-                    .map(|prefix_in_bucket| parse_toml_string("prefix_in_bucket", prefix_in_bucket))
-                    .transpose()?,
-                endpoint: toml
-                    .get("endpoint")
-                    .map(|endpoint| parse_toml_string("endpoint", endpoint))
-                    .transpose()?,
-                concurrency_limit,
-                max_keys_per_list_response,
-            }),
-            (Some(local_path), None, None) => RemoteStorageKind::LocalFs(Utf8PathBuf::from(
-                parse_toml_string("local_path", local_path)?,
-            )),
-            (Some(_), Some(_), _) => bail!("local_path and bucket_name are mutually exclusive"),
+            (None, Some(bucket_name), Some(bucket_region), ..) => {
+                RemoteStorageKind::AwsS3(S3Config {
+                    bucket_name: parse_toml_string("bucket_name", bucket_name)?,
+                    bucket_region: parse_toml_string("bucket_region", bucket_region)?,
+                    prefix_in_bucket: toml
+                        .get("prefix_in_bucket")
+                        .map(|prefix_in_bucket| {
+                            parse_toml_string("prefix_in_bucket", prefix_in_bucket)
+                        })
+                        .transpose()?,
+                    endpoint,
+                    concurrency_limit,
+                    max_keys_per_list_response,
+                })
+            }
+            (_, _, _, Some(_), None) => {
+                bail!("'container_name' option is mandatory if 'container_region' is given ")
+            }
+            (_, _, _, None, Some(_)) => {
+                bail!("'container_name' option is mandatory if 'container_region' is given ")
+            }
+            (None, None, None, Some(container_name), Some(container_region)) => {
+                RemoteStorageKind::AzureContainer(AzureConfig {
+                    container_name: parse_toml_string("container_name", container_name)?,
+                    container_region: parse_toml_string("container_region", container_region)?,
+                    prefix_in_container: toml
+                        .get("prefix_in_container")
+                        .map(|prefix_in_container| {
+                            parse_toml_string("prefix_in_container", prefix_in_container)
+                        })
+                        .transpose()?,
+                    concurrency_limit,
+                    max_keys_per_list_response,
+                })
+            }
+            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
+                Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
+            ),
+            (Some(_), Some(_), ..) => {
+                bail!("'local_path' and 'bucket_name' are mutually exclusive")
+            }
+            (Some(_), _, _, Some(_), Some(_)) => {
+                bail!("local_path and 'container_name' are mutually exclusive")
+            }
         };
 
         Ok(Some(RemoteStorageConfig {
@@ -511,6 +617,46 @@ fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
         .as_str()
         .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
+}
+
+struct ConcurrencyLimiter {
+    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
+    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
+    // The helps to ensure we don't exceed the thresholds.
+    write: Arc<Semaphore>,
+    read: Arc<Semaphore>,
+}
+
+impl ConcurrencyLimiter {
+    fn for_kind(&self, kind: RequestKind) -> &Arc<Semaphore> {
+        match kind {
+            RequestKind::Get => &self.read,
+            RequestKind::Put => &self.write,
+            RequestKind::List => &self.read,
+            RequestKind::Delete => &self.write,
+        }
+    }
+
+    async fn acquire(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
+        self.for_kind(kind).acquire().await
+    }
+
+    async fn acquire_owned(
+        &self,
+        kind: RequestKind,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        Arc::clone(self.for_kind(kind)).acquire_owned().await
+    }
+
+    fn new(limit: usize) -> ConcurrencyLimiter {
+        Self {
+            read: Arc::new(Semaphore::new(limit)),
+            write: Arc::new(Semaphore::new(limit)),
+        }
+    }
 }
 
 #[cfg(test)]

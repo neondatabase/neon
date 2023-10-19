@@ -3,8 +3,12 @@ use crate::{
     config::ProxyConfig,
     error::io_error,
     protocol2::{ProxyProtocolAccept, WithClientIp},
-    proxy::{handle_client, ClientMode},
+    proxy::{
+        handle_client, ClientMode, NUM_CLIENT_CONNECTION_CLOSED_COUNTER,
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER,
+    },
 };
+use anyhow::bail;
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
 use hyper::{
@@ -19,7 +23,6 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
-    convert::Infallible,
     future::ready,
     pin::Pin,
     sync::Arc,
@@ -202,7 +205,14 @@ async fn ws_handler(
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        sql_over_http::handle(request, sni_hostname, conn_pool, session_id).await
+        sql_over_http::handle(
+            request,
+            sni_hostname,
+            conn_pool,
+            session_id,
+            &config.http_config,
+        )
+        .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
@@ -270,28 +280,36 @@ pub async fn task_main(
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
             let (io, tls) = stream.get_ref();
-            let peer_addr = io.client_addr().unwrap_or(io.inner.remote_addr());
+            let client_addr = io.client_addr();
+            let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
 
             async move {
-                Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| {
-                    let sni_name = sni_name.clone();
-                    let conn_pool = conn_pool.clone();
+                let peer_addr = match client_addr {
+                    Some(addr) => addr,
+                    None if config.require_client_ip => bail!("missing required client ip"),
+                    None => remote_addr,
+                };
+                Ok(MetricService::new(hyper::service::service_fn(
+                    move |req: Request<Body>| {
+                        let sni_name = sni_name.clone();
+                        let conn_pool = conn_pool.clone();
 
-                    async move {
-                        let cancel_map = Arc::new(CancelMap::default());
-                        let session_id = uuid::Uuid::new_v4();
+                        async move {
+                            let cancel_map = Arc::new(CancelMap::default());
+                            let session_id = uuid::Uuid::new_v4();
 
-                        ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
-                            .instrument(info_span!(
-                                "ws-client",
-                                session = %session_id,
-                                %peer_addr,
-                            ))
-                            .await
-                    }
-                }))
+                            ws_handler(req, config, conn_pool, cancel_map, session_id, sni_name)
+                                .instrument(info_span!(
+                                    "ws-client",
+                                    session = %session_id,
+                                    %peer_addr,
+                                ))
+                                .await
+                        }
+                    },
+                )))
             }
         },
     );
@@ -302,4 +320,42 @@ pub async fn task_main(
         .await?;
 
     Ok(())
+}
+
+struct MetricService<S> {
+    inner: S,
+}
+
+impl<S> MetricService<S> {
+    fn new(inner: S) -> MetricService<S> {
+        NUM_CLIENT_CONNECTION_OPENED_COUNTER
+            .with_label_values(&["http"])
+            .inc();
+        MetricService { inner }
+    }
+}
+
+impl<S> Drop for MetricService<S> {
+    fn drop(&mut self) {
+        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
+            .with_label_values(&["http"])
+            .inc();
+    }
+}
+
+impl<S, ReqBody> hyper::service::Service<Request<ReqBody>> for MetricService<S>
+where
+    S: hyper::service::Service<Request<ReqBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        self.inner.call(req)
+    }
 }

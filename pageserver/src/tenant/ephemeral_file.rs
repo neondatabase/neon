@@ -354,8 +354,7 @@ mod tests {
         }
 
         // Test a large blob that spans multiple pages
-        let mut large_data = Vec::new();
-        large_data.resize(20000, 0);
+        let mut large_data = vec![0; 20000];
         thread_rng().fill_bytes(&mut large_data);
         let pos_large = file.write_blob(&large_data, &ctx).await?;
         let result = file.block_cursor().read_blob(pos_large, &ctx).await?;

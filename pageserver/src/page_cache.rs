@@ -318,15 +318,6 @@ impl std::ops::Deref for PageWriteGuard<'_> {
     }
 }
 
-impl AsMut<[u8; PAGE_SZ]> for PageWriteGuard<'_> {
-    fn as_mut(&mut self) -> &mut [u8; PAGE_SZ] {
-        match &mut self.state {
-            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
-            PageWriteGuardState::Downgraded => unreachable!(),
-        }
-    }
-}
-
 impl<'a> PageWriteGuard<'a> {
     /// Mark that the buffer contents are now valid.
     #[must_use]

@@ -252,7 +252,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     IF NOT EXISTS (
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
-                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION IN ROLE pg_read_all_data, pg_write_all_data;
                         IF array_length(roles, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
                                            array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
@@ -692,10 +692,11 @@ impl ComputeNode {
         // Proceed with post-startup configuration. Note, that order of operations is important.
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
         create_neon_superuser(spec, &mut client)?;
+        cleanup_instance(&mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, self.connstr.as_str())?;
+        handle_grants(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
         create_availability_check_data(&mut client)?;
 
@@ -731,10 +732,11 @@ impl ComputeNode {
         // Disable DDL forwarding because control plane already knows about these roles/databases.
         if spec.mode == ComputeMode::Primary {
             client.simple_query("SET neon.forward_ddl = false")?;
+            cleanup_instance(&mut client)?;
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, self.connstr.as_str())?;
+            handle_grants(&spec, &mut client, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
         }
 

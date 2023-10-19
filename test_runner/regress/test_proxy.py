@@ -7,6 +7,8 @@ import pytest
 import requests
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
+GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
+
 
 def test_proxy_select_1(static_proxy: NeonProxy):
     """
@@ -188,7 +190,7 @@ def test_sql_over_http(static_proxy: NeonProxy):
             headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
             verify=str(static_proxy.test_output_dir / "proxy.crt"),
         )
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         return response.json()
 
     rows = q("select 42 as answer")["rows"]
@@ -205,6 +207,12 @@ def test_sql_over_http(static_proxy: NeonProxy):
 
     rows = q("select $1::json->'a' as answer", [{"a": {"b": 42}}])["rows"]
     assert rows == [{"answer": {"b": 42}}]
+
+    rows = q("select $1::jsonb[] as answer", [[{}]])["rows"]
+    assert rows == [{"answer": [{}]}]
+
+    rows = q("select $1::jsonb[] as answer", [[{"foo": 1}, {"bar": 2}]])["rows"]
+    assert rows == [{"answer": [{"foo": 1}, {"bar": 2}]}]
 
     rows = q("select * from pg_class limit 1")["rows"]
     assert len(rows) == 1
@@ -347,7 +355,7 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     def get_pid(status: int, pw: str) -> Any:
         return static_proxy.http_query(
-            "SELECT pid FROM pg_stat_activity WHERE state = 'active'",
+            GET_CONNECTION_PID_QUERY,
             [],
             user="http_auth",
             password=pw,
@@ -381,7 +389,6 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
 # Beginning a transaction should not impact the next query,
 # which might come from a completely different client.
-@pytest.mark.xfail(reason="not implemented")
 def test_http_pool_begin(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
@@ -397,3 +404,21 @@ def test_http_pool_begin(static_proxy: NeonProxy):
     query(200, "BEGIN;")
     query(400, "garbage-lol(&(&(&(&")  # Intentional error to break the transaction
     query(200, "SELECT 1;")  # Query that should succeed regardless of the transaction
+
+
+def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth2 with password 'http' superuser")
+
+    def query(status: int, query: str) -> Any:
+        return static_proxy.http_query(
+            query,
+            [],
+            user="http_auth2",
+            password="http",
+            expected_code=status,
+        )
+
+    pid1 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
+    query(200, "BEGIN")
+    pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
+    assert pid1 != pid2

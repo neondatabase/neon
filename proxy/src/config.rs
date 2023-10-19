@@ -13,6 +13,8 @@ pub struct ProxyConfig {
     pub auth_backend: auth::BackendType<'static, ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
+    pub http_config: HttpConfig,
+    pub require_client_ip: bool,
 }
 
 #[derive(Debug)]
@@ -24,6 +26,10 @@ pub struct MetricCollectionConfig {
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
+}
+
+pub struct HttpConfig {
+    pub sql_over_http_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {

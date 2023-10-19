@@ -24,10 +24,11 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::{LocationConf, LocationMode, TenantConfOpt};
+use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
-    create_tenant_files, AttachedTenantConf, CreateTenantFilesMode, Tenant, TenantState,
+    create_tenant_files, AttachMarkerMode, AttachedTenantConf, CreateTenantFilesMode, Tenant,
+    TenantState,
 };
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
@@ -50,7 +51,7 @@ use super::TenantSharedResources;
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
 #[derive(Clone)]
-pub enum TenantSlot {
+pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary,
 }
@@ -151,6 +152,49 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 
 static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::Initializing));
 
+/// Create a directory, including parents.  This does no fsyncs and makes
+/// no guarantees about the persistence of the resulting metadata: for
+/// use when creating dirs for use as cache.
+async fn unsafe_create_dir_all(path: &Utf8PathBuf) -> std::io::Result<()> {
+    let mut dirs_to_create = Vec::new();
+    let mut path: &Utf8Path = path.as_ref();
+
+    // Figure out which directories we need to create.
+    loop {
+        let meta = tokio::fs::metadata(path).await;
+        match meta {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("non-directory found in path: {path}"),
+                ));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+
+        dirs_to_create.push(path);
+
+        match path.parent() {
+            Some(parent) => path = parent,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("can't find parent of path '{path}'"),
+                ));
+            }
+        }
+    }
+
+    // Create directories from parent to child.
+    for &path in dirs_to_create.iter().rev() {
+        tokio::fs::create_dir(path).await?;
+    }
+
+    Ok(())
+}
+
 fn emergency_generations(
     tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
 ) -> HashMap<TenantId, Generation> {
@@ -206,8 +250,7 @@ async fn init_load_generations(
     if resources.remote_storage.is_some() {
         resources
             .deletion_queue_client
-            .recover(generations.clone())
-            .await?;
+            .recover(generations.clone())?;
     }
 
     Ok(Some(generations))
@@ -447,7 +490,15 @@ pub(crate) fn schedule_local_tenant_processing(
                 "attaching mark file present but no remote storage configured".to_string(),
             )
         } else {
-            match Tenant::spawn_attach(conf, tenant_id, resources, location_conf, tenants, ctx) {
+            match Tenant::spawn_attach(
+                conf,
+                tenant_id,
+                resources,
+                location_conf,
+                tenants,
+                AttachMarkerMode::Expect,
+                ctx,
+            ) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -482,7 +533,7 @@ pub(crate) fn schedule_local_tenant_processing(
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
 #[instrument(skip_all)]
-pub async fn shutdown_all_tenants() {
+pub(crate) async fn shutdown_all_tenants() {
     shutdown_all_tenants0(&TENANTS).await
 }
 
@@ -594,7 +645,7 @@ async fn shutdown_all_tenants0(tenants: &tokio::sync::RwLock<TenantsMap>) {
     // caller will log how long we took
 }
 
-pub async fn create_tenant(
+pub(crate) async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -629,14 +680,14 @@ pub async fn create_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SetNewTenantConfigError {
+pub(crate) enum SetNewTenantConfigError {
     #[error(transparent)]
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
 }
 
-pub async fn set_new_tenant_config(
+pub(crate) async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -656,7 +707,7 @@ pub async fn set_new_tenant_config(
     Ok(())
 }
 
-#[instrument(skip_all, fields(tenant_id, new_location_config))]
+#[instrument(skip_all, fields(%tenant_id))]
 pub(crate) async fn upsert_location(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
@@ -695,6 +746,18 @@ pub(crate) async fn upsert_location(
 
     if let Some(tenant) = shutdown_tenant {
         let (_guard, progress) = utils::completion::channel();
+
+        match tenant.get_attach_mode() {
+            AttachmentMode::Single | AttachmentMode::Multi => {
+                // Before we leave our state as the presumed holder of the latest generation,
+                // flush any outstanding deletions to reduce the risk of leaking objects.
+                deletion_queue_client.flush_advisory()
+            }
+            AttachmentMode::Stale => {
+                // If we're stale there's not point trying to flush deletions
+            }
+        };
+
         info!("Shutting down attached tenant");
         match tenant.shutdown(progress, false).await {
             Ok(()) => {}
@@ -723,36 +786,61 @@ pub(crate) async fn upsert_location(
             }
 
             let new_slot = match &new_location_config.mode {
-                LocationMode::Secondary(_) => TenantSlot::Secondary,
-                LocationMode::Attached(_attach_config) => {
-                    // Do a schedule_local_tenant_processing
-                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
-                    // we have the same problem in load_tenant/attach_tenant.  Probably
-                    // need a lock in TenantSlot to fix this.
+                LocationMode::Secondary(_) => {
+                    let tenant_path = conf.tenant_path(&tenant_id);
+                    // Directory doesn't need to be fsync'd because if we crash it can
+                    // safely be recreated next time this tenant location is configured.
+                    unsafe_create_dir_all(&tenant_path)
+                        .await
+                        .with_context(|| format!("Creating {tenant_path}"))?;
+
                     Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
-                    let tenant_path = conf.tenant_path(&tenant_id);
-                    let resources = TenantSharedResources {
-                        broker_client,
-                        remote_storage,
-                        deletion_queue_client,
-                    };
-                    let new_tenant = schedule_local_tenant_processing(
+
+                    TenantSlot::Secondary
+                }
+                LocationMode::Attached(_attach_config) => {
+                    // FIXME: should avoid doing this disk I/O inside the TenantsMap lock,
+                    // we have the same problem in load_tenant/attach_tenant.  Probably
+                    // need a lock in TenantSlot to fix this.
+                    let timelines_path = conf.timelines_path(&tenant_id);
+
+                    // Directory doesn't need to be fsync'd because we do not depend on
+                    // it to exist after crashes: it may be recreated when tenant is
+                    // re-attached, see https://github.com/neondatabase/neon/issues/5550
+                    unsafe_create_dir_all(&timelines_path)
+                        .await
+                        .with_context(|| format!("Creating {timelines_path}"))?;
+
+                    Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
+                        .await
+                        .map_err(SetNewTenantConfigError::Persist)?;
+
+                    let tenant = match Tenant::spawn_attach(
                         conf,
                         tenant_id,
-                        &tenant_path,
+                        TenantSharedResources {
+                            broker_client,
+                            remote_storage,
+                            deletion_queue_client,
+                        },
                         AttachedTenantConf::try_from(new_location_config)?,
-                        resources,
-                        None,
                         &TENANTS,
+                        // The LocationConf API does not use marker files, because we have Secondary
+                        // locations where the directory's existence is not a signal that it contains
+                        // all timelines.  See https://github.com/neondatabase/neon/issues/5550
+                        AttachMarkerMode::Ignore,
                         ctx,
-                    )
-                    .with_context(|| {
-                        format!("Failed to schedule tenant processing in path {tenant_path:?}")
-                    })?;
+                    ) {
+                        Ok(tenant) => tenant,
+                        Err(e) => {
+                            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                        }
+                    };
 
-                    TenantSlot::Attached(new_tenant)
+                    TenantSlot::Attached(tenant)
                 }
             };
 
@@ -760,12 +848,11 @@ pub(crate) async fn upsert_location(
         })
         .await?;
     }
-
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum GetTenantError {
+pub(crate) enum GetTenantError {
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
     #[error("Tenant {0} is not active")]
@@ -781,7 +868,7 @@ pub enum GetTenantError {
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
 ///
 /// This method is cancel-safe.
-pub async fn get_tenant(
+pub(crate) async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
@@ -806,7 +893,7 @@ pub async fn get_tenant(
     }
 }
 
-pub async fn delete_tenant(
+pub(crate) async fn delete_tenant(
     conf: &'static PageServerConf,
     remote_storage: Option<GenericRemoteStorage>,
     tenant_id: TenantId,
@@ -815,7 +902,7 @@ pub async fn delete_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeleteTimelineError {
+pub(crate) enum DeleteTimelineError {
     #[error("Tenant {0}")]
     Tenant(#[from] GetTenantError),
 
@@ -823,7 +910,7 @@ pub enum DeleteTimelineError {
     Timeline(#[from] crate::tenant::DeleteTimelineError),
 }
 
-pub async fn delete_timeline(
+pub(crate) async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     _ctx: &RequestContext,
@@ -834,23 +921,29 @@ pub async fn delete_timeline(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantStateError {
+pub(crate) enum TenantStateError {
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
     #[error("Tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-pub async fn detach_tenant(
+pub(crate) async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     detach_ignored: bool,
+    deletion_queue_client: &DeletionQueueClient,
 ) -> Result<(), TenantStateError> {
-    let tmp_path = detach_tenant0(conf, &TENANTS, tenant_id, detach_ignored).await?;
+    let tmp_path = detach_tenant0(
+        conf,
+        &TENANTS,
+        tenant_id,
+        detach_ignored,
+        deletion_queue_client,
+    )
+    .await?;
     // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
     let task_tenant_id = None;
@@ -875,6 +968,7 @@ async fn detach_tenant0(
     tenants: &tokio::sync::RwLock<TenantsMap>,
     tenant_id: TenantId,
     detach_ignored: bool,
+    deletion_queue_client: &DeletionQueueClient,
 ) -> Result<Utf8PathBuf, TenantStateError> {
     let tenant_dir_rename_operation = |tenant_id_to_clean| async move {
         let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
@@ -885,6 +979,10 @@ async fn detach_tenant0(
 
     let removal_result =
         remove_tenant_from_memory(tenants, tenant_id, tenant_dir_rename_operation(tenant_id)).await;
+
+    // Flush pending deletions, so that they have a good chance of passing validation
+    // before this tenant is potentially re-attached elsewhere.
+    deletion_queue_client.flush_advisory();
 
     // Ignored tenants are not present in memory and will bail the removal from memory operation.
     // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
@@ -902,7 +1000,7 @@ async fn detach_tenant0(
     removal_result
 }
 
-pub async fn load_tenant(
+pub(crate) async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     generation: Generation,
@@ -939,7 +1037,7 @@ pub async fn load_tenant(
     Ok(())
 }
 
-pub async fn ignore_tenant(
+pub(crate) async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
@@ -967,7 +1065,7 @@ async fn ignore_tenant0(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantMapListError {
+pub(crate) enum TenantMapListError {
     #[error("tenant map is still initiailizing")]
     Initializing,
 }
@@ -975,7 +1073,7 @@ pub enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
     let tenants = TENANTS.read().await;
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -993,7 +1091,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 ///
 /// Downloading all the tenant data is performed in the background, this merely
 /// spawns the background task and returns quickly.
-pub async fn attach_tenant(
+pub(crate) async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     generation: Generation,
@@ -1030,7 +1128,7 @@ pub async fn attach_tenant(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TenantMapInsertError {
+pub(crate) enum TenantMapInsertError {
     #[error("tenant map is still initializing")]
     StillInitializing,
     #[error("tenant map is shutting down")]
@@ -1193,7 +1291,7 @@ use {
     utils::http::error::ApiError,
 };
 
-pub async fn immediate_gc(
+pub(crate) async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,

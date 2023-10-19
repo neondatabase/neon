@@ -65,7 +65,7 @@ def start_heavy_write_workload(env: PgCompare, n_tables: int, scale: int, num_it
 
     def start_single_table_workload(table_id: int):
         for _ in range(num_iters):
-            with env.pg.connect().cursor() as cur:
+            with env.pg.connect(options="-cstatement_timeout=300s").cursor() as cur:
                 cur.execute(
                     f"INSERT INTO t{table_id} SELECT FROM generate_series(1,{new_rows_each_update})"
                 )

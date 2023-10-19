@@ -253,7 +253,7 @@ impl Endpoint {
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
-        conf.append("wal_level", "replica");
+        conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
         // It also defines how often the walreciever will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");

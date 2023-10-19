@@ -112,7 +112,6 @@ pub struct SharedState {
     /// TODO: it might be better to remove tli completely from GlobalTimelines
     /// when tli is inactive instead of having this flag.
     active: bool,
-    num_computes: u32,
     last_removed_segno: XLogSegNo,
 }
 
@@ -151,7 +150,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -171,7 +169,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -219,7 +216,7 @@ impl SharedState {
             };
             trace!(
                 "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
-                self.sk.state.timeline_id, action_pending, self.num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
+                self.sk.state.timeline_id, action_pending, num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
             );
         }
         res
@@ -531,7 +528,7 @@ impl Timeline {
             return true;
         }
         let shared_state = self.write_shared_state().await;
-        if shared_state.num_computes == 0 {
+        if self.walreceivers.get_num() == 0 {
             return shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn;
         }
@@ -765,7 +762,7 @@ impl Timeline {
                 ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
-                num_computes: state.num_computes,
+                num_computes: self.walreceivers.get_num() as u32,
                 last_removed_segno: state.last_removed_segno,
                 epoch_start_lsn: state.sk.epoch_start_lsn,
                 mem_state: state.sk.inmem.clone(),
@@ -792,7 +789,7 @@ impl Timeline {
             walsenders: self.walsenders.get_all(),
             wal_backup_active: state.wal_backup_active,
             active: state.active,
-            num_computes: state.num_computes,
+            num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
             epoch_start_lsn: state.sk.epoch_start_lsn,
             mem_state: state.sk.inmem.clone(),

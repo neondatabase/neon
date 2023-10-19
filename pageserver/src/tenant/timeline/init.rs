@@ -72,7 +72,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
 }
 
 /// Decision on what to do with a layer file after considering its local and remote metadata.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Decision {
     /// The layer is not present locally.
     Evicted(LayerFileMetadata),
@@ -84,27 +84,30 @@ pub(super) enum Decision {
     },
     /// The layer is present locally, and metadata matches.
     UseLocal(LayerFileMetadata),
-    /// The layer is only known locally, it needs to be uploaded.
-    NeedsUpload(LayerFileMetadata),
 }
 
-/// The related layer is is in future compared to disk_consistent_lsn, it must not be loaded.
+/// A layer needs to be left out of the layer map.
 #[derive(Debug)]
-pub(super) struct FutureLayer {
-    /// The local metadata. `None` if the layer is only known through [`IndexPart`].
-    pub(super) local: Option<LayerFileMetadata>,
+pub(super) enum DismissedLayer {
+    /// The related layer is is in future compared to disk_consistent_lsn, it must not be loaded.
+    Future {
+        /// The local metadata. `None` if the layer is only known through [`IndexPart`].
+        local: Option<LayerFileMetadata>,
+    },
+    /// The layer only exists locally.
+    ///
+    /// In order to make crash safe updates to layer map, we must dismiss layers which are only
+    /// found locally or not yet included in the remote `index_part.json`.
+    LocalOnly(LayerFileMetadata),
 }
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
-///
-/// This function should not gain additional reasons to fail than [`FutureLayer`], consider adding
-/// the checks earlier to [`scan_timeline_dir`].
 pub(super) fn reconcile(
     discovered: Vec<(LayerFileName, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
     generation: Generation,
-) -> Vec<(LayerFileName, Result<Decision, FutureLayer>)> {
+) -> Vec<(LayerFileName, Result<Decision, DismissedLayer>)> {
     use Decision::*;
 
     // name => (local, remote)
@@ -142,17 +145,19 @@ pub(super) fn reconcile(
         .into_iter()
         .map(|(name, (local, remote))| {
             let decision = if name.is_in_future(disk_consistent_lsn) {
-                Err(FutureLayer { local })
+                Err(DismissedLayer::Future { local })
             } else {
-                Ok(match (local, remote) {
-                    (Some(local), Some(remote)) if local != remote => UseRemote { local, remote },
-                    (Some(x), Some(_)) => UseLocal(x),
-                    (None, Some(x)) => Evicted(x),
-                    (Some(x), None) => NeedsUpload(x),
+                match (local, remote) {
+                    (Some(local), Some(remote)) if local != remote => {
+                        Ok(UseRemote { local, remote })
+                    }
+                    (Some(x), Some(_)) => Ok(UseLocal(x)),
+                    (None, Some(x)) => Ok(Evicted(x)),
+                    (Some(x), None) => Err(DismissedLayer::LocalOnly(x)),
                     (None, None) => {
                         unreachable!("there must not be any non-local non-remote files")
                     }
-                })
+                }
             };
 
             (name, decision)
@@ -192,14 +197,21 @@ pub(super) fn cleanup_future_layer(
     name: &LayerFileName,
     disk_consistent_lsn: Lsn,
 ) -> anyhow::Result<()> {
-    use LayerFileName::*;
-    let kind = match name {
-        Delta(_) => "delta",
-        Image(_) => "image",
-    };
     // future image layers are allowed to be produced always for not yet flushed to disk
     // lsns stored in InMemoryLayer.
+    let kind = name.kind();
     tracing::info!("found future {kind} layer {name} disk_consistent_lsn is {disk_consistent_lsn}");
-    crate::tenant::timeline::rename_to_backup(path)?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+pub(super) fn cleanup_local_only_file(
+    path: &Utf8Path,
+    name: &LayerFileName,
+    local: &LayerFileMetadata,
+) -> anyhow::Result<()> {
+    let kind = name.kind();
+    tracing::info!("found local-only {kind} layer {name}, metadata {local:?}");
+    std::fs::remove_file(path)?;
     Ok(())
 }
