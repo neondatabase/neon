@@ -726,10 +726,8 @@ impl WalRedoProcess {
                                 Ok(Ok(n)) => {
                                     // The message might not be split correctly into lines here. But this is
                                     // good enough, the important thing is to get the message to the log.
-                                    error!(
-                                        output=String::from_utf8_lossy(&errbuf[0..n]),
-                                        "received output",
-                                    );
+                                    let output=String::from_utf8_lossy(&errbuf[0..n]).to_string();
+                                    error!(output, "received output");
                                 },
                                 Ok(Err(e)) => {
                                     error!(error = ?e, "read() error, waiting for cancellation");
