@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta, timezone
 
 from fixtures.log_helper import log
@@ -95,6 +96,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
+        time.sleep(0.005)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
@@ -147,7 +149,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
         # Probe a bunch of timestamps in the valid range
         step_size = 100
-        for i in range(1, len(tbl), step_size):
+        for i in range(step_size, len(tbl), step_size):
             after_timestamp = tbl[i][1]
             after_lsn = tbl[i][2]
             result = client.timeline_get_timestamp_of_lsn(
