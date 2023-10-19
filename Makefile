@@ -186,6 +186,7 @@ walproposer-lib: neon-pg-ext-v16
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+ifeq ($(UNAME_S),Linux)
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
 		pg_strong_random.o
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
@@ -195,6 +196,7 @@ walproposer-lib: neon-pg-ext-v16
 		scram-common.o \
 		md5_common.o \
 		checksum_helper.o
+endif
 
 .PHONY: walproposer-lib-clean
 walproposer-lib-clean:
