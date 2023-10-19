@@ -42,6 +42,13 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     available_remote_storages,
 )
+from fixtures.sk_utils import (
+    is_flush_lsn_caught_up,
+    is_segment_offloaded,
+    is_segs_not_exist,
+    is_wal_trimmed,
+    wait,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -387,52 +394,9 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # wait till first segment is removed on all safekeepers
     wait(
-        lambda first_segments=first_segments: all(not os.path.exists(p) for p in first_segments),
+        partial(is_segs_not_exist, first_segments, http_cli, tenant_id, timeline_id),
         "first segment get removed",
-        wait_f=lambda http_cli=http_cli, tenant_id=tenant_id, timeline_id=timeline_id: log.info(
-            f"waiting for segments removal, sk info: {http_cli.timeline_status(tenant_id=tenant_id, timeline_id=timeline_id)}"
-        ),
     )
-
-
-# Wait for something, defined as f() returning True, raising error if this
-# doesn't happen without timeout seconds, and calling wait_f while waiting.
-def wait(f, desc, timeout=30, wait_f=None):
-    started_at = time.time()
-    while True:
-        if f():
-            break
-        elapsed = time.time() - started_at
-        if elapsed > timeout:
-            raise RuntimeError(f"timed out waiting {elapsed:.0f}s for {desc}")
-        time.sleep(0.5)
-        if wait_f is not None:
-            wait_f()
-
-
-def is_segment_offloaded(
-    sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, seg_end: Lsn
-):
-    http_cli = sk.http_client()
-    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"sk status is {tli_status}")
-    return tli_status.backup_lsn >= seg_end
-
-
-def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
-    http_cli = sk.http_client()
-    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"sk status is {tli_status}")
-    return tli_status.flush_lsn >= lsn
-
-
-def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
-    http_cli = sk.http_client()
-    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id)))
-    sk_wal_size_mb = sk_wal_size / 1024 / 1024
-    log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
-    return sk_wal_size_mb <= target_size_mb
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())

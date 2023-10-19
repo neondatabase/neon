@@ -1,4 +1,8 @@
+import time
+from functools import partial
+
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.sk_utils import is_commit_lsn_equals_flush_lsn, wait
 
 
 # Test safekeeper sync and pageserver catch up
@@ -9,7 +13,9 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_pageserver_catchup_while_compute_down")
+    tenant_id = env.initial_tenant
+
+    timeline_id = env.neon_cli.create_branch("test_pageserver_catchup_while_compute_down")
     # Make shared_buffers large to ensure we won't query pageserver while it is down.
     endpoint = env.endpoints.create_start(
         "test_pageserver_catchup_while_compute_down", config_lines=["shared_buffers=512MB"]
@@ -45,11 +51,25 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
             FROM generate_series(1, 10000) g
     """
     )
+    endpoint.stop()
+
+    # wait until safekeepers catch up. This forces/tests fast path which avoids
+    # sync-safekeepers on next compute start.
+    for sk in env.safekeepers:
+        wait(
+            partial(is_commit_lsn_equals_flush_lsn, sk, tenant_id, timeline_id),
+            "commit_lsn to reach flush_lsn",
+        )
 
     # stop safekeepers gracefully
     env.safekeepers[0].stop()
     env.safekeepers[1].stop()
     env.safekeepers[2].stop()
+
+    # Wait until in flight messages to broker arrive so pageserver won't know
+    # where to connect if timeline is not activated on safekeeper after restart
+    # -- we had such a bug once.
+    time.sleep(1)
 
     # start everything again
     # safekeepers must synchronize and pageserver must catch up
@@ -59,7 +79,7 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
     env.safekeepers[2].start()
 
     # restart compute node
-    endpoint.stop_and_destroy().create_start("test_pageserver_catchup_while_compute_down")
+    endpoint = env.endpoints.create_start("test_pageserver_catchup_while_compute_down")
 
     # Ensure that basebackup went correct and pageserver returned all data
     pg_conn = endpoint.connect()
