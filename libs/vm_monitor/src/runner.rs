@@ -253,11 +253,22 @@ impl Runner {
         if let Some(cgroup) = &self.cgroup {
             let (last_time, last_history) = *cgroup.watcher.borrow();
 
+            // NB: The ordering of these conditions is intentional. During startup, we should deny
+            // downscaling until we have enough information to determine that it's safe to do so
+            // (i.e. enough samples have come in). But if it's been a while and we *still* haven't
+            // received any information, we should *fail* instead of just denying downscaling.
+            //
+            // `last_time` is set to `Instant::now()` on startup, so checking `last_time.elapsed()`
+            // serves double-duty: it trips if we haven't received *any* metrics for long enough,
+            // OR if we haven't received metrics *recently enough*.
+            //
             // TODO: make the duration here configurable.
             if last_time.elapsed() > Duration::from_secs(5) {
                 bail!("haven't gotten cgroup memory stats recently enough to determine downscaling information");
             } else if last_history.samples_count <= 1 {
-                bail!("haven't received enough cgroup memory stats yet");
+                let status = "haven't received enough cgroup memory stats yet";
+                info!(status, "discontinuing downscale");
+                return Ok((false, status.to_owned()));
             }
 
             let new_threshold = self
