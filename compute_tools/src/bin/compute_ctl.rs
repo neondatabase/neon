@@ -288,7 +288,7 @@ fn main() -> Result<()> {
             // Note: it seems like you can make a runtime in an inner scope and
             // if you start a task in it it won't be dropped. However, make it
             // in the outermost scope just to be safe.
-            let rt = if let Some(_) = env::var_os("AUTOSCALING") {
+            let rt = if env::var_os("AUTOSCALING").is_some() {
                 Some(
                     tokio::runtime::Builder::new_multi_thread()
                         .worker_threads(4)
