@@ -312,10 +312,9 @@ impl PostgresRedoManager {
                 // This probably needs revisiting at some later point.
                 let mut wait_done = proc.stderr_logger_task_done.clone();
                 drop(proc);
-                match wait_done.wait_for(|v| *v).await {
-                    Ok(_) => {}
-                    Err(_) => todo!(),
-                };
+                wait_done
+                    .wait_for(|v| *v)
+                    .expect("we use scopeguard to ensure we always send `true` to the channel before dropping the sender");
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
