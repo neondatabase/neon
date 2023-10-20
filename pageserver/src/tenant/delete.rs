@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::TenantState;
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, UploadSource};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, warn, Instrument, Span};
@@ -68,11 +68,15 @@ async fn create_remote_delete_mark(
 ) -> Result<(), DeleteTenantError> {
     let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_id)?;
 
-    let data: &[u8] = &[];
     backoff::retry(
         || async {
             remote_storage
-                .upload(data, 0, &remote_mark_path, None)
+                .upload(
+                    UploadSource::Bytes(bytes::Bytes::new()),
+                    0,
+                    &remote_mark_path,
+                    None,
+                )
                 .await
         },
         |_e| false,

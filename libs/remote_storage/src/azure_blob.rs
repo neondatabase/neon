@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::{borrow::Cow, collections::HashMap, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use azure_core::request_options::{MaxResults, Metadata, Range};
+use azure_core::tokio::fs::FileStreamBuilder;
 use azure_core::Header;
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
@@ -18,13 +19,12 @@ use azure_storage_blobs::{
 };
 use futures_util::StreamExt;
 use http_types::StatusCode;
-use tokio::io::AsyncRead;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
-    RemoteStorage, StorageMetadata,
+    RemoteStorage, StorageMetadata, UploadSource,
 };
 
 pub struct AzureBlobStorage {
@@ -238,21 +238,22 @@ impl RemoteStorage for AzureBlobStorage {
     }
     async fn upload(
         &self,
-        mut from: impl AsyncRead + Unpin + Send + Sync + 'static,
-        data_size_bytes: usize,
+        from: UploadSource,
+        _data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
         let _permit = self.permit(RequestKind::Put).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        // TODO FIX THIS UGLY HACK and don't buffer the entire object
-        // into RAM here, but use the streaming interface. For that,
-        // we'd have to change the interface though...
-        // https://github.com/neondatabase/neon/issues/5563
-        let mut buf = Vec::with_capacity(data_size_bytes);
-        tokio::io::copy(&mut from, &mut buf).await?;
-        let body = azure_core::Body::Bytes(buf.into());
+        let body = match from {
+            UploadSource::Bytes(b) => azure_core::Body::Bytes(b),
+            UploadSource::File(f) => FileStreamBuilder::new(f)
+                .build()
+                .await
+                .context("failed to build request body for file")?
+                .into(), // file stream -> body
+        };
 
         let mut builder = blob_client.put_block_blob(body);
 

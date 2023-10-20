@@ -15,7 +15,7 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, UploadSource};
 use tokio::fs::File;
 
 use tokio::select;
@@ -494,14 +494,12 @@ async fn backup_object(
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(
-        File::open(&source_file)
-            .await
-            .with_context(|| format!("Failed to open file {} for wal backup", source_file))?,
-    );
+    let file = File::open(&source_file)
+        .await
+        .with_context(|| format!("Failed to open file {} for wal backup", source_file))?;
 
     storage
-        .upload_storage_object(Box::new(file), size, target_file)
+        .upload_storage_object(UploadSource::File(file), size, target_file)
         .await
 }
 

@@ -21,17 +21,15 @@ use aws_sdk_s3::{
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use aws_smithy_http::body::SdkBody;
-use hyper::Body;
+use aws_smithy_http::byte_stream::FsBuilder;
 use scopeguard::ScopeGuard;
 use tokio::io::{self, AsyncRead};
-use tokio_util::io::ReaderStream;
 use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    S3Config, UploadSource, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -383,7 +381,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: UploadSource,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -393,8 +391,14 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(ReaderStream::new(from));
-        let bytes_stream = ByteStream::new(SdkBody::from(body));
+        let body = match from {
+            UploadSource::Bytes(b) => ByteStream::from(b),
+            UploadSource::File(f) => FsBuilder::new()
+                .file(f)
+                .build()
+                .await
+                .context("failed to build request body from file")?,
+        };
 
         let res = self
             .client
@@ -403,7 +407,7 @@ impl RemoteStorage for S3Bucket {
             .key(self.relative_path_to_s3_object(to))
             .set_metadata(metadata.map(|m| m.0))
             .content_length(from_size_bytes.try_into()?)
-            .body(bytes_stream)
+            .body(body)
             .send()
             .await;
 

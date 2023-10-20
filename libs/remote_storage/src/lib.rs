@@ -25,6 +25,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::{io, sync::Semaphore};
+use tokio_util::io::StreamReader;
 use toml_edit::Item;
 use tracing::info;
 
@@ -189,7 +190,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: UploadSource,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
@@ -213,6 +214,26 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+}
+
+/// Source of data to upload
+pub enum UploadSource {
+    File(tokio::fs::File),
+    Bytes(bytes::Bytes),
+}
+
+impl UploadSource {
+    pub fn into_byte_reader(self) -> Pin<Box<dyn 'static + Send + Sync + io::AsyncRead>> {
+        match self {
+            UploadSource::File(f) => Box::pin(f),
+            UploadSource::Bytes(b) => {
+                // to get io::AsyncRead from Bytes, create a Stream<io::Result<Bytes>> from the
+                // single Bytes, and then convert to AsyncRead.
+                let stream = futures_util::stream::once(std::future::ready(Ok::<_, io::Error>(b)));
+                Box::pin(StreamReader::new(stream))
+            }
+        }
+    }
 }
 
 pub struct Download {
@@ -310,7 +331,7 @@ impl GenericRemoteStorage {
 
     pub async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: UploadSource,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -408,7 +429,7 @@ impl GenericRemoteStorage {
     /// this path is used for the remote object id conversion only.
     pub async fn upload_storage_object(
         &self,
-        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: UploadSource,
         from_size_bytes: usize,
         to: &RemotePath,
     ) -> anyhow::Result<()> {

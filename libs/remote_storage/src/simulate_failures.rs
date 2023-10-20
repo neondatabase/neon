@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use crate::{
     Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+    UploadSource,
 };
 
 pub struct UnreliableWrapper {
@@ -108,7 +109,7 @@ impl RemoteStorage for UnreliableWrapper {
 
     async fn upload(
         &self,
-        data: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        data: UploadSource,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,

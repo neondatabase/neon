@@ -11,7 +11,7 @@ use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
 };
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, UploadSource};
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
@@ -36,11 +36,15 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_bytes =
         serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
-    let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
+    let index_part_bytes = bytes::Bytes::from(index_part_bytes);
 
     let remote_path = remote_index_path(tenant_id, timeline_id, generation);
     storage
-        .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
+        .upload_storage_object(
+            UploadSource::Bytes(index_part_bytes),
+            index_part_size,
+            &remote_path,
+        )
         .await
         .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
 }
@@ -97,7 +101,12 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
     storage
-        .upload(source_file, fs_size, &storage_path, None)
+        .upload(
+            UploadSource::File(source_file),
+            fs_size,
+            &storage_path,
+            None,
+        )
         .await
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
