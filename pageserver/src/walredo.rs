@@ -297,7 +297,6 @@ impl PostgresRedoManager {
                             // Another thread was faster to observe the error, and already took the process out of rotation.
                         }
                     }
-                    drop(guard);
                 }
                 // NB: there may still be other concurrent threads using `proc`.
                 // The last one will send SIGKILL when the underlying Arc reaches refcount 0.
@@ -713,7 +712,7 @@ impl WalRedoProcess {
                     // the child, the writing end of the stderr pipe gets closed.
                     match stderr.readable_mut().await {
                         Ok(mut guard) => {
-                            let mut errbuf: [u8; 16384] = [0; 16384];
+                            let mut errbuf = [0; 16384];
                             let res = guard.try_io(|fd| {
                                 use std::io::Read;
                                 fd.get_mut().read(&mut errbuf)
@@ -726,7 +725,7 @@ impl WalRedoProcess {
                                 Ok(Ok(n)) => {
                                     // The message might not be split correctly into lines here. But this is
                                     // good enough, the important thing is to get the message to the log.
-                                    let output=String::from_utf8_lossy(&errbuf[0..n]).to_string();
+                                    let output = String::from_utf8_lossy(&errbuf[0..n]).to_string();
                                     error!(output, "received output");
                                 },
                                 Ok(Err(e)) => {
