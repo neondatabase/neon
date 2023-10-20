@@ -495,13 +495,39 @@ async fn get_lsn_by_timestamp_handler(
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
 
-    let result = match result {
-        LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-        LsnForTimestamp::Future(_lsn) => "future".into(),
-        LsnForTimestamp::Past(_lsn) => "past".into(),
-        LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-    };
-    json_response(StatusCode::OK, result)
+    if request
+        .headers()
+        .get(header::ACCEPT)
+        .map(|v| v == "application/json")
+        .unwrap_or_default()
+    {
+        #[derive(serde::Serialize)]
+        struct Result {
+            lsn: String,
+            r#type: &'static str,
+        }
+        let (lsn, type_) = match result {
+            LsnForTimestamp::Present(lsn) => (lsn, "present"),
+            LsnForTimestamp::Future(lsn) => (lsn, "future"),
+            LsnForTimestamp::Past(lsn) => (lsn, "past"),
+            LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
+        };
+        json_response(
+            StatusCode::OK,
+            Result {
+                lsn: lsn.to_string(),
+                r#type: type_,
+            },
+        )
+    } else {
+        let result = match result {
+            LsnForTimestamp::Present(lsn) => format!("{lsn}"),
+            LsnForTimestamp::Future(_lsn) => "future".into(),
+            LsnForTimestamp::Past(_lsn) => "past".into(),
+            LsnForTimestamp::NoData(_lsn) => "nodata".into(),
+        };
+        json_response(StatusCode::OK, result)
+    }
 }
 
 async fn get_timestamp_of_lsn_handler(
