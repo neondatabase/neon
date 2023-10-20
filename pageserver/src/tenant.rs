@@ -63,6 +63,7 @@ use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
+use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -3377,6 +3378,30 @@ impl Tenant {
 
     pub fn cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
+    }
+
+    /// Flush any in-progress layers, schedule uploads, and wait for uploads to complete.
+    ///
+    /// This function can take a long time: callers should wrap it in a timeout if calling
+    /// from an external API handler.
+    pub async fn flush_remote(&self) -> anyhow::Result<()> {
+        let timelines = self.timelines.lock().unwrap().clone();
+
+        for (timeline_id, timeline) in timelines {
+            tracing::info!(%timeline_id, "Flushing...");
+            timeline.freeze_and_flush().await?;
+            tracing::info!(%timeline_id, "Waiting for uploads...");
+            if let Some(client) = &timeline.remote_client {
+                client.wait_completion().await?;
+            }
+        }
+
+        match self.deletion_queue_client.flush_execute().await {
+            Ok(_) => {}
+            Err(DeletionQueueError::ShuttingDown) => {}
+        }
+
+        Ok(())
     }
 }
 

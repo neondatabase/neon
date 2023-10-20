@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 use tokio::fs;
 
 use anyhow::Context;
@@ -26,7 +26,9 @@ use crate::control_plane_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
-use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
+use crate::tenant::config::{
+    AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, TenantConfOpt,
+};
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
     create_tenant_files, AttachMarkerMode, AttachedTenantConf, CreateTenantFilesMode, Tenant,
@@ -705,6 +707,7 @@ pub(crate) async fn create_tenant(
     let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
 
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    info!("Creating tenant at location {location_conf:?}");
 
     // We're holding the tenants lock in write mode while doing local IO.
     // If this section ever becomes contentious, introduce a new `TenantState::Creating`
@@ -776,6 +779,7 @@ impl TenantManager {
         &self,
         tenant_id: TenantId,
         new_location_config: LocationConf,
+        flush: Option<Duration>,
         ctx: &RequestContext,
     ) -> Result<(), anyhow::Error> {
         info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
@@ -783,7 +787,7 @@ impl TenantManager {
         // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
         // then we do not need to set the slot to InProgress, we can just call into the
         // existng tenant.
-        {
+        let modify_tenant = {
             let locked = self.tenants.read().unwrap();
             let peek_slot = tenant_map_peek_slot(&locked, &tenant_id)?;
             match (&new_location_config.mode, peek_slot) {
@@ -793,22 +797,58 @@ impl TenantManager {
                         // take our fast path and just provide the updated configuration
                         // to the tenant.
                         tenant.set_new_location_config(AttachedTenantConf::try_from(
-                            new_location_config,
+                            new_location_config.clone(),
                         )?);
 
-                        // Persist the new config in the background, to avoid holding up any
-                        // locks while we do so.
-                        // TODO
-
-                        return Ok(());
+                        Some(tenant.clone())
                     } else {
                         // Different generations, fall through to general case
+                        None
                     }
                 }
                 _ => {
                     // Not an Attached->Attached transition, fall through to general case
+                    None
                 }
             }
+        };
+
+        // Fast-path continued: having dropped out of the self.tenants lock, do the async
+        // phase of waiting for flush, before returning.
+        if let Some(tenant) = modify_tenant {
+            // Transition to AttachedStale means we may well hold a valid generation
+            // still, and have been requested to go stale as part of a migration.  If
+            // the caller set `flush`, then flush to remote storage.
+            if let LocationMode::Attached(AttachedLocationConfig {
+                generation: _,
+                attach_mode: AttachmentMode::Stale,
+            }) = &new_location_config.mode
+            {
+                if let Some(flush_timeout) = flush {
+                    info!(timeout_ms = flush_timeout.as_millis(), "Flushing");
+                    match tokio::time::timeout(
+                        flush_timeout,
+                        tenant.flush_remote().instrument(info_span!("flush_remote")),
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            if let Err(e) = r {
+                                tracing::error!("Failed to flush to remote storage: {e}");
+                                return Err(e);
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                timeout_ms = flush_timeout.as_millis(),
+                                "Timed out waiting for flush to remote storage, proceeding anyway."
+                            )
+                        }
+                    }
+                }
+            }
+
+            return Ok(());
         }
 
         // General case for upserts to TenantsMap, excluding the case above: we will substitute an

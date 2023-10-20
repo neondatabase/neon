@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
@@ -1118,6 +1119,9 @@ async fn put_tenant_location_config_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
+
+    let flush = parse_query_param(&request, "flush_ms")?.map(Duration::from_millis);
+
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
@@ -1147,7 +1151,7 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_id, location_conf, &ctx)
+        .upsert_location(tenant_id, location_conf, flush, &ctx)
         .await
         // TODO: badrequest assumes the caller was asking for something unreasonable, but in
         // principle we might have hit something like concurrent API calls to the same tenant,
